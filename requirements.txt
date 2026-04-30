@@ -2,3 +2,4 @@ faster-whisper
 ebooklib
 beautifulsoup4
 lxml
+opencc-python-reimplemented

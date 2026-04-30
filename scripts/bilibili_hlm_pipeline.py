@@ -23,10 +23,10 @@ DEFAULT_SPACE_URL = "https://space.bilibili.com/558777092/lists"
 DEFAULT_MID = 558777092
 DEFAULT_QUERY = "红楼梦"
 DEFAULT_ASR_PROMPT = (
-    "以下音频是普通话中文读书讲解，主题包括《红楼梦》、曹雪芹、脂砚斋、"
-    "大观园、贾宝玉、林黛玉、王熙凤、平儿、司棋、柳家的、莲花、鸡蛋羹。"
-    "请使用简体中文转写，尽量保留文学人物和回目专名。"
+    "《红楼梦》文本细读。用简体中文。专名按原著写：宝黛钗、钗黛、脂批、回目、原著、读者、诸君。"
 )
+ASR_PROMPT_GLOSSARY_CHAR_LIMIT = 60
+ASR_HOTWORDS_CHAR_LIMIT = 80
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -210,6 +210,44 @@ def complete_file(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
 
 
+def load_glossary_terms(path: Path | None) -> list[str]:
+    if not path:
+        return []
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "#" in line:
+            line = line.split("#", 1)[0].strip()
+        for term in re.split(r"[，,、\t]+", line):
+            term = term.strip()
+            if term and term not in seen:
+                seen.add(term)
+                terms.append(term)
+    return terms
+
+
+def build_asr_prompt(base_prompt: str, archive: Archive, glossary_terms: list[str]) -> str:
+    parts = [base_prompt.strip(), f"当前视频标题：{archive.title}。"]
+    if glossary_terms:
+        glossary = "、".join(glossary_terms)
+        if len(glossary) > ASR_PROMPT_GLOSSARY_CHAR_LIMIT:
+            glossary = glossary[:ASR_PROMPT_GLOSSARY_CHAR_LIMIT].rsplit("、", 1)[0]
+        parts.append(f"可能出现的专名和固定表达：{glossary}")
+    return "\n".join(part for part in parts if part).strip()
+
+
+def glossary_hotwords(glossary_terms: list[str]) -> str | None:
+    if not glossary_terms:
+        return None
+    hotwords = " ".join(glossary_terms)
+    if len(hotwords) > ASR_HOTWORDS_CHAR_LIMIT:
+        hotwords = hotwords[:ASR_HOTWORDS_CHAR_LIMIT].rsplit(" ", 1)[0]
+    return hotwords
+
+
 def download_video(archive: Archive, out_dir: Path, cookies: Path | None) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = safe_stem(archive)
@@ -348,7 +386,12 @@ def fetch_bilibili_subtitles(archive: Archive, text_dir: Path, stem: str) -> boo
 
 
 def transcribe_with_faster_whisper(
-    audio_path: Path, text_dir: Path, stem: str, model: str, prompt: str
+    audio_path: Path,
+    text_dir: Path,
+    stem: str,
+    model: str,
+    prompt: str,
+    hotwords: str | None,
 ) -> bool:
     try:
         from faster_whisper import WhisperModel  # type: ignore
@@ -361,6 +404,7 @@ def transcribe_with_faster_whisper(
         str(audio_path),
         language="zh",
         initial_prompt=prompt,
+        hotwords=hotwords,
         vad_filter=True,
         beam_size=5,
     )
@@ -383,6 +427,8 @@ def transcribe_with_faster_whisper(
                 "model": model,
                 "language": info.language,
                 "language_probability": info.language_probability,
+                "initial_prompt": prompt,
+                "hotwords": hotwords,
                 "segments": subtitle_items,
             },
             ensure_ascii=False,
@@ -433,7 +479,28 @@ def transcribe(audio_path: Path, text_dir: Path, stem: str, model: str, prompt: 
         print(f"Using existing transcript: {text_dir / f'{stem}.txt'}", flush=True)
         return True
 
-    if transcribe_with_faster_whisper(audio_path, text_dir, stem, model, prompt):
+    if transcribe_with_faster_whisper(audio_path, text_dir, stem, model, prompt, None):
+        return True
+    return transcribe_with_whisper_cli(audio_path, text_dir, stem, model, prompt)
+
+
+def transcribe_with_context(
+    audio_path: Path,
+    text_dir: Path,
+    stem: str,
+    model: str,
+    prompt: str,
+    hotwords: str | None,
+    force: bool,
+) -> bool:
+    if not force and all(
+        complete_file(text_dir / f"{stem}{suffix}")
+        for suffix in (".txt", ".srt", ".transcript.json")
+    ):
+        print(f"Using existing transcript: {text_dir / f'{stem}.txt'}", flush=True)
+        return True
+
+    if transcribe_with_faster_whisper(audio_path, text_dir, stem, model, prompt, hotwords):
         return True
     return transcribe_with_whisper_cli(audio_path, text_dir, stem, model, prompt)
 
@@ -477,8 +544,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="only write metadata and print selected videos")
     parser.add_argument("--skip-video", action="store_true", help="do not download video/extract audio")
     parser.add_argument("--skip-transcript", action="store_true", help="do not fetch subtitles or run ASR")
+    parser.add_argument("--prefer-asr", action="store_true", help="run ASR instead of fetching Bilibili subtitles")
+    parser.add_argument("--force-transcript", action="store_true", help="overwrite existing transcript files")
     parser.add_argument("--asr-model", default="base", help="Whisper/faster-whisper model name")
     parser.add_argument("--asr-prompt", default=DEFAULT_ASR_PROMPT, help="initial prompt for ASR")
+    parser.add_argument("--asr-glossary", type=Path, help="newline/comma separated ASR hotword glossary")
     return parser.parse_args()
 
 
@@ -495,6 +565,8 @@ def main() -> int:
     save_metadata(args.output_dir, lists, kind, meta, archives)
 
     selected = archives[args.offset : args.offset + args.limit]
+    glossary_terms = load_glossary_terms(args.asr_glossary)
+    hotwords = glossary_hotwords(glossary_terms)
     print(f"Selected {len(selected)} video(s) from {kind}: {meta.get('title') or meta.get('name')}")
     for archive in selected:
         print(f"{archive.index:03d} {archive.bvid} {archive.title}")
@@ -516,10 +588,17 @@ def main() -> int:
             audio_path, wav_path = extract_audio(video_path, args.output_dir / "audio", stem)
 
         if not args.skip_transcript:
-            if fetch_bilibili_subtitles(archive, args.output_dir / "text", stem):
+            asr_prompt = build_asr_prompt(args.asr_prompt, archive, glossary_terms)
+            if not args.prefer_asr and fetch_bilibili_subtitles(archive, args.output_dir / "text", stem):
                 transcript = "bilibili-subtitle"
-            elif wav_path and transcribe(
-                wav_path, args.output_dir / "text", stem, args.asr_model, args.asr_prompt
+            elif wav_path and transcribe_with_context(
+                wav_path,
+                args.output_dir / "text",
+                stem,
+                args.asr_model,
+                asr_prompt,
+                hotwords,
+                args.force_transcript,
             ):
                 transcript = "asr"
             else:

@@ -37,6 +37,21 @@ https://space.bilibili.com/558777092/lists
 .venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 1 --asr-model small
 ```
 
+针对《红楼梦》专名、章回名和红学常用表达，建议带词表重转录：
+
+```bash
+.venv/bin/python scripts/bilibili_hlm_pipeline.py \
+  --limit 1 \
+  --asr-model small \
+  --asr-glossary resources/hongloumeng_asr_glossary.txt \
+  --prefer-asr \
+  --force-transcript
+```
+
+词表文件在 `resources/hongloumeng_asr_glossary.txt`，覆盖“宝黛钗”“钗黛”“脂批”“第六十一回 投鼠忌器宝玉瞒赃 判冤决狱平儿行权”以及“司棋、莲花儿、柳家的、鸡蛋羹、茯苓霜”等第一条视频高频词。
+
+实测较长音频直接塞入大量提示词会影响解码稳定性。第一条音频的修正版采用的是：先按约 3 分钟切段，用 `small` 模型无提示词重转录，再按红楼词表做窄范围术语校正。修正版已覆盖原 `downloads/bilibili/text/001_*.txt/.srt/.transcript.json`。
+
 如需下载 720P/1080P，B 站要求登录，可导出 cookies 后传入：
 
 ```bash
