@@ -1,43 +1,37 @@
-# 红楼梦 B 站视频下载与转写
+# 红楼梦文本与视频校验项目
 
-当前脚本默认使用这个空间页：
+本项目的目标是构建一个可修订、可追溯、可自定义风格的《红楼梦》交互机器人。当前阶段围绕《红楼梦》相关视频和基础版本文本，完成下载、音频提取、机器转录、文本抽取、术语校订和后续多 agent 校验知识库建设。
 
-```bash
-https://space.bilibili.com/558777092/lists
-```
+当前重点不是做泛泛的问答库，而是建立可追溯的校订流程和可扩展的风格语料体系：每条转录中的原文引用、脂批、章回名、人物名、器物名和同音词，都要能回到基础版本文本、注释或图片字形资源确认；用户后续可以选择不同文本版本、研究视角和对话风格进行探讨。
 
-默认会选择标题/说明里包含“红楼梦”的合集，也就是“红楼梦文本探究”。
+## 当前状态
 
-## 已完成
+- 已处理 B 站“红楼梦文本探究”合集全部 60 个视频。
+- 已生成每条视频的 `.txt`、`.srt`、`.transcript.json`。
+- 已抽取当前《红楼梦》基础版本文本、注释/校记、图片字形和元数据。
+- 第一条视频已做重点术语校订，并确认三份转录文件文本内容一致。
+- B 站视频转录被定位为一种讲解风格语料，风格名为“不红居士”。
+- 多机器多 agent 校验知识库方案已确定，尚未实现服务端。
 
-已处理“红楼梦文本探究”合集全部 60 个视频，输出在：
+## 目录入口
 
-- `downloads/bilibili/videos/`: MP4 视频
-- `downloads/bilibili/audio/`: m4a 音轨和 16k WAV
-- `downloads/bilibili/text/`: ASR 文本、SRT 字幕、转写 JSON
-- `downloads/bilibili/metadata/`: 合集清单和运行状态
+- [项目概览](docs/PROJECT_OVERVIEW.md)
+- [交互机器人愿景](docs/INTERACTIVE_BOT_VISION.md)
+- [目录结构](docs/DIRECTORY_STRUCTURE.md)
+- [运行手册](docs/RUNBOOK.md)
+- [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
+- [校验知识库服务方案](docs/KB_SERVICE_PLAN.md)
+- [进展与决策记录](docs/PROGRESS.md)
 
-## 继续处理
+## 快速命令
 
-本项目已创建 `.venv` 并安装 `faster-whisper`。继续处理后续视频：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 3 --asr-model base
-```
-
-只看会选中哪些视频，不下载：
+只查看会选中哪些视频：
 
 ```bash
 .venv/bin/python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
 ```
 
-处理更高质量转写可以把模型换成 `small` 或 `medium`，但会明显更慢、占用更多磁盘：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 1 --asr-model small
-```
-
-针对《红楼梦》专名、章回名和红学常用表达，建议带词表重转录：
+按词表重转录视频：
 
 ```bash
 .venv/bin/python scripts/bilibili_hlm_pipeline.py \
@@ -48,34 +42,49 @@ https://space.bilibili.com/558777092/lists
   --force-transcript
 ```
 
-词表文件在 `resources/hongloumeng_asr_glossary.txt`，覆盖“宝黛钗”“钗黛”“脂批”“第六十一回 投鼠忌器宝玉瞒赃 判冤决狱平儿行权”以及“司棋、莲花儿、柳家的、鸡蛋羹、茯苓霜”等第一条视频高频词。
-
-实测较长音频直接塞入大量提示词会影响解码稳定性。第一条音频的修正版采用的是：先按约 3 分钟切段，用 `small` 模型无提示词重转录，再按红楼词表做窄范围术语校正。修正版已覆盖原 `downloads/bilibili/text/001_*.txt/.srt/.transcript.json`。
-
-校订时需区分“原文引用”和“讲解口述”：原文引用先对照 EPUB 抽取文本，例如第六十一回的“莲花儿走来说”“馊的”“分例”；前八十回表示荣国府公家钱物/供应体系的常用词是“官中”，例如“拿着官中的钱”“不必动官中钱粮”，不要误校为“公中”或“宫中”。“不红君”是讲解者自称，应原样保留。
-
-如需下载 720P/1080P，B 站要求登录，可导出 cookies 后传入：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --limit 1 --cookies cookies.txt
-```
-
-文本是机器 ASR 初稿，适合检索和粗读；涉及引用、整理出版或校勘时需要人工复核。
-
-## EPUB 文本提取
-
-从 `books/` 下的《红楼梦》EPUB 提取章节正文、注释/校记、目录、元数据和图片：
+抽取基础版本文本：
 
 ```bash
 .venv/bin/python scripts/extract_epub_hongloumeng.py
 ```
 
-默认输出到 `downloads/epub_hongloumeng/`。当前提交保留其中的可读资料和必要小型图片：
+检查第一条视频三份转录文本是否一致：
 
-- `chapters_txt/`, `chapters_md/`: 按回整理的正文、注释/校记。
-- `sections_txt/`, `sections_md/`: EPUB 全部分节，包括序言、目录、前后折页等。
-- `combined/`: 合并版 TXT/Markdown。
-- `metadata/`: 目录、spine、注释、manifest 和提取报告。
-- `images/*.jpeg`, `cover.jpg`: EPUB 内嵌图片；正文中的异体字/生僻字多以小字形图片保存，文本里用 `[[image:images/00006.jpeg]]` 或 Markdown 图片语法引用。
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import json, re, hashlib, sys
 
-未提交音频、视频、EPUB 源文件、原始解包目录和较大的 JSON 中间产物。
+stem = '001_BV1qSjdz5ET2_司棋大闹大观园厨房，一碗炖鸡蛋，埋伏着曹雪芹精心设置的妙笔'
+base = Path('resources/styles/buhongjushi/transcripts')
+txt = [line.strip() for line in (base / f'{stem}.txt').read_text(encoding='utf-8').splitlines() if line.strip()]
+
+def srt_lines(text):
+    out = []
+    for block in re.split(r'\n\s*\n', text.strip()):
+        parts = block.splitlines()
+        if len(parts) >= 3:
+            out.append(' '.join(line.strip() for line in parts[2:] if line.strip()))
+    return [line for line in out if line]
+
+srt = srt_lines((base / f'{stem}.srt').read_text(encoding='utf-8'))
+data = json.loads((base / f'{stem}.transcript.json').read_text(encoding='utf-8'))
+segments = [str(seg.get('content', '')).strip() for seg in data.get('segments', []) if str(seg.get('content', '')).strip()]
+
+def digest(lines):
+    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
+
+print(len(txt), digest(txt))
+print(len(srt), digest(srt))
+print(len(segments), digest(segments))
+sys.exit(0 if txt == srt == segments else 1)
+PY
+```
+
+## 关键原则
+
+- `官中` 是前八十回表示荣国府公家钱物/供应体系的常用词，不要误校为 `公中` 或 `宫中`。
+- `不红君` 是讲解者自称，应原样保留。
+- 原文引用、脂批和章回名必须跨章节交叉验证，不能只查视频标题对应章节。
+- 生僻字/异体字图片保留为字形证据，不强行 OCR 成不确定字符。
+- 音频、视频、原始大文件和临时缓存不提交。

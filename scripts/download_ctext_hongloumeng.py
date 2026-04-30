@@ -638,7 +638,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="downloads/ctext_hongloumeng")
+    parser.add_argument("--out", default="resources/cache/ctext_hongloumeng")
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--start", type=int, default=1)
     parser.add_argument("--limit", type=int, default=0)

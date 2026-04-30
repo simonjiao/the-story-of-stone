@@ -539,7 +539,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--series-id", type=int, help="download a specific series id")
     parser.add_argument("--limit", type=int, default=3, help="number of videos to process")
     parser.add_argument("--offset", type=int, default=0, help="skip this many videos before processing")
-    parser.add_argument("--output-dir", type=Path, default=Path("downloads/bilibili"))
+    parser.add_argument("--output-dir", type=Path, default=Path("resources/styles/buhongjushi"))
     parser.add_argument("--cookies", type=Path, help="yt-dlp cookies.txt for login-only quality/content")
     parser.add_argument("--dry-run", action="store_true", help="only write metadata and print selected videos")
     parser.add_argument("--skip-video", action="store_true", help="do not download video/extract audio")
@@ -589,11 +589,12 @@ def main() -> int:
 
         if not args.skip_transcript:
             asr_prompt = build_asr_prompt(args.asr_prompt, archive, glossary_terms)
-            if not args.prefer_asr and fetch_bilibili_subtitles(archive, args.output_dir / "text", stem):
+            transcript_dir = args.output_dir / "transcripts"
+            if not args.prefer_asr and fetch_bilibili_subtitles(archive, transcript_dir, stem):
                 transcript = "bilibili-subtitle"
             elif wav_path and transcribe_with_context(
                 wav_path,
-                args.output_dir / "text",
+                transcript_dir,
                 stem,
                 args.asr_model,
                 asr_prompt,

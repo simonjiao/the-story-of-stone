@@ -564,7 +564,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="books/红楼梦 (曹雪芹, 高鹗, 程伟元).epub",
         help="Path to the EPUB file.",
     )
-    parser.add_argument("--out", default="downloads/epub_hongloumeng")
+    parser.add_argument("--out", default="resources/base/hongloumeng")
     return parser.parse_args(argv)
 
 

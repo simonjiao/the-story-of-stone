@@ -1,6 +1,6 @@
 {
   "epub": "books/红楼梦 (曹雪芹, 高鹗, 程伟元).epub",
-  "output": "downloads/epub_hongloumeng",
+  "output": "resources/base/hongloumeng",
   "generated_at": "2026-04-30T16:19:09+08:00",
   "raw_files": 309,
   "manifest_items": 305,
