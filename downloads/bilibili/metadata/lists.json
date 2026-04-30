@@ -1,0 +1,1666 @@
+{
+  "page": {
+    "page_num": 1,
+    "page_size": 20,
+    "total": 12
+  },
+  "seasons_list": [
+    {
+      "archives": [
+        {
+          "aid": 114579292036120,
+          "bvid": "BV1qSjdz5ET2",
+          "ctime": 1748341361,
+          "duration": 939,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/fa654d5acf4f66dda6b5320cc2d054126d789622.jpg",
+          "playback_position": 0,
+          "pubdate": 1748773800,
+          "stat": {
+            "view": 21984,
+            "vt": 0,
+            "danmaku": 27
+          },
+          "state": 0,
+          "title": "司棋大闹大观园厨房，一碗炖鸡蛋，埋伏着曹雪芹精心设置的妙笔",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114376254231308,
+          "bvid": "BV12E52zoENu",
+          "ctime": 1745243274,
+          "duration": 781,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/b584ddfc0c2a2c4ff88fbf7934a11bf11c5b6555.jpg",
+          "playback_position": 0,
+          "pubdate": 1745672400,
+          "stat": {
+            "view": 17848,
+            "vt": 0,
+            "danmaku": 23
+          },
+          "state": 0,
+          "title": "《红楼梦》元宵宴风波：贾母出言责备袭人，王熙凤为何站出来顶罪",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114335619814264,
+          "bvid": "BV1yAojYNEZU",
+          "ctime": 1744623257,
+          "duration": 447,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/01030bafd6cba3bcd2b3a0a5aa228b4c1e85091f.jpg",
+          "playback_position": 0,
+          "pubdate": 1745056800,
+          "stat": {
+            "view": 10685,
+            "vt": 0,
+            "danmaku": 11
+          },
+          "state": 0,
+          "title": "《红楼梦》怡红院里的内鬼：虾须镯失窃案背后，隐藏着职场大忌",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114312936953571,
+          "bvid": "BV1xMd5YFEhr",
+          "ctime": 1744277301,
+          "duration": 473,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/e64ee54bfa18a3f367d5121ef72899bb0169f105.jpg",
+          "playback_position": 0,
+          "pubdate": 1744711200,
+          "stat": {
+            "view": 5640,
+            "vt": 0,
+            "danmaku": 6
+          },
+          "state": 0,
+          "title": "芦雪庵雪下联诗，颦儿一个建议，揭示她早已不是逞强争胜的林黛玉",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114279097308464,
+          "bvid": "BV1mjZdYQEAR",
+          "ctime": 1743760720,
+          "duration": 454,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/4c3233e063b12db0121026f34cb59f2074d85790.jpg",
+          "playback_position": 0,
+          "pubdate": 1744192800,
+          "stat": {
+            "view": 11589,
+            "vt": 0,
+            "danmaku": 4
+          },
+          "state": 0,
+          "title": "《红楼梦》邢岫烟住进大观园：一处小细节，窥见三小姐探春的心机",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114228027463239,
+          "bvid": "BV1vEoqYyEvM",
+          "ctime": 1742981678,
+          "duration": 596,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/c362d8ec530590bcad6209658168ebda0d9e768f.jpg",
+          "playback_position": 0,
+          "pubdate": 1743413400,
+          "stat": {
+            "view": 34097,
+            "vt": 0,
+            "danmaku": 28
+          },
+          "state": 0,
+          "title": "《红楼梦》最可叹之处：贾家私塾，成为薛蟠大展龙阳之兴的修罗场",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/4e0252a4943f72e3cc943d6cd34aed3b900f219c.jpg",
+        "description": "红楼梦文本探究",
+        "mid": 558777092,
+        "name": "合集·红楼梦文本探究",
+        "ptime": 1777294800,
+        "season_id": 5908544,
+        "total": 60,
+        "title": "红楼梦文本探究"
+      },
+      "recent_aids": [
+        114579292036120,
+        114376254231308,
+        114335619814264,
+        114312936953571,
+        114279097308464,
+        114228027463239
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 1806161887,
+          "bvid": "BV1ob421n7A4",
+          "ctime": 1720537588,
+          "duration": 580,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/19142bf3d569b17adfa38609dc1316a1d053f26d.jpg",
+          "playback_position": 0,
+          "pubdate": 1720602000,
+          "stat": {
+            "view": 48863,
+            "vt": 0,
+            "danmaku": 25
+          },
+          "state": 0,
+          "title": "《金瓶梅》西门庆迎娶孟玉楼：种种荒诞的背后，处处写着一个钱字",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1206417573,
+          "bvid": "BV1kf421v7rC",
+          "ctime": 1721647630,
+          "duration": 529,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/11519368af0a083522b2937295201d9252c5313b.jpg",
+          "playback_position": 0,
+          "pubdate": 1721647630,
+          "stat": {
+            "view": 28981,
+            "vt": 0,
+            "danmaku": 26
+          },
+          "state": 0,
+          "title": "《金瓶梅》刻画人性：李瓶儿背叛花子虚，处处皆是处世之道",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1906317131,
+          "bvid": "BV1hU411U7pn",
+          "ctime": 1721733788,
+          "duration": 708,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/2b5eee7d552622e6661bab900eacaaed136995c9.jpg",
+          "playback_position": 0,
+          "pubdate": 1721733788,
+          "stat": {
+            "view": 28450,
+            "vt": 0,
+            "danmaku": 56
+          },
+          "state": 0,
+          "title": "《金瓶梅》人性之恶：吴月娘对李瓶儿的算计，暴露出她的城府之深",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1656420731,
+          "bvid": "BV11E421w7WC",
+          "ctime": 1723380639,
+          "duration": 574,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/43081700aa3a1a27f7184221b9772976b192a77f.jpg",
+          "playback_position": 0,
+          "pubdate": 1723380639,
+          "stat": {
+            "view": 33812,
+            "vt": 0,
+            "danmaku": 34
+          },
+          "state": 0,
+          "title": "《金瓶梅》人情如纸张张薄：西门庆与李瓶儿",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 113042918540456,
+          "bvid": "BV1ZLs5exEs3",
+          "ctime": 1724898326,
+          "duration": 589,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/829546c9006bbbb3ce30d728753b2439ada9ea98.jpg",
+          "playback_position": 0,
+          "pubdate": 1724922000,
+          "stat": {
+            "view": 23281,
+            "vt": 0,
+            "danmaku": 17
+          },
+          "state": 0,
+          "title": "《金瓶梅》潘金莲究竟有多聪明？一场芙蓉宴，揭开潘金莲的高智商",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114189238540547,
+          "bvid": "BV1zSQfYNETw",
+          "ctime": 1742389584,
+          "duration": 620,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/d2656da6398a3f19da76a9bf8ed1342f7282a4c2.jpg",
+          "playback_position": 0,
+          "pubdate": 1742814000,
+          "stat": {
+            "view": 58417,
+            "vt": 0,
+            "danmaku": 41
+          },
+          "state": 0,
+          "title": "《金瓶梅》西门庆的灭亡，兰陵笑笑生写得到底有多绝？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/81224749ebbd5a999527ee539282a80a1a5be466.jpg",
+        "description": "金瓶梅文本探究",
+        "mid": 558777092,
+        "name": "合集·金瓶梅文本探究",
+        "ptime": 1777208400,
+        "season_id": 3407393,
+        "total": 122,
+        "title": "金瓶梅文本探究"
+      },
+      "recent_aids": [
+        1806161887,
+        1206417573,
+        1906317131,
+        1656420731,
+        113042918540456,
+        114189238540547
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 115745056887723,
+          "bvid": "BV1bhqdBFEcz",
+          "ctime": 1766129682,
+          "duration": 766,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/b65d2719d71b73153c4165199df2f8397a2feaaa.jpg",
+          "playback_position": 0,
+          "pubdate": 1766577600,
+          "stat": {
+            "view": 18490,
+            "vt": 0,
+            "danmaku": 18
+          },
+          "state": 0,
+          "title": "红楼结局探究（1）：论宁荣两府的抄家",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115766867333178,
+          "bvid": "BV18WBNBdEp7",
+          "ctime": 1766462284,
+          "duration": 739,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/86f71948c4e81d6b134a985ce5e5815a4c825bfd.jpg",
+          "playback_position": 0,
+          "pubdate": 1766916000,
+          "stat": {
+            "view": 8276,
+            "vt": 0,
+            "danmaku": 13
+          },
+          "state": 0,
+          "title": "红楼结局探究（2）：扇子公案与贾家抄家",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115791479446199,
+          "bvid": "BV16eByBHEMr",
+          "ctime": 1766837971,
+          "duration": 609,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/0158e744453435d7b060613853097f9815a12224.jpg",
+          "playback_position": 0,
+          "pubdate": 1767272400,
+          "stat": {
+            "view": 8888,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "红楼结局探究（3）：荣府大房败落原因补充",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115854662439337,
+          "bvid": "BV1bximBqEWb",
+          "ctime": 1767802059,
+          "duration": 553,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/04b2d2ff66098dfee1a8f075a6a0a89902a72ca4.jpg",
+          "playback_position": 0,
+          "pubdate": 1768212000,
+          "stat": {
+            "view": 7681,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "红楼结局探究（4）：论贾家政治、经济上的双重凋敝",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115888250429304,
+          "bvid": "BV1B3rjB5EpJ",
+          "ctime": 1768314530,
+          "duration": 646,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/07fd45652cb59902a5ece34da2874997ed42334d.jpg",
+          "playback_position": 0,
+          "pubdate": 1768816800,
+          "stat": {
+            "view": 7932,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "红楼结局探究（5）：论江南甄家与贾家败落的联系",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115899155619179,
+          "bvid": "BV1GHkFB4EGr",
+          "ctime": 1768480933,
+          "duration": 747,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/9b493bcf35bd0d2182888b899b4e4ed788decac7.jpg",
+          "playback_position": 0,
+          "pubdate": 1768989600,
+          "stat": {
+            "view": 6342,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "红楼结局探究（6）：论贾家抄家的删改与完善",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/b65d2719d71b73153c4165199df2f8397a2feaaa.jpg",
+        "description": "",
+        "mid": 558777092,
+        "name": "合集·红楼梦结局探究",
+        "ptime": 1776249000,
+        "season_id": 6986152,
+        "total": 25,
+        "title": "红楼梦结局探究"
+      },
+      "recent_aids": [
+        115745056887723,
+        115766867333178,
+        115791479446199,
+        115854662439337,
+        115888250429304,
+        115899155619179
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 114135719288403,
+          "bvid": "BV1w6R3YmEog",
+          "ctime": 1741572981,
+          "duration": 589,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/7ff932e6b84ecb1c540979ede96979f98c2eadbd.jpg",
+          "playback_position": 0,
+          "pubdate": 1742041800,
+          "stat": {
+            "view": 1634,
+            "vt": 0,
+            "danmaku": 6
+          },
+          "state": 0,
+          "title": "【纯VLOG】：首拍个人生活",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114113321638345,
+          "bvid": "BV1w1RwYpEEK",
+          "ctime": 1741232323,
+          "duration": 414,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/2fd68ca315880e1a448a9c5771de510f02aa5c5a.jpg",
+          "playback_position": 0,
+          "pubdate": 1741232322,
+          "stat": {
+            "view": 1087,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "【开箱VLOG】：红楼游园",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114505438797679,
+          "bvid": "BV1sXEvzzEQY",
+          "ctime": 1747214857,
+          "duration": 718,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/fc1d9dbf184f5266da44dbf3ecfb280f9800744c.jpg",
+          "playback_position": 0,
+          "pubdate": 1747648800,
+          "stat": {
+            "view": 1625,
+            "vt": 0,
+            "danmaku": 5
+          },
+          "state": 0,
+          "title": "【纯VLOG】和老母亲出去游玩，记录一下",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114698074723589,
+          "bvid": "BV18eNvzyEkZ",
+          "ctime": 1750153771,
+          "duration": 408,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/5061591ba89fc38f3925fc0fd91e81007b94a8c1.jpg",
+          "playback_position": 0,
+          "pubdate": 1750586400,
+          "stat": {
+            "view": 1216,
+            "vt": 0,
+            "danmaku": 6
+          },
+          "state": 0,
+          "title": "【纯Vlog】平凡一天：逛超市、开榴莲、组装电动升降桌",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114755838679733,
+          "bvid": "BV1jZKzzBEnh",
+          "ctime": 1751037957,
+          "duration": 462,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/c31183d93f09bb996620d9984f93a8a8bc8c087e.jpg",
+          "playback_position": 0,
+          "pubdate": 1751466600,
+          "stat": {
+            "view": 1248,
+            "vt": 0,
+            "danmaku": 6
+          },
+          "state": 0,
+          "title": "【纯Vlog】养猫记",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114801472706851,
+          "bvid": "BV1rk3ozgEFs",
+          "ctime": 1751731545,
+          "duration": 736,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/72bdad77b39e4fe4f99c186dee784467cfa49b52.jpg",
+          "playback_position": 0,
+          "pubdate": 1752156000,
+          "stat": {
+            "view": 1398,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "【纯Vlog】广西壮族自治区图书馆，参观戴敦邦四大名著展览",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/6a406162d1829084d0ad41c972fe35fff006cb94.jpg",
+        "description": "记录生活",
+        "mid": 558777092,
+        "name": "合集·Vlog合集",
+        "ptime": 1774260000,
+        "season_id": 5663229,
+        "total": 13,
+        "title": "Vlog合集"
+      },
+      "recent_aids": [
+        114135719288403,
+        114113321638345,
+        114505438797679,
+        114698074723589,
+        114755838679733,
+        114801472706851
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 270681083,
+          "bvid": "BV1bc411T7MZ",
+          "ctime": 1683024653,
+          "duration": 186,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/48e25e912c47539762a56ab5534ad2004843ddda.jpg",
+          "playback_position": 0,
+          "pubdate": 1683024652,
+          "stat": {
+            "view": 12286,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "《水浒传》之令人听畏的酷刑：木驴刑罚",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 228324224,
+          "bvid": "BV15h411j77k",
+          "ctime": 1683198764,
+          "duration": 323,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/66d45afab830797391338f6dd92fded0d3c59782.jpg",
+          "playback_position": 0,
+          "pubdate": 1683198764,
+          "stat": {
+            "view": 16026,
+            "vt": 0,
+            "danmaku": 16
+          },
+          "state": 0,
+          "title": "《水浒传》里的精巧构思：潘金莲的四位邻居，处处都透着隐喻",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 485793879,
+          "bvid": "BV1eT411b71Y",
+          "ctime": 1683352597,
+          "duration": 810,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/a93d3b550d2e3f7f63a3da67c88b48cd4e06f358.jpg",
+          "playback_position": 0,
+          "pubdate": 1683352597,
+          "stat": {
+            "view": 24734,
+            "vt": 0,
+            "danmaku": 50
+          },
+          "state": 0,
+          "title": "《水浒传》深度解读：拳打镇关西——不寒而栗的自我执法",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 313629708,
+          "bvid": "BV1yP411R7EU",
+          "ctime": 1684225914,
+          "duration": 185,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/547eb351cc5a88b23c4616dbf9a3e1b991eff370.jpg",
+          "playback_position": 0,
+          "pubdate": 1684225914,
+          "stat": {
+            "view": 8630,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "《水浒传》里的深度隐喻：阮小五的诨号，为何要叫短命二郎？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 486132643,
+          "bvid": "BV1xT411t7qq",
+          "ctime": 1684242947,
+          "duration": 161,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/defade1156c1a89a87cc2453dd146652ad81d9eb.jpg",
+          "playback_position": 0,
+          "pubdate": 1684242947,
+          "stat": {
+            "view": 9047,
+            "vt": 0,
+            "danmaku": 5
+          },
+          "state": 0,
+          "title": "《水浒传》中的诨号隐喻：柴进为何被称为“小旋风”？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 699041976,
+          "bvid": "BV1Mm4y1b73B",
+          "ctime": 1684933899,
+          "duration": 485,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/48bfb9d7f87e9ea14a6e205600ef9e7c302d797a.jpg",
+          "playback_position": 0,
+          "pubdate": 1684933899,
+          "stat": {
+            "view": 8878,
+            "vt": 0,
+            "danmaku": 8
+          },
+          "state": 0,
+          "title": "扈三娘全家被害，被宋江逼着嫁给王矮虎，为何她还觉得宋江仁义？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/665389e805455bea70baa640c1f2c2569c2fba3c.jpg",
+        "description": "",
+        "mid": 558777092,
+        "name": "合集·《水浒传》解读",
+        "ptime": 1773741600,
+        "season_id": 1347921,
+        "total": 61,
+        "title": "《水浒传》解读"
+      },
+      "recent_aids": [
+        270681083,
+        228324224,
+        485793879,
+        313629708,
+        486132643,
+        699041976
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 112988744845445,
+          "bvid": "BV1tdp2ehEdz",
+          "ctime": 1724071585,
+          "duration": 831,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/66b5527a1989cccfce2ee0fb7b7bc0f272375e70.jpg",
+          "playback_position": 0,
+          "pubdate": 1724071585,
+          "stat": {
+            "view": 10113,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "《红楼梦》神话起源：木石姻缘的前生注定",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 112998156927791,
+          "bvid": "BV1SGW8eSEsq",
+          "ctime": 1724215461,
+          "duration": 513,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/a39382a44ecb289616ec7b5eb3ea67585a1bb865.jpg",
+          "playback_position": 0,
+          "pubdate": 1724215461,
+          "stat": {
+            "view": 6652,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "《红楼梦》第二集：贾夫人仙逝扬州城，冷子兴演说荣国府",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 113010622333659,
+          "bvid": "BV1QPWDe1E1F",
+          "ctime": 1724406315,
+          "duration": 1266,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/2c8e67a78ad67550bfbdcc078301134cc9e718ab.jpg",
+          "playback_position": 0,
+          "pubdate": 1724406315,
+          "stat": {
+            "view": 9003,
+            "vt": 0,
+            "danmaku": 8
+          },
+          "state": 0,
+          "title": "《红楼梦》第三集：金陵城起复贾雨村，荣国府收养林黛玉",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 113023003919490,
+          "bvid": "BV1NJWreyEoT",
+          "ctime": 1724595192,
+          "duration": 795,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/05e604c2992fbca029a55e37869120d5ddbd43c4.jpg",
+          "playback_position": 0,
+          "pubdate": 1724595192,
+          "stat": {
+            "view": 6521,
+            "vt": 0,
+            "danmaku": 3
+          },
+          "state": 0,
+          "title": "《红楼梦》第四集：薄命女偏逢薄命郎，葫芦僧乱判葫芦案",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 113049327372523,
+          "bvid": "BV1zmH5eXEL4",
+          "ctime": 1724996104,
+          "duration": 1167,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/b3968eec0ba76a855429f2ccc7e45b3abe996456.jpg",
+          "playback_position": 0,
+          "pubdate": 1724996104,
+          "stat": {
+            "view": 7784,
+            "vt": 0,
+            "danmaku": 2
+          },
+          "state": 0,
+          "title": "《红楼梦》贾宝玉梦入太虚幻境，窥见金陵十二钗薄命结局",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 113057296616327,
+          "bvid": "BV1zfnZe3Ead",
+          "ctime": 1725118079,
+          "duration": 957,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/3d708c37af661f9c24de1fe1b9983de6648a6cf3.jpg",
+          "playback_position": 0,
+          "pubdate": 1725118079,
+          "stat": {
+            "view": 6862,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "《红楼梦》刘姥姥一进荣国府，展现人情世故的文字魅力",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/546672698cf5c8605ca6f2519107da5329b40667.jpg",
+        "description": "红楼故事，以甲戌本、庚辰本、蒙府本为据。",
+        "mid": 558777092,
+        "name": "合集·《红楼梦》故事集",
+        "ptime": 1772964000,
+        "season_id": 3698280,
+        "total": 74,
+        "title": "《红楼梦》故事集"
+      },
+      "recent_aids": [
+        112988744845445,
+        112998156927791,
+        113010622333659,
+        113023003919490,
+        113049327372523,
+        113057296616327
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 114660057550885,
+          "bvid": "BV1CQMGzyEZ5",
+          "ctime": 1749573892,
+          "duration": 918,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/de1b5c601014e0fe5578154c29694cdb94802ec6.jpg",
+          "playback_position": 0,
+          "pubdate": 1750046400,
+          "stat": {
+            "view": 8761,
+            "vt": 0,
+            "danmaku": 24
+          },
+          "state": 0,
+          "title": "《红楼梦》到底有没有抄袭《金瓶梅》？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114727585911523,
+          "bvid": "BV17TKWztEkw",
+          "ctime": 1750604435,
+          "duration": 698,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/18e0ad0c1a6ff0b3810bd513e057a05ac1a9a81a.jpg",
+          "playback_position": 0,
+          "pubdate": 1751034600,
+          "stat": {
+            "view": 4466,
+            "vt": 0,
+            "danmaku": 18
+          },
+          "state": 0,
+          "title": "红楼梦、金瓶梅对比：司棋、潘又安的悲剧，玉箫、书童的分道扬镳",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114999527739557,
+          "bvid": "BV1YNthztEMz",
+          "ctime": 1754753780,
+          "duration": 701,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/eac891db064bab6986bf2ca0259d0dea7f7d5782.jpg",
+          "playback_position": 0,
+          "pubdate": 1755180000,
+          "stat": {
+            "view": 6776,
+            "vt": 0,
+            "danmaku": 20
+          },
+          "state": 0,
+          "title": "红楼、金瓶文本对观：心比天高的晴雯，恰是庞春梅的影子",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115145405700657,
+          "bvid": "BV1YtamzHEhz",
+          "ctime": 1756979538,
+          "duration": 659,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/27d35c6d42f4956cfd9c604d977c06aa47e0f878.jpg",
+          "playback_position": 0,
+          "pubdate": 1757412000,
+          "stat": {
+            "view": 23605,
+            "vt": 0,
+            "danmaku": 23
+          },
+          "state": 0,
+          "title": "庞春梅为何收留陈敬济？混乱的姐弟关系，暗藏着兰陵笑笑生的苦心",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/53b88fdc919b67e830b33b77bc187eb43734eb70.jpg",
+        "description": "分析红楼梦、金瓶梅中的相似之处。",
+        "mid": 558777092,
+        "name": "合集·红楼、金瓶文本对看",
+        "ptime": 1757412000,
+        "season_id": 5663213,
+        "total": 4,
+        "title": "红楼、金瓶文本对看"
+      },
+      "recent_aids": [
+        114660057550885,
+        114727585911523,
+        114999527739557,
+        115145405700657
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 114982683482293,
+          "bvid": "BV1mWtAzrEUF",
+          "ctime": 1754496767,
+          "duration": 737,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/1b575dcc30e58f74ddac5ae47db7ea62cc72abbd.jpg",
+          "playback_position": 0,
+          "pubdate": 1754922600,
+          "stat": {
+            "view": 4701,
+            "vt": 0,
+            "danmaku": 33
+          },
+          "state": 0,
+          "title": "细评《红楼梦之金玉良缘》4:蛮不讲理的林黛玉",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114948390786020,
+          "bvid": "BV1PG8UzeEF6",
+          "ctime": 1753973509,
+          "duration": 724,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/d1231973212e4fa90c4fe36e6b18eb8b2c08465d.jpg",
+          "playback_position": 0,
+          "pubdate": 1754395200,
+          "stat": {
+            "view": 4521,
+            "vt": 0,
+            "danmaku": 28
+          },
+          "state": 0,
+          "title": "细评《红楼梦之金玉良缘》3",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114920523830541,
+          "bvid": "BV1P68hzHELr",
+          "ctime": 1753548108,
+          "duration": 561,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/5db9b8166ec17ad1565ed0aea6f293eba0b368d2.jpg",
+          "playback_position": 0,
+          "pubdate": 1753966800,
+          "stat": {
+            "view": 6785,
+            "vt": 0,
+            "danmaku": 43
+          },
+          "state": 0,
+          "title": "细评《红楼梦之金玉良缘》2：周瑞送宫花中存在的问题",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 114908511343115,
+          "bvid": "BV1kobkzLE8E",
+          "ctime": 1753364826,
+          "duration": 830,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/439c2cb71dd4a57d5aa0aac91afb6554a11fe113.jpg",
+          "playback_position": 0,
+          "pubdate": 1753783200,
+          "stat": {
+            "view": 8972,
+            "vt": 0,
+            "danmaku": 47
+          },
+          "state": 0,
+          "title": "季节错乱，人设崩塌，《红楼梦之金玉良缘》差在哪儿？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115005282324683,
+          "bvid": "BV1DqbMzcEUh",
+          "ctime": 1754841579,
+          "duration": 738,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/f3a08239057455ccd956905e6757293b704e6ced.jpg",
+          "playback_position": 0,
+          "pubdate": 1755268200,
+          "stat": {
+            "view": 5019,
+            "vt": 0,
+            "danmaku": 38
+          },
+          "state": 0,
+          "title": "细评《红楼梦之金玉良缘》5:薛姨妈、王熙凤面目全非",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 115022176981938,
+          "bvid": "BV1YobazvEHT",
+          "ctime": 1755099362,
+          "duration": 668,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/c31e2923bae3fa82c851671f13f81e748728f8fa.jpg",
+          "playback_position": 0,
+          "pubdate": 1755523800,
+          "stat": {
+            "view": 3659,
+            "vt": 0,
+            "danmaku": 24
+          },
+          "state": 0,
+          "title": "细评《红楼梦之金玉良缘》6",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/ab189e235ba66c78e1a029e40c8600c52aea36bd.jpg",
+        "description": "细评《红楼梦之金玉良缘》",
+        "mid": 558777092,
+        "name": "合集·细评《红楼梦之金玉良缘》",
+        "ptime": 1756305000,
+        "season_id": 6048856,
+        "total": 7,
+        "title": "细评《红楼梦之金玉良缘》"
+      },
+      "recent_aids": [
+        114982683482293,
+        114948390786020,
+        114920523830541,
+        114908511343115,
+        115005282324683,
+        115022176981938
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 1300907525,
+          "bvid": "BV18u4m1A7sE",
+          "ctime": 1708424098,
+          "duration": 748,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/4248bd9899c184eaa450472df77b727be20031d3.jpg",
+          "playback_position": 0,
+          "pubdate": 1708424098,
+          "stat": {
+            "view": 23605,
+            "vt": 0,
+            "danmaku": 19
+          },
+          "state": 0,
+          "title": "贾巧自小多病多灾，贾母为何对她视而不见？刘姥姥一眼洞穿原因",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1100751620,
+          "bvid": "BV1wA4m137mA",
+          "ctime": 1708267336,
+          "duration": 660,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/28a0d45b787f5d454ad2fa8881e6427ac7bba8f2.jpg",
+          "playback_position": 0,
+          "pubdate": 1708267336,
+          "stat": {
+            "view": 14916,
+            "vt": 0,
+            "danmaku": 18
+          },
+          "state": 0,
+          "title": "赵姨娘顺路探病潇湘馆，林黛玉对此心知肚明，为何还热情招待？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1051068269,
+          "bvid": "BV1aH4y177MQ",
+          "ctime": 1708948890,
+          "duration": 643,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/4c40be22ed215b339aa414bfd3d0e3079a2410ff.jpg",
+          "playback_position": 0,
+          "pubdate": 1708948890,
+          "stat": {
+            "view": 10837,
+            "vt": 0,
+            "danmaku": 6
+          },
+          "state": 0,
+          "title": "王熙凤接手管家权，需要付出多沉重的代价？平儿的评价一针见血",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1251133046,
+          "bvid": "BV1BJ4m1e763",
+          "ctime": 1709282418,
+          "duration": 582,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/55423f755a7829b681c7aad1bb3a2550b2a60924.jpg",
+          "playback_position": 0,
+          "pubdate": 1709282418,
+          "stat": {
+            "view": 15609,
+            "vt": 0,
+            "danmaku": 13
+          },
+          "state": 0,
+          "title": "王夫人房里有多混乱？怡红院麝月无心之语，一针见血直指赵姨娘",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1101326117,
+          "bvid": "BV1rw4m1o7Kg",
+          "ctime": 1709820576,
+          "duration": 544,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/41d2b2a97cf05de4c1e0c610c0168991b19ca6d1.jpg",
+          "playback_position": 0,
+          "pubdate": 1709820576,
+          "stat": {
+            "view": 12660,
+            "vt": 0,
+            "danmaku": 19
+          },
+          "state": 0,
+          "title": "林黛玉争强好胜的性格，在元妃省亲时，有没有引起贾元春的反感？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 1752163840,
+          "bvid": "BV1mx421k7zU",
+          "ctime": 1711119812,
+          "duration": 737,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/3fafaaf3665745c1f457994b9e0f32a6e2cdf0a1.jpg",
+          "playback_position": 0,
+          "pubdate": 1711119812,
+          "stat": {
+            "view": 11858,
+            "vt": 0,
+            "danmaku": 4
+          },
+          "state": 0,
+          "title": "贾家红稻米不够吃，王熙凤却有余资广收羽翼，暴露出职场丛林法则",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/5672b9fd3110700a0e72d074fddec945deea34d5.jpg",
+        "description": "漫谈《红楼梦》人物典型性格特点，以及相关情节文本解读。",
+        "mid": 558777092,
+        "name": "合集·红楼人物论",
+        "ptime": 1723120607,
+        "season_id": 2245040,
+        "total": 11,
+        "title": "红楼人物论"
+      },
+      "recent_aids": [
+        1300907525,
+        1100751620,
+        1051068269,
+        1251133046,
+        1101326117,
+        1752163840
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 1300137696,
+          "bvid": "BV1aT4m1S7Xe",
+          "ctime": 1706790595,
+          "duration": 534,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/5cd74e04c276790f69800a0747d563f4713aca4a.jpg",
+          "playback_position": 0,
+          "pubdate": 1706790595,
+          "stat": {
+            "view": 4736,
+            "vt": 0,
+            "danmaku": 19
+          },
+          "state": 0,
+          "title": "漫谈新红楼（2）：聪慧过人林黛玉，反变矫情显眼包？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 751785728,
+          "bvid": "BV13k4y1S76u",
+          "ctime": 1706278135,
+          "duration": 740,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/64fb03840b840b215c3eb82f1f5a771394916f94.jpg",
+          "playback_position": 0,
+          "pubdate": 1706278135,
+          "stat": {
+            "view": 13720,
+            "vt": 0,
+            "danmaku": 53
+          },
+          "state": 0,
+          "title": "漫谈新红楼梦（1）：漏洞百出——林黛玉进荣国府",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/29fb009d31d7a65d58e694f8bec2009d99558345.jpg",
+        "description": "聊聊新红楼为何广受吐槽。",
+        "mid": 558777092,
+        "name": "合集·漫谈新《红楼梦》",
+        "ptime": 1706790595,
+        "season_id": 2165065,
+        "total": 2,
+        "title": "漫谈新《红楼梦》"
+      },
+      "recent_aids": [
+        1300137696,
+        751785728
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 266812570,
+          "bvid": "BV1SY411i7Sk",
+          "ctime": 1676211251,
+          "duration": 243,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/567b7cf437a0ec93ddf21f01d32d12997f7c1979.jpg",
+          "playback_position": 0,
+          "pubdate": 1676211251,
+          "stat": {
+            "view": 4530,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "【红楼不红】红楼解说第1集——甄英莲元宵夜丢失",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 351779151,
+          "bvid": "BV1rR4y1B7B4",
+          "ctime": 1676287155,
+          "duration": 311,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/7f04c9c39c1018e81e0685aa73174d8aea5b479a.jpg",
+          "playback_position": 0,
+          "pubdate": 1676287155,
+          "stat": {
+            "view": 2018,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "【红楼不红】红楼解说第2集：甄士隐遇道顿悟",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 351917542,
+          "bvid": "BV1YR4y1i7C7",
+          "ctime": 1676453529,
+          "duration": 255,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/36782c8f3531a16ecab23db8b1e50eec8ebfbc53.jpg",
+          "playback_position": 0,
+          "pubdate": 1676453529,
+          "stat": {
+            "view": 1760,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "【红楼不红】红楼解说第3集：贾雨村林府任西宾",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 479594854,
+          "bvid": "BV1jM411A7La",
+          "ctime": 1676625074,
+          "duration": 257,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/e59fb6349027a15772e090e3b680c59a1a1b6602.jpg",
+          "playback_position": 0,
+          "pubdate": 1676625074,
+          "stat": {
+            "view": 1833,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "【红楼不红】红楼解说第4集：林黛玉抛父进京都",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 567219850,
+          "bvid": "BV1nv4y1s7cT",
+          "ctime": 1676891680,
+          "duration": 427,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/a3b65feb19b42a1df17bd4cbc89b5073bfacc232.jpg",
+          "playback_position": 0,
+          "pubdate": 1676891680,
+          "stat": {
+            "view": 2312,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "红楼解说第5集：林黛玉初进荣国府",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 907647829,
+          "bvid": "BV1LM4y1o7iG",
+          "ctime": 1677478616,
+          "duration": 382,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/b5b8621516820fea0df536012a31b9aa512623cb.jpg",
+          "playback_position": 0,
+          "pubdate": 1677478616,
+          "stat": {
+            "view": 2295,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "红楼解说第6集：林黛玉拜见两舅",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/2a5270057a49d662907dda2e1acd9923ff5309df.jpg",
+        "description": "",
+        "mid": 558777092,
+        "name": "合集·87版红楼讲解",
+        "ptime": 1683884136,
+        "season_id": 536295,
+        "total": 25,
+        "title": "87版红楼讲解"
+      },
+      "recent_aids": [
+        266812570,
+        351779151,
+        351917542,
+        479594854,
+        567219850,
+        907647829
+      ]
+    },
+    {
+      "archives": [
+        {
+          "aid": 643688124,
+          "bvid": "BV1uY4y1j7dT",
+          "ctime": 1658388366,
+          "duration": 53,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/01a012a372419c4720e033668316a58b7b2fee05.jpg",
+          "playback_position": 0,
+          "pubdate": 1658388366,
+          "stat": {
+            "view": 5775,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "红楼梦：周瑞家的给林黛玉送宫花时，黛玉为何要阴阳怪气地嘲讽？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 686131893,
+          "bvid": "BV1BU4y1i7LG",
+          "ctime": 1658388754,
+          "duration": 53,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/2cd26504e782a561af05f9ffd05502d33b8ce1c4.jpg",
+          "playback_position": 0,
+          "pubdate": 1658388754,
+          "stat": {
+            "view": 3690,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "红楼梦：探春为什么会忘记林黛玉的生日？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 856247148,
+          "bvid": "BV1eV4y177Rf",
+          "ctime": 1658394353,
+          "duration": 68,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i2.hdslb.com/bfs/archive/10ad6529fcb84857168299dd919430f8a1232a99.jpg",
+          "playback_position": 0,
+          "pubdate": 1658394352,
+          "stat": {
+            "view": 4578,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "红楼梦：林如海去世后，林黛玉为何不知道自家财产的去向？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 386226221,
+          "bvid": "BV1vd4y1S7yS",
+          "ctime": 1658459362,
+          "duration": 72,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/681214808cd5f32421d3081201114591b1ab963e.jpg",
+          "playback_position": 0,
+          "pubdate": 1658459362,
+          "stat": {
+            "view": 3922,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "红楼梦：林黛玉的父亲林如海，在官场上到底属于什么阶层？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 983631822,
+          "bvid": "BV1bt4y1576L",
+          "ctime": 1658477209,
+          "duration": 67,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i0.hdslb.com/bfs/archive/b3888a41fb80c6e8286b9e4aa104cb25119bbf5a.jpg",
+          "playback_position": 0,
+          "pubdate": 1658477209,
+          "stat": {
+            "view": 3137,
+            "vt": 0,
+            "danmaku": 1
+          },
+          "state": 0,
+          "title": "红楼梦：宁荣两府经济走向衰败的核心原因是什么？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        },
+        {
+          "aid": 598685194,
+          "bvid": "BV1KB4y1e7tA",
+          "ctime": 1658550170,
+          "duration": 66,
+          "enable_vt": false,
+          "interactive_video": false,
+          "pic": "http://i1.hdslb.com/bfs/archive/22f99d0cd43d75ceec9cdeedcf129ad25691eb9a.jpg",
+          "playback_position": 0,
+          "pubdate": 1658550170,
+          "stat": {
+            "view": 2484,
+            "vt": 0,
+            "danmaku": 0
+          },
+          "state": 0,
+          "title": "红楼梦：林如海的丧事，究竟是如何处理的？",
+          "ugc_pay": 0,
+          "vt_display": "",
+          "is_lesson_video": 0
+        }
+      ],
+      "meta": {
+        "category": 0,
+        "cover": "https://archive.biliimg.com/bfs/archive/6bece74bd2f0b9faaddd1b23ee1b37bbd408ca51.jpg",
+        "description": "关注红楼不红，带你了解更多红楼知识。",
+        "mid": 558777092,
+        "name": "合集·《红楼梦》小解",
+        "ptime": 1678450127,
+        "season_id": 587399,
+        "total": 133,
+        "title": "《红楼梦》小解"
+      },
+      "recent_aids": [
+        643688124,
+        686131893,
+        856247148,
+        386226221,
+        983631822,
+        598685194
+      ]
+    }
+  ],
+  "series_list": []
+}
