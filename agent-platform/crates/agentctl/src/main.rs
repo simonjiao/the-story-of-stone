@@ -1,0 +1,290 @@
+use anyhow::{Context, bail};
+use clap::{Args, Parser, Subcommand};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde_json::{Value, json};
+
+#[derive(Debug, Parser)]
+#[command(name = "agentctl")]
+#[command(about = "P0 Agent Manager admin CLI")]
+struct Cli {
+    #[arg(
+        long,
+        env = "AGENT_MANAGER_URL",
+        default_value = "http://127.0.0.1:8088"
+    )]
+    manager_url: String,
+
+    #[arg(long, env = "AGENTCTL_USER", default_value = "admin")]
+    user: String,
+
+    #[arg(long, env = "AGENTCTL_SERVICE", default_value = "agentctl")]
+    service: String,
+
+    #[arg(long, env = "AGENTCTL_ROLES", default_value = "system_admin")]
+    roles: String,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Requests(RequestsCommand),
+    Agents(AgentsCommand),
+    Audit(AuditCommand),
+    Observer(ObserverCommand),
+}
+
+#[derive(Debug, Args)]
+struct RequestsCommand {
+    #[command(subcommand)]
+    command: RequestsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RequestsSubcommand {
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    Approve {
+        request_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    Deny {
+        request_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+struct AgentsCommand {
+    #[command(subcommand)]
+    command: AgentsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentsSubcommand {
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    Pause {
+        agent_id: String,
+    },
+    Resume {
+        agent_id: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct AuditCommand {
+    #[arg(long, default_value_t = 100)]
+    limit: i64,
+}
+
+#[derive(Debug, Args)]
+struct ObserverCommand {
+    #[command(subcommand)]
+    command: ObserverSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ObserverSubcommand {
+    Reports {
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    Show {
+        report_id: String,
+    },
+    Run,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let client = reqwest::Client::new();
+    let headers = headers(&cli)?;
+    let manager_url = cli.manager_url.clone();
+    let value = match cli.command {
+        Command::Requests(command) => match command.command {
+            RequestsSubcommand::List { limit } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/requests?limit={limit}"),
+                )
+                .await?
+            }
+            RequestsSubcommand::Approve { request_id, reason } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/requests/{request_id}/approve"),
+                    json!({ "reason": reason }),
+                )
+                .await?
+            }
+            RequestsSubcommand::Deny { request_id, reason } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/requests/{request_id}/deny"),
+                    json!({ "reason": reason }),
+                )
+                .await?
+            }
+        },
+        Command::Agents(command) => match command.command {
+            AgentsSubcommand::List { limit } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/agents?limit={limit}"),
+                )
+                .await?
+            }
+            AgentsSubcommand::Pause { agent_id } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/agents/{agent_id}/pause"),
+                    json!({}),
+                )
+                .await?
+            }
+            AgentsSubcommand::Resume { agent_id } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/agents/{agent_id}/resume"),
+                    json!({}),
+                )
+                .await?
+            }
+        },
+        Command::Audit(command) => {
+            get(
+                &client,
+                &manager_url,
+                &headers,
+                &format!("/v1/admin/audit?limit={}", command.limit),
+            )
+            .await?
+        }
+        Command::Observer(command) => match command.command {
+            ObserverSubcommand::Reports { limit } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/observer/reports?limit={limit}"),
+                )
+                .await?
+            }
+            ObserverSubcommand::Show { report_id } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/observer/reports/{report_id}"),
+                )
+                .await?
+            }
+            ObserverSubcommand::Run => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    "/v1/admin/observer/runs",
+                    json!({}),
+                )
+                .await?
+            }
+        },
+    };
+
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn headers(cli: &Cli) -> anyhow::Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-agent-user"),
+        HeaderValue::from_str(&cli.user)?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-agent-service"),
+        HeaderValue::from_str(&cli.service)?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-agent-roles"),
+        HeaderValue::from_str(&cli.roles)?,
+    );
+    headers.insert(
+        HeaderName::from_static("x-agent-allowed-actions"),
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-agent-resource-allowlist"),
+        HeaderValue::from_static("*"),
+    );
+    Ok(headers)
+}
+
+async fn get(
+    client: &reqwest::Client,
+    manager_url: &str,
+    headers: &HeaderMap,
+    path: &str,
+) -> anyhow::Result<Value> {
+    let response = client
+        .get(format!("{}{}", manager_url, path))
+        .headers(headers.clone())
+        .send()
+        .await
+        .context("request failed")?;
+    response_json(response).await
+}
+
+async fn post(
+    client: &reqwest::Client,
+    manager_url: &str,
+    headers: &HeaderMap,
+    path: &str,
+    body: Value,
+) -> anyhow::Result<Value> {
+    let response = client
+        .post(format!("{}{}", manager_url, path))
+        .headers(headers.clone())
+        .json(&body)
+        .send()
+        .await
+        .context("request failed")?;
+    response_json(response).await
+}
+
+async fn response_json(response: reqwest::Response) -> anyhow::Result<Value> {
+    let status = response.status();
+    let value = response
+        .json::<Value>()
+        .await
+        .context("invalid JSON response")?;
+    if !status.is_success() {
+        bail!(
+            "manager returned {status}: {}",
+            serde_json::to_string_pretty(&value)?
+        );
+    }
+    Ok(value)
+}

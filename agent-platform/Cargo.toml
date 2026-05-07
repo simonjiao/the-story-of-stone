@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent-core",
+    "crates/agent-store",
+    "crates/agent-manager",
+    "crates/agent-orchestrator",
+    "crates/agent-runtime",
+    "crates/agent-worker",
+    "crates/agentctl",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.95"
+
+[workspace.dependencies]
+agent-core = { path = "crates/agent-core" }
+agent-store = { path = "crates/agent-store" }
+agent-runtime = { path = "crates/agent-runtime" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "json"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+config = { version = "0.15", default-features = false, features = ["toml"] }
+dotenvy = "0.15"
+futures-util = "0.3"
+http = "1"
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+metrics = "0.24"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "json", "migrate", "macros"] }
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
+tower = { version = "0.5", features = ["timeout", "limit", "util"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "sensitive-headers", "limit", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+utoipa = { version = "5", features = ["axum_extras", "uuid", "time"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+zeroize = "1"
