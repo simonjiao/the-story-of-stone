@@ -54,6 +54,24 @@ render `data/hermes/config.yaml` after editing `.env`:
 ./scripts/render-hermes-config.sh
 ```
 
+The render script backs up an existing Hermes config before overwriting it. By
+default it disables Hermes persistent memory for this Open WebUI deployment so
+new Open WebUI chats do not inherit previous chat-specific facts:
+
+```yaml
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+```
+
+If cross-session Hermes memory is intentionally desired, set these in `.env`
+before rendering:
+
+```bash
+HERMES_MEMORY_ENABLED=true
+HERMES_USER_PROFILE_ENABLED=true
+```
+
 The model-serving container must be on the same Docker network as Hermes. This
 compose file attaches Hermes to `LOCAL_OPENAI_DOCKER_NETWORK`.
 
@@ -82,6 +100,12 @@ Start the stack:
 docker compose pull
 docker compose up -d
 docker compose ps
+```
+
+After re-rendering Hermes config, restart Hermes:
+
+```bash
+docker compose restart hermes
 ```
 
 Check logs:
