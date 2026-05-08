@@ -172,6 +172,26 @@
 | BRIDGE-HARDEN-PUBLIC-20260508 | PASS | 公网 Open WebUI API 仍可访问。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200，响应 464 bytes。 |  |  |
 | BRIDGE-HARDEN-LOGS-20260508 | PASS | hardening 复测窗口内关键服务无错误关键词。 | `docker compose logs --since=5m agent-manager agent-orchestrator open-webui` 未检出 `error/panic/failed/forbidden`。 |  |  |
 
+## 2026-05-08 Agent Platform 管理面远程复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| ADMIN-NONADMIN-REJECT-20260508 | PASS | 非 admin JWT 访问 admin request list 被拒绝。 | `GET /v1/admin/requests?limit=1` 返回 HTTP 403。 |  | 验证 Open WebUI 普通用户不等于 Agent Platform admin。 |
+| ADMIN-REQUEST-AUDIT-LIST-20260508 | PASS | admin JWT 可读取 request list 和 audit list。 | `GET /v1/admin/requests?limit=3`、`GET /v1/admin/audit?limit=3` 均返回 HTTP 200。 |  | 测试 JWT 临时签发，未输出 secret。 |
+| ADMIN-DENY-20260508 | PASS | admin 可 deny 待审批请求。 | 请求 `req_019e07dc3e917331aeadfbbabb55f250` 从 `approval_required` 变为 `denied`。 |  |  |
+| ADMIN-APPROVE-20260508 | PASS | admin 可 approve 待审批请求并创建 agent。 | 请求 `req_019e07dc3fc173e1a1dd2e4e502d2f9f` fulfilled，生成 `agent_019e07dc405e7d50a29535da3dbf7992`。 |  |  |
+| ADMIN-AGENT-LIFECYCLE-20260508 | PASS | admin agent list/pause/resume/delete 均可用。 | `agent_019e07dc405e7d50a29535da3dbf7992` 可被 list 命中，状态依次为 `paused`、`running`、`terminated`。 |  | delete 语义为标记 terminated。 |
+| ADMIN-GRANT-20260508 | PASS | admin 可创建 grant。 | `POST /v1/admin/grants` 返回 `grant_019e07dc42eb72e28cf668cdf8d32e6e`。 |  |  |
+| ADMIN-OBSERVER-20260508 | PASS | admin 可 list observer reports、手动触发 observer run 并读取 report。 | 手动触发生成 `obsr_019e07dc44107b329f4355143ed1df33`，随后 `GET /v1/admin/observer/reports/{id}` 返回 HTTP 200。 |  |  |
+| ADMIN-RUN-RETRY-TERMINATE-20260508 | PASS | admin 可对 dead-letter run 执行 retry 和 terminate。 | `run_admin_run_smoke_1778248384_retry` dead-letter 后 retry 回 `queued`；`run_admin_run_smoke_1778248384_terminate` dead-letter 后 terminate 为 `cancelled`。 |  | 测试 run 由 internal service endpoint 构造，只用于管理面 smoke。 |
+| ADMIN-LOGS-20260508 | PASS | 管理面复测窗口内关键服务无错误关键词。 | `docker compose logs --since=5m agent-manager agent-worker agent-observer` 未检出 `error/panic/failed`。 |  |  |
+
+仍未覆盖且需要 Open WebUI 管理员账号或 admin token：
+
+1. Open WebUI Function API happy path：使用真实 Open WebUI admin token 执行 `deploy/scripts/install-openwebui-function.sh`。
+2. Open WebUI Admin Panel 手工导入/更新 Function 的 UI 路径。
+3. Open WebUI admin 登录用户通过 Bridge 发起控制请求时，默认不映射为 Agent Platform admin 的真实账号级 E2E 验证。
+
 未做专项远程 smoke 的边界：
 
 1. 第二个 Open WebUI 登录用户隔离未做远程账号级复测；当前代码和 store 测试覆盖 binding subject 隔离。
