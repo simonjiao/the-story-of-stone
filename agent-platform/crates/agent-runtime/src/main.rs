@@ -15,7 +15,11 @@ struct Args {
     #[arg(long, env = "AGENT_RUNTIME_BIND", default_value = "127.0.0.1:8090")]
     bind: SocketAddr,
 
-    #[arg(long, env = "AGENT_RUNTIME_PROFILE", default_value = "p0-minimal")]
+    #[arg(
+        long,
+        env = "AGENT_RUNTIME_PROFILE",
+        default_value = "agent-platform-minimal"
+    )]
     profile: String,
 }
 

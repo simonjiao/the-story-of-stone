@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 #[derive(Debug, Parser)]
 #[command(name = "agentctl")]
-#[command(about = "P0 Agent Manager admin CLI")]
+#[command(about = "Agent Manager admin CLI")]
 struct Cli {
     #[arg(
         long,

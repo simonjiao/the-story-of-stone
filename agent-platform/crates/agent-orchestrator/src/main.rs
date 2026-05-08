@@ -497,7 +497,7 @@ Suggest 3-5 relevant follow-up questions or prompts.
 JSON format: { "follow_ups": ["Question 1?"] }
 ### Chat History:
 <chat_history>
-USER: 创建 agent resource:team/default 进行 UI P0 smoke
+USER: 创建 agent resource:team/default 进行 UI Agent Platform smoke
 ASSISTANT: 该请求需要资源负责人审批。
 </chat_history>"#;
 

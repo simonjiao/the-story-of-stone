@@ -482,7 +482,7 @@ impl AgentInstance {
         let agent_type = agent_type.into();
         Self {
             id: new_id("agent"),
-            hermes_profile: format!("{agent_type}:p0-minimal"),
+            hermes_profile: format!("{agent_type}:agent-platform-minimal"),
             agent_type,
             owner_user: owner_user.into(),
             target_resource: target_resource.into(),

@@ -234,7 +234,7 @@ pub async fn observer_tick(store: StoreRef, trace_id: &str) -> CoreResult<Observ
         } else {
             Some(RiskLevel::Low)
         },
-        format!("Observer generated read-only P0 report; dead_letter={dead_letters}."),
+        format!("Observer generated read-only Agent Platform report; dead_letter={dead_letters}."),
         json!({
             "run_counts": snapshot.run_counts,
             "agent_counts": snapshot.agent_counts,

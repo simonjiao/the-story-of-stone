@@ -1,7 +1,7 @@
 name: hermes-home
 
 x-agent-platform-image: &agent-platform-image
-  image: hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-p0}
+  image: hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-formal}
   build:
     context: "${AGENT_PLATFORM_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: Dockerfile

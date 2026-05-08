@@ -98,7 +98,7 @@ impl DefaultPolicy {
 
         if matches!(ctx.risk_level, RiskLevel::Critical) {
             return PolicyDecision::Denied {
-                reason: "critical risk action is denied by P0 policy".to_string(),
+                reason: "critical risk action is denied by Agent Platform policy".to_string(),
             };
         }
 
@@ -110,7 +110,8 @@ impl DefaultPolicy {
 
         if matches!(ctx.side_effect_mode, SideEffectMode::Authorized) {
             return PolicyDecision::Denied {
-                reason: "P0 does not allow authorized external side effects".to_string(),
+                reason: "Agent Platform read-only policy does not allow authorized external side effects"
+                    .to_string(),
             };
         }
 

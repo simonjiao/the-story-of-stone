@@ -11,15 +11,15 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `agent-manager`: Agent Platform P0 control plane, internal Docker network only.
+- `agent-manager`: Agent Platform control plane, internal Docker network only.
 - `agent-orchestrator`: OpenAI-compatible gateway used by Open WebUI; ordinary
   chat is passed through to Hermes, while agent control requests go to Manager.
-- `agent-worker`: P0 run worker.
+- `agent-worker`: Agent run worker.
 - `agent-observer`: read-only Observer Agent report loop.
 - `open-webui`: email/password login and chat UI. It connects only to
   `agent-orchestrator`.
 - `cloudflared`: Cloudflare Tunnel connector.
-- `agent-platform-postgres`: dedicated Agent Platform P0 database, internal
+- `agent-platform-postgres`: dedicated Agent Platform database, internal
   Docker network only.
 
 Open WebUI starts in offline mode to avoid blocking first boot on Hugging Face
@@ -63,7 +63,7 @@ Create persistent directories:
 mkdir -p data/hermes data/open-webui data/agent-platform-postgres
 ```
 
-Agent Platform P0 uses its own Postgres container. Do not reuse
+Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and
 has its own lifecycle, data directory, and schema ownership.
 

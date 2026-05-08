@@ -12,15 +12,15 @@ P1
 
 | 用例 ID | 状态 | 说明 |
 | --- | --- | --- |
-| `P0-APPROVAL-OWNER-20260508` | FAIL->PASS | 审批创建 agent 后，agent 应归属原始请求人，而不是审批人。 |
-| `P0-MULTI-SESSION-20260508` | PASS | 同一请求人可在同一 agent 下创建多个 session。 |
-| `P0-WORKER-RUN-20260508` | PASS | 两个 session run 均被 Worker claim 并完成。 |
+| `AGENT-APPROVAL-OWNER-20260508` | FAIL->PASS | 审批创建 agent 后，agent 应归属原始请求人，而不是审批人。 |
+| `AGENT-MULTI-SESSION-20260508` | PASS | 同一请求人可在同一 agent 下创建多个 session。 |
+| `AGENT-WORKER-RUN-20260508` | PASS | 两个 session run 均被 Worker claim 并完成。 |
 
 ## 影响
 
 审批流旧实现使用审批人的 `AuthContext` 创建 agent，并用审批人作为复用查询 owner。结果是 UI/用户发起的请求被审批后，agent 进入审批人的 `my-agents`，原始请求人看不到该 agent，也不能基于它创建自己的 session/run。
 
-这会破坏 agent 复用、多 session 和用户侧审计归属，是 P0 控制面功能性问题。
+这会破坏 agent 复用、多 session 和用户侧审计归属，是 Agent Platform 控制面功能性问题。
 
 ## 证据
 

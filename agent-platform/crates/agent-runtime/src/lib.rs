@@ -17,11 +17,11 @@ impl MinimalRuntimeClient {
         }
     }
 
-    fn ensure_p0_read_only(&self, side_effect_mode: SideEffectMode) -> CoreResult<()> {
+    fn ensure_read_only_runtime(&self, side_effect_mode: SideEffectMode) -> CoreResult<()> {
         if matches!(side_effect_mode, SideEffectMode::Authorized) {
             return Err(AgentCoreError::coded(
                 ErrorCode::Forbidden,
-                "Minimal Runtime refuses authorized side effects in P0",
+                "Minimal Runtime refuses authorized side effects",
             ));
         }
         Ok(())
@@ -34,14 +34,14 @@ impl MinimalRuntimeClient {
 
 impl Default for MinimalRuntimeClient {
     fn default() -> Self {
-        Self::new("p0-minimal")
+        Self::new("agent-platform-minimal")
     }
 }
 
 #[async_trait]
 impl RuntimeClient for MinimalRuntimeClient {
     async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
-        self.ensure_p0_read_only(input.run.side_effect_mode)?;
+        self.ensure_read_only_runtime(input.run.side_effect_mode)?;
         let context_size = input
             .context
             .as_ref()
@@ -144,7 +144,7 @@ mod tests {
     use agent_core::{AgentRun, TriggerType, new_trace_id};
 
     #[tokio::test]
-    async fn minimal_runtime_refuses_p0_side_effects() {
+    async fn minimal_runtime_refuses_authorized_side_effects() {
         let runtime = MinimalRuntimeClient::default();
         let mut run = AgentRun::new(
             "agent-1",

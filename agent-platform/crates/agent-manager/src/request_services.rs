@@ -191,7 +191,7 @@ pub(crate) async fn fulfill_request(
             agent.display_name = request
                 .intent_text
                 .clone()
-                .or_else(|| Some("P0 background worker".to_string()));
+                .or_else(|| Some("Agent Platform background worker".to_string()));
             let agent = store.create_agent_instance(agent).await?;
             request.status = AgentRequestStatus::Fulfilled;
             request.result_agent_id = Some(agent.id);
