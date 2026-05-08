@@ -15,7 +15,7 @@
 
 ## 当前状态
 
-基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。
+基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。Open WebUI 管理员账号级 Function API、Admin Panel Function 更新和 admin 运行时权限边界补测已完成。
 
 ## 阻断规则
 
@@ -186,11 +186,15 @@
 | ADMIN-RUN-RETRY-TERMINATE-20260508 | PASS | admin 可对 dead-letter run 执行 retry 和 terminate。 | `run_admin_run_smoke_1778248384_retry` dead-letter 后 retry 回 `queued`；`run_admin_run_smoke_1778248384_terminate` dead-letter 后 terminate 为 `cancelled`。 |  | 测试 run 由 internal service endpoint 构造，只用于管理面 smoke。 |
 | ADMIN-LOGS-20260508 | PASS | 管理面复测窗口内关键服务无错误关键词。 | `docker compose logs --since=5m agent-manager agent-worker agent-observer` 未检出 `error/panic/failed`。 |  |  |
 
-仍未覆盖且需要 Open WebUI 管理员账号或 admin token：
+## 2026-05-08 Open WebUI 管理员实账号补测
 
-1. Open WebUI Function API happy path：使用真实 Open WebUI admin token 执行 `deploy/scripts/install-openwebui-function.sh`。
-2. Open WebUI Admin Panel 手工导入/更新 Function 的 UI 路径。
-3. Open WebUI admin 登录用户通过 Bridge 发起控制请求时，默认不映射为 Agent Platform admin 的真实账号级 E2E 验证。
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| OPENWEBUI-FUNCTION-API-20260508 | PASS | 使用真实 Open WebUI admin 登录 token 通过正式 Function API 更新 `agent_identity_bridge`。 | `deploy/scripts/install-openwebui-function.sh` 返回 `{"function_id":"agent_identity_bridge","action":"updated","target_model":"hermes-agent"}`；随后 `GET /api/v1/functions/id/agent_identity_bridge` 返回 HTTP 200。 |  | 走远端 Docker 内网 `http://172.20.0.3:8080`，未使用临时 Open WebUI；未记录 token。 |
+| OPENWEBUI-FUNCTION-VALVES-20260508 | PASS | Function API 更新后，Filter 仍为全局启用且 valves 完整。 | `export?include_valves=true` 中 `is_active=true`、`is_global=true`，valve keys 为 `AGENT_BRIDGE_ISSUER`、`AGENT_BRIDGE_SECRET`、`TARGET_MODEL`。 |  | 只记录 key，不记录 secret 值。 |
+| OPENWEBUI-FUNCTION-UI-20260508 | PASS | Admin Panel 可进入 Function 编辑页并通过 UI 保存更新。 | 管理员菜单显示 `管理员面板`；`/admin/functions` 显示 `Agent Identity Bridge v1.0.0`；编辑页点击 `保存` 后 toast `函数更新成功`；DB `updated_at=2026-05-08 23:01:24 CST`，`is_active=1`、`is_global=1`。 |  | 验证 UI 更新路径；未创建临时 Function。 |
+| OPENWEBUI-ADMIN-BRIDGE-ROLE-20260508 | PASS | Open WebUI admin 登录用户通过 Bridge 发起控制请求时，默认不会映射为 Agent Platform admin。 | UI/API 请求返回 `request_id=req_019e0814ba0e71d393fe0c915fce02de` 且包含 `approval_required`；Manager DB 行为 `requested_by_user=openwebui:e85ce153-bdd3-4ef1-a82a-e107c0a12a53`、`requested_by_service=agent-orchestrator`、`status=approval_required`。 |  | Orchestrator 环境为 `AGENT_BRIDGE_USER_ROLE=viewer`、`AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled`。 |
+| OPENWEBUI-ADMIN-BRIDGE-LOGS-20260508 | PASS | 管理员实账号补测窗口内关键服务无错误日志。 | `docker compose logs --since=15m open-webui agent-orchestrator agent-manager` 未检出 `error/panic/failed/forbidden/unauthorized`。 |  |  |
 
 未做专项远程 smoke 的边界：
 
