@@ -35,7 +35,7 @@ P1
 | 2026-05-08 18:47 CST | 复核审批后 agent 归属。 | 确认审批创建的测试 agent 归属 `admin`，不是原始请求人。 |
 | 2026-05-08 18:49 CST | 修改 Manager fulfill 逻辑。 | agent owner 和复用查询 owner 改为 `request.requested_by_user`。 |
 | 2026-05-08 18:50 CST | 增加回归单测。 | `approved_create_agent_keeps_requester_as_owner` 覆盖请求人与审批人不同的审批路径。 |
-| 2026-05-08 18:55 CST | 重建并部署正式 Agent Platform 镜像。 | `agent-manager`、`agent-orchestrator`、`agent-worker`、`agent-observer` 均使用新 `hermes-agent-platform:p0` 镜像重启。 |
+| 2026-05-08 18:55 CST | 重建并部署正式 Agent Platform 镜像。 | `agent-manager`、`agent-orchestrator`、`agent-worker`、`agent-observer` 均使用新 Agent Platform 镜像重启；当前正式 tag 已改为 `formal`。 |
 
 ## 验证
 

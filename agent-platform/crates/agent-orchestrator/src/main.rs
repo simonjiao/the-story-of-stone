@@ -6,7 +6,7 @@ use agent_core::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Response,
@@ -22,13 +22,7 @@ use reqwest::header::{HeaderMap as ReqHeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
-use std::{
-    collections::{BTreeMap, HashMap},
-    convert::Infallible,
-    net::SocketAddr,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, convert::Infallible, net::SocketAddr, time::Duration};
 use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
 
@@ -64,12 +58,6 @@ struct Args {
         default_value_t = 300
     )]
     agent_bridge_max_clock_skew_seconds: i64,
-    #[arg(
-        long,
-        env = "AGENT_BRIDGE_REQUIRED_FOR_CONTROL",
-        default_value_t = true
-    )]
-    agent_bridge_required_for_control: bool,
     #[arg(
         long,
         env = "AGENT_BRIDGE_RESOURCE_ALLOWLIST",
@@ -112,7 +100,6 @@ struct AppState {
     bridge: BridgeConfig,
     manager_auth: ManagerAuthConfig,
     client: reqwest::Client,
-    bindings: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,8 +107,6 @@ struct ChatCompletionRequest {
     model: Option<String>,
     messages: Vec<ChatMessage>,
     stream: Option<bool>,
-    metadata: Option<Value>,
-    user: Option<String>,
     agent_bridge_context: Option<AgentBridgeContext>,
 }
 
@@ -131,17 +116,11 @@ struct ChatMessage {
     content: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct BindingInput {
-    session_id: String,
-}
-
 #[derive(Clone)]
 struct BridgeConfig {
     secret: Option<String>,
     issuer: String,
     max_clock_skew_seconds: i64,
-    required_for_control: bool,
     resource_allowlist: Vec<String>,
     user_role: String,
     admin_role_mapping: String,
@@ -201,35 +180,6 @@ struct UserJwtClaims {
     exp: usize,
 }
 
-impl AppState {
-    fn bind_session(
-        &self,
-        conversation_id: &str,
-        session_id: &str,
-        trace_id: &str,
-    ) -> Result<(), SafeError> {
-        let mut bindings = self
-            .bindings
-            .write()
-            .map_err(|_| internal_error(trace_id))?;
-        bindings.insert(conversation_id.to_string(), session_id.to_string());
-        Ok(())
-    }
-
-    fn bound_session_by_conversation(
-        &self,
-        conversation_id: &str,
-        trace_id: &str,
-    ) -> Result<Option<String>, SafeError> {
-        let bindings = self.bindings.read().map_err(|_| internal_error(trace_id))?;
-        Ok(bindings.get(conversation_id).cloned())
-    }
-}
-
-fn internal_error(trace_id: &str) -> SafeError {
-    SafeError::new(agent_core::ErrorCode::InternalError, trace_id.to_string())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -246,7 +196,6 @@ async fn main() -> anyhow::Result<()> {
             secret: args.agent_bridge_secret.filter(|value| !value.is_empty()),
             issuer: args.agent_bridge_issuer,
             max_clock_skew_seconds: args.agent_bridge_max_clock_skew_seconds,
-            required_for_control: args.agent_bridge_required_for_control,
             resource_allowlist: parse_csv(&args.agent_bridge_resource_allowlist),
             user_role: args.agent_bridge_user_role,
             admin_role_mapping: args.agent_bridge_admin_role_mapping,
@@ -259,16 +208,11 @@ async fn main() -> anyhow::Result<()> {
             jwt_ttl_seconds: args.agent_manager_jwt_ttl_seconds,
         },
         client: reqwest::Client::new(),
-        bindings: Arc::new(RwLock::new(HashMap::new())),
     };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
-        .route(
-            "/v1/orchestrator/bindings/{conversation_id}",
-            post(bind_session),
-        )
         .with_state(state)
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
@@ -288,24 +232,6 @@ async fn models() -> Json<Value> {
             }
         ]
     }))
-}
-
-async fn bind_session(
-    State(state): State<AppState>,
-    Path(conversation_id): Path<String>,
-    Json(input): Json<BindingInput>,
-) -> Response {
-    let trace_id = new_trace_id();
-    match state.bind_session(&conversation_id, &input.session_id, &trace_id) {
-        Ok(()) => Json(json!({
-            "status": "bound",
-            "conversation_id": conversation_id,
-            "session_id": input.session_id,
-            "trace_id": trace_id,
-        }))
-        .into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response(),
-    }
 }
 
 async fn chat_completions(
@@ -393,20 +319,8 @@ async fn chat_completions(
         }
     }
 
-    match bound_session(&state, &request, &trace_id) {
-        Ok(Some(session_id)) if !state.bridge.required_for_control => control_response(
-            model,
-            stream,
-            append_session_message_legacy(&state, &headers, &session_id, &last_user, &trace_id)
-                .await,
-            &trace_id,
-        ),
-        Ok(_) => {
-            strip_bridge_context(&mut payload);
-            passthrough_chat_completion(&state, &headers, payload, &trace_id).await
-        }
-        Err(error) => control_response(model, stream, Err(error), &trace_id),
-    }
+    strip_bridge_context(&mut payload);
+    passthrough_chat_completion(&state, &headers, payload, &trace_id).await
 }
 
 fn control_response(
@@ -562,31 +476,6 @@ fn direct_user_control_text(content: &str) -> &str {
         .trim()
 }
 
-fn bound_session(
-    state: &AppState,
-    request: &ChatCompletionRequest,
-    trace_id: &str,
-) -> Result<Option<String>, SafeError> {
-    if let Some(session_id) = request
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("agent_session_id"))
-        .and_then(Value::as_str)
-    {
-        return Ok(Some(session_id.to_string()));
-    }
-    let conversation_id = request
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("conversation_id"))
-        .and_then(Value::as_str)
-        .or(request.user.as_deref());
-    match conversation_id {
-        Some(conversation_id) => state.bound_session_by_conversation(conversation_id, trace_id),
-        None => Ok(None),
-    }
-}
-
 fn verify_bridge_context(
     state: &AppState,
     context: &AgentBridgeContext,
@@ -641,12 +530,9 @@ fn verify_bridge_context(
 
 fn require_bridge<'a>(
     bridge: Option<&'a TrustedBridgeContext>,
-    state: &AppState,
+    _state: &AppState,
     trace_id: &str,
 ) -> Result<&'a TrustedBridgeContext, SafeError> {
-    if !state.bridge.required_for_control {
-        return bridge.ok_or_else(|| SafeError::new(ErrorCode::Unauthorized, trace_id.to_string()));
-    }
     bridge.ok_or_else(|| SafeError::new(ErrorCode::Unauthorized, trace_id.to_string()))
 }
 
@@ -847,41 +733,6 @@ async fn submit_agent_request(
         ));
     }
     Ok(summary)
-}
-
-async fn append_session_message_legacy(
-    state: &AppState,
-    headers: &HeaderMap,
-    session_id: &str,
-    content: &str,
-    trace_id: &str,
-) -> Result<String, SafeError> {
-    let body = AppendMessageInput {
-        role: MessageRole::User,
-        content_summary: content.to_string(),
-        content_ref: None,
-        run_id: None,
-    };
-    let response = state
-        .client
-        .post(format!(
-            "{}/v1/agent-sessions/{}/messages",
-            state.manager_url, session_id
-        ))
-        .headers(forward_headers(headers, trace_id))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|_| SafeError::new(agent_core::ErrorCode::InternalError, trace_id.to_string()))?;
-    if !response.status().is_success() {
-        return Err(response.json::<SafeError>().await.unwrap_or_else(|_| {
-            SafeError::new(agent_core::ErrorCode::InternalError, trace_id.to_string())
-        }));
-    }
-    Ok(format!(
-        "session {} message appended trace_id={}",
-        session_id, trace_id
-    ))
 }
 
 async fn append_session_message_and_run(
@@ -1156,7 +1007,6 @@ mod tests {
                 secret: secret.map(ToString::to_string),
                 issuer: "open-webui".to_string(),
                 max_clock_skew_seconds: 300,
-                required_for_control: true,
                 resource_allowlist: vec!["resource:team/default".to_string()],
                 user_role: "viewer".to_string(),
                 admin_role_mapping: "disabled".to_string(),
@@ -1169,7 +1019,6 @@ mod tests {
                 jwt_ttl_seconds: 300,
             },
             client: reqwest::Client::new(),
-            bindings: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1262,31 +1111,6 @@ ASSISTANT: 该请求需要资源负责人审批。
         strip_bridge_context(&mut payload);
         assert!(payload.get("agent_bridge_context").is_none());
     }
-}
-
-fn forward_headers(headers: &HeaderMap, trace_id: &str) -> ReqHeaderMap {
-    let mut forwarded = ReqHeaderMap::new();
-    for name in [
-        "authorization",
-        "x-agent-user-token",
-        "x-agent-service",
-        "x-agent-user",
-        "x-agent-roles",
-        "x-agent-allowed-actions",
-        "x-agent-resource-allowlist",
-    ] {
-        if let Some(value) = headers.get(name)
-            && let Ok(header_name) = HeaderName::from_bytes(name.as_bytes())
-        {
-            forwarded.insert(header_name, value.clone());
-        }
-    }
-    forwarded.insert(
-        HeaderName::from_static("x-agent-trace-id"),
-        HeaderValue::from_str(trace_id)
-            .unwrap_or_else(|_| HeaderValue::from_static("trace_invalid")),
-    );
-    forwarded
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {

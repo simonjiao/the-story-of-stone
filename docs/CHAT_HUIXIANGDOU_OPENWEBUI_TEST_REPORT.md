@@ -63,6 +63,8 @@
 
 ## 修复记录
 
+说明：早期记录中的阶段名、临时容器和临时测试前缀不代表当前正式方案命名。当前正式部署镜像 tag 使用 `formal`，Agent Identity Bridge 不使用阶段名作为协议、字段、函数、Docker tag 或部署命名。
+
 | 时间 | 操作 | 结果 |
 | --- | --- | --- |
 | 2026-05-07 13:00 CST | 暂停后续聊天/RAG/历史测试，开始定位模型列表为空的可修复范围。 | 已进入修复定位。 |
@@ -78,14 +80,14 @@
 | 2026-05-07 14:28 CST | 修复 `ISSUE-003`。 | 已更新 Hermes 配置渲染脚本：写配置前备份，并默认关闭 `memory.memory_enabled` 与 `memory.user_profile_enabled`。 |
 | 2026-05-07 14:28 CST | 定位 `ISSUE-002`。 | Open WebUI 官方文档预期历史搜索支持消息内容；当前部署无可用配置项，需 Open WebUI 代码修复或升级验证。 |
 | 2026-05-08 16:07 CST | 正式部署前备份远程 `deploy/.env`。 | 备份路径：`/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |
-| 2026-05-08 16:08 CST | 同步正式 Agent Platform 构建上下文、compose 和 README 到远程部署目录。 | 远程 `docker compose config` 通过；`hermes-agent-platform:p0` 镜像构建成功。 |
+| 2026-05-08 16:08 CST | 同步正式 Agent Platform 构建上下文、compose 和 README 到远程部署目录。 | 远程 `docker compose config` 通过；早期测试镜像构建成功。当前正式 tag 已改为 `formal`。 |
 | 2026-05-08 16:15 CST | 首次正式 `docker compose up` 启动 Open WebUI 失败。 | Docker 返回 `failed to set up container networking: Address already in use`；`agent-manager` 动态占用 `172.20.0.3/16`，与 Open WebUI 固定 origin IP 冲突。 |
 | 2026-05-08 16:18 CST | 修复内部网络地址分配。 | `hermes-agent` 固定 `172.20.0.2`，`open-webui` 固定 `172.20.0.3`，Agent Platform 服务固定在 `.4` 与 `.10`-`.13`。 |
 | 2026-05-08 16:20 CST | 重新启动正式 compose。 | `agent-manager`、`agent-orchestrator`、`agent-worker`、`agent-observer`、`hermes-agent`、`hermes-open-webui` 均启动；Open WebUI 指向 `http://agent-orchestrator:8080/v1`。 |
 | 2026-05-08 16:20 CST | 验证正式 Orchestrator 普通聊天穿透。 | `/v1/chat/completions` 返回 `HERMES_FORMAL_OK`。 |
 | 2026-05-08 16:20 CST | 验证 Agent Platform 控制类请求。 | 控制指令返回 `approval_required`，请求 `req_019e06ac5efa7663a9a397b00408ea4d` 写入 Manager，审计记录包含 `request:create_agent`。 |
 | 2026-05-08 16:20 CST | 验证公网入口。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200。 |
-| 2026-05-08 16:21 CST | 清理临时测试资源。 | 已删除 `codex-p0-*p0_webui_test_20260508155417` 容器、临时数据库和临时用户，`hermes-internal` 网络中不再存在临时测试容器。 |
+| 2026-05-08 16:21 CST | 清理临时测试资源。 | 已删除早期临时测试容器、临时数据库和临时用户，`hermes-internal` 网络中不再存在临时测试容器。 |
 | 2026-05-08 16:23 CST | 正式部署 Hermes memory 配置。 | 配置备份：`/home/simon/hermes-home-deploy/data/hermes/config.yaml.bak.20260508-082325`；已确认 `memory_enabled: false` 与 `user_profile_enabled: false`。 |
 | 2026-05-08 16:24 CST | Hermes 重启后复测。 | 普通聊天返回 `HERMES_FORMAL_AFTER_RESTART_OK`；API 级跨请求记忆复测返回 `UNKNOWN_ONLY`；公网 `/api/config` 仍返回 HTTP 200。 |
 | 2026-05-08 18:20 CST | 使用测试账号重新执行 UI 关键路径与长回答专项。 | 登录成功，模型选择器显示 `hermes-agent`；UI 普通聊天返回 `ROUTE_UI_OK`；UI Agent Platform 控制指令返回 `approval_required`。 |
@@ -93,7 +95,7 @@
 | 2026-05-08 18:26 CST | 执行长回答停止生成测试。 | 1000 行清单生成被中断在第 6 行附近，未出现第 1000 行，页面出现 `继续生成`。停止控制功能可用，但生成中控制按钮在可访问 DOM 中无明确标签。 |
 | 2026-05-08 18:27 CST | 刷新长回答会话。 | 长回答、被中断回答和 `继续生成` 状态均恢复；误输入代码块的草稿未保存。 |
 | 2026-05-08 18:28 CST | 执行 UI 新会话隔离复测。 | 新会话 `/c/19884914-a0ae-42ce-9c82-3fcb799d7dbf` 追问上一会话测试代号，模型返回 `UNKNOWN_ONLY`。 |
-| 2026-05-08 18:31 CST | 执行历史正文搜索回归。 | 新长回答正文关键词 `codex-test-p0-long-20260508-A` 可找到新会话；旧正文关键词 `codex-test-basic-20260507` 仍返回 `未找到结果`。 |
+| 2026-05-08 18:31 CST | 执行历史正文搜索回归。 | 新长回答正文关键词可找到新会话；旧正文关键词 `codex-test-basic-20260507` 仍返回 `未找到结果`。 |
 | 2026-05-08 18:33 CST | 发现并修复 Open WebUI 追问建议导致的 控制请求误判。 | 追问建议内部提示曾额外创建 `req_019e071a9a667a13a10be4f718ee3746`；修复 Orchestrator 只识别 `### Chat History` 之前的直接用户文本。 |
 | 2026-05-08 18:38 CST | 部署并复测 控制请求误判修复。 | 内部追问建议提示复测前后最新请求 ID 不变，响应不含 `approval_required`；直接用户控制指令仍创建 `req_019e072a5bc87352b4ca99c26664157f`。 |
 | 2026-05-08 18:47 CST | 发现审批后 agent owner 错误。 | 审批请求 `req_019e072a5bc87352b4ca99c26664157f` 后生成的 `agent_019e0732cc207a11b34713104a7f2e6d` 出现在审批人 `admin` 的 `my-agents`，不在原始请求人下。 |
@@ -105,9 +107,9 @@
 | 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | DEPLOY-01 | PASS | 远程 `.env` 已在变更前备份。 | `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |  | 未输出密钥或密码。 |
-| DEPLOY-02 | PASS | 正式 compose 配置可解析，Agent Platform 镜像可构建。 | `remote_compose_config_ok`；`Image hermes-agent-platform:p0 Built`。 |  | 首次构建受 crates.io 网络重试影响，但最终成功。 |
+| DEPLOY-02 | PASS | 正式 compose 配置可解析，Agent Platform 镜像可构建。 | `remote_compose_config_ok`；早期测试镜像构建成功。当前正式 tag 已改为 `formal`。 |  | 首次构建受 crates.io 网络重试影响，但最终成功。 |
 | DEPLOY-03 | PASS | 正式服务全部健康或运行中。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator`、`agent-platform-postgres`、`hermes-agent`、`hermes-open-webui` healthy，worker/observer running。 |  |  |
-| NET-01 | PASS | Open WebUI origin IP 冲突已修复。 | `hermes-open-webui 172.20.0.3/16`；`agent-manager 172.20.0.10/16`；无 `codex-p0` 临时容器。 | P1 | 见 `ISSUE-004`。 |
+| NET-01 | PASS | Open WebUI origin IP 冲突已修复。 | `hermes-open-webui 172.20.0.3/16`；`agent-manager 172.20.0.10/16`；无临时测试容器。 | P1 | 见 `ISSUE-004`。 |
 | ROUTE-01 | PASS | Open WebUI 后端已切到正式 Orchestrator。 | 容器环境仅验证非敏感项：`OPENAI_API_BASE_URL=http://agent-orchestrator:8080/v1`。 |  |  |
 | CHAT-AGENT-01 | PASS | 普通聊天经 Orchestrator 穿透到默认 Hermes Agent。 | 重启前返回 `HERMES_FORMAL_OK`；Hermes 重启后返回 `HERMES_FORMAL_AFTER_RESTART_OK`。 |  |  |
 | AGENT-CTRL-01 | PASS | Agent Platform 控制类聊天请求进入 Manager 并要求审批。 | 响应包含 `request_id=req_019e06ac5efa7663a9a397b00408ea4d`、`status=approval_required`。 |  |  |
@@ -127,9 +129,9 @@
 | AGENT-UI-AUDIT-20260508 | PASS | 远程 Manager 可见 UI 触发的 Agent Platform 请求。 | `agentctl requests list` 包含 `req_019e071a9a2572c08488577cc52d77d6`，状态 `approval_required`。 |  |  |
 | LONG-RENDER-20260508 | PASS | 800-1000 字中文长回答可完整显示并渲染 Markdown。 | 会话 `/c/cd0fa0fe-43b5-49e8-ac93-bb905e91e32a`；包含二级标题、列表、表格、代码块和 `LONG_RENDER_DONE_20260508_A`。 |  |  |
 | LONG-STOP-20260508 | PASS | 长回答生成可中断，已生成内容保留。 | 1000 行清单请求被中断在第 6 行附近，未出现 `第 1000 行`，页面显示 `继续生成`。 |  | 停止控制可用，但见 `ISSUE-006`。 |
-| LONG-SAVE-20260508 | PASS | 刷新后长回答和中断状态可恢复。 | 刷新 `/c/cd0fa0fe-43b5-49e8-ac93-bb905e91e32a` 后仍可见 `LONG_RENDER_DONE_20260508_A`、`codex-test-p0-long-20260508-C` 和 `继续生成`。 |  |  |
+| LONG-SAVE-20260508 | PASS | 刷新后长回答和中断状态可恢复。 | 刷新 `/c/cd0fa0fe-43b5-49e8-ac93-bb905e91e32a` 后仍可见 `LONG_RENDER_DONE_20260508_A`、长回答测试标记和 `继续生成`。 |  |  |
 | MEMORY-UI-20260508 | PASS | 新会话不会继承上一会话测试代号。 | 新会话 `/c/19884914-a0ae-42ce-9c82-3fcb799d7dbf` 返回 `UNKNOWN_ONLY`。 |  | 覆盖 `ISSUE-003` 的 UI 级回归。 |
-| HIST-NEW-BODY-20260508 | PASS | 新长回答会话可通过正文关键词搜索到。 | 搜索 `codex-test-p0-long-20260508-A` 返回 `🤖 Hermes Agent Chat`。 |  |  |
+| HIST-NEW-BODY-20260508 | PASS | 新长回答会话可通过正文关键词搜索到。 | 搜索新长回答测试标记返回 `🤖 Hermes Agent Chat`。 |  |  |
 | HIST-OLD-BODY-20260508 | FAIL | 旧会话正文关键词仍无法搜索到。 | 搜索 `codex-test-basic-20260507` 返回 `未找到结果`。 | P2 | `ISSUE-002` 仍未完全解决，可能是旧历史未重建索引或历史正文搜索覆盖不一致。 |
 | AGENT-FOLLOWUP-FP-20260508 | FAIL->PASS | Open WebUI 追问建议内部提示曾误创建 Agent Platform 请求；修复部署后不再复现。 | 修复前额外请求 `req_019e071a9a667a13a10be4f718ee3746`；修复后同类提示复测前后最新请求 ID 不变，且响应不含 `approval_required`。 | P1 | 见 `ISSUE-005`。 |
 
@@ -158,6 +160,24 @@
 | BRIDGE-MULTI-SESSION-20260508 | PASS | 同一 Open WebUI 用户的新 chat 复用同一 agent 但创建不同 session。 | `agent_019e07979eb673d3ac7dab69b8088388` 下 active binding 聚合为 `2` 个 distinct chat、`2` 个 distinct session。 |  |  |
 | BRIDGE-CLOSE-20260508 | PASS | 关闭当前 agent session 后 binding 标记 closed。 | `sess_019e07979ebc7200b06652ccd3716d73` 对应 binding 状态为 `closed`，`closed_at is not null`。 |  |  |
 | BRIDGE-LOGS-20260508 | PASS | 复测窗口内关键服务无 error/panic/failed 日志。 | `docker compose logs --since=10m agent-manager agent-orchestrator agent-worker open-webui` 未检出错误关键词。 |  |  |
+
+## 2026-05-08 Agent Identity Bridge 一致性 hardening 复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-HARDEN-DEPLOY-20260508 | PASS | 远程正式镜像重建并重启 Manager/Orchestrator，服务健康。 | `agent-manager`、`agent-orchestrator` 均运行 `hermes-agent-platform:formal` 且 healthy；Open WebUI healthy。 |  | 本次未修改远程 `.env`。 |
+| BRIDGE-HARDEN-ROUTE-20260508 | PASS | Orchestrator 模型列表和普通 Hermes passthrough 正常。 | 内网 `/v1/models` 返回 `hermes-agent`；普通聊天包含 `HARDENING_OK_20260508`。 |  |  |
+| BRIDGE-HARDEN-FAILCLOSED-20260508 | PASS | 缺少 `agent_bridge_context` 的控制请求继续 fail closed。 | 内网控制请求返回 OpenAI-compatible 响应，内容包含 `unauthorized`。 |  |  |
+| BRIDGE-HARDEN-JWT-20260508 | PASS | Manager 仍拒绝 dev headers。 | 直连 Manager，带 `x-agent-user: dev-user` 的创建请求返回 HTTP 401。 |  |  |
+| BRIDGE-HARDEN-PUBLIC-20260508 | PASS | 公网 Open WebUI API 仍可访问。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200，响应 464 bytes。 |  |  |
+| BRIDGE-HARDEN-LOGS-20260508 | PASS | hardening 复测窗口内关键服务无错误关键词。 | `docker compose logs --since=5m agent-manager agent-orchestrator open-webui` 未检出 `error/panic/failed/forbidden`。 |  |  |
+
+未做专项远程 smoke 的边界：
+
+1. 第二个 Open WebUI 登录用户隔离未做远程账号级复测；当前代码和 store 测试覆盖 binding subject 隔离。
+2. Orchestrator 重启后 binding 复用未单独重启复测；正式代码路径已移除 Orchestrator 内存 binding，运行时每次从 Manager/Postgres 读取 active binding。
+3. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`。
+4. Open WebUI 同一 user message 重试时，run 幂等已覆盖；session message append 去重尚未做 schema 扩展。
 
 ## 修复结论
 

@@ -124,6 +124,11 @@ Function. It injects a signed `agent_bridge_context` before requests reach
 `agent-orchestrator`; Orchestrator verifies the signature, signs Manager JWTs,
 and maps each Open WebUI chat to a persistent Agent Platform session.
 
+Open WebUI admin is only required to install or update the Function and its
+valves. Runtime approval, audit, and management permissions stay inside Agent
+Platform JWT roles. Open WebUI admin users are not mapped to Agent Platform
+admin unless `AGENT_BRIDGE_ADMIN_ROLE_MAPPING=agent_admin` is explicitly set.
+
 Install or update the Function against the formal Open WebUI only:
 
 ```bash
