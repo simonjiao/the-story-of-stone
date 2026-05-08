@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 dotenvy = "0.15"
 futures-util = "0.3"
+hmac = "0.12"
 http = "1"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 metrics = "0.24"

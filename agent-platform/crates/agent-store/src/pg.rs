@@ -1,11 +1,11 @@
 use crate::{AgentStore, store_error};
 use agent_core::{
-    AgentGrant, AgentInstance, AgentInstanceStatus, AgentRequest, AgentRequestStatus, AgentRun,
-    AgentRunStatus, AgentSession, AgentSessionMessage, AgentSummary, AgentTemplate,
-    AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, EmptyResponse,
-    MemoryStore, ObserverReport, ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore,
-    ResourceLock, RunClaim, RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary,
-    validate_run_transition, validate_session_transition,
+    AgentBridgeBinding, AgentGrant, AgentInstance, AgentInstanceStatus, AgentRequest,
+    AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage, AgentSummary,
+    AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult,
+    EmptyResponse, MemoryStore, ObserverReport, ObserverReportSummary, ObserverSnapshot,
+    ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary, RuntimeOutput,
+    SessionContext, SessionSummary, validate_run_transition, validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -208,6 +208,26 @@ fn map_run(row: &PgRow) -> CoreResult<AgentRun> {
         created_at: row.try_get("created_at").map_err(store_error)?,
         claimed_at: row.try_get("claimed_at").map_err(store_error)?,
         finished_at: row.try_get("finished_at").map_err(store_error)?,
+    })
+}
+
+fn map_bridge_binding(row: &PgRow) -> CoreResult<AgentBridgeBinding> {
+    Ok(AgentBridgeBinding {
+        id: row.try_get("id").map_err(store_error)?,
+        open_webui_subject: row.try_get("open_webui_subject").map_err(store_error)?,
+        open_webui_chat_id: row.try_get("open_webui_chat_id").map_err(store_error)?,
+        open_webui_session_id: row.try_get("open_webui_session_id").map_err(store_error)?,
+        model: row.try_get("model").map_err(store_error)?,
+        agent_id: row.try_get("agent_id").map_err(store_error)?,
+        agent_session_id: row.try_get("agent_session_id").map_err(store_error)?,
+        status: parse(row.try_get::<String, _>("status").map_err(store_error)?)?,
+        last_message_id: row.try_get("last_message_id").map_err(store_error)?,
+        last_run_id: row.try_get("last_run_id").map_err(store_error)?,
+        trace_id: row.try_get("trace_id").map_err(store_error)?,
+        version: row.try_get("version").map_err(store_error)?,
+        created_at: row.try_get("created_at").map_err(store_error)?,
+        updated_at: row.try_get("updated_at").map_err(store_error)?,
+        closed_at: row.try_get("closed_at").map_err(store_error)?,
     })
 }
 
@@ -844,6 +864,145 @@ impl AgentStore for PgAgentStore {
         .await
         .map_err(store_error)?;
         Ok(sequence)
+    }
+
+    async fn get_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+    ) -> CoreResult<Option<AgentBridgeBinding>> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM open_webui_bridge_bindings
+            WHERE open_webui_subject = $1
+              AND open_webui_chat_id = $2
+              AND model = $3
+              AND status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(open_webui_subject)
+        .bind(open_webui_chat_id)
+        .bind(model)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
+        row.as_ref().map(map_bridge_binding).transpose()
+    }
+
+    async fn upsert_open_webui_bridge_binding(
+        &self,
+        binding: AgentBridgeBinding,
+    ) -> CoreResult<AgentBridgeBinding> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO open_webui_bridge_bindings (
+                id, open_webui_subject, open_webui_chat_id, open_webui_session_id,
+                model, agent_id, agent_session_id, status, last_message_id, last_run_id,
+                trace_id, version, created_at, updated_at, closed_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            ON CONFLICT (open_webui_subject, open_webui_chat_id, model)
+                WHERE status = 'active'
+            DO UPDATE SET
+                open_webui_session_id = EXCLUDED.open_webui_session_id,
+                agent_id = EXCLUDED.agent_id,
+                agent_session_id = EXCLUDED.agent_session_id,
+                last_message_id = EXCLUDED.last_message_id,
+                trace_id = EXCLUDED.trace_id,
+                version = open_webui_bridge_bindings.version + 1,
+                updated_at = EXCLUDED.updated_at
+            RETURNING *
+            "#,
+        )
+        .bind(&binding.id)
+        .bind(&binding.open_webui_subject)
+        .bind(&binding.open_webui_chat_id)
+        .bind(&binding.open_webui_session_id)
+        .bind(&binding.model)
+        .bind(&binding.agent_id)
+        .bind(&binding.agent_session_id)
+        .bind(binding.status.to_string())
+        .bind(&binding.last_message_id)
+        .bind(&binding.last_run_id)
+        .bind(&binding.trace_id)
+        .bind(binding.version)
+        .bind(binding.created_at)
+        .bind(OffsetDateTime::now_utc())
+        .bind(binding.closed_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        map_bridge_binding(&row)
+    }
+
+    async fn close_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse> {
+        sqlx::query(
+            r#"
+            UPDATE open_webui_bridge_bindings
+            SET status = 'closed',
+                trace_id = $4,
+                version = version + 1,
+                updated_at = $5,
+                closed_at = $5
+            WHERE open_webui_subject = $1
+              AND open_webui_chat_id = $2
+              AND model = $3
+              AND status = 'active'
+            "#,
+        )
+        .bind(open_webui_subject)
+        .bind(open_webui_chat_id)
+        .bind(model)
+        .bind(trace_id)
+        .bind(OffsetDateTime::now_utc())
+        .execute(&self.pool)
+        .await
+        .map_err(store_error)?;
+        Ok(EmptyResponse {
+            status: "closed".to_string(),
+            trace_id: trace_id.to_string(),
+        })
+    }
+
+    async fn update_open_webui_bridge_run(
+        &self,
+        open_webui_subject: &str,
+        binding_id: &str,
+        message_id: Option<&str>,
+        run_id: &str,
+        trace_id: &str,
+    ) -> CoreResult<AgentBridgeBinding> {
+        let row = sqlx::query(
+            r#"
+            UPDATE open_webui_bridge_bindings
+            SET last_message_id = $2,
+                last_run_id = $3,
+                trace_id = $4,
+                version = version + 1,
+                updated_at = $5
+            WHERE id = $1 AND open_webui_subject = $6
+            RETURNING *
+            "#,
+        )
+        .bind(binding_id)
+        .bind(message_id)
+        .bind(run_id)
+        .bind(trace_id)
+        .bind(OffsetDateTime::now_utc())
+        .bind(open_webui_subject)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        map_bridge_binding(&row)
     }
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun> {

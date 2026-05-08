@@ -45,6 +45,12 @@ Required changes:
   deploy node when `agent-platform/` is copied next to `docker-compose.yml`.
   The local default is `../agent-platform` when running from this `deploy/`
   directory.
+- `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
+  `agent_identity_bridge` Filter and `agent-orchestrator`.
+- `AGENT_JWT_SECRET`: Manager JWT signing secret shared by `agent-manager` and
+  `agent-orchestrator`.
+- `AGENT_PLATFORM_ALLOW_DEV_HEADERS`: set to `false` after Bridge smoke passes
+  so Open WebUI control requests cannot fall back to default dev identity.
 - Optional internal IP overrides: `HERMES_AGENT_IP`, `OPEN_WEBUI_ORIGIN_IP`,
   `AGENT_PLATFORM_POSTGRES_IP`, `AGENT_MANAGER_IP`,
   `AGENT_ORCHESTRATOR_IP`, `AGENT_WORKER_IP`, and `AGENT_OBSERVER_IP`.
@@ -108,7 +114,48 @@ model:
   provider: custom
   model: your-served-model-name
   base_url: http://sub2api:8080/v1
-  api_key: none
+api_key: none
+```
+
+## Open WebUI Agent Identity Bridge
+
+The formal Open WebUI deployment uses `agent_identity_bridge` as a Filter
+Function. It injects a signed `agent_bridge_context` before requests reach
+`agent-orchestrator`; Orchestrator verifies the signature, signs Manager JWTs,
+and maps each Open WebUI chat to a persistent Agent Platform session.
+
+Install or update the Function against the formal Open WebUI only:
+
+```bash
+./scripts/install-openwebui-function.sh
+```
+
+The script requires these environment variables to be present in the shell or
+`.env`-sourced environment:
+
+```text
+OPEN_WEBUI_BASE_URL or PUBLIC_WEBUI_URL
+OPEN_WEBUI_ADMIN_TOKEN
+AGENT_BRIDGE_SECRET
+AGENT_BRIDGE_ISSUER
+```
+
+If the available Open WebUI account is not an admin and the Function API returns
+401, use the formal container/DB installer instead of creating a temporary Open
+WebUI:
+
+```bash
+./scripts/install-openwebui-function-db.sh
+```
+
+This writes the Function into the mounted Open WebUI `webui.db`, stores valves
+there, and restarts only the formal `open-webui` service.
+
+Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`, or
+`AGENT_JWT_SECRET`. Before editing `deploy/.env`, run:
+
+```bash
+./scripts/env-backup.sh backup
 ```
 
 Test the endpoint from the same Docker network:

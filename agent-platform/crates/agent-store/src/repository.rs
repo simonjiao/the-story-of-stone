@@ -1,8 +1,8 @@
 use agent_core::{
-    AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus, AgentRequest,
-    AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSummary, AgentTemplate,
-    ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, EmptyResponse, ObserverReport,
-    ObserverReportSummary, ResourceLock, RunSummary, SessionSummary,
+    AgentBridgeBinding, AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus,
+    AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSummary,
+    AgentTemplate, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, EmptyResponse,
+    ObserverReport, ObserverReportSummary, ResourceLock, RunSummary, SessionSummary,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -86,6 +86,32 @@ pub trait AgentStore:
     -> CoreResult<Vec<SessionSummary>>;
     async fn close_session(&self, session_id: &str, trace_id: &str) -> CoreResult<AgentSession>;
     async fn next_message_sequence(&self, session_id: &str) -> CoreResult<i64>;
+
+    async fn get_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+    ) -> CoreResult<Option<AgentBridgeBinding>>;
+    async fn upsert_open_webui_bridge_binding(
+        &self,
+        binding: AgentBridgeBinding,
+    ) -> CoreResult<AgentBridgeBinding>;
+    async fn close_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse>;
+    async fn update_open_webui_bridge_run(
+        &self,
+        open_webui_subject: &str,
+        binding_id: &str,
+        message_id: Option<&str>,
+        run_id: &str,
+        trace_id: &str,
+    ) -> CoreResult<AgentBridgeBinding>;
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun>;
     async fn get_run(&self, run_id: &str) -> CoreResult<Option<AgentRun>>;

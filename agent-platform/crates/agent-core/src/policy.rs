@@ -32,6 +32,7 @@ pub mod actions {
     pub const INTERNAL_MEMORY_SUMMARY: &str = "internal:memory_summary";
     pub const INTERNAL_OBSERVER_TICK: &str = "internal:observer_tick";
     pub const INTERNAL_WEBHOOK: &str = "internal:webhook";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE: &str = "internal:open_webui_bridge";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

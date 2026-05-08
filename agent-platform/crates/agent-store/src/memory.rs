@@ -1,11 +1,12 @@
 use crate::{AgentStore, store_error};
 use agent_core::{
-    AgentGrant, AgentInstance, AgentInstanceStatus, AgentRequest, AgentRequestStatus, AgentRun,
-    AgentRunStatus, AgentSession, AgentSessionMessage, AgentSummary, AgentTemplate,
-    AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, EmptyResponse,
-    MemoryStore, ObserverReport, ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore,
-    ResourceLock, RunClaim, RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary,
-    validate_run_transition, validate_session_transition,
+    AgentBridgeBinding, AgentBridgeBindingStatus, AgentGrant, AgentInstance, AgentInstanceStatus,
+    AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage,
+    AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog,
+    CoreResult, EmptyResponse, MemoryStore, ObserverReport, ObserverReportSummary,
+    ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary,
+    RuntimeOutput, SessionContext, SessionSummary, validate_run_transition,
+    validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -23,6 +24,7 @@ struct Inner {
     approvals: HashMap<String, ApprovalRequest>,
     agents: HashMap<String, AgentInstance>,
     sessions: HashMap<String, AgentSession>,
+    open_webui_bridge_bindings: HashMap<String, AgentBridgeBinding>,
     messages: HashMap<String, Vec<AgentSessionMessage>>,
     runs: HashMap<String, AgentRun>,
     audits: Vec<AuditLog>,
@@ -405,6 +407,109 @@ impl AgentStore for MemoryAgentStore {
             .get(session_id)
             .map(|messages| messages.len() as i64 + 1)
             .unwrap_or(1))
+    }
+
+    async fn get_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+    ) -> CoreResult<Option<AgentBridgeBinding>> {
+        Ok(self
+            .read()?
+            .open_webui_bridge_bindings
+            .values()
+            .find(|binding| {
+                binding.open_webui_subject == open_webui_subject
+                    && binding.open_webui_chat_id == open_webui_chat_id
+                    && binding.model == model
+                    && binding.status == AgentBridgeBindingStatus::Active
+            })
+            .cloned())
+    }
+
+    async fn upsert_open_webui_bridge_binding(
+        &self,
+        mut binding: AgentBridgeBinding,
+    ) -> CoreResult<AgentBridgeBinding> {
+        let mut inner = self.write()?;
+        if let Some(existing) = inner
+            .open_webui_bridge_bindings
+            .values_mut()
+            .find(|existing| {
+                existing.open_webui_subject == binding.open_webui_subject
+                    && existing.open_webui_chat_id == binding.open_webui_chat_id
+                    && existing.model == binding.model
+                    && existing.status == AgentBridgeBindingStatus::Active
+            })
+        {
+            existing.open_webui_session_id = binding.open_webui_session_id.take();
+            existing.agent_id = binding.agent_id;
+            existing.agent_session_id = binding.agent_session_id;
+            existing.last_message_id = binding.last_message_id;
+            existing.trace_id = binding.trace_id;
+            existing.version += 1;
+            existing.updated_at = OffsetDateTime::now_utc();
+            return Ok(existing.clone());
+        }
+        inner
+            .open_webui_bridge_bindings
+            .insert(binding.id.clone(), binding.clone());
+        Ok(binding)
+    }
+
+    async fn close_open_webui_bridge_binding(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse> {
+        let mut inner = self.write()?;
+        if let Some(binding) = inner
+            .open_webui_bridge_bindings
+            .values_mut()
+            .find(|binding| {
+                binding.open_webui_subject == open_webui_subject
+                    && binding.open_webui_chat_id == open_webui_chat_id
+                    && binding.model == model
+                    && binding.status == AgentBridgeBindingStatus::Active
+            })
+        {
+            binding.status = AgentBridgeBindingStatus::Closed;
+            binding.trace_id = trace_id.to_string();
+            binding.closed_at = Some(OffsetDateTime::now_utc());
+            binding.updated_at = OffsetDateTime::now_utc();
+            binding.version += 1;
+        }
+        Ok(EmptyResponse {
+            status: "closed".to_string(),
+            trace_id: trace_id.to_string(),
+        })
+    }
+
+    async fn update_open_webui_bridge_run(
+        &self,
+        open_webui_subject: &str,
+        binding_id: &str,
+        message_id: Option<&str>,
+        run_id: &str,
+        trace_id: &str,
+    ) -> CoreResult<AgentBridgeBinding> {
+        let mut inner = self.write()?;
+        let binding = inner
+            .open_webui_bridge_bindings
+            .get_mut(binding_id)
+            .ok_or_else(|| store_error("bridge binding not found"))?;
+        if binding.open_webui_subject != open_webui_subject {
+            return Err(store_error("bridge binding not found"));
+        }
+        binding.last_message_id = message_id.map(ToString::to_string);
+        binding.last_run_id = Some(run_id.to_string());
+        binding.trace_id = trace_id.to_string();
+        binding.updated_at = OffsetDateTime::now_utc();
+        binding.version += 1;
+        Ok(binding.clone())
     }
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun> {
@@ -951,7 +1056,7 @@ impl ObserverSnapshotStore for MemoryAgentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{AgentRun, TriggerType, new_trace_id};
+    use agent_core::{AgentBridgeBinding, AgentRun, TriggerType, new_trace_id};
 
     #[tokio::test]
     async fn claim_uses_single_lease_owner() {
@@ -1053,5 +1158,86 @@ mod tests {
             .await
             .unwrap();
         assert!(immediate_claim.is_some());
+    }
+
+    #[tokio::test]
+    async fn bridge_binding_is_user_chat_model_scoped_and_reopenable() {
+        let store = MemoryAgentStore::new();
+        let trace_id = new_trace_id();
+        let binding = AgentBridgeBinding::new(
+            "openwebui:user-1",
+            "chat-1",
+            Some("ow-session-1".to_string()),
+            "hermes-agent",
+            "agent-1",
+            "sess-1",
+            trace_id.clone(),
+        );
+        let binding = store
+            .upsert_open_webui_bridge_binding(binding)
+            .await
+            .unwrap();
+
+        let found = store
+            .get_open_webui_bridge_binding("openwebui:user-1", "chat-1", "hermes-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, binding.id);
+
+        let other_user = store
+            .get_open_webui_bridge_binding("openwebui:user-2", "chat-1", "hermes-agent")
+            .await
+            .unwrap();
+        assert!(other_user.is_none());
+
+        store
+            .update_open_webui_bridge_run(
+                "openwebui:user-1",
+                &binding.id,
+                Some("msg-1"),
+                "run-1",
+                &trace_id,
+            )
+            .await
+            .unwrap();
+        let updated = store
+            .get_open_webui_bridge_binding("openwebui:user-1", "chat-1", "hermes-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.last_run_id.as_deref(), Some("run-1"));
+
+        store
+            .close_open_webui_bridge_binding(
+                "openwebui:user-1",
+                "chat-1",
+                "hermes-agent",
+                &trace_id,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_open_webui_bridge_binding("openwebui:user-1", "chat-1", "hermes-agent")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let reopened = AgentBridgeBinding::new(
+            "openwebui:user-1",
+            "chat-1",
+            None,
+            "hermes-agent",
+            "agent-1",
+            "sess-2",
+            trace_id,
+        );
+        let reopened = store
+            .upsert_open_webui_bridge_binding(reopened)
+            .await
+            .unwrap();
+        assert_eq!(reopened.agent_session_id, "sess-2");
     }
 }

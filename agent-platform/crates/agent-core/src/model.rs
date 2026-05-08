@@ -212,6 +212,13 @@ string_enum! {
     }
 }
 
+string_enum! {
+    pub enum AgentBridgeBindingStatus {
+        Active => "active",
+        Closed => "closed",
+    }
+}
+
 pub const AGENT_TYPE_BACKGROUND_WORKER: &str = "background_worker";
 pub const AGENT_TYPE_OBSERVER: &str = "observer_agent";
 
@@ -636,6 +643,56 @@ impl AgentRun {
             created_at: OffsetDateTime::now_utc(),
             claimed_at: None,
             finished_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentBridgeBinding {
+    pub id: String,
+    pub open_webui_subject: String,
+    pub open_webui_chat_id: String,
+    pub open_webui_session_id: Option<String>,
+    pub model: String,
+    pub agent_id: String,
+    pub agent_session_id: String,
+    pub status: AgentBridgeBindingStatus,
+    pub last_message_id: Option<String>,
+    pub last_run_id: Option<String>,
+    pub trace_id: String,
+    pub version: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub closed_at: Option<OffsetDateTime>,
+}
+
+impl AgentBridgeBinding {
+    pub fn new(
+        open_webui_subject: impl Into<String>,
+        open_webui_chat_id: impl Into<String>,
+        open_webui_session_id: Option<String>,
+        model: impl Into<String>,
+        agent_id: impl Into<String>,
+        agent_session_id: impl Into<String>,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            id: new_id("bridge"),
+            open_webui_subject: open_webui_subject.into(),
+            open_webui_chat_id: open_webui_chat_id.into(),
+            open_webui_session_id,
+            model: model.into(),
+            agent_id: agent_id.into(),
+            agent_session_id: agent_session_id.into(),
+            status: AgentBridgeBindingStatus::Active,
+            last_message_id: None,
+            last_run_id: None,
+            trace_id: trace_id.into(),
+            version: 0,
+            created_at: now,
+            updated_at: now,
+            closed_at: None,
         }
     }
 }

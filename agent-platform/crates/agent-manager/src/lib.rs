@@ -6,19 +6,20 @@ mod run_admin_services;
 mod telemetry_support;
 
 use agent_core::{
-    AgentCoreError, AgentGrant, AgentInstance, AgentRequestInput, AgentRequestResponse,
-    AgentRequestStatus, AgentRun, AgentSession, AgentSessionMessage, AppendMessageInput,
-    ApprovalDecisionInput, ApprovalStatus, AuditDecision, AuditLog, AuthContext, CoreResult,
-    CreateChildSessionInput, CreateGrantInput, CreateRunInput, CreateSessionInput,
-    DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport, Page, RiskLevel,
-    RoleName, RunAdminDecisionInput, RunSummary, WebhookTriggerInput, actions, new_id,
+    AgentBridgeBinding, AgentBridgeBindingSummary, AgentCoreError, AgentGrant, AgentInstance,
+    AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
+    AgentSessionMessage, AppendMessageInput, ApprovalDecisionInput, ApprovalStatus, AuditDecision,
+    AuditLog, AuthContext, CoreResult, CreateChildSessionInput, CreateGrantInput, CreateRunInput,
+    CreateSessionInput, DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport,
+    Page, RiskLevel, RoleName, RunAdminDecisionInput, RunSummary, UpdateOpenWebUiBridgeRunInput,
+    UpsertOpenWebUiBridgeBindingInput, WebhookTriggerInput, actions, new_id,
 };
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::HeaderMap,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 pub use http_support::{ApiError, ManagerConfig, extract_auth};
 use http_support::{ensure_admin, ensure_service_allows};
@@ -41,6 +42,11 @@ struct ListQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BridgeBindingQuery {
+    model: Option<String>,
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -54,6 +60,7 @@ pub fn router(state: AppState) -> Router {
             post(cancel_agent_request),
         )
         .route("/v1/my-agents/{agent_id}/runs", post(create_run))
+        .route("/v1/my-runs/{run_id}", get(my_run))
         .route("/v1/my-agents/{agent_id}/sessions", post(create_session))
         .route("/v1/agent-sessions/{session_id}", get(get_session))
         .route(
@@ -98,6 +105,22 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/admin/observer/runs", post(admin_observer_run))
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
+        .route(
+            "/v1/internal/open-webui-bridge/bindings/{chat_id}",
+            get(internal_open_webui_bridge_binding),
+        )
+        .route(
+            "/v1/internal/open-webui-bridge/bindings",
+            put(internal_upsert_open_webui_bridge_binding),
+        )
+        .route(
+            "/v1/internal/open-webui-bridge/bindings/{chat_id}/close",
+            post(internal_close_open_webui_bridge_binding),
+        )
+        .route(
+            "/v1/internal/open-webui-bridge/bindings/{binding_id}/run",
+            post(internal_update_open_webui_bridge_run),
+        )
         .route("/v1/internal/runs", post(internal_create_run))
         .route("/v1/internal/runs/claim", post(internal_claim_run))
         .route(
@@ -292,6 +315,45 @@ async fn my_runs(
     Ok(Json(json!(Page { items })))
 }
 
+async fn my_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunSummary>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    let run = state
+        .store
+        .get_run(&run_id)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
+        .ok_or_else(|| {
+            ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+                auth.trace_id.clone(),
+            )
+        })?;
+    let agent = state
+        .store
+        .get_agent(&run.agent_id)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
+        .ok_or_else(|| {
+            ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+                auth.trace_id.clone(),
+            )
+        })?;
+    if agent.owner_user != auth.user_id
+        && !auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin])
+    {
+        return Err(ApiError::from_core(
+            AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+            auth.trace_id,
+        ));
+    }
+    Ok(Json(run_summary(&run)))
+}
+
 async fn my_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -358,6 +420,43 @@ struct SessionEnvelope {
     context: agent_core::SessionContext,
 }
 
+fn run_summary(run: &AgentRun) -> RunSummary {
+    RunSummary {
+        run_id: run.id.clone(),
+        agent_id: run.agent_id.clone(),
+        session_id: run.session_id.clone(),
+        trigger_type: run.trigger_type,
+        target_resource: run.target_resource.clone(),
+        run_status: run.run_status,
+        risk_level: run.risk_level,
+        result_summary: run.result_summary.clone(),
+        result_ref: run.result_ref.clone(),
+        next_retry_at: run.next_retry_at,
+        created_at: run.created_at,
+        finished_at: run.finished_at,
+        trace_id: run.trace_id.clone(),
+    }
+}
+
+fn bridge_binding_summary(binding: &AgentBridgeBinding) -> AgentBridgeBindingSummary {
+    AgentBridgeBindingSummary {
+        binding_id: binding.id.clone(),
+        open_webui_subject: binding.open_webui_subject.clone(),
+        open_webui_chat_id: binding.open_webui_chat_id.clone(),
+        open_webui_session_id: binding.open_webui_session_id.clone(),
+        model: binding.model.clone(),
+        agent_id: binding.agent_id.clone(),
+        agent_session_id: binding.agent_session_id.clone(),
+        status: binding.status,
+        last_message_id: binding.last_message_id.clone(),
+        last_run_id: binding.last_run_id.clone(),
+        trace_id: binding.trace_id.clone(),
+        created_at: binding.created_at,
+        updated_at: binding.updated_at,
+        closed_at: binding.closed_at,
+    }
+}
+
 async fn append_message(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -411,6 +510,25 @@ async fn close_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<AgentSession>, ApiError> {
     let auth = auth(&headers, &state)?;
+    let current = state
+        .store
+        .get_session(&session_id)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
+        .ok_or_else(|| {
+            ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+                auth.trace_id.clone(),
+            )
+        })?;
+    if current.owner_user != auth.user_id
+        && !auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin])
+    {
+        return Err(ApiError::from_core(
+            AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+            auth.trace_id,
+        ));
+    }
     let session = state
         .store
         .close_session(&session_id, &auth.trace_id)
@@ -903,6 +1021,93 @@ async fn internal_webhook(
     Ok(Json(response))
 }
 
+async fn internal_open_webui_bridge_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(chat_id): Path<String>,
+    Query(query): Query<BridgeBindingQuery>,
+) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
+    let binding = state
+        .store
+        .get_open_webui_bridge_binding(&auth.user_id, &chat_id, &model)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
+        .ok_or_else(|| {
+            ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+                auth.trace_id.clone(),
+            )
+        })?;
+    Ok(Json(bridge_binding_summary(&binding)))
+}
+
+async fn internal_upsert_open_webui_bridge_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UpsertOpenWebUiBridgeBindingInput>,
+) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    let mut binding = AgentBridgeBinding::new(
+        auth.user_id.clone(),
+        input.open_webui_chat_id,
+        input.open_webui_session_id,
+        input.model,
+        input.agent_id,
+        input.agent_session_id,
+        auth.trace_id.clone(),
+    );
+    binding.last_message_id = input.last_message_id;
+    let binding = state
+        .store
+        .upsert_open_webui_bridge_binding(binding)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(bridge_binding_summary(&binding)))
+}
+
+async fn internal_close_open_webui_bridge_binding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(chat_id): Path<String>,
+    Query(query): Query<BridgeBindingQuery>,
+) -> Result<Json<EmptyResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
+    let response = state
+        .store
+        .close_open_webui_bridge_binding(&auth.user_id, &chat_id, &model, &auth.trace_id)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(response))
+}
+
+async fn internal_update_open_webui_bridge_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(binding_id): Path<String>,
+    Json(input): Json<UpdateOpenWebUiBridgeRunInput>,
+) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    let binding = state
+        .store
+        .update_open_webui_bridge_run(
+            &auth.user_id,
+            &binding_id,
+            input.message_id.as_deref(),
+            &input.run_id,
+            &auth.trace_id,
+        )
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(bridge_binding_summary(&binding)))
+}
+
 async fn internal_create_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1236,6 +1441,84 @@ mod tests {
 
         assert_eq!(response.status, AgentRequestStatus::Fulfilled);
         assert!(response.agent_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn bridge_source_creates_reusable_agent_with_distinct_chat_sessions() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let first = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create bridge worker".to_string()),
+                structured_payload: json!({
+                    "mode": "bridge-reuse",
+                    "bridge_source": {
+                        "kind": "open_webui",
+                        "chat_id": "chat-1",
+                        "session_id": "ow-session-1",
+                        "message_id": "msg-1",
+                        "model": "hermes-agent"
+                    }
+                }),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        let second = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create bridge worker in another chat".to_string()),
+                structured_payload: json!({
+                    "mode": "bridge-reuse",
+                    "bridge_source": {
+                        "kind": "open_webui",
+                        "chat_id": "chat-2",
+                        "session_id": "ow-session-2",
+                        "message_id": "msg-2",
+                        "model": "hermes-agent"
+                    }
+                }),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.status, AgentRequestStatus::Fulfilled);
+        assert_eq!(first.agent_id, second.agent_id);
+
+        let first_binding = state
+            .store
+            .get_open_webui_bridge_binding(&auth.user_id, "chat-1", "hermes-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        let second_binding = state
+            .store
+            .get_open_webui_bridge_binding(&auth.user_id, "chat-2", "hermes-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_binding.agent_id, second_binding.agent_id);
+        assert_ne!(
+            first_binding.agent_session_id,
+            second_binding.agent_session_id
+        );
+        assert_eq!(first_binding.last_message_id.as_deref(), Some("msg-1"));
     }
 
     #[tokio::test]

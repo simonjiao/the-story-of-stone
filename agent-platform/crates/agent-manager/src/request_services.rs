@@ -1,11 +1,12 @@
 use crate::{StoreRef, telemetry_support};
 use agent_core::{
-    AGENT_TYPE_BACKGROUND_WORKER, AgentCoreError, AgentInstance, AgentRequest, AgentRequestInput,
-    AgentRequestResponse, AgentRequestStatus, AgentRun, ApprovalRequest, ApprovalStatus,
-    AuditDecision, AuditLog, AuthContext, CoreResult, ErrorCode, PolicyContext, PolicyDecision,
-    RequestType, ResourceRef, RiskLevel, SideEffectMode, TriggerType, new_id, request_action,
+    AGENT_TYPE_BACKGROUND_WORKER, AgentBridgeBinding, AgentCoreError, AgentInstance, AgentRequest,
+    AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
+    ApprovalRequest, ApprovalStatus, AuditDecision, AuditLog, AuthContext, CoreResult, ErrorCode,
+    PolicyContext, PolicyDecision, RequestType, ResourceRef, RiskLevel, SideEffectMode,
+    TriggerType, new_id, request_action,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
@@ -174,8 +175,17 @@ pub(crate) async fn fulfill_request(
                 .await?
             {
                 request.status = AgentRequestStatus::Fulfilled;
-                request.result_agent_id = Some(existing.id);
+                request.result_agent_id = Some(existing.id.clone());
                 let request = store.update_agent_request(request).await?;
+                ensure_open_webui_bridge_binding(
+                    store,
+                    &request.requested_by_user,
+                    &existing.id,
+                    &target_resource,
+                    &request,
+                    &auth.trace_id,
+                )
+                .await?;
                 return Ok(request_response(&request));
             }
             request.status = AgentRequestStatus::Provisioning;
@@ -194,8 +204,17 @@ pub(crate) async fn fulfill_request(
                 .or_else(|| Some("Agent Platform background worker".to_string()));
             let agent = store.create_agent_instance(agent).await?;
             request.status = AgentRequestStatus::Fulfilled;
-            request.result_agent_id = Some(agent.id);
+            request.result_agent_id = Some(agent.id.clone());
             let request = store.update_agent_request(request).await?;
+            ensure_open_webui_bridge_binding(
+                store,
+                &request.requested_by_user,
+                &agent.id,
+                &agent.target_resource,
+                &request,
+                &auth.trace_id,
+            )
+            .await?;
             Ok(request_response(&request))
         }
         RequestType::CreateRun => {
@@ -251,9 +270,110 @@ pub(crate) fn policy_ctx(
 
 fn core_hash(payload: &Value) -> String {
     let mut hasher = Sha256::new();
-    let encoded = serde_json::to_vec(payload).unwrap_or_default();
+    let mut payload = payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("bridge_source");
+    }
+    let encoded = serde_json::to_vec(&payload).unwrap_or_default();
     hasher.update(encoded);
     format!("{:x}", hasher.finalize())
+}
+
+async fn ensure_open_webui_bridge_binding(
+    store: &StoreRef,
+    owner_user: &str,
+    agent_id: &str,
+    target_resource: &str,
+    request: &AgentRequest,
+    trace_id: &str,
+) -> CoreResult<Option<AgentBridgeBinding>> {
+    let Some(source) = BridgeSource::from_payload(&request.structured_payload)? else {
+        return Ok(None);
+    };
+    let idempotency_key = format!("openwebui:{}:{}:{}", owner_user, source.chat_id, agent_id);
+    let session = if let Some(existing) = store
+        .find_session_by_idempotency(owner_user, agent_id, &idempotency_key)
+        .await?
+    {
+        existing
+    } else {
+        let mut session = AgentSession::new(
+            agent_id.to_string(),
+            owner_user.to_string(),
+            json!({
+                "resource": target_resource,
+                "bridge_source": {
+                    "kind": "open_webui",
+                    "chat_id": source.chat_id.clone(),
+                    "session_id": source.session_id.clone(),
+                    "model": source.model.clone(),
+                }
+            }),
+            trace_id.to_string(),
+        );
+        session.idempotency_key = Some(idempotency_key);
+        session.source_conversation_id = Some(source.chat_id.clone());
+        store.create_session(session).await?
+    };
+    let mut binding = AgentBridgeBinding::new(
+        owner_user.to_string(),
+        source.chat_id,
+        source.session_id,
+        source.model,
+        agent_id.to_string(),
+        session.id,
+        trace_id.to_string(),
+    );
+    binding.last_message_id = source.message_id;
+    store
+        .upsert_open_webui_bridge_binding(binding)
+        .await
+        .map(Some)
+}
+
+#[derive(Debug)]
+struct BridgeSource {
+    chat_id: String,
+    session_id: Option<String>,
+    message_id: Option<String>,
+    model: String,
+}
+
+impl BridgeSource {
+    fn from_payload(payload: &Value) -> CoreResult<Option<Self>> {
+        let Some(source) = payload.get("bridge_source") else {
+            return Ok(None);
+        };
+        if source.get("kind").and_then(Value::as_str) != Some("open_webui") {
+            return Ok(None);
+        }
+        let chat_id = source
+            .get("chat_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AgentCoreError::coded(ErrorCode::Conflict, "bridge chat_id required"))?
+            .to_string();
+        let model = source
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("hermes-agent")
+            .to_string();
+        Ok(Some(Self {
+            chat_id,
+            session_id: source
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            message_id: source
+                .get("message_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            model,
+        }))
+    }
 }
 
 async fn append_audit(

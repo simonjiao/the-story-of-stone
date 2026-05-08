@@ -1,6 +1,7 @@
 use crate::{
-    AgentInstanceStatus, AgentRequestStatus, AgentRunStatus, AgentSessionStatus, HealthStatus,
-    MessageRole, RequestType, RiskLevel, SideEffectMode, TriggerType,
+    AgentBridgeBindingStatus, AgentInstanceStatus, AgentRequestStatus, AgentRunStatus,
+    AgentSessionStatus, HealthStatus, MessageRole, RequestType, RiskLevel, SideEffectMode,
+    TriggerType,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -116,6 +117,40 @@ pub struct RunSummary {
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentBridgeBindingSummary {
+    pub binding_id: String,
+    pub open_webui_subject: String,
+    pub open_webui_chat_id: String,
+    pub open_webui_session_id: Option<String>,
+    pub model: String,
+    pub agent_id: String,
+    pub agent_session_id: String,
+    pub status: AgentBridgeBindingStatus,
+    pub last_message_id: Option<String>,
+    pub last_run_id: Option<String>,
+    pub trace_id: String,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub closed_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertOpenWebUiBridgeBindingInput {
+    pub open_webui_chat_id: String,
+    pub open_webui_session_id: Option<String>,
+    pub model: String,
+    pub agent_id: String,
+    pub agent_session_id: String,
+    pub last_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateOpenWebUiBridgeRunInput {
+    pub message_id: Option<String>,
+    pub run_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

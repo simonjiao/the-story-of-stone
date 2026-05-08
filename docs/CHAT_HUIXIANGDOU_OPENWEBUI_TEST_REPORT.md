@@ -59,7 +59,7 @@
 | [ISSUE-005](chat_huixiangdou_issues/ISSUE-005-followup-prompt-agent-control-false-positive.md) | P1 | Open WebUI 自动追问建议提示包含历史中的 Agent Platform 控制指令时，被 Orchestrator 误判为新的 Agent Platform 请求。 | Agent Platform 请求列表和审计被内部辅助提示污染，可能产生重复审批噪音。 | RESOLVED: 已收窄识别范围并部署复测 |
 | [ISSUE-006](chat_huixiangdou_issues/ISSUE-006-stop-generation-control-unlabelled.md) | P3 | 长回答生成中的停止控制在可访问 DOM 中表现为无标签按钮。 | 自动化和辅助技术难以明确识别“停止生成”按钮。 | OPEN: 停止功能可用，但建议补充 `aria-label` |
 | [ISSUE-007](chat_huixiangdou_issues/ISSUE-007-approved-agent-owner-mismatch.md) | P1 | 审批后 agent 曾归属审批人而不是原始请求人。 | 原始请求人无法在 `my-agents` 中看到审批后的 agent，影响 agent 复用、多 session 和用户侧 run。 | RESOLVED: Manager fulfill 改用 `requested_by_user` 并通过正式多 session/Worker run 复测 |
-| [ISSUE-008](chat_huixiangdou_issues/ISSUE-008-open-webui-agent-identity-session-bridge.md) | P2 | Open WebUI 默认调用未透传动态 Agent Platform 用户身份和 agent session 元数据。 | 多用户审计和 UI 级 agent session 绑定不能依赖当前默认聊天请求。 | OPEN: 后端 API 已支持多 session；UI 桥接需插件、代理或 JWT 注入 |
+| [ISSUE-008](chat_huixiangdou_issues/ISSUE-008-open-webui-agent-identity-session-bridge.md) | P2 | Open WebUI 默认调用未透传动态 Agent Platform 用户身份和 agent session 元数据。 | 多用户审计和 UI 级 agent session 绑定不能依赖旧的默认聊天请求。 | RESOLVED: 已部署 Agent Identity Bridge，Open WebUI Filter 注入签名上下文，Manager 使用 `openwebui:<id>` 审计并支持 UI chat 到 agent session 绑定 |
 
 ## 修复记录
 
@@ -142,6 +142,23 @@
 | AGENT-WORKER-RUN-20260508 | PASS | Worker 能处理同一 agent 的两个 session run。 | `run_019e073cf1637c40adb597c8960649ed`、`run_019e073cf2f87580add2d1e6500811af` 均为 `completed`，摘要均包含 `with 1 recent messages`。 |  | 审计包含 `worker:run_claim`、`worker:run_status`、`worker:run_finish`。 |
 | AGENT-OBSERVER-20260508 | PASS | Observer 在 Worker run 后继续报告健康。 | 最新报告 `obsr_019e073d65d67222ac9e55bd2822a7e5` 为 `healthy`，摘要 `dead_letter=0`。 |  |  |
 
+## 2026-05-08 Agent Identity Bridge 正式部署复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-DEPLOY-20260508 | PASS | 正式远程 Docker 已部署 `hermes-agent-platform:formal`，Manager/Orchestrator/Worker/Observer 健康。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator` healthy，worker/observer running；Open WebUI healthy。 |  | 变更前备份 `.env` 到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-201853`。 |
+| BRIDGE-FUNCTION-20260508 | PASS | 正式 Open WebUI 已安装全局 `agent_identity_bridge` Filter。 | Open WebUI `function` 表存在 `agent_identity_bridge`，`type=filter`、`is_active=1`、`is_global=1`。 |  | 测试账号非 admin，Function 通过正式容器持久 DB 写入并重启 Open WebUI 生效；未使用临时 Open WebUI。 |
+| BRIDGE-CHAT-SHORT-20260508 | PASS | 普通短聊天仍走默认 Hermes。 | Open WebUI `/api/chat/completions` 返回 `我在线。`。 |  |  |
+| BRIDGE-CHAT-LONG-20260508 | PASS | 普通长回答仍可完成。 | `BRIDGE-SMOKE-LONG-20260508` 返回 634 字中文回答。 |  |  |
+| BRIDGE-AUTH-20260508 | PASS | UI 控制请求按真实 Open WebUI 用户进入 Manager。 | 请求 `req_019e0796c6f77c52ae779adc787de54f` 的 `requested_by_user=openwebui:7fe86b5c-4248-46ac-a8bc-bb716e1ca102`，`requested_by_service=agent-orchestrator`。 | P2 | 覆盖 `ISSUE-008`。 |
+| BRIDGE-JWT-20260508 | PASS | Manager 已进入 JWT 模式，dev headers 被拒绝。 | 直接用 `x-agent-user=dev-user` 调 Manager 创建请求返回 HTTP 401 `unauthorized`。 |  | `AGENT_PLATFORM_ALLOW_DEV_HEADERS=false`。 |
+| BRIDGE-TAMPER-20260508 | PASS | 缺失 `agent_bridge_context` 的控制请求被 Orchestrator 拒绝。 | 直连 Orchestrator 控制请求返回内容 `{"error":"unauthorized",...}`。 |  | 普通聊天不受影响。 |
+| BRIDGE-BINDING-20260508 | PASS | 审批后自动创建 Open WebUI chat 到 agent session 的持久 binding。 | `open_webui_bridge_bindings` 记录 `chat_id=3c77dba8-6890-44d2-8f97-39e08cb723b9`、`agent_session_id=sess_019e07979ebc7200b06652ccd3716d73`、`status=active`。 |  |  |
+| BRIDGE-RUN-20260508 | PASS | 同一 Open WebUI chat 后续消息自动 append session message 并创建 run，Worker 完成执行。 | 后续消息返回 `run_019e07981bc17b02ae64ff45e243f67a`、`session_id=sess_019e07979ebc7200b06652ccd3716d73`，摘要含 `with 1 recent messages`。 |  |  |
+| BRIDGE-MULTI-SESSION-20260508 | PASS | 同一 Open WebUI 用户的新 chat 复用同一 agent 但创建不同 session。 | `agent_019e07979eb673d3ac7dab69b8088388` 下 active binding 聚合为 `2` 个 distinct chat、`2` 个 distinct session。 |  |  |
+| BRIDGE-CLOSE-20260508 | PASS | 关闭当前 agent session 后 binding 标记 closed。 | `sess_019e07979ebc7200b06652ccd3716d73` 对应 binding 状态为 `closed`，`closed_at is not null`。 |  |  |
+| BRIDGE-LOGS-20260508 | PASS | 复测窗口内关键服务无 error/panic/failed 日志。 | `docker compose logs --since=10m agent-manager agent-orchestrator agent-worker open-webui` 未检出错误关键词。 |  |  |
+
 ## 修复结论
 
 当前状态：
@@ -153,4 +170,4 @@
 5. `ISSUE-005` 已在 Orchestrator 中修复并部署，Open WebUI 追问建议不会再污染 Agent Platform 请求列表。
 6. `ISSUE-006` 不阻断核心路径；建议后续补充停止生成按钮可访问标签。
 7. `ISSUE-007` 已在 Manager 中修复并部署，审批后的 agent 归属原始请求人，Worker 复用和多 session API 路径通过。
-8. `ISSUE-008` 仍开放：Open WebUI 默认聊天没有动态 Agent Platform 身份/session 桥接；若需要多用户 UI 级 agent session，需要专门桥接实现。
+8. `ISSUE-008` 已通过 Agent Identity Bridge 修复并部署：Open WebUI Function 注入签名上下文，Orchestrator 验签并签发 Manager JWT，Manager 持久化 Open WebUI chat 到 agent session binding，后续消息可自动创建 Worker run。
