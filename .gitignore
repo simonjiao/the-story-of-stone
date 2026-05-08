@@ -1,4 +1,8 @@
 .env
+*.env.bak
+*.env.bak.*
+*.yml.bak.*
+*.yaml.bak.*
 .venv/
 .codex
 .codex/

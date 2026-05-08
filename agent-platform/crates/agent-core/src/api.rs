@@ -112,9 +112,15 @@ pub struct RunSummary {
     pub risk_level: RiskLevel,
     pub result_summary: Option<String>,
     pub result_ref: Option<String>,
+    pub next_retry_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub finished_at: Option<OffsetDateTime>,
     pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunAdminDecisionInput {
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,7 +152,21 @@ pub struct WebhookTriggerInput {
     pub resource: String,
     pub dedupe_key: String,
     pub payload_ref: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub received_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGrantInput {
+    pub subject_type: String,
+    pub subject_id: String,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    #[serde(default)]
+    pub constraints: Value,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

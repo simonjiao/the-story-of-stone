@@ -5,7 +5,7 @@ use agent_core::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -68,6 +68,35 @@ struct BindingInput {
     session_id: String,
 }
 
+impl AppState {
+    fn bind_session(
+        &self,
+        conversation_id: &str,
+        session_id: &str,
+        trace_id: &str,
+    ) -> Result<(), SafeError> {
+        let mut bindings = self
+            .bindings
+            .write()
+            .map_err(|_| internal_error(trace_id))?;
+        bindings.insert(conversation_id.to_string(), session_id.to_string());
+        Ok(())
+    }
+
+    fn bound_session_by_conversation(
+        &self,
+        conversation_id: &str,
+        trace_id: &str,
+    ) -> Result<Option<String>, SafeError> {
+        let bindings = self.bindings.read().map_err(|_| internal_error(trace_id))?;
+        Ok(bindings.get(conversation_id).cloned())
+    }
+}
+
+fn internal_error(trace_id: &str) -> SafeError {
+    SafeError::new(agent_core::ErrorCode::InternalError, trace_id.to_string())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -114,18 +143,18 @@ async fn bind_session(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
     Json(input): Json<BindingInput>,
-) -> Json<Value> {
-    state
-        .bindings
-        .write()
-        .expect("bindings lock")
-        .insert(conversation_id.clone(), input.session_id.clone());
-    Json(json!({
-        "status": "bound",
-        "conversation_id": conversation_id,
-        "session_id": input.session_id,
-        "trace_id": new_trace_id(),
-    }))
+) -> Response {
+    let trace_id = new_trace_id();
+    match state.bind_session(&conversation_id, &input.session_id, &trace_id) {
+        Ok(()) => Json(json!({
+            "status": "bound",
+            "conversation_id": conversation_id,
+            "session_id": input.session_id,
+            "trace_id": trace_id,
+        }))
+        .into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response(),
+    }
 }
 
 async fn chat_completions(
@@ -141,12 +170,15 @@ async fn chat_completions(
         .find(|message| message.role == "user")
         .map(|message| message.content.clone())
         .unwrap_or_default();
-    let result = if let Some(session_id) = bound_session(&state, &request) {
-        append_session_message(&state, &headers, &session_id, &last_user, &trace_id).await
-    } else if looks_like_agent_request(&last_user) {
-        submit_agent_request(&state, &headers, &last_user, &trace_id).await
-    } else {
-        Ok(format!("Minimal gateway response: {}", last_user))
+    let result = match bound_session(&state, &request, &trace_id) {
+        Ok(Some(session_id)) => {
+            append_session_message(&state, &headers, &session_id, &last_user, &trace_id).await
+        }
+        Ok(None) if looks_like_agent_request(&last_user) => {
+            submit_agent_request(&state, &headers, &last_user, &trace_id).await
+        }
+        Ok(None) => Ok(format!("Minimal gateway response: {}", last_user)),
+        Err(error) => Err(error),
     };
 
     let content = match result {
@@ -231,27 +263,29 @@ fn looks_like_agent_request(content: &str) -> bool {
             || lowered.contains("create"))
 }
 
-fn bound_session(state: &AppState, request: &ChatCompletionRequest) -> Option<String> {
+fn bound_session(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+    trace_id: &str,
+) -> Result<Option<String>, SafeError> {
     if let Some(session_id) = request
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("agent_session_id"))
         .and_then(Value::as_str)
     {
-        return Some(session_id.to_string());
+        return Ok(Some(session_id.to_string()));
     }
     let conversation_id = request
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("conversation_id"))
         .and_then(Value::as_str)
-        .or(request.user.as_deref())?;
-    state
-        .bindings
-        .read()
-        .expect("bindings lock")
-        .get(conversation_id)
-        .cloned()
+        .or(request.user.as_deref());
+    match conversation_id {
+        Some(conversation_id) => state.bound_session_by_conversation(conversation_id, trace_id),
+        None => Ok(None),
+    }
 }
 
 async fn submit_agent_request(

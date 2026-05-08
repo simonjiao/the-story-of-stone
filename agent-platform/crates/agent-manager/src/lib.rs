@@ -1,28 +1,32 @@
+mod control_services;
+mod http_support;
+mod lifecycle_services;
+mod request_services;
+mod run_admin_services;
+mod telemetry_support;
+
 use agent_core::{
-    AGENT_TYPE_BACKGROUND_WORKER, AgentCoreError, AgentInstance, AgentRequest, AgentRequestInput,
-    AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession, AgentSessionMessage,
-    AppendMessageInput, ApprovalDecisionInput, ApprovalRequest, ApprovalStatus, AuditDecision,
-    AuditLog, AuthContext, CoreResult, CreateChildSessionInput, CreateRunInput, CreateSessionInput,
-    DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport, Page, PolicyContext,
-    PolicyDecision, RequestType, ResourceRef, RiskLevel, RoleAssignment, RoleName, SafeError,
-    SideEffectMode, TriggerType, actions, new_id, new_trace_id, request_action,
+    AgentCoreError, AgentGrant, AgentInstance, AgentRequestInput, AgentRequestResponse,
+    AgentRequestStatus, AgentRun, AgentSession, AgentSessionMessage, AppendMessageInput,
+    ApprovalDecisionInput, ApprovalStatus, AuditDecision, AuditLog, AuthContext, CoreResult,
+    CreateChildSessionInput, CreateGrantInput, CreateRunInput, CreateSessionInput,
+    DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport, Page, RiskLevel,
+    RoleName, RunAdminDecisionInput, RunSummary, WebhookTriggerInput, actions, new_id,
 };
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::HeaderMap,
     routing::{delete, get, post},
 };
-use jsonwebtoken::{DecodingKey, Validation, decode};
-use secrecy::{ExposeSecret, SecretString};
+pub use http_support::{ApiError, ManagerConfig, extract_auth};
+use http_support::{ensure_admin, ensure_service_allows};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use time::OffsetDateTime;
 use tower_http::trace::TraceLayer;
+use tracing::Instrument;
 
 pub type StoreRef = Arc<dyn AgentStore>;
 
@@ -30,187 +34,6 @@ pub type StoreRef = Arc<dyn AgentStore>;
 pub struct AppState {
     pub store: StoreRef,
     pub config: Arc<ManagerConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ManagerConfig {
-    pub jwt_secret: Option<SecretString>,
-    pub allow_dev_headers: bool,
-    pub default_service_actions: Vec<String>,
-}
-
-impl ManagerConfig {
-    pub fn from_env() -> Self {
-        Self {
-            jwt_secret: std::env::var("AGENT_JWT_SECRET")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(SecretString::from),
-            allow_dev_headers: std::env::var("AGENT_ALLOW_DEV_HEADERS")
-                .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-                .unwrap_or(true),
-            default_service_actions: vec![
-                "request:*".to_string(),
-                "session:*".to_string(),
-                "run:*".to_string(),
-                "admin:*".to_string(),
-                "internal:*".to_string(),
-            ],
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ApiError {
-    status: StatusCode,
-    body: SafeError,
-}
-
-impl ApiError {
-    fn from_core(error: AgentCoreError, trace_id: impl Into<String>) -> Self {
-        let code = error.code();
-        let status = match code {
-            ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
-            ErrorCode::ApprovalRequired => StatusCode::ACCEPTED,
-            ErrorCode::NotFound => StatusCode::NOT_FOUND,
-            ErrorCode::Conflict => StatusCode::CONFLICT,
-            ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-            ErrorCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        Self {
-            status,
-            body: SafeError::new(code, trace_id),
-        }
-    }
-
-    fn unauthorized(trace_id: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::UNAUTHORIZED,
-            body: SafeError::new(ErrorCode::Unauthorized, trace_id),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ServiceJwtClaims {
-    sub: String,
-    service_name: Option<String>,
-    allowed_actions: Vec<String>,
-    exp: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UserJwtClaims {
-    sub: String,
-    roles: Vec<String>,
-    resource_allowlist: Vec<String>,
-    exp: usize,
-}
-
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(ToString::to_string)
-}
-
-fn parse_roles(value: &str) -> Vec<RoleAssignment> {
-    value
-        .split(',')
-        .filter_map(|role| role.trim().parse::<RoleName>().ok())
-        .map(RoleAssignment::global)
-        .collect()
-}
-
-fn parse_csv(value: Option<String>) -> Vec<String> {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn bearer(value: &str) -> Option<&str> {
-    value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-}
-
-pub fn extract_auth(headers: &HeaderMap, config: &ManagerConfig) -> Result<AuthContext, ApiError> {
-    let trace_id = header_value(headers, "x-agent-trace-id").unwrap_or_else(new_trace_id);
-
-    if let Some(secret) = &config.jwt_secret {
-        let service_token = header_value(headers, "authorization")
-            .and_then(|value| bearer(&value).map(ToString::to_string))
-            .ok_or_else(|| ApiError::unauthorized(trace_id.clone()))?;
-        let user_token = header_value(headers, "x-agent-user-token")
-            .and_then(|value| bearer(&value).map(ToString::to_string).or(Some(value)))
-            .ok_or_else(|| ApiError::unauthorized(trace_id.clone()))?;
-        let service = decode::<ServiceJwtClaims>(
-            &service_token,
-            &DecodingKey::from_secret(secret.expose_secret().as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| ApiError::unauthorized(trace_id.clone()))?
-        .claims;
-        let user = decode::<UserJwtClaims>(
-            &user_token,
-            &DecodingKey::from_secret(secret.expose_secret().as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| ApiError::unauthorized(trace_id.clone()))?
-        .claims;
-        return Ok(AuthContext {
-            user_id: user.sub,
-            service_id: service.sub,
-            service_allowed_actions: service.allowed_actions,
-            roles: user
-                .roles
-                .into_iter()
-                .filter_map(|role| role.parse::<RoleName>().ok())
-                .map(RoleAssignment::global)
-                .collect(),
-            resource_allowlist: user.resource_allowlist,
-            trace_id,
-        });
-    }
-
-    if config.allow_dev_headers {
-        let service_id = header_value(headers, "x-agent-service")
-            .unwrap_or_else(|| "dev-orchestrator".to_string());
-        let user_id =
-            header_value(headers, "x-agent-user").unwrap_or_else(|| "dev-user".to_string());
-        let roles = parse_roles(
-            &header_value(headers, "x-agent-roles").unwrap_or_else(|| "system_admin".to_string()),
-        );
-        let allowed = parse_csv(header_value(headers, "x-agent-allowed-actions"));
-        return Ok(AuthContext {
-            user_id,
-            service_id,
-            service_allowed_actions: if allowed.is_empty() {
-                config.default_service_actions.clone()
-            } else {
-                allowed
-            },
-            roles,
-            resource_allowlist: parse_csv(header_value(headers, "x-agent-resource-allowlist"))
-                .into_iter()
-                .chain(std::iter::once("*".to_string()))
-                .collect(),
-            trace_id,
-        });
-    }
-
-    Err(ApiError::unauthorized(trace_id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +83,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/admin/agents/{agent_id}", delete(admin_delete_agent))
         .route("/v1/admin/audit", get(admin_audit))
+        .route("/v1/admin/runs", get(admin_runs))
+        .route("/v1/admin/runs/{run_id}", get(admin_run))
+        .route("/v1/admin/runs/{run_id}/retry", post(admin_retry_run))
+        .route(
+            "/v1/admin/runs/{run_id}/terminate",
+            post(admin_terminate_run),
+        )
         .route("/v1/admin/grants", post(admin_create_grant))
         .route("/v1/admin/observer/reports", get(admin_observer_reports))
         .route(
@@ -269,7 +99,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/observer/runs", post(admin_observer_run))
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
         .route("/v1/internal/runs", post(internal_create_run))
-        .route("/v1/internal/runs/{run_id}/claim", post(internal_claim_run))
+        .route("/v1/internal/runs/claim", post(internal_claim_run))
         .route(
             "/v1/internal/runs/{run_id}/heartbeat",
             post(internal_heartbeat_run),
@@ -321,35 +151,8 @@ pub async fn serve(bind: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn core_hash(payload: &Value) -> String {
-    let mut hasher = Sha256::new();
-    let encoded = serde_json::to_vec(payload).unwrap_or_default();
-    hasher.update(encoded);
-    format!("{:x}", hasher.finalize())
-}
-
 fn auth(headers: &HeaderMap, state: &AppState) -> Result<AuthContext, ApiError> {
     extract_auth(headers, &state.config)
-}
-
-fn policy_ctx(
-    action: &str,
-    request_type: Option<RequestType>,
-    agent_type: Option<String>,
-    target_resource: Option<String>,
-    risk_level: RiskLevel,
-    side_effect_mode: SideEffectMode,
-) -> CoreResult<PolicyContext> {
-    Ok(PolicyContext {
-        action: action.to_string(),
-        request_type,
-        agent_type,
-        resource: target_resource.map(ResourceRef::parse).transpose()?,
-        risk_level,
-        side_effect_mode,
-        resource_attributes: Value::Null,
-        observer_mode: false,
-    })
 }
 
 async fn audit(
@@ -372,266 +175,24 @@ async fn audit(
         .await;
 }
 
-async fn submit_request(
-    state: &AppState,
-    auth: &AuthContext,
-    input: AgentRequestInput,
-) -> Result<AgentRequestResponse, ApiError> {
-    if let Some(key) = &input.idempotency_key
-        && let Some(existing) = state
-            .store
-            .find_agent_request_by_idempotency(&auth.user_id, &auth.service_id, key)
-            .await
-            .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
-    {
-        return Ok(request_response(&existing));
-    }
-
-    let mut request = AgentRequest::new(
-        auth,
-        input.request_type,
-        input.agent_type.clone(),
-        input.target_resource.clone(),
-        input.intent_text.clone(),
-        input.structured_payload.clone(),
-        input.idempotency_key,
-    );
-    request = state
-        .store
-        .create_agent_request(request)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    request.status = AgentRequestStatus::Parsed;
-    request = state
-        .store
-        .update_agent_request(request)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-
-    let risk_level = input.risk_level.unwrap_or(RiskLevel::Low);
-    let side_effect_mode = input.side_effect_mode.unwrap_or_else(|| {
-        if input.request_type == RequestType::CreateAgent {
-            SideEffectMode::ApprovalRequired
-        } else {
-            SideEffectMode::ReadOnly
-        }
-    });
-    let action = request_action(input.request_type);
-    let policy = policy_ctx(
-        action,
-        Some(input.request_type),
-        input.agent_type.clone(),
-        input.target_resource.clone(),
-        risk_level,
-        side_effect_mode,
-    )
-    .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    let decision = agent_core::DefaultPolicy::authorize(auth, &policy);
-    request.status = AgentRequestStatus::PolicyChecked;
-    request = state
-        .store
-        .update_agent_request(request)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-
-    match decision {
-        PolicyDecision::Denied { reason } => {
-            request.status = AgentRequestStatus::Denied;
-            request.denial_reason = Some(reason.clone());
-            request = state
-                .store
-                .update_agent_request(request)
-                .await
-                .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-            audit(
-                state,
-                Some(auth),
-                action,
-                AuditDecision::Denied,
-                Some(reason),
-                &auth.trace_id,
-            )
-            .await;
-            Ok(request_response(&request))
-        }
-        PolicyDecision::ApprovalRequired { reason } => {
-            let approval = ApprovalRequest {
-                id: new_id("approval"),
-                request_id: request.id.clone(),
-                requested_by_user: auth.user_id.clone(),
-                approver_user: None,
-                status: ApprovalStatus::Pending,
-                risk_level: Some(risk_level),
-                reason: Some(reason.clone()),
-                decision_reason: None,
-                created_at: OffsetDateTime::now_utc(),
-                decided_at: None,
-            };
-            let approval = state
-                .store
-                .create_approval(approval)
-                .await
-                .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-            request.status = AgentRequestStatus::ApprovalRequired;
-            request.approval_id = Some(approval.id.clone());
-            request = state
-                .store
-                .update_agent_request(request)
-                .await
-                .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-            audit(
-                state,
-                Some(auth),
-                action,
-                AuditDecision::ApprovalRequired,
-                Some(reason),
-                &auth.trace_id,
-            )
-            .await;
-            Ok(request_response(&request))
-        }
-        PolicyDecision::Allowed => {
-            audit(
-                state,
-                Some(auth),
-                action,
-                AuditDecision::Allowed,
-                None,
-                &auth.trace_id,
-            )
-            .await;
-            fulfill_request(state, auth, request)
-                .await
-                .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
-        }
-    }
-}
-
-async fn fulfill_request(
-    state: &AppState,
-    auth: &AuthContext,
-    mut request: AgentRequest,
-) -> CoreResult<AgentRequestResponse> {
-    match request.request_type {
-        RequestType::CreateAgent | RequestType::ChangeAgent | RequestType::ResumeAgent => {
-            let agent_type = request
-                .agent_type
-                .clone()
-                .unwrap_or_else(|| AGENT_TYPE_BACKGROUND_WORKER.to_string());
-            let target_resource = request.target_resource.clone().ok_or_else(|| {
-                AgentCoreError::coded(ErrorCode::Conflict, "target_resource required")
-            })?;
-            let hash = core_hash(&request.structured_payload);
-            if let Some(existing) = state
-                .store
-                .find_reusable_agent(&auth.user_id, &agent_type, &target_resource, &hash)
-                .await?
-            {
-                request.status = AgentRequestStatus::Fulfilled;
-                request.result_agent_id = Some(existing.id);
-                let request = state.store.update_agent_request(request).await?;
-                return Ok(request_response(&request));
-            }
-            request.status = AgentRequestStatus::Provisioning;
-            request = state.store.update_agent_request(request).await?;
-            let mut agent = AgentInstance::new(
-                auth.user_id.clone(),
-                agent_type,
-                target_resource,
-                hash,
-                request.structured_payload.clone(),
-                auth.trace_id.clone(),
-            );
-            agent.display_name = request
-                .intent_text
-                .clone()
-                .or_else(|| Some("P0 background worker".to_string()));
-            let agent = state.store.create_agent_instance(agent).await?;
-            request.status = AgentRequestStatus::Fulfilled;
-            request.result_agent_id = Some(agent.id);
-            let request = state.store.update_agent_request(request).await?;
-            Ok(request_response(&request))
-        }
-        RequestType::CreateRun => {
-            let payload_agent_id = request
-                .structured_payload
-                .get("agent_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| AgentCoreError::coded(ErrorCode::Conflict, "agent_id required"))?;
-            let agent = state
-                .store
-                .get_agent(payload_agent_id)
-                .await?
-                .ok_or_else(|| AgentCoreError::coded(ErrorCode::NotFound, "agent not found"))?;
-            let run = AgentRun::new(
-                agent.id,
-                None,
-                TriggerType::Manual,
-                agent.target_resource,
-                auth.trace_id.clone(),
-            );
-            let run = state.store.create_run(run).await?;
-            request.status = AgentRequestStatus::Fulfilled;
-            request.result_run_id = Some(run.id);
-            let request = state.store.update_agent_request(request).await?;
-            Ok(request_response(&request))
-        }
-        RequestType::CreateSession | RequestType::CreateChildSession => {
-            request.status = AgentRequestStatus::Fulfilled;
-            let request = state.store.update_agent_request(request).await?;
-            Ok(request_response(&request))
-        }
-    }
-}
-
-fn request_response(request: &AgentRequest) -> AgentRequestResponse {
-    let message = match request.status {
-        AgentRequestStatus::ApprovalRequired => "该请求需要资源负责人审批。",
-        AgentRequestStatus::Denied => "该请求已被策略拒绝。",
-        AgentRequestStatus::Fulfilled => "请求已完成。",
-        AgentRequestStatus::Cancelled => "请求已取消。",
-        _ => "请求已记录。",
-    };
-    AgentRequestResponse {
-        request_id: request.id.clone(),
-        status: request.status,
-        message: message.to_string(),
-        approval_id: request.approval_id.clone(),
-        agent_id: request.result_agent_id.clone(),
-        run_id: request.result_run_id.clone(),
-        trace_id: request.trace_id.clone(),
-    }
-}
-
-fn ensure_admin(auth: &AuthContext, action: &str) -> Result<(), ApiError> {
-    let ctx = PolicyContext {
-        action: action.to_string(),
-        request_type: None,
-        agent_type: None,
-        resource: None,
-        risk_level: RiskLevel::Low,
-        side_effect_mode: SideEffectMode::Deny,
-        resource_attributes: Value::Null,
-        observer_mode: false,
-    };
-    match agent_core::DefaultPolicy::authorize(auth, &ctx) {
-        PolicyDecision::Allowed => Ok(()),
-        PolicyDecision::Denied { reason } | PolicyDecision::ApprovalRequired { reason } => {
-            Err(ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::Forbidden, reason),
-                auth.trace_id.clone(),
-            ))
-        }
-    }
-}
-
 async fn create_agent_request(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<AgentRequestInput>,
 ) -> Result<Json<AgentRequestResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
-    submit_request(&state, &auth, input).await.map(Json)
+    let span = tracing::info_span!(
+        "manager.create_agent_request",
+        trace_id = %auth.trace_id,
+        user_id = %auth.user_id,
+        service_id = %auth.service_id,
+        request_type = %input.request_type
+    );
+    request_services::submit_request(&state.store, &auth, input)
+        .instrument(span)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
 }
 
 async fn get_agent_request(
@@ -659,7 +220,7 @@ async fn get_agent_request(
             auth.trace_id,
         ));
     }
-    Ok(Json(request_response(&request)))
+    Ok(Json(request_services::request_response(&request)))
 }
 
 async fn cancel_agent_request(
@@ -700,7 +261,7 @@ async fn cancel_agent_request(
         &auth.trace_id,
     )
     .await;
-    Ok(Json(request_response(&request)))
+    Ok(Json(request_services::request_response(&request)))
 }
 
 async fn my_agents(
@@ -752,51 +313,10 @@ async fn create_session(
     Json(input): Json<CreateSessionInput>,
 ) -> Result<Json<AgentSession>, ApiError> {
     let auth = auth(&headers, &state)?;
-    let agent = state
-        .store
-        .get_agent(&agent_id)
+    lifecycle_services::create_session(&state.store, &auth, agent_id, input)
         .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
-        .ok_or_else(|| {
-            ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-                auth.trace_id.clone(),
-            )
-        })?;
-    if agent.owner_user != auth.user_id
-        && !auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin])
-    {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-            auth.trace_id,
-        ));
-    }
-    let mut session = AgentSession::new(
-        agent.id,
-        auth.user_id.clone(),
-        if input.resource_scope.is_null() {
-            json!({"resource": agent.target_resource})
-        } else {
-            input.resource_scope
-        },
-        auth.trace_id.clone(),
-    );
-    session.source_conversation_id = input.source_conversation_id;
-    let session = state
-        .store
-        .create_session(session)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    audit(
-        &state,
-        Some(&auth),
-        actions::SESSION_CREATE,
-        AuditDecision::Allowed,
-        None,
-        &auth.trace_id,
-    )
-    .await;
-    Ok(Json(session))
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
 }
 
 async fn get_session(
@@ -845,52 +365,17 @@ async fn append_message(
     Json(input): Json<AppendMessageInput>,
 ) -> Result<Json<AgentSessionMessage>, ApiError> {
     let auth = auth(&headers, &state)?;
-    let session = state
-        .store
-        .get_session(&session_id)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
-        .ok_or_else(|| {
-            ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-                auth.trace_id.clone(),
-            )
-        })?;
-    if session.owner_user != auth.user_id {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-            auth.trace_id,
-        ));
-    }
-    let sequence = state
-        .store
-        .next_message_sequence(&session_id)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    let mut message = AgentSessionMessage::new(
-        session_id,
-        sequence,
-        input.role,
-        Some(input.content_summary),
-        input.run_id,
-        auth.trace_id.clone(),
-    );
-    message.content_ref = input.content_ref;
-    let message = state
-        .store
-        .append_message(message)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    audit(
-        &state,
-        Some(&auth),
+    control_services::append_message_to_session(
+        &state.store,
+        &auth,
+        &session_id,
+        input,
+        true,
         actions::SESSION_APPEND_MESSAGE,
-        AuditDecision::Allowed,
-        None,
-        &auth.trace_id,
     )
-    .await;
-    Ok(Json(message))
+    .await
+    .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+    .map(Json)
 }
 
 async fn create_child_session(
@@ -900,70 +385,10 @@ async fn create_child_session(
     Json(input): Json<CreateChildSessionInput>,
 ) -> Result<Json<AgentSession>, ApiError> {
     let auth = auth(&headers, &state)?;
-    let parent = state
-        .store
-        .get_session(&parent_session_id)
+    lifecycle_services::create_child_session(&state.store, &auth, parent_session_id, input)
         .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
-        .ok_or_else(|| {
-            ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-                auth.trace_id.clone(),
-            )
-        })?;
-    if parent.owner_user != auth.user_id || parent.depth >= 1 {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(
-                ErrorCode::Conflict,
-                "child session depth or owner constraint failed",
-            ),
-            auth.trace_id,
-        ));
-    }
-    let children = state
-        .store
-        .list_child_sessions(&parent_session_id)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    let active_children = children
-        .iter()
-        .filter(|child| child.status == agent_core::AgentSessionStatus::Active)
-        .count();
-    if children.len() >= 3 || active_children >= 2 {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(ErrorCode::Conflict, "child session budget exceeded"),
-            auth.trace_id,
-        ));
-    }
-    let mut child = AgentSession::new(
-        input.agent_id.unwrap_or(parent.agent_id.clone()),
-        auth.user_id.clone(),
-        if input.resource_scope.is_null() {
-            parent.resource_scope.clone()
-        } else {
-            input.resource_scope
-        },
-        auth.trace_id.clone(),
-    );
-    child.parent_session_id = Some(parent_session_id.clone());
-    child.created_by_session_id = Some(parent_session_id);
-    child.depth = parent.depth + 1;
-    child.context_summary = input.context_summary.or(parent.context_summary);
-    let child = state
-        .store
-        .create_session(child)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    audit(
-        &state,
-        Some(&auth),
-        "session:create_child",
-        AuditDecision::Allowed,
-        None,
-        &auth.trace_id,
-    )
-    .await;
-    Ok(Json(child))
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
 }
 
 async fn list_children(
@@ -1001,77 +426,10 @@ async fn create_run(
     Json(input): Json<CreateRunInput>,
 ) -> Result<Json<AgentRun>, ApiError> {
     let auth = auth(&headers, &state)?;
-    let agent = state
-        .store
-        .get_agent(&agent_id)
+    lifecycle_services::create_run(&state.store, &auth, agent_id, input)
         .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
-        .ok_or_else(|| {
-            ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-                auth.trace_id.clone(),
-            )
-        })?;
-    if agent.owner_user != auth.user_id
-        && !auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin])
-    {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(ErrorCode::NotFound, "not found"),
-            auth.trace_id,
-        ));
-    }
-    let mut run = AgentRun::new(
-        agent.id,
-        input.session_id,
-        input.trigger_type,
-        input.target_resource.unwrap_or(agent.target_resource),
-        auth.trace_id.clone(),
-    );
-    run.idempotency_key = input.idempotency_key;
-    run.risk_level = input.risk_level.unwrap_or(RiskLevel::Low);
-    run.side_effect_mode = input.side_effect_mode.unwrap_or(SideEffectMode::ReadOnly);
-    let policy = policy_ctx(
-        actions::RUN_CREATE,
-        Some(RequestType::CreateRun),
-        Some(agent.agent_type),
-        Some(run.target_resource.clone()),
-        run.risk_level,
-        run.side_effect_mode,
-    )
-    .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    match agent_core::DefaultPolicy::authorize(&auth, &policy) {
-        PolicyDecision::Allowed => {}
-        PolicyDecision::Denied { reason } | PolicyDecision::ApprovalRequired { reason } => {
-            audit(
-                &state,
-                Some(&auth),
-                actions::RUN_CREATE,
-                AuditDecision::Denied,
-                Some(reason.clone()),
-                &auth.trace_id,
-            )
-            .await;
-            return Err(ApiError::from_core(
-                AgentCoreError::coded(ErrorCode::Forbidden, reason),
-                auth.trace_id,
-            ));
-        }
-    }
-    let run = state
-        .store
-        .create_run(run)
-        .await
-        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
-    audit(
-        &state,
-        Some(&auth),
-        actions::RUN_CREATE,
-        AuditDecision::Allowed,
-        None,
-        &auth.trace_id,
-    )
-    .await;
-    Ok(Json(run))
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
 }
 
 async fn admin_requests(
@@ -1144,7 +502,7 @@ async fn admin_approve(
         &auth.trace_id,
     )
     .await;
-    let response = fulfill_request(&state, &auth, request)
+    let response = request_services::fulfill_request(&state.store, &auth, request)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
     Ok(Json(response))
@@ -1202,7 +560,7 @@ async fn admin_deny(
         &auth.trace_id,
     )
     .await;
-    Ok(Json(request_response(&request)))
+    Ok(Json(request_services::request_response(&request)))
 }
 
 async fn admin_agents(
@@ -1319,19 +677,90 @@ async fn admin_audit(
     Ok(Json(json!(Page { items })))
 }
 
-async fn admin_create_grant(
-    State(_state): State<AppState>,
+async fn admin_runs(
+    State(state): State<AppState>,
     headers: HeaderMap,
-    Json(_body): Json<Value>,
-) -> Result<Json<EmptyResponse>, ApiError> {
-    let trace_id = header_value(&headers, "x-agent-trace-id").unwrap_or_else(new_trace_id);
-    Err(ApiError::from_core(
-        AgentCoreError::coded(
-            ErrorCode::Forbidden,
-            "P0 keeps grant creation endpoint present but denies ad-hoc grants until policy schema is explicit",
-        ),
-        trace_id,
-    ))
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_RUN_READ)?;
+    let items: Vec<RunSummary> = state
+        .store
+        .list_runs(None, None, query.limit.unwrap_or(100))
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(json!(Page { items })))
+}
+
+async fn admin_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<Json<AgentRun>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_RUN_READ)?;
+    let run = state
+        .store
+        .get_run(&run_id)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?
+        .ok_or_else(|| {
+            ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::NotFound, "not found"),
+                auth.trace_id.clone(),
+            )
+        })?;
+    Ok(Json(run))
+}
+
+async fn admin_retry_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(input): Json<RunAdminDecisionInput>,
+) -> Result<Json<AgentRun>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_RUN_RETRY)?;
+    run_admin_services::retry_dead_letter_run(&state.store, &auth, &run_id, input.reason)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
+}
+
+async fn admin_terminate_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(input): Json<RunAdminDecisionInput>,
+) -> Result<Json<AgentRun>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_RUN_TERMINATE)?;
+    run_admin_services::terminate_dead_letter_run(&state.store, &auth, &run_id, input.reason)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+        .map(Json)
+}
+
+async fn admin_create_grant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateGrantInput>,
+) -> Result<Json<AgentGrant>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    tracing::info!(
+        trace_id = %auth.trace_id,
+        user_id = %auth.user_id,
+        subject_type = %input.subject_type,
+        action = %input.action,
+        resource_type = %input.resource_type,
+        "manager admin create grant"
+    );
+    telemetry_support::record_request_metric(actions::ADMIN_GRANT_CREATE, &auth.service_id);
+    ensure_admin(&auth, actions::ADMIN_GRANT_CREATE)?;
+    let grant = control_services::create_grant(&state.store, &auth, input)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(grant))
 }
 
 async fn admin_observer_reports(
@@ -1449,51 +878,39 @@ async fn internal_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(connector): Path<String>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
+    Json(input): Json<WebhookTriggerInput>,
+) -> Result<Json<control_services::WebhookAcceptedResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
-    if !auth.service_allows(actions::INTERNAL_WEBHOOK) {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(
-                ErrorCode::Forbidden,
-                "internal webhook service claim required",
-            ),
-            auth.trace_id,
-        ));
-    }
-    audit(
-        &state,
-        Some(&auth),
-        actions::INTERNAL_WEBHOOK,
-        AuditDecision::Allowed,
-        Some(format!("normalized connector webhook: {connector}")),
-        &auth.trace_id,
-    )
-    .await;
-    Ok(Json(json!({
-        "status": "accepted",
-        "connector": connector,
-        "dedupe_key": body.get("dedupe_key"),
-        "trace_id": auth.trace_id,
-    })))
+    tracing::info!(
+        trace_id = %auth.trace_id,
+        service_id = %auth.service_id,
+        connector = %connector,
+        event_type = %input.event_type,
+        "manager internal webhook"
+    );
+    telemetry_support::record_request_metric(actions::INTERNAL_WEBHOOK, &auth.service_id);
+    ensure_service_allows(&auth, actions::INTERNAL_WEBHOOK)?;
+    let response = control_services::accept_webhook(&state.store, &auth, connector, input)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    tracing::info!(
+        trace_id = %auth.trace_id,
+        connector = %response.connector,
+        event_type = %response.event_type,
+        run_count = response.run_ids.len(),
+        "webhook normalized to controlled runs"
+    );
+    Ok(Json(response))
 }
 
 async fn internal_create_run(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut run): Json<AgentRun>,
+    Json(run): Json<AgentRun>,
 ) -> Result<Json<AgentRun>, ApiError> {
     let auth = auth(&headers, &state)?;
-    if !auth.service_allows("internal:runs") && !auth.service_allows(actions::RUN_CREATE) {
-        return Err(ApiError::from_core(
-            AgentCoreError::coded(ErrorCode::Forbidden, "internal run service claim required"),
-            auth.trace_id,
-        ));
-    }
-    run.trace_id = auth.trace_id.clone();
-    let run = state
-        .store
-        .create_run(run)
+    ensure_service_allows(&auth, actions::INTERNAL_RUN_CREATE)?;
+    let run = control_services::create_internal_run(&state.store, &auth, run)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
     Ok(Json(run))
@@ -1502,9 +919,9 @@ async fn internal_create_run(
 async fn internal_claim_run(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_run_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_RUN_CLAIM)?;
     let claim = state
         .store
         .claim_next_run(&auth.service_id, Duration::from_secs(30))
@@ -1519,6 +936,7 @@ async fn internal_heartbeat_run(
     Path(run_id): Path<String>,
 ) -> Result<Json<EmptyResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_RUN_HEARTBEAT)?;
     state
         .store
         .heartbeat_run(&run_id, &auth.service_id, Duration::from_secs(30))
@@ -1539,6 +957,7 @@ async fn internal_finish_run(
     Json(output): Json<agent_core::RuntimeOutput>,
 ) -> Result<Json<AgentRun>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_RUN_FINISH)?;
     let run = state
         .store
         .finish_run(&run_id, output)
@@ -1554,6 +973,7 @@ async fn internal_dead_letter_run(
     Json(body): Json<Value>,
 ) -> Result<Json<AgentRun>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_RUN_DEAD_LETTER)?;
     let reason = body
         .get("reason")
         .and_then(Value::as_str)
@@ -1572,7 +992,19 @@ async fn internal_append_message(
     Path(session_id): Path<String>,
     Json(input): Json<AppendMessageInput>,
 ) -> Result<Json<AgentSessionMessage>, ApiError> {
-    append_message(State(state), headers, Path(session_id), Json(input)).await
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_SESSION_APPEND_MESSAGE)?;
+    control_services::append_message_to_session(
+        &state.store,
+        &auth,
+        &session_id,
+        input,
+        false,
+        actions::INTERNAL_SESSION_APPEND_MESSAGE,
+    )
+    .await
+    .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))
+    .map(Json)
 }
 
 async fn internal_session_context(
@@ -1581,6 +1013,7 @@ async fn internal_session_context(
     Path(session_id): Path<String>,
 ) -> Result<Json<agent_core::SessionContext>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_SESSION_CONTEXT)?;
     state
         .store
         .session_context(&session_id, &auth.trace_id)
@@ -1595,6 +1028,7 @@ async fn internal_memory_summary(
     Json(body): Json<Value>,
 ) -> Result<Json<EmptyResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_MEMORY_SUMMARY)?;
     let session_id = body
         .get("session_id")
         .and_then(Value::as_str)
@@ -1626,6 +1060,7 @@ async fn internal_observer_tick(
     headers: HeaderMap,
 ) -> Result<Json<ObserverReport>, ApiError> {
     let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OBSERVER_TICK)?;
     create_observer_report_from_snapshot(&state, &auth.trace_id)
         .await
         .map(Json)
@@ -1635,7 +1070,11 @@ async fn internal_observer_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{AGENT_TYPE_BACKGROUND_WORKER, RoleAssignment};
+    use agent_core::{
+        AGENT_TYPE_BACKGROUND_WORKER, AgentRunStatus, AgentSession, MessageRole, RequestType,
+        RoleAssignment, SideEffectMode, TriggerType, new_trace_id,
+    };
+    use time::OffsetDateTime;
 
     async fn test_state() -> AppState {
         let store = MemoryAgentStore::new();
@@ -1661,12 +1100,46 @@ mod tests {
         }
     }
 
+    async fn create_read_only_run(state: &AppState, auth: &AuthContext, label: &str) -> AgentRun {
+        let agent = request_services::submit_request(
+            &state.store,
+            auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some(format!("create {label} worker")),
+                structured_payload: json!({"mode": label}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        lifecycle_services::create_run(
+            &state.store,
+            auth,
+            agent.agent_id.unwrap(),
+            CreateRunInput {
+                session_id: None,
+                trigger_type: TriggerType::Manual,
+                idempotency_key: None,
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn create_agent_defaults_to_approval_required() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);
-        let response = submit_request(
-            &state,
+        let response = request_services::submit_request(
+            &state.store,
             &auth,
             AgentRequestInput {
                 request_type: RequestType::CreateAgent,
@@ -1690,8 +1163,8 @@ mod tests {
     async fn read_only_create_agent_is_fulfilled() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);
-        let response = submit_request(
-            &state,
+        let response = request_services::submit_request(
+            &state.store,
             &auth,
             AgentRequestInput {
                 request_type: RequestType::CreateAgent,
@@ -1709,5 +1182,272 @@ mod tests {
 
         assert_eq!(response.status, AgentRequestStatus::Fulfilled);
         assert!(response.agent_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn admin_grant_endpoint_persists_and_audits_grant() {
+        let state = test_state().await;
+        let Json(grant) = admin_create_grant(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(CreateGrantInput {
+                subject_type: "user".to_string(),
+                subject_id: "maintainer-1".to_string(),
+                action: "run:create".to_string(),
+                resource_type: "team".to_string(),
+                resource_id: "project-alpha".to_string(),
+                constraints: json!({"side_effect_mode": "read_only"}),
+                expires_at: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(grant.subject_id, "maintainer-1");
+        assert_eq!(grant.granted_by.as_deref(), Some("dev-user"));
+        let audits = state.store.list_audit(10).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_GRANT_CREATE
+                && audit.decision == Some(AuditDecision::Allowed)
+        }));
+    }
+
+    #[tokio::test]
+    async fn admin_dead_letter_retry_and_terminate_are_audited() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+
+        let retry_run = create_read_only_run(&state, &auth, "dead-letter-retry").await;
+        let dead_letter = state
+            .store
+            .dead_letter_run(&retry_run.id, "runtime exhausted")
+            .await
+            .unwrap();
+        assert_eq!(dead_letter.run_status, AgentRunStatus::DeadLetter);
+
+        let Json(inspected) = admin_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(dead_letter.id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(inspected.run_status, AgentRunStatus::DeadLetter);
+
+        let Json(retried) = admin_retry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(dead_letter.id.clone()),
+            Json(RunAdminDecisionInput {
+                reason: Some("retry after operator fix".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retried.run_status, AgentRunStatus::Queued);
+        assert_eq!(retried.retry_count, 0);
+        assert!(retried.next_retry_at.is_none());
+
+        let terminate_run = create_read_only_run(&state, &auth, "dead-letter-terminate").await;
+        let terminate_dead_letter = state
+            .store
+            .dead_letter_run(&terminate_run.id, "runtime exhausted")
+            .await
+            .unwrap();
+        let Json(terminated) = admin_terminate_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(terminate_dead_letter.id),
+            Json(RunAdminDecisionInput {
+                reason: Some("operator stop".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(terminated.run_status, AgentRunStatus::Cancelled);
+        assert!(terminated.finished_at.is_some());
+
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_RUN_RETRY
+                && audit.run_id.as_deref() == Some(retry_run.id.as_str())
+                && audit.decision == Some(AuditDecision::Allowed)
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_RUN_TERMINATE
+                && audit.run_id.as_deref() == Some(terminate_run.id.as_str())
+                && audit.decision == Some(AuditDecision::Allowed)
+        }));
+    }
+
+    #[tokio::test]
+    async fn webhook_creates_idempotent_read_only_runs_for_matching_agents() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let agent = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create webhook worker".to_string()),
+                structured_payload: json!({"mode": "webhook"}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(agent.agent_id.is_some());
+
+        let input = WebhookTriggerInput {
+            trigger_type: "webhook".to_string(),
+            connector: "github".to_string(),
+            event_type: "issue.updated".to_string(),
+            resource: "resource:team/project-alpha".to_string(),
+            dedupe_key: "github-issue-1-42".to_string(),
+            payload_ref: "memory://webhook/github-issue-1-42".to_string(),
+            received_at: OffsetDateTime::now_utc(),
+        };
+        let Json(first) = internal_webhook(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("github".to_string()),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+        let Json(second) = internal_webhook(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("github".to_string()),
+            Json(input),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.run_ids.len(), 1);
+        assert_eq!(second.run_ids, first.run_ids);
+        let run = state
+            .store
+            .get_run(&first.run_ids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.trigger_type, TriggerType::Webhook);
+        assert_eq!(run.side_effect_mode, SideEffectMode::ReadOnly);
+        assert_eq!(run.idempotency_key.as_deref(), Some("github-issue-1-42"));
+    }
+
+    #[tokio::test]
+    async fn user_session_and_run_create_are_idempotent() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let agent = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create idempotent worker".to_string()),
+                structured_payload: json!({"mode": "idempotency"}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        let agent_id = agent.agent_id.unwrap();
+
+        let session_input = CreateSessionInput {
+            source_conversation_id: Some("conv-idempotent".to_string()),
+            resource_scope: json!({}),
+            idempotency_key: Some("session-key-1".to_string()),
+        };
+        let first_session = lifecycle_services::create_session(
+            &state.store,
+            &auth,
+            agent_id.clone(),
+            session_input.clone(),
+        )
+        .await
+        .unwrap();
+        let second_session = lifecycle_services::create_session(
+            &state.store,
+            &auth,
+            agent_id.clone(),
+            session_input,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second_session.id, first_session.id);
+        assert_eq!(
+            first_session.idempotency_key.as_deref(),
+            Some("session-key-1")
+        );
+
+        let run_input = CreateRunInput {
+            session_id: Some(first_session.id),
+            trigger_type: TriggerType::Manual,
+            idempotency_key: Some("run-key-1".to_string()),
+            target_resource: Some("resource:team/project-alpha".to_string()),
+            risk_level: Some(RiskLevel::Low),
+            side_effect_mode: Some(SideEffectMode::ReadOnly),
+        };
+        let first_run = lifecycle_services::create_run(
+            &state.store,
+            &auth,
+            agent_id.clone(),
+            run_input.clone(),
+        )
+        .await
+        .unwrap();
+        let second_run = lifecycle_services::create_run(&state.store, &auth, agent_id, run_input)
+            .await
+            .unwrap();
+        assert_eq!(second_run.id, first_run.id);
+        assert_eq!(first_run.idempotency_key.as_deref(), Some("run-key-1"));
+    }
+
+    #[tokio::test]
+    async fn internal_append_message_uses_service_authorization_not_owner_identity() {
+        let state = test_state().await;
+        let session = state
+            .store
+            .create_session(AgentSession::new(
+                "agent-1",
+                "session-owner",
+                json!({"resource": "resource:team/project-alpha"}),
+                "trace-test",
+            ))
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-user", "worker-user".parse().unwrap());
+        headers.insert(
+            "x-agent-allowed-actions",
+            actions::INTERNAL_SESSION_APPEND_MESSAGE.parse().unwrap(),
+        );
+
+        let Json(message) = internal_append_message(
+            State(state),
+            headers,
+            Path(session.id),
+            Json(AppendMessageInput {
+                role: MessageRole::Assistant,
+                content_summary: "runtime response".to_string(),
+                content_ref: None,
+                run_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(message.sequence, 1);
+        assert_eq!(message.content_summary.as_deref(), Some("runtime response"));
     }
 }

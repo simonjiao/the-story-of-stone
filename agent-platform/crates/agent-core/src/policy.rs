@@ -9,6 +9,7 @@ pub mod actions {
     pub const REQUEST_CREATE_AGENT: &str = "request:create_agent";
     pub const REQUEST_CHANGE_AGENT: &str = "request:change_agent";
     pub const SESSION_CREATE: &str = "session:create";
+    pub const SESSION_CREATE_CHILD: &str = "session:create_child";
     pub const SESSION_APPEND_MESSAGE: &str = "session:append_message";
     pub const RUN_CREATE: &str = "run:create";
     pub const ADMIN_APPROVE: &str = "admin:approve";
@@ -17,9 +18,18 @@ pub mod actions {
     pub const ADMIN_AGENT_RESUME: &str = "admin:agent_resume";
     pub const ADMIN_AUDIT_READ: &str = "admin:audit_read";
     pub const ADMIN_OBSERVER_READ: &str = "admin:observer_read";
+    pub const ADMIN_GRANT_CREATE: &str = "admin:grant_create";
+    pub const ADMIN_RUN_READ: &str = "admin:run_read";
+    pub const ADMIN_RUN_RETRY: &str = "admin:run_retry";
+    pub const ADMIN_RUN_TERMINATE: &str = "admin:run_terminate";
+    pub const INTERNAL_RUN_CREATE: &str = "internal:run_create";
     pub const INTERNAL_RUN_CLAIM: &str = "internal:run_claim";
     pub const INTERNAL_RUN_HEARTBEAT: &str = "internal:run_heartbeat";
     pub const INTERNAL_RUN_FINISH: &str = "internal:run_finish";
+    pub const INTERNAL_RUN_DEAD_LETTER: &str = "internal:run_dead_letter";
+    pub const INTERNAL_SESSION_APPEND_MESSAGE: &str = "internal:session_append_message";
+    pub const INTERNAL_SESSION_CONTEXT: &str = "internal:session_context";
+    pub const INTERNAL_MEMORY_SUMMARY: &str = "internal:memory_summary";
     pub const INTERNAL_OBSERVER_TICK: &str = "internal:observer_tick";
     pub const INTERNAL_WEBHOOK: &str = "internal:webhook";
 }
@@ -125,7 +135,11 @@ impl DefaultPolicy {
             | actions::ADMIN_AGENT_PAUSE
             | actions::ADMIN_AGENT_RESUME
             | actions::ADMIN_AUDIT_READ
-            | actions::ADMIN_OBSERVER_READ => {
+            | actions::ADMIN_OBSERVER_READ
+            | actions::ADMIN_GRANT_CREATE
+            | actions::ADMIN_RUN_READ
+            | actions::ADMIN_RUN_RETRY
+            | actions::ADMIN_RUN_TERMINATE => {
                 if auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin]) {
                     PolicyDecision::Allowed
                 } else {

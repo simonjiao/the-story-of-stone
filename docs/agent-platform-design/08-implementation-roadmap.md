@@ -4,7 +4,20 @@
 
 ## P0 控制面 + Minimal Runtime 闭环
 
-状态：TODO
+状态：已实现（2026-05-08 复盘后）
+
+复盘修正：
+
+```text
+1. `POST /v1/admin/grants` 不再是占位拒绝，已持久化 AgentGrant 并写 audit。
+2. `POST /v1/internal/webhooks/{connector}` 不再只记录 accepted，已校验输入并为匹配的 running agent 幂等创建 read-only webhook run。
+3. internal API 已统一 service action gate，避免内部主体绕过或误用用户 owner 路径。
+4. run claim API 已改为 `POST /v1/internal/runs/claim`，避免 `{run_id}` 伪参数和实际 claim-next 语义不一致。
+5. Orchestrator session binding 已去除锁 panic 路径，失败时返回安全错误摘要。
+6. 已补充 Manager 回归测试覆盖 grant、webhook 幂等 run 创建和 internal append message service gate。
+7. 已补齐 session/run 创建幂等语义和 Worker 状态推进 audit 链，避免 P0 checklist 对幂等与审计写得过满。
+8. 已补齐 retry 退避和 dead_letter 管理闭环：`next_retry_at`、30s / 120s / 300s backoff、admin runs API、agentctl runs list/show(inspect)/retry/terminate。
+```
 
 目标：
 
@@ -25,7 +38,7 @@ Open WebUI / Orchestrator → Manager → Session / Run → Worker → Minimal R
 8. Memory / Session Store 的 message append、summary 占位、result_ref。
 9. Worker 的 Postgres claim、heartbeat、timeout、retry、dead_letter、resource lock。
 10. Minimal Runtime：AgentRuntime trait、RuntimeClient、mock/local echo/read-only profile。
-11. agentctl：request list / approve / deny / agents list / pause / resume / audit / observer reports。
+11. agentctl：request list / approve / deny / agents list / pause / resume / audit / observer reports / runs list / show(inspect) / retry / terminate。
 12. Observer Agent：只读 snapshot、observer run、observer_report 持久化、audit 关联。
 13. 扩展边界：RuntimeClient、MemoryStore、ConnectorClient、RunQueue、Telemetry facade。
 14. P0 可观测性：trace_id、tracing span、metrics name/label、audit trace 关联；OpenTelemetry/Prometheus exporter 可 feature-gated。

@@ -56,6 +56,14 @@ fn lease_until(lease: Duration) -> OffsetDateTime {
         + time::Duration::try_from(lease).unwrap_or_else(|_| time::Duration::seconds(30))
 }
 
+fn retry_backoff(retry_count: i32) -> time::Duration {
+    match retry_count {
+        count if count <= 1 => time::Duration::seconds(30),
+        2 => time::Duration::seconds(120),
+        _ => time::Duration::seconds(300),
+    }
+}
+
 fn agent_summary(inner: &Inner, agent: &AgentInstance) -> AgentSummary {
     let active_session_count = inner
         .sessions
@@ -109,6 +117,7 @@ fn run_summary(run: &AgentRun) -> RunSummary {
         risk_level: run.risk_level,
         result_summary: run.result_summary.clone(),
         result_ref: run.result_ref.clone(),
+        next_retry_at: run.next_retry_at,
         created_at: run.created_at,
         finished_at: run.finished_at,
         trace_id: run.trace_id.clone(),
@@ -325,6 +334,24 @@ impl AgentStore for MemoryAgentStore {
         Ok(self.read()?.sessions.get(session_id).cloned())
     }
 
+    async fn find_session_by_idempotency(
+        &self,
+        owner_user: &str,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentSession>> {
+        Ok(self
+            .read()?
+            .sessions
+            .values()
+            .find(|session| {
+                session.owner_user == owner_user
+                    && session.agent_id == agent_id
+                    && session.idempotency_key.as_deref() == Some(idempotency_key)
+            })
+            .cloned())
+    }
+
     async fn list_sessions(
         &self,
         user_id: Option<&str>,
@@ -389,6 +416,21 @@ impl AgentStore for MemoryAgentStore {
         Ok(self.read()?.runs.get(run_id).cloned())
     }
 
+    async fn find_run_by_idempotency(
+        &self,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentRun>> {
+        Ok(self
+            .read()?
+            .runs
+            .values()
+            .find(|run| {
+                run.agent_id == agent_id && run.idempotency_key.as_deref() == Some(idempotency_key)
+            })
+            .cloned())
+    }
+
     async fn list_runs(
         &self,
         user_id: Option<&str>,
@@ -429,6 +471,7 @@ impl AgentStore for MemoryAgentStore {
         validate_run_transition(run.run_status, status)?;
         run.run_status = status;
         run.trace_id = trace_id.to_string();
+        run.next_retry_at = None;
         run.version += 1;
         if matches!(
             status,
@@ -440,6 +483,48 @@ impl AgentStore for MemoryAgentStore {
         ) {
             run.finished_at = Some(OffsetDateTime::now_utc());
         }
+        Ok(run.clone())
+    }
+
+    async fn retry_run(&self, run_id: &str, reason: &str, trace_id: &str) -> CoreResult<AgentRun> {
+        let mut inner = self.write()?;
+        let run = inner
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| store_error("run not found"))?;
+        validate_run_transition(run.run_status, AgentRunStatus::Queued)?;
+        run.run_status = AgentRunStatus::Queued;
+        run.retry_count = 0;
+        run.result_summary = Some(reason.to_string());
+        run.lease_owner = None;
+        run.lease_until = None;
+        run.next_retry_at = None;
+        run.finished_at = None;
+        run.trace_id = trace_id.to_string();
+        run.version += 1;
+        Ok(run.clone())
+    }
+
+    async fn terminate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        trace_id: &str,
+    ) -> CoreResult<AgentRun> {
+        let mut inner = self.write()?;
+        let run = inner
+            .runs
+            .get_mut(run_id)
+            .ok_or_else(|| store_error("run not found"))?;
+        validate_run_transition(run.run_status, AgentRunStatus::Cancelled)?;
+        run.run_status = AgentRunStatus::Cancelled;
+        run.result_summary = Some(reason.to_string());
+        run.lease_owner = None;
+        run.lease_until = None;
+        run.next_retry_at = None;
+        run.finished_at = Some(OffsetDateTime::now_utc());
+        run.trace_id = trace_id.to_string();
+        run.version += 1;
         Ok(run.clone())
     }
 
@@ -658,11 +743,13 @@ impl RunQueue for MemoryAgentStore {
         lease: Duration,
     ) -> CoreResult<Option<RunClaim>> {
         let mut inner = self.write()?;
+        let now = OffsetDateTime::now_utc();
         let Some(run) = inner
             .runs
             .values_mut()
             .filter(|run| run.run_status == AgentRunStatus::Queued)
-            .min_by_key(|run| run.created_at)
+            .filter(|run| run.next_retry_at.is_none_or(|retry_at| retry_at <= now))
+            .min_by_key(|run| (run.next_retry_at.unwrap_or(run.created_at), run.created_at))
         else {
             return Ok(None);
         };
@@ -670,7 +757,8 @@ impl RunQueue for MemoryAgentStore {
         run.run_status = AgentRunStatus::Claimed;
         run.lease_owner = Some(worker_id.to_string());
         run.lease_until = Some(lease_until(lease));
-        run.claimed_at = Some(OffsetDateTime::now_utc());
+        run.next_retry_at = None;
+        run.claimed_at = Some(now);
         run.version += 1;
         Ok(Some(RunClaim {
             run: run.clone(),
@@ -713,6 +801,7 @@ impl RunQueue for MemoryAgentStore {
         run.finished_at = Some(OffsetDateTime::now_utc());
         run.lease_owner = None;
         run.lease_until = None;
+        run.next_retry_at = None;
         run.version += 1;
         Ok(run.clone())
     }
@@ -731,9 +820,11 @@ impl RunQueue for MemoryAgentStore {
         if run.retry_count >= max_retries {
             run.run_status = AgentRunStatus::DeadLetter;
             run.finished_at = Some(OffsetDateTime::now_utc());
+            run.next_retry_at = None;
         } else {
             run.run_status = AgentRunStatus::Queued;
             run.retry_count += 1;
+            run.next_retry_at = Some(OffsetDateTime::now_utc() + retry_backoff(run.retry_count));
         }
         run.result_summary = Some(reason.to_string());
         run.lease_owner = None;
@@ -753,6 +844,7 @@ impl RunQueue for MemoryAgentStore {
         run.finished_at = Some(OffsetDateTime::now_utc());
         run.lease_owner = None;
         run.lease_until = None;
+        run.next_retry_at = None;
         run.version += 1;
         Ok(run.clone())
     }
@@ -775,9 +867,11 @@ impl RunQueue for MemoryAgentStore {
                 if run.retry_count >= max_retries {
                     run.run_status = AgentRunStatus::DeadLetter;
                     run.finished_at = Some(now);
+                    run.next_retry_at = None;
                 } else {
                     run.run_status = AgentRunStatus::Queued;
                     run.retry_count += 1;
+                    run.next_retry_at = Some(now + retry_backoff(run.retry_count));
                 }
                 run.lease_owner = None;
                 run.lease_until = None;
@@ -892,5 +986,72 @@ mod tests {
         assert_eq!(snapshot.lock_summary["active_locks"], json!(0));
         assert!(snapshot.audit_summary.get("recent_decisions").is_some());
         let _ = agent_core::HealthStatus::Healthy;
+    }
+
+    #[tokio::test]
+    async fn retry_failure_defers_next_claim() {
+        let store = MemoryAgentStore::new();
+        let run = AgentRun::new(
+            "agent-1",
+            None,
+            TriggerType::Manual,
+            "resource:team/project-alpha",
+            new_trace_id(),
+        );
+        let run = store.enqueue_run(run).await.unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        let claim = store
+            .claim_next_run("worker-1", Duration::from_secs(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.run.id, run.id);
+
+        let retry = store
+            .fail_or_retry_run(&run.id, "runtime failed", 3)
+            .await
+            .unwrap();
+        assert_eq!(retry.run_status, AgentRunStatus::Queued);
+        assert_eq!(retry.retry_count, 1);
+        assert!(retry.next_retry_at.is_some_and(|retry_at| retry_at > now));
+
+        let deferred_claim = store
+            .claim_next_run("worker-2", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(deferred_claim.is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_retry_requeues_dead_letter_run_immediately() {
+        let store = MemoryAgentStore::new();
+        let run = AgentRun::new(
+            "agent-1",
+            None,
+            TriggerType::Manual,
+            "resource:team/project-alpha",
+            new_trace_id(),
+        );
+        let run = store.enqueue_run(run).await.unwrap();
+        let dead_letter = store
+            .dead_letter_run(&run.id, "runtime exhausted")
+            .await
+            .unwrap();
+        assert_eq!(dead_letter.run_status, AgentRunStatus::DeadLetter);
+
+        let manual_retry = store
+            .retry_run(&run.id, "admin retry", "trace-admin")
+            .await
+            .unwrap();
+        assert_eq!(manual_retry.run_status, AgentRunStatus::Queued);
+        assert_eq!(manual_retry.retry_count, 0);
+        assert!(manual_retry.next_retry_at.is_none());
+
+        let immediate_claim = store
+            .claim_next_run("worker-3", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(immediate_claim.is_some());
     }
 }

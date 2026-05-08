@@ -501,6 +501,7 @@ impl AgentInstance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     pub id: String,
+    pub idempotency_key: Option<String>,
     pub agent_id: String,
     pub owner_user: String,
     pub source_conversation_id: Option<String>,
@@ -527,6 +528,7 @@ impl AgentSession {
         let now = OffsetDateTime::now_utc();
         Self {
             id: new_id("sess"),
+            idempotency_key: None,
             agent_id: agent_id.into(),
             owner_user: owner_user.into(),
             source_conversation_id: None,
@@ -594,6 +596,7 @@ pub struct AgentRun {
     pub side_effect_mode: SideEffectMode,
     pub lease_owner: Option<String>,
     pub lease_until: Option<OffsetDateTime>,
+    pub next_retry_at: Option<OffsetDateTime>,
     pub retry_count: i32,
     pub result_summary: Option<String>,
     pub result_ref: Option<String>,
@@ -624,6 +627,7 @@ impl AgentRun {
             side_effect_mode: SideEffectMode::ReadOnly,
             lease_owner: None,
             lease_until: None,
+            next_retry_at: None,
             retry_count: 0,
             result_summary: None,
             result_ref: None,
@@ -821,6 +825,7 @@ pub fn validate_run_transition(from: AgentRunStatus, to: AgentRunStatus) -> Core
             | (AwaitingApproval, PolicyChecked | Cancelled | Failed)
             | (Failed, Queued | DeadLetter)
             | (TimedOut, Queued | DeadLetter)
+            | (DeadLetter, Queued | Cancelled)
     );
     if ok {
         Ok(())

@@ -56,6 +56,14 @@ fn lease_until(lease: Duration) -> OffsetDateTime {
         + time::Duration::try_from(lease).unwrap_or_else(|_| time::Duration::seconds(30))
 }
 
+fn retry_backoff(retry_count: i32) -> time::Duration {
+    match retry_count {
+        count if count <= 1 => time::Duration::seconds(30),
+        2 => time::Duration::seconds(120),
+        _ => time::Duration::seconds(300),
+    }
+}
+
 fn map_template(row: &PgRow) -> CoreResult<AgentTemplate> {
     Ok(AgentTemplate {
         agent_type: row.try_get("agent_type").map_err(store_error)?,
@@ -134,6 +142,7 @@ fn map_agent(row: &PgRow) -> CoreResult<AgentInstance> {
 fn map_session(row: &PgRow) -> CoreResult<AgentSession> {
     Ok(AgentSession {
         id: row.try_get("id").map_err(store_error)?,
+        idempotency_key: row.try_get("idempotency_key").map_err(store_error)?,
         agent_id: row.try_get("agent_id").map_err(store_error)?,
         owner_user: row.try_get("owner_user").map_err(store_error)?,
         source_conversation_id: row.try_get("source_conversation_id").map_err(store_error)?,
@@ -190,6 +199,7 @@ fn map_run(row: &PgRow) -> CoreResult<AgentRun> {
         )?,
         lease_owner: row.try_get("lease_owner").map_err(store_error)?,
         lease_until: row.try_get("lease_until").map_err(store_error)?,
+        next_retry_at: row.try_get("next_retry_at").map_err(store_error)?,
         retry_count: row.try_get("retry_count").map_err(store_error)?,
         result_summary: row.try_get("result_summary").map_err(store_error)?,
         result_ref: row.try_get("result_ref").map_err(store_error)?,
@@ -258,6 +268,7 @@ fn run_summary(run: &AgentRun) -> RunSummary {
         risk_level: run.risk_level,
         result_summary: run.result_summary.clone(),
         result_ref: run.result_ref.clone(),
+        next_retry_at: run.next_retry_at,
         created_at: run.created_at,
         finished_at: run.finished_at,
         trace_id: run.trace_id.clone(),
@@ -693,15 +704,16 @@ impl AgentStore for PgAgentStore {
         let row = sqlx::query(
             r#"
             INSERT INTO agent_sessions (
-                id, agent_id, owner_user, source_conversation_id, parent_session_id,
+                id, idempotency_key, agent_id, owner_user, source_conversation_id, parent_session_id,
                 created_by_session_id, status, depth, resource_scope, context_summary,
                 trace_id, version, expires_at, created_at, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             RETURNING *
             "#,
         )
         .bind(&session.id)
+        .bind(&session.idempotency_key)
         .bind(&session.agent_id)
         .bind(&session.owner_user)
         .bind(&session.source_conversation_id)
@@ -728,6 +740,31 @@ impl AgentStore for PgAgentStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(store_error)?;
+        row.as_ref().map(map_session).transpose()
+    }
+
+    async fn find_session_by_idempotency(
+        &self,
+        owner_user: &str,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentSession>> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM agent_sessions
+            WHERE owner_user = $1
+              AND agent_id = $2
+              AND idempotency_key = $3
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(owner_user)
+        .bind(agent_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
         row.as_ref().map(map_session).transpose()
     }
 
@@ -814,11 +851,11 @@ impl AgentStore for PgAgentStore {
             r#"
             INSERT INTO agent_runs (
                 id, idempotency_key, agent_id, session_id, trigger_type, target_resource,
-                run_status, risk_level, side_effect_mode, lease_owner, lease_until,
-                retry_count, result_summary, result_ref, trace_id, version,
-                created_at, claimed_at, finished_at
+                run_status, risk_level, side_effect_mode, lease_owner, lease_until, next_retry_at,
+                retry_count, result_summary, result_ref, trace_id, version, created_at,
+                claimed_at, finished_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
             RETURNING *
             "#,
         )
@@ -833,6 +870,7 @@ impl AgentStore for PgAgentStore {
         .bind(run.side_effect_mode.to_string())
         .bind(&run.lease_owner)
         .bind(run.lease_until)
+        .bind(run.next_retry_at)
         .bind(run.retry_count)
         .bind(&run.result_summary)
         .bind(&run.result_ref)
@@ -853,6 +891,27 @@ impl AgentStore for PgAgentStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(store_error)?;
+        row.as_ref().map(map_run).transpose()
+    }
+
+    async fn find_run_by_idempotency(
+        &self,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentRun>> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM agent_runs
+            WHERE agent_id = $1 AND idempotency_key = $2
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(agent_id)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
         row.as_ref().map(map_run).transpose()
     }
 
@@ -910,7 +969,11 @@ impl AgentStore for PgAgentStore {
         let row = sqlx::query(
             r#"
             UPDATE agent_runs
-            SET run_status = $2, trace_id = $3, finished_at = $4, version = version + 1
+            SET run_status = $2,
+                trace_id = $3,
+                finished_at = $4,
+                next_retry_at = NULL,
+                version = version + 1
             WHERE id = $1
             RETURNING *
             "#,
@@ -922,6 +985,85 @@ impl AgentStore for PgAgentStore {
         .fetch_one(&self.pool)
         .await
         .map_err(store_error)?;
+        map_run(&row)
+    }
+
+    async fn retry_run(&self, run_id: &str, reason: &str, trace_id: &str) -> CoreResult<AgentRun> {
+        let current = self
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| store_error("run not found"))?;
+        validate_run_transition(current.run_status, AgentRunStatus::Queued)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE agent_runs SET
+                run_status = 'queued',
+                retry_count = 0,
+                result_summary = $2,
+                lease_owner = NULL,
+                lease_until = NULL,
+                next_retry_at = NULL,
+                finished_at = NULL,
+                trace_id = $3,
+                version = version + 1
+            WHERE id = $1 AND run_status = 'dead_letter'
+            RETURNING *
+            "#,
+        )
+        .bind(run_id)
+        .bind(reason)
+        .bind(trace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
+        let Some(row) = row else {
+            return Err(agent_core::AgentCoreError::coded(
+                agent_core::ErrorCode::Conflict,
+                "run status changed before retry",
+            ));
+        };
+        map_run(&row)
+    }
+
+    async fn terminate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
+        trace_id: &str,
+    ) -> CoreResult<AgentRun> {
+        let current = self
+            .get_run(run_id)
+            .await?
+            .ok_or_else(|| store_error("run not found"))?;
+        validate_run_transition(current.run_status, AgentRunStatus::Cancelled)?;
+        let row = sqlx::query(
+            r#"
+            UPDATE agent_runs SET
+                run_status = 'cancelled',
+                result_summary = $2,
+                lease_owner = NULL,
+                lease_until = NULL,
+                next_retry_at = NULL,
+                finished_at = $3,
+                trace_id = $4,
+                version = version + 1
+            WHERE id = $1 AND run_status = 'dead_letter'
+            RETURNING *
+            "#,
+        )
+        .bind(run_id)
+        .bind(reason)
+        .bind(OffsetDateTime::now_utc())
+        .bind(trace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
+        let Some(row) = row else {
+            return Err(agent_core::AgentCoreError::coded(
+                agent_core::ErrorCode::Conflict,
+                "run status changed before termination",
+            ));
+        };
         map_run(&row)
     }
 
@@ -1298,7 +1440,8 @@ impl RunQueue for PgAgentStore {
             WITH candidate AS (
                 SELECT id FROM agent_runs
                 WHERE run_status = 'queued'
-                ORDER BY created_at ASC
+                  AND (next_retry_at IS NULL OR next_retry_at <= $3)
+                ORDER BY COALESCE(next_retry_at, created_at), created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
@@ -1307,6 +1450,7 @@ impl RunQueue for PgAgentStore {
                 lease_owner = $1,
                 lease_until = $2,
                 claimed_at = $3,
+                next_retry_at = NULL,
                 version = version + 1
             WHERE id = (SELECT id FROM candidate)
             RETURNING *
@@ -1365,6 +1509,7 @@ impl RunQueue for PgAgentStore {
                 result_ref = $3,
                 lease_owner = NULL,
                 lease_until = NULL,
+                next_retry_at = NULL,
                 finished_at = $4,
                 version = version + 1
             WHERE id = $1
@@ -1401,6 +1546,11 @@ impl RunQueue for PgAgentStore {
         } else {
             current.retry_count
         };
+        let next_retry_at = if next_status == AgentRunStatus::Queued {
+            Some(OffsetDateTime::now_utc() + retry_backoff(next_retry))
+        } else {
+            None
+        };
         let finished_at = if next_status == AgentRunStatus::DeadLetter {
             Some(OffsetDateTime::now_utc())
         } else {
@@ -1414,7 +1564,8 @@ impl RunQueue for PgAgentStore {
                 result_summary = $4,
                 lease_owner = NULL,
                 lease_until = NULL,
-                finished_at = $5,
+                next_retry_at = $5,
+                finished_at = $6,
                 version = version + 1
             WHERE id = $1
             RETURNING *
@@ -1424,6 +1575,7 @@ impl RunQueue for PgAgentStore {
         .bind(next_status.to_string())
         .bind(next_retry)
         .bind(reason)
+        .bind(next_retry_at)
         .bind(finished_at)
         .fetch_one(&self.pool)
         .await
@@ -1439,6 +1591,7 @@ impl RunQueue for PgAgentStore {
                 result_summary = $2,
                 lease_owner = NULL,
                 lease_until = NULL,
+                next_retry_at = NULL,
                 finished_at = $3,
                 version = version + 1
             WHERE id = $1

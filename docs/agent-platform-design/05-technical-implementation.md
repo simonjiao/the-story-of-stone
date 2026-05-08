@@ -25,7 +25,7 @@ agent-store 只处理数据库和事务，不做产品策略。
 agent-manager 是唯一控制面服务。
 agent-orchestrator 不访问 admin API，不持有目标 Agent credential。
 agent-runtime 不决定授权，只执行已授权 session/run。
-agent-worker 不绕过 Manager，所有 run 状态推进写 audit。
+agent-worker 只消费 Manager 已创建和授权的 run；P0 可通过 `RunQueue` / store 推进 lease/status，不能创建权限或扩大权限，所有 run 状态推进写 audit。
 agentctl 只调用 admin API。
 ```
 
@@ -168,6 +168,10 @@ PATCH  /v1/admin/agents/{agent_id}
 DELETE /v1/admin/agents/{agent_id}
 POST   /v1/admin/grants
 GET    /v1/admin/audit
+GET    /v1/admin/runs
+GET    /v1/admin/runs/{run_id}
+POST   /v1/admin/runs/{run_id}/retry
+POST   /v1/admin/runs/{run_id}/terminate
 GET    /v1/admin/observer/reports
 POST   /v1/admin/observer/runs
 ```
@@ -184,6 +188,10 @@ POST   /v1/admin/agents/{agent_id}/resume
 DELETE /v1/admin/agents/{agent_id}
 GET    /v1/admin/audit
 POST   /v1/admin/grants
+GET    /v1/admin/runs
+GET    /v1/admin/runs/{run_id}
+POST   /v1/admin/runs/{run_id}/retry
+POST   /v1/admin/runs/{run_id}/terminate
 GET    /v1/admin/observer/reports
 GET    /v1/admin/observer/reports/{report_id}
 POST   /v1/admin/observer/runs
@@ -194,7 +202,7 @@ POST   /v1/admin/observer/runs
 ```http
 POST /v1/internal/webhooks/{connector}
 POST /v1/internal/runs
-POST /v1/internal/runs/{run_id}/claim
+POST /v1/internal/runs/claim
 POST /v1/internal/runs/{run_id}/heartbeat
 POST /v1/internal/runs/{run_id}/finish
 POST /v1/internal/runs/{run_id}/dead-letter
@@ -203,6 +211,8 @@ GET  /v1/internal/sessions/{session_id}/context
 POST /v1/internal/memory/summaries
 POST /v1/internal/observer/tick
 ```
+
+`/v1/internal/runs/claim` 语义是 claim next queued run；后续 heartbeat / finish / dead-letter 才绑定到具体 `{run_id}`。
 
 ## P0 并发与队列选择
 
@@ -381,6 +391,7 @@ CREATE TABLE agent_runs (
     side_effect_mode TEXT NOT NULL,
     lease_owner TEXT,
     lease_until TIMESTAMP,
+    next_retry_at TIMESTAMP,
     retry_count INT NOT NULL DEFAULT 0,
     result_summary TEXT,
     result_ref TEXT,
@@ -393,6 +404,9 @@ CREATE TABLE agent_runs (
 CREATE UNIQUE INDEX ux_agent_runs_idempotency
 ON agent_runs(agent_id, idempotency_key)
 WHERE idempotency_key IS NOT NULL;
+
+CREATE INDEX ix_agent_runs_retry_ready
+ON agent_runs(run_status, next_retry_at, created_at);
 
 CREATE TABLE agent_run_steps (
     id TEXT PRIMARY KEY,

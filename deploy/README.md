@@ -13,6 +13,8 @@ Services:
 - `hermes`: Hermes Agent API server, internal Docker network only.
 - `open-webui`: email/password login and chat UI.
 - `cloudflared`: Cloudflare Tunnel connector.
+- `agent-platform-postgres`: dedicated Agent Platform P0 database, internal
+  Docker network only.
 
 Open WebUI starts in offline mode to avoid blocking first boot on Hugging Face
 embedding-model downloads. Chat works normally through Hermes. Enable and
@@ -29,6 +31,8 @@ Required changes:
 
 - `CLOUDFLARED_TOKEN`: paste the token from Cloudflare Zero Trust.
 - `HERMES_API_KEY`: replace with a long random value.
+- `AGENT_PLATFORM_POSTGRES_PASSWORD`: generated locally for the dedicated Agent
+  Platform database; do not reuse `sub2api-postgres`.
 - local model endpoint values if Hermes should call a local OpenAI-compatible container:
   - `LOCAL_OPENAI_BASE_URL`, for example `http://vllm:8000/v1`
   - `LOCAL_OPENAI_MODEL`, matching the model name served by that container
@@ -38,8 +42,12 @@ Required changes:
 Create persistent directories:
 
 ```bash
-mkdir -p data/hermes data/open-webui
+mkdir -p data/hermes data/open-webui data/agent-platform-postgres
 ```
+
+Agent Platform P0 uses its own Postgres container. Do not reuse
+`sub2api-postgres`; it belongs to the separate `sub2api` compose project and
+has its own lifecycle, data directory, and schema ownership.
 
 Run Hermes setup once if the Hermes data directory is fresh:
 
@@ -114,6 +122,7 @@ Check logs:
 docker compose logs -f hermes
 docker compose logs -f open-webui
 docker compose logs -f cloudflared
+docker compose logs -f agent-platform-postgres
 ```
 
 Cloudflare Tunnel public hostname should point to:
@@ -123,3 +132,4 @@ chat.huixiangdou.top -> http://open-webui:8080
 ```
 
 Do not expose Hermes ports `8642` or `9119` to the public internet.
+Do not expose Agent Platform Postgres port `5432` to the public internet.

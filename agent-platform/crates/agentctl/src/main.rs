@@ -31,6 +31,7 @@ struct Cli {
 enum Command {
     Requests(RequestsCommand),
     Agents(AgentsCommand),
+    Runs(RunsCommand),
     Audit(AuditCommand),
     Observer(ObserverCommand),
 }
@@ -76,6 +77,32 @@ enum AgentsSubcommand {
     },
     Resume {
         agent_id: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct RunsCommand {
+    #[command(subcommand)]
+    command: RunsSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsSubcommand {
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    #[command(alias = "inspect")]
+    Show { run_id: String },
+    Retry {
+        run_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    Terminate {
+        run_id: String,
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -168,6 +195,46 @@ async fn main() -> anyhow::Result<()> {
                     &headers,
                     &format!("/v1/admin/agents/{agent_id}/resume"),
                     json!({}),
+                )
+                .await?
+            }
+        },
+        Command::Runs(command) => match command.command {
+            RunsSubcommand::List { limit } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs?limit={limit}"),
+                )
+                .await?
+            }
+            RunsSubcommand::Show { run_id } => {
+                get(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}"),
+                )
+                .await?
+            }
+            RunsSubcommand::Retry { run_id, reason } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/retry"),
+                    json!({ "reason": reason }),
+                )
+                .await?
+            }
+            RunsSubcommand::Terminate { run_id, reason } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/terminate"),
+                    json!({ "reason": reason }),
                 )
                 .await?
             }

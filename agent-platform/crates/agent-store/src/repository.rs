@@ -70,6 +70,12 @@ pub trait AgentStore:
 
     async fn create_session(&self, session: AgentSession) -> CoreResult<AgentSession>;
     async fn get_session(&self, session_id: &str) -> CoreResult<Option<AgentSession>>;
+    async fn find_session_by_idempotency(
+        &self,
+        owner_user: &str,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentSession>>;
     async fn list_sessions(
         &self,
         user_id: Option<&str>,
@@ -83,6 +89,11 @@ pub trait AgentStore:
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun>;
     async fn get_run(&self, run_id: &str) -> CoreResult<Option<AgentRun>>;
+    async fn find_run_by_idempotency(
+        &self,
+        agent_id: &str,
+        idempotency_key: &str,
+    ) -> CoreResult<Option<AgentRun>>;
     async fn list_runs(
         &self,
         user_id: Option<&str>,
@@ -93,6 +104,13 @@ pub trait AgentStore:
         &self,
         run_id: &str,
         status: AgentRunStatus,
+        trace_id: &str,
+    ) -> CoreResult<AgentRun>;
+    async fn retry_run(&self, run_id: &str, reason: &str, trace_id: &str) -> CoreResult<AgentRun>;
+    async fn terminate_run(
+        &self,
+        run_id: &str,
+        reason: &str,
         trace_id: &str,
     ) -> CoreResult<AgentRun>;
 

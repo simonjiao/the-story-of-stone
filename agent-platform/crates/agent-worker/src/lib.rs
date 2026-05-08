@@ -54,6 +54,14 @@ impl Worker {
         self.store
             .record_worker_heartbeat(&self.worker_id, Some(&run_id), "claimed", &trace_id)
             .await?;
+        self.audit_run(
+            &run_id,
+            "worker:run_claim",
+            AuditDecision::Allowed,
+            Some("status=claimed".to_string()),
+            &trace_id,
+        )
+        .await;
         metrics::counter!(metric_names::RUN_CLAIM_TOTAL, "trigger_type" => claim.run.trigger_type.to_string()).increment(1);
 
         let result = self.execute_claim(claim.run.clone()).await;
@@ -61,6 +69,7 @@ impl Worker {
             Ok(summary) => {
                 self.audit_run(
                     &run_id,
+                    "worker:run_finish",
                     AuditDecision::Completed,
                     Some(summary.clone()),
                     &trace_id,
@@ -77,6 +86,7 @@ impl Worker {
                     metrics::counter!(metric_names::RUN_DEAD_LETTER_TOTAL, "status" => "dead_letter").increment(1);
                     self.audit_run(
                         &run_id,
+                        "worker:run_dead_letter",
                         AuditDecision::Failed,
                         Some(error.to_string()),
                         &trace_id,
@@ -85,6 +95,14 @@ impl Worker {
                 } else {
                     metrics::counter!(metric_names::RUN_RETRY_TOTAL, "status" => "queued")
                         .increment(1);
+                    self.audit_run(
+                        &run_id,
+                        "worker:run_retry",
+                        AuditDecision::Allowed,
+                        Some(format!("status={}", updated.run_status)),
+                        &trace_id,
+                    )
+                    .await;
                 }
                 Ok(Some(run_id))
             }
@@ -95,6 +113,8 @@ impl Worker {
         self.store
             .update_run_status(&run.id, AgentRunStatus::ContextBuilt, &run.trace_id)
             .await?;
+        self.audit_run_status(&run.id, AgentRunStatus::ContextBuilt, &run.trace_id)
+            .await;
         self.store
             .heartbeat_run(&run.id, &self.worker_id, self.lease)
             .await?;
@@ -111,6 +131,8 @@ impl Worker {
         self.store
             .update_run_status(&run.id, AgentRunStatus::PolicyChecked, &run.trace_id)
             .await?;
+        self.audit_run_status(&run.id, AgentRunStatus::PolicyChecked, &run.trace_id)
+            .await;
 
         let mut lock_held = false;
         if matches!(run.side_effect_mode, SideEffectMode::Authorized) {
@@ -135,6 +157,8 @@ impl Worker {
         self.store
             .update_run_status(&run.id, AgentRunStatus::Executing, &run.trace_id)
             .await?;
+        self.audit_run_status(&run.id, AgentRunStatus::Executing, &run.trace_id)
+            .await;
         self.store
             .heartbeat_run(&run.id, &self.worker_id, self.lease)
             .await?;
@@ -155,6 +179,8 @@ impl Worker {
         self.store
             .update_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
             .await?;
+        self.audit_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
+            .await;
         let summary = output.result_summary.clone();
         self.store.finish_run(&run.id, output).await?;
         if lock_held {
@@ -163,14 +189,26 @@ impl Worker {
         Ok(summary)
     }
 
+    async fn audit_run_status(&self, run_id: &str, status: AgentRunStatus, trace_id: &str) {
+        self.audit_run(
+            run_id,
+            "worker:run_status",
+            AuditDecision::Completed,
+            Some(format!("status={status}")),
+            trace_id,
+        )
+        .await;
+    }
+
     async fn audit_run(
         &self,
         run_id: &str,
+        action: &str,
         decision: AuditDecision,
         reason: Option<String>,
         trace_id: &str,
     ) {
-        let mut audit = AuditLog::new(None, "worker:run", decision, reason, trace_id.to_string());
+        let mut audit = AuditLog::new(None, action, decision, reason, trace_id.to_string());
         audit.run_id = Some(run_id.to_string());
         let _ = self.store.append_audit(audit).await;
     }
