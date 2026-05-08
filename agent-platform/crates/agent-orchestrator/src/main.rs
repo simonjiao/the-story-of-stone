@@ -342,12 +342,24 @@ fn streaming_response(model: &str, content: String) -> Response {
 }
 
 fn looks_like_agent_request(content: &str) -> bool {
-    let lowered = content.to_lowercase();
+    let direct_content = direct_user_control_text(content);
+    let lowered = direct_content.to_lowercase();
     lowered.contains("agent")
-        && (content.contains("启动")
-            || content.contains("创建")
-            || content.contains("常驻")
+        && (direct_content.contains("启动")
+            || direct_content.contains("创建")
+            || direct_content.contains("常驻")
             || lowered.contains("create"))
+}
+
+fn direct_user_control_text(content: &str) -> &str {
+    content
+        .split("### Chat History:")
+        .next()
+        .unwrap_or(content)
+        .split("<chat_history>")
+        .next()
+        .unwrap_or(content)
+        .trim()
 }
 
 fn bound_session(
@@ -464,6 +476,33 @@ fn extract_resource(content: &str) -> Option<String> {
             part.trim_matches(|c: char| c == '。' || c == ',' || c == '.')
                 .to_string()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_agent_request;
+
+    #[test]
+    fn detects_direct_agent_create_request() {
+        assert!(looks_like_agent_request(
+            "创建 agent resource:team/default 进行 smoke test"
+        ));
+    }
+
+    #[test]
+    fn ignores_open_webui_followup_prompt_chat_history() {
+        let prompt = r#"### Task:
+Suggest 3-5 relevant follow-up questions or prompts.
+### Output:
+JSON format: { "follow_ups": ["Question 1?"] }
+### Chat History:
+<chat_history>
+USER: 创建 agent resource:team/default 进行 UI P0 smoke
+ASSISTANT: 该请求需要资源负责人审批。
+</chat_history>"#;
+
+        assert!(!looks_like_agent_request(prompt));
+    }
 }
 
 fn forward_headers(headers: &HeaderMap, trace_id: &str) -> ReqHeaderMap {

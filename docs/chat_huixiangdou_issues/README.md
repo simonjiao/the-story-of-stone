@@ -8,6 +8,10 @@
 | [ISSUE-002](ISSUE-002-history-body-search.md) | BLOCKED_CODE_REQUIRED | P2 | `HIST-04A`, `HIST-04B` | 历史搜索按消息正文关键词无法找到会话；官方文档预期支持正文搜索，但当前部署无配置项可修。 |
 | [ISSUE-003](ISSUE-003-cross-chat-memory-visibility.md) | RESOLVED | P2 | `CTX-04`, `MEMORY-01` | 已正式部署 Hermes memory 关闭配置，API 级跨请求复测返回 `UNKNOWN_ONLY`。 |
 | [ISSUE-004](ISSUE-004-open-webui-origin-ip-conflict.md) | RESOLVED | P1 | `DEPLOY-03`, `NET-01`, `PUBLIC-01` | Open WebUI 固定 origin IP 被 Agent Platform 动态占用；已改为稳定内网地址分配。 |
+| [ISSUE-005](ISSUE-005-followup-prompt-p0-false-positive.md) | RESOLVED | P1 | `P0-FOLLOWUP-FP-20260508` | Open WebUI 追问建议提示包含历史 P0 指令时被误判为新 P0 请求；已修复并部署。 |
+| [ISSUE-006](ISSUE-006-stop-generation-control-unlabelled.md) | OPEN | P3 | `LONG-STOP-20260508` | 长回答停止生成可用，但生成中的停止控制在可访问 DOM 中无明确标签。 |
+| [ISSUE-007](ISSUE-007-approved-agent-owner-mismatch.md) | RESOLVED | P1 | `P0-APPROVAL-OWNER-20260508`, `P0-MULTI-SESSION-20260508`, `P0-WORKER-RUN-20260508` | 审批后 agent 曾归属审批人而不是原始请求人；已修复并通过多 session/Worker run 复测。 |
+| [ISSUE-008](ISSUE-008-open-webui-p0-identity-session-bridge.md) | OPEN | P2 | `P0-UI-CTRL-20260508`, `P0-UI-AUDIT-20260508`, `P0-MULTI-SESSION-20260508` | Open WebUI 默认调用未透传动态 P0 用户身份和 agent session 元数据；后端多 session 已通过 API 验证。 |
 
 ## 状态定义
 

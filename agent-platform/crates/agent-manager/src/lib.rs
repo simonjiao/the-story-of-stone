@@ -1160,6 +1160,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approved_create_agent_keeps_requester_as_owner() {
+        let state = test_state().await;
+        let requester = test_auth(RoleName::ResourceMaintainer);
+        let response = request_services::submit_request(
+            &state.store,
+            &requester,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create approved background worker".to_string()),
+                structured_payload: json!({"mode": "approved-owner"}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, AgentRequestStatus::ApprovalRequired);
+
+        let Json(approved) = admin_approve(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(response.request_id),
+            Json(ApprovalDecisionInput {
+                reason: Some("test approval".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let agent_id = approved.agent_id.unwrap();
+        let agent = state.store.get_agent(&agent_id).await.unwrap().unwrap();
+        assert_eq!(agent.owner_user, requester.user_id);
+        let requester_agents = state
+            .store
+            .list_agents(Some(&requester.user_id), 10)
+            .await
+            .unwrap();
+        assert!(
+            requester_agents
+                .iter()
+                .any(|agent| agent.agent_id == agent_id)
+        );
+        let approver_agents = state.store.list_agents(Some("dev-user"), 10).await.unwrap();
+        assert!(
+            !approver_agents
+                .iter()
+                .any(|agent| agent.agent_id == agent_id)
+        );
+    }
+
+    #[tokio::test]
     async fn read_only_create_agent_is_fulfilled() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);

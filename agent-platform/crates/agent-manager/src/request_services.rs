@@ -165,7 +165,12 @@ pub(crate) async fn fulfill_request(
             })?;
             let hash = core_hash(&request.structured_payload);
             if let Some(existing) = store
-                .find_reusable_agent(&auth.user_id, &agent_type, &target_resource, &hash)
+                .find_reusable_agent(
+                    &request.requested_by_user,
+                    &agent_type,
+                    &target_resource,
+                    &hash,
+                )
                 .await?
             {
                 request.status = AgentRequestStatus::Fulfilled;
@@ -176,7 +181,7 @@ pub(crate) async fn fulfill_request(
             request.status = AgentRequestStatus::Provisioning;
             request = store.update_agent_request(request).await?;
             let mut agent = AgentInstance::new(
-                auth.user_id.clone(),
+                request.requested_by_user.clone(),
                 agent_type,
                 target_resource,
                 hash,
