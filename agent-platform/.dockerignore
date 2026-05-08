@@ -1,0 +1,5 @@
+target/
+.codex-target/
+.git/
+.DS_Store
+**/.DS_Store

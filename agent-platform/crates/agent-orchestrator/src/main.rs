@@ -4,8 +4,9 @@ use agent_core::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -39,11 +40,21 @@ struct Args {
         default_value = "http://127.0.0.1:8088"
     )]
     manager_url: String,
+    #[arg(
+        long,
+        env = "AGENT_ORCHESTRATOR_UPSTREAM_BASE_URL",
+        default_value = "http://hermes:8642/v1"
+    )]
+    upstream_base_url: String,
+    #[arg(long, env = "AGENT_ORCHESTRATOR_UPSTREAM_API_KEY")]
+    upstream_api_key: Option<String>,
 }
 
 #[derive(Clone)]
 struct AppState {
     manager_url: String,
+    upstream_base_url: String,
+    upstream_api_key: Option<String>,
     client: reqwest::Client,
     bindings: Arc<RwLock<HashMap<String, String>>>,
 }
@@ -107,6 +118,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let state = AppState {
         manager_url: args.manager_url,
+        upstream_base_url: args.upstream_base_url.trim_end_matches('/').to_string(),
+        upstream_api_key: args.upstream_api_key,
         client: reqwest::Client::new(),
         bindings: Arc::new(RwLock::new(HashMap::new())),
     };
@@ -160,9 +173,22 @@ async fn bind_session(
 async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<ChatCompletionRequest>,
+    Json(payload): Json<Value>,
 ) -> Response {
     let trace_id = header_value(&headers, "x-agent-trace-id").unwrap_or_else(new_trace_id);
+    let request = match serde_json::from_value::<ChatCompletionRequest>(payload.clone()) {
+        Ok(request) => request,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(SafeError::new(
+                    agent_core::ErrorCode::InternalError,
+                    trace_id.to_string(),
+                )),
+            )
+                .into_response();
+        }
+    };
     let last_user = request
         .messages
         .iter()
@@ -170,17 +196,35 @@ async fn chat_completions(
         .find(|message| message.role == "user")
         .map(|message| message.content.clone())
         .unwrap_or_default();
-    let result = match bound_session(&state, &request, &trace_id) {
-        Ok(Some(session_id)) => {
-            append_session_message(&state, &headers, &session_id, &last_user, &trace_id).await
-        }
-        Ok(None) if looks_like_agent_request(&last_user) => {
-            submit_agent_request(&state, &headers, &last_user, &trace_id).await
-        }
-        Ok(None) => Ok(format!("Minimal gateway response: {}", last_user)),
-        Err(error) => Err(error),
-    };
+    match bound_session(&state, &request, &trace_id) {
+        Ok(Some(session_id)) => control_response(
+            request.model.as_deref(),
+            request.stream.unwrap_or(false),
+            append_session_message(&state, &headers, &session_id, &last_user, &trace_id).await,
+            &trace_id,
+        ),
+        Ok(None) if looks_like_agent_request(&last_user) => control_response(
+            request.model.as_deref(),
+            request.stream.unwrap_or(false),
+            submit_agent_request(&state, &headers, &last_user, &trace_id).await,
+            &trace_id,
+        ),
+        Ok(None) => passthrough_chat_completion(&state, &headers, payload, &trace_id).await,
+        Err(error) => control_response(
+            request.model.as_deref(),
+            request.stream.unwrap_or(false),
+            Err(error),
+            &trace_id,
+        ),
+    }
+}
 
+fn control_response(
+    model: Option<&str>,
+    stream: bool,
+    result: Result<String, SafeError>,
+    trace_id: &str,
+) -> Response {
     let content = match result {
         Ok(content) => content,
         Err(error) => serde_json::to_string(&error).unwrap_or_else(|_| {
@@ -191,17 +235,60 @@ async fn chat_completions(
         }),
     };
 
-    if request.stream.unwrap_or(false) {
-        streaming_response(
-            &request.model.unwrap_or_else(|| "hermes-agent".to_string()),
-            content,
-        )
+    if stream {
+        streaming_response(model.unwrap_or("hermes-agent"), content)
     } else {
-        completion_response(
-            &request.model.unwrap_or_else(|| "hermes-agent".to_string()),
-            content,
-        )
+        completion_response(model.unwrap_or("hermes-agent"), content)
     }
+}
+
+async fn passthrough_chat_completion(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: Value,
+    trace_id: &str,
+) -> Response {
+    let mut request = state
+        .client
+        .post(format!("{}/chat/completions", state.upstream_base_url))
+        .header("x-agent-trace-id", trace_id)
+        .json(&payload);
+
+    if let Some(api_key) = &state.upstream_api_key {
+        request = request.bearer_auth(api_key);
+    } else if let Some(authorization) = headers.get(header::AUTHORIZATION) {
+        request = request.header(header::AUTHORIZATION, authorization.clone());
+    }
+
+    match request.send().await {
+        Ok(upstream) => upstream_response(upstream).await,
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(SafeError::new(
+                agent_core::ErrorCode::InternalError,
+                trace_id.to_string(),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+async fn upstream_response(upstream: reqwest::Response) -> Response {
+    let status = upstream.status();
+    let mut response = Response::builder().status(status);
+    for name in [header::CONTENT_TYPE, header::CACHE_CONTROL] {
+        if let Some(value) = upstream.headers().get(&name) {
+            response = response.header(name, value);
+        }
+    }
+    let body = Body::from_stream(upstream.bytes_stream());
+    response.body(body).unwrap_or_else(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "upstream_response_failed"})),
+        )
+            .into_response()
+    })
 }
 
 fn completion_response(model: &str, content: String) -> Response {

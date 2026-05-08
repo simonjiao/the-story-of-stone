@@ -15,7 +15,7 @@
 
 ## 当前状态
 
-基础功能测试已继续执行。文件/RAG/Knowledge 本轮按要求跳过。
+基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform P0 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。
 
 ## 阻断规则
 
@@ -54,7 +54,8 @@
 | --- | --- | --- | --- | --- |
 | [ISSUE-001](chat_huixiangdou_issues/ISSUE-001-model-list-empty.md) | P1 | 登录后模型列表为空。 | 用户无法选择模型，基础聊天无法继续验证。 | RESOLVED: 用户完成 admin 侧修复后，`CHAT-01-RERUN` 通过 |
 | [ISSUE-002](chat_huixiangdou_issues/ISSUE-002-history-body-search.md) | P2 | 历史搜索按消息正文关键词无法找到会话，但按标题可找到。 | 用户记得消息内容但不记得标题时，可能找不到历史会话。 | BLOCKED_CODE_REQUIRED: 官方文档预期支持正文搜索，但当前部署无配置项可修 |
-| [ISSUE-003](chat_huixiangdou_issues/ISSUE-003-cross-chat-memory-visibility.md) | P2 | Open WebUI 新对话未显式提示会继承 Hermes Agent 外部记忆，但模型可回答上一会话测试代号。 | 用户可能误以为新对话完全隔离。 | READY_FOR_DEPLOY: 已更新 Hermes 配置渲染脚本，需部署后复测 |
+| [ISSUE-003](chat_huixiangdou_issues/ISSUE-003-cross-chat-memory-visibility.md) | P2 | Open WebUI 新对话未显式提示会继承 Hermes Agent 外部记忆，但模型可回答上一会话测试代号。 | 用户可能误以为新对话完全隔离。 | RESOLVED: 正式部署后已确认 Hermes memory 关闭，API 级跨请求复测返回 `UNKNOWN_ONLY` |
+| [ISSUE-004](chat_huixiangdou_issues/ISSUE-004-open-webui-origin-ip-conflict.md) | P1 | 正式 compose 首次启动 Open WebUI 时，固定 origin IP 被动态分配给 `agent-manager`。 | Open WebUI 无法启动，Cloudflare Tunnel 无法访问聊天窗口。 | RESOLVED: 已为内部服务分配稳定 IP 并复测通过 |
 
 ## 修复记录
 
@@ -72,11 +73,39 @@
 | 2026-05-07 14:02 CST | 记录剩余问题。 | 正文关键词历史搜索失败；新对话可访问上一会话测试代号，需确认是否为 Hermes 跨会话记忆的预期行为。 |
 | 2026-05-07 14:28 CST | 修复 `ISSUE-003`。 | 已更新 Hermes 配置渲染脚本：写配置前备份，并默认关闭 `memory.memory_enabled` 与 `memory.user_profile_enabled`。 |
 | 2026-05-07 14:28 CST | 定位 `ISSUE-002`。 | Open WebUI 官方文档预期历史搜索支持消息内容；当前部署无可用配置项，需 Open WebUI 代码修复或升级验证。 |
+| 2026-05-08 16:07 CST | 正式部署前备份远程 `deploy/.env`。 | 备份路径：`/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |
+| 2026-05-08 16:08 CST | 同步正式 Agent Platform 构建上下文、compose 和 README 到远程部署目录。 | 远程 `docker compose config` 通过；`hermes-agent-platform:p0` 镜像构建成功。 |
+| 2026-05-08 16:15 CST | 首次正式 `docker compose up` 启动 Open WebUI 失败。 | Docker 返回 `failed to set up container networking: Address already in use`；`agent-manager` 动态占用 `172.20.0.3/16`，与 Open WebUI 固定 origin IP 冲突。 |
+| 2026-05-08 16:18 CST | 修复内部网络地址分配。 | `hermes-agent` 固定 `172.20.0.2`，`open-webui` 固定 `172.20.0.3`，Agent Platform 服务固定在 `.4` 与 `.10`-`.13`。 |
+| 2026-05-08 16:20 CST | 重新启动正式 compose。 | `agent-manager`、`agent-orchestrator`、`agent-worker`、`agent-observer`、`hermes-agent`、`hermes-open-webui` 均启动；Open WebUI 指向 `http://agent-orchestrator:8080/v1`。 |
+| 2026-05-08 16:20 CST | 验证正式 Orchestrator 普通聊天穿透。 | `/v1/chat/completions` 返回 `HERMES_FORMAL_OK`。 |
+| 2026-05-08 16:20 CST | 验证 P0 控制类请求。 | 控制指令返回 `approval_required`，请求 `req_019e06ac5efa7663a9a397b00408ea4d` 写入 Manager，审计记录包含 `request:create_agent`。 |
+| 2026-05-08 16:20 CST | 验证公网入口。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200。 |
+| 2026-05-08 16:21 CST | 清理临时测试资源。 | 已删除 `codex-p0-*p0_webui_test_20260508155417` 容器、临时数据库和临时用户，`hermes-internal` 网络中不再存在临时测试容器。 |
+| 2026-05-08 16:23 CST | 正式部署 Hermes memory 配置。 | 配置备份：`/home/simon/hermes-home-deploy/data/hermes/config.yaml.bak.20260508-082325`；已确认 `memory_enabled: false` 与 `user_profile_enabled: false`。 |
+| 2026-05-08 16:24 CST | Hermes 重启后复测。 | 普通聊天返回 `HERMES_FORMAL_AFTER_RESTART_OK`；API 级跨请求记忆复测返回 `UNKNOWN_ONLY`；公网 `/api/config` 仍返回 HTTP 200。 |
+
+## 2026-05-08 正式部署验证
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| DEPLOY-01 | PASS | 远程 `.env` 已在变更前备份。 | `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |  | 未输出密钥或密码。 |
+| DEPLOY-02 | PASS | 正式 compose 配置可解析，Agent Platform 镜像可构建。 | `remote_compose_config_ok`；`Image hermes-agent-platform:p0 Built`。 |  | 首次构建受 crates.io 网络重试影响，但最终成功。 |
+| DEPLOY-03 | PASS | 正式服务全部健康或运行中。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator`、`agent-platform-postgres`、`hermes-agent`、`hermes-open-webui` healthy，worker/observer running。 |  |  |
+| NET-01 | PASS | Open WebUI origin IP 冲突已修复。 | `hermes-open-webui 172.20.0.3/16`；`agent-manager 172.20.0.10/16`；无 `codex-p0` 临时容器。 | P1 | 见 `ISSUE-004`。 |
+| ROUTE-01 | PASS | Open WebUI 后端已切到正式 Orchestrator。 | 容器环境仅验证非敏感项：`OPENAI_API_BASE_URL=http://agent-orchestrator:8080/v1`。 |  |  |
+| CHAT-P0-01 | PASS | 普通聊天经 Orchestrator 穿透到默认 Hermes Agent。 | 重启前返回 `HERMES_FORMAL_OK`；Hermes 重启后返回 `HERMES_FORMAL_AFTER_RESTART_OK`。 |  |  |
+| P0-CTRL-01 | PASS | P0 控制类聊天请求进入 Manager 并要求审批。 | 响应包含 `request_id=req_019e06ac5efa7663a9a397b00408ea4d`、`status=approval_required`。 |  |  |
+| P0-AUDIT-01 | PASS | P0 控制请求有审计记录，Observer 正常 tick。 | `agentctl audit --limit 10` 包含 `request:create_agent` 与多条 `observer:tick`。 |  |  |
+| PUBLIC-01 | PASS | 公网 Cloudflare 入口可访问 Open WebUI API。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200，响应体 464 bytes。 |  |  |
+| MEMORY-01 | PASS | Hermes 跨请求持久记忆已关闭。 | 配置显示 `memory_enabled: false`、`user_profile_enabled: false`；独立追问返回 `UNKNOWN_ONLY`。 |  | 覆盖 `ISSUE-003` 的部署后验证。 |
+| UI-SESSION-20260508 | NOT_RUN | 未在本轮重新执行浏览器登录、发送消息和会话保存。 | 未请求或记录登录密码；本轮用正式后端/API 路径验证部署。 |  | 2026-05-07 已完成 UI 登录、聊天和刷新恢复测试；正式路由切换后的浏览器会话保存仍需人工登录态复核。 |
 
 ## 修复结论
 
 当前状态：
 
 1. `ISSUE-001` 已通过 admin 配置修复并复测通过。
-2. `ISSUE-003` 已在仓库部署配置中修复，等待部署应用并复测。
+2. `ISSUE-003` 已部署并通过 API 级跨请求复测。
 3. `ISSUE-002` 不能通过当前部署配置修正；需要 Open WebUI 代码修复、上游修复或升级后复测。
+4. `ISSUE-004` 已在正式 compose 中修复，Open WebUI origin IP 不再被 Agent Platform 动态占用。

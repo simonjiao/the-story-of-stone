@@ -11,7 +11,13 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `open-webui`: email/password login and chat UI.
+- `agent-manager`: Agent Platform P0 control plane, internal Docker network only.
+- `agent-orchestrator`: OpenAI-compatible gateway used by Open WebUI; ordinary
+  chat is passed through to Hermes, while agent control requests go to Manager.
+- `agent-worker`: P0 run worker.
+- `agent-observer`: read-only Observer Agent report loop.
+- `open-webui`: email/password login and chat UI. It connects only to
+  `agent-orchestrator`.
 - `cloudflared`: Cloudflare Tunnel connector.
 - `agent-platform-postgres`: dedicated Agent Platform P0 database, internal
   Docker network only.
@@ -33,6 +39,18 @@ Required changes:
 - `HERMES_API_KEY`: replace with a long random value.
 - `AGENT_PLATFORM_POSTGRES_PASSWORD`: generated locally for the dedicated Agent
   Platform database; do not reuse `sub2api-postgres`.
+- `AGENT_PLATFORM_DATABASE_URL`: Postgres URL for Agent Platform services,
+  using the dedicated Agent Platform database credentials.
+- `AGENT_PLATFORM_BUILD_CONTEXT`: set to `./agent-platform` on the remote
+  deploy node when `agent-platform/` is copied next to `docker-compose.yml`.
+  The local default is `../agent-platform` when running from this `deploy/`
+  directory.
+- Optional internal IP overrides: `HERMES_AGENT_IP`, `OPEN_WEBUI_ORIGIN_IP`,
+  `AGENT_PLATFORM_POSTGRES_IP`, `AGENT_MANAGER_IP`,
+  `AGENT_ORCHESTRATOR_IP`, `AGENT_WORKER_IP`, and `AGENT_OBSERVER_IP`.
+  Defaults reserve stable addresses on `HERMES_INTERNAL_SUBNET` so Docker
+  restart order cannot steal the Open WebUI origin IP used by Cloudflare
+  Tunnel.
 - local model endpoint values if Hermes should call a local OpenAI-compatible container:
   - `LOCAL_OPENAI_BASE_URL`, for example `http://vllm:8000/v1`
   - `LOCAL_OPENAI_MODEL`, matching the model name served by that container
@@ -105,6 +123,7 @@ docker run --rm --network "${LOCAL_OPENAI_DOCKER_NETWORK}" curlimages/curl:lates
 Start the stack:
 
 ```bash
+docker compose build agent-manager agent-orchestrator agent-worker agent-observer
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -120,6 +139,10 @@ Check logs:
 
 ```bash
 docker compose logs -f hermes
+docker compose logs -f agent-manager
+docker compose logs -f agent-orchestrator
+docker compose logs -f agent-worker
+docker compose logs -f agent-observer
 docker compose logs -f open-webui
 docker compose logs -f cloudflared
 docker compose logs -f agent-platform-postgres
@@ -133,3 +156,6 @@ chat.huixiangdou.top -> http://open-webui:8080
 
 Do not expose Hermes ports `8642` or `9119` to the public internet.
 Do not expose Agent Platform Postgres port `5432` to the public internet.
+Do not expose Agent Platform Manager, Worker, Observer, or Runtime ports to the
+public internet. The only public HTTP entrypoint remains Cloudflare Tunnel to
+`open-webui:8080`.

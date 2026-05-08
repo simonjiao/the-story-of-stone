@@ -2,7 +2,7 @@
 
 ## 状态
 
-READY_FOR_DEPLOY
+RESOLVED
 
 ## 等级
 
@@ -15,6 +15,7 @@ P2
 | `CTX-01` | PASS | 在原会话建立测试代号 `codex-test-basic-20260507`。 |
 | `CTX-02` | PASS | 原会话内追问测试代号，模型正确回答。 |
 | `CTX-04` | WARN | 新建空白对话后，模型仍能回答上一会话的测试代号。 |
+| `MEMORY-01` | PASS | 正式部署后，独立请求间不再保留一次性测试代号。 |
 
 ## 影响
 
@@ -64,7 +65,10 @@ HERMES_USER_PROFILE_ENABLED=true
 
 ## 后续动作
 
-1. 在部署节点运行 `./scripts/render-hermes-config.sh`。
-2. 运行 `docker compose restart hermes`。
-3. 复测 `CTX-04`：新建空白对话后询问上一轮测试代号，应回答不知道或不包含旧代号。
-4. 复测通过后将状态改为 `RESOLVED`。
+已解决。正式部署节点已重新渲染 Hermes 配置并重启 Hermes：
+
+- 配置备份：`/home/simon/hermes-home-deploy/data/hermes/config.yaml.bak.20260508-082325`
+- 当前非敏感配置验证：`memory_enabled: false`、`user_profile_enabled: false`
+- API 级复测：先发送一次性测试代号，再用全新独立请求追问，模型返回 `UNKNOWN_ONLY`
+
+浏览器登录态下的新会话体验可在后续人工登录时顺手复核，但当前 Hermes 持久记忆配置已经部署并验证生效。

@@ -1,5 +1,12 @@
 name: hermes-home
 
+x-agent-platform-image: &agent-platform-image
+  image: hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-p0}
+  build:
+    context: "${AGENT_PLATFORM_BUILD_CONTEXT:-../agent-platform}"
+    dockerfile: Dockerfile
+  restart: unless-stopped
+
 services:
   hermes:
     image: nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}
@@ -23,8 +30,9 @@ services:
       - "8642"
       - "9119"
     networks:
-      - hermes-internal
-      - local-openai-network
+      hermes-internal:
+        ipv4_address: "${HERMES_AGENT_IP:-172.20.0.2}"
+      local-openai-network: {}
     healthcheck:
       test:
         [
@@ -41,8 +49,8 @@ services:
     container_name: hermes-open-webui
     restart: unless-stopped
     depends_on:
-      hermes:
-        condition: service_started
+      agent-orchestrator:
+        condition: service_healthy
     environment:
       WEBUI_NAME: "${OPEN_WEBUI_NAME:-Hermes Home}"
       WEBUI_URL: "${PUBLIC_WEBUI_URL:?set PUBLIC_WEBUI_URL in .env}"
@@ -59,7 +67,7 @@ services:
       RAG_EMBEDDING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_EMBEDDING_MODEL_AUTO_UPDATE:-false}"
       RAG_RERANKING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_RERANKING_MODEL_AUTO_UPDATE:-false}"
       WHISPER_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_WHISPER_MODEL_AUTO_UPDATE:-false}"
-      OPENAI_API_BASE_URL: "http://hermes:8642/v1"
+      OPENAI_API_BASE_URL: "http://agent-orchestrator:8080/v1"
       OPENAI_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
       ENABLE_OLLAMA_API: "${OPEN_WEBUI_ENABLE_OLLAMA_API:-false}"
     volumes:
@@ -98,7 +106,8 @@ services:
     expose:
       - "5432"
     networks:
-      - hermes-internal
+      hermes-internal:
+        ipv4_address: "${AGENT_PLATFORM_POSTGRES_IP:-172.20.0.4}"
     healthcheck:
       test:
         [
@@ -109,6 +118,97 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
+
+  agent-manager:
+    <<: *agent-platform-image
+    container_name: agent-manager
+    command: ["agent-manager", "--bind", "0.0.0.0:8088"]
+    depends_on:
+      agent-platform-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
+      AGENT_ALLOW_DEV_HEADERS: "${AGENT_PLATFORM_ALLOW_DEV_HEADERS:-true}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    expose:
+      - "8088"
+    networks:
+      hermes-internal:
+        ipv4_address: "${AGENT_MANAGER_IP:-172.20.0.10}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  agent-orchestrator:
+    <<: *agent-platform-image
+    container_name: agent-orchestrator
+    command: ["agent-orchestrator", "--bind", "0.0.0.0:8080"]
+    depends_on:
+      hermes:
+        condition: service_healthy
+      agent-manager:
+        condition: service_healthy
+    environment:
+      AGENT_MANAGER_URL: "http://agent-manager:8088"
+      AGENT_ORCHESTRATOR_UPSTREAM_BASE_URL: "http://hermes:8642/v1"
+      AGENT_ORCHESTRATOR_UPSTREAM_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    expose:
+      - "8080"
+    networks:
+      hermes-internal:
+        ipv4_address: "${AGENT_ORCHESTRATOR_IP:-172.20.0.11}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  agent-worker:
+    <<: *agent-platform-image
+    container_name: agent-worker
+    command:
+      [
+        "agent-worker",
+        "worker",
+        "--worker-id",
+        "${AGENT_WORKER_ID:-worker-primary}",
+        "--interval-ms",
+        "${AGENT_WORKER_INTERVAL_MS:-1000}",
+      ]
+    depends_on:
+      agent-platform-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    networks:
+      hermes-internal:
+        ipv4_address: "${AGENT_WORKER_IP:-172.20.0.12}"
+
+  agent-observer:
+    <<: *agent-platform-image
+    container_name: agent-observer
+    command:
+      [
+        "agent-worker",
+        "observer",
+        "--interval-ms",
+        "${AGENT_OBSERVER_INTERVAL_MS:-30000}",
+      ]
+    depends_on:
+      agent-platform-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    networks:
+      hermes-internal:
+        ipv4_address: "${AGENT_OBSERVER_IP:-172.20.0.13}"
 
 networks:
   hermes-internal:
