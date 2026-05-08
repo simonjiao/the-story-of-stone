@@ -45,7 +45,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 1. Agent Orchestrator / Gateway 作为 Open WebUI 唯一后台入口。
 2. Agent Manager 内网部署。
 3. Agent Runtime 的 Minimal Runtime 闭环。
-4. Memory / Session Store 支持 session、message、summary 占位和 result_ref。
+4. Memory / Session Store 支持 session、message、summary 和 result_ref。
 5. Worker / Scheduler 支持 run claim、heartbeat、timeout、resource lock 和 dead-letter。
 6. agentctl CLI 支持 requests / agents / audit / observer reports。
 7. service token + user claims 双主体授权。
@@ -70,7 +70,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | [04-internal-definition.md](04-internal-definition.md) | 对象、状态机、权限上下文、隔离和复用规则 |
 | [05-technical-implementation.md](05-technical-implementation.md) | Rust 模块、依赖、API、数据表、并发和 Worker 机制 |
 | [06-negative-list.md](06-negative-list.md) | 明确禁止、不建议、延期实现和延期原因 |
-| [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、原则覆盖、决策清单和验收标准 |
+| [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、决策清单和验收标准 |
 | [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 实施 TODO 和阶段验收 |
 
 一致性规则：

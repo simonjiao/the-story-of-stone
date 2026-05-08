@@ -59,6 +59,7 @@ Observer Agent → 任何控制或写入 API
 6. 不建议在 P0 引入 Redis 作为正确性依赖；P0 用 Postgres lease 先闭环。
 7. 不建议让 ORM、GraphQL、gRPC 或外部 memory provider 决定 P0 架构；P0 应先固定 trait / adapter 边界。
 8. 不建议跳过 P0 可观测性埋点；trace_id、tracing span、metrics name/label 必须从 P0 开始。
+9. 不建议把 P2 当作重构阶段；P1 应先固定 side-effect plan、credential lease、write connector contract 和 no-op adapter，P2 只启用真实 provider / connector。
 ```
 
 ## v1 暂不实现
