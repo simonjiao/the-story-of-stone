@@ -1,21 +1,26 @@
 use agent_core::{
-    AgentRunStatus, AuditDecision, AuditLog, CoreResult, EmptyResponse, HealthStatus,
-    ObserverReport, ResourceLock, RiskLevel, RuntimeClient, RuntimeRunInput, SideEffectMode,
+    AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient, CoreResult,
+    EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ResourceLock, RuntimeClient,
+    RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, TriggerType, assess_observer_snapshot,
     metric_names, new_id,
 };
-use agent_runtime::MinimalRuntimeClient;
+use agent_runtime::{
+    HermesRuntimeClient, HttpReadOnlyConnector, HttpReadOnlyConnectorConfig,
+    LocalReadOnlyConnector, MinimalRuntimeClient,
+};
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
-use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use time::OffsetDateTime;
 
 pub type StoreRef = Arc<dyn AgentStore>;
 pub type RuntimeRef = Arc<dyn RuntimeClient>;
+pub type ConnectorRef = Arc<dyn ConnectorClient>;
 
 #[derive(Clone)]
 pub struct Worker {
     pub store: StoreRef,
     pub runtime: RuntimeRef,
+    pub connector: ConnectorRef,
     pub worker_id: String,
     pub lease: Duration,
     pub max_retries: i32,
@@ -23,9 +28,19 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(store: StoreRef, runtime: RuntimeRef, worker_id: impl Into<String>) -> Self {
+        Self::with_connector(store, runtime, Arc::new(LocalReadOnlyConnector), worker_id)
+    }
+
+    pub fn with_connector(
+        store: StoreRef,
+        runtime: RuntimeRef,
+        connector: ConnectorRef,
+        worker_id: impl Into<String>,
+    ) -> Self {
         Self {
             store,
             runtime,
+            connector,
             worker_id: worker_id.into(),
             lease: Duration::from_secs(30),
             max_retries: 3,
@@ -127,6 +142,11 @@ impl Worker {
         } else {
             None
         };
+        let agent = self
+            .store
+            .get_agent(&run.agent_id)
+            .await?
+            .ok_or_else(|| agent_store::store_error("agent not found"))?;
 
         self.store
             .update_run_status(&run.id, AgentRunStatus::PolicyChecked, &run.trace_id)
@@ -135,7 +155,7 @@ impl Worker {
             .await;
 
         let mut lock_held = false;
-        if matches!(run.side_effect_mode, SideEffectMode::Authorized) {
+        if matches!(run.external_action_mode, ExternalActionMode::Authorized) {
             let resource = agent_core::ResourceRef::parse(run.target_resource.clone())?;
             self.store
                 .acquire_resource_lock(
@@ -143,7 +163,7 @@ impl Worker {
                         id: new_id("lock"),
                         resource_type: resource.resource_type,
                         resource_id: resource.resource_id,
-                        lock_scope: "side_effect".to_string(),
+                        lock_scope: "external_action".to_string(),
                         holder_run_id: run.id.clone(),
                         lease_until: OffsetDateTime::now_utc(),
                         created_at: OffsetDateTime::now_utc(),
@@ -167,26 +187,81 @@ impl Worker {
             .get_run(&run.id)
             .await?
             .ok_or_else(|| agent_store::store_error("run disappeared"))?;
-        let output = self
-            .runtime
-            .execute_run(RuntimeRunInput {
-                run: run.clone(),
-                context,
-                snapshot: None,
-                trace_id: run.trace_id.clone(),
-            })
-            .await?;
+        let snapshot = self
+            .connector
+            .read_only_snapshot(connector_name(&agent), &run.target_resource, &run.trace_id)
+            .await?
+            .summary;
+        let output = if matches!(run.trigger_type, TriggerType::SessionMessage) {
+            let context =
+                context.ok_or_else(|| agent_store::store_error("session context missing"))?;
+            let message = latest_user_message(&context)?;
+            self.runtime
+                .send_session_message(RuntimeSessionInput {
+                    session_id: context.session_id.clone(),
+                    agent_id: agent.id.clone(),
+                    agent: Some(agent.clone()),
+                    message,
+                    context,
+                    snapshot: Some(snapshot),
+                    trace_id: run.trace_id.clone(),
+                })
+                .await?
+        } else {
+            self.runtime
+                .execute_run(RuntimeRunInput {
+                    run: run.clone(),
+                    agent: Some(agent.clone()),
+                    context,
+                    snapshot: Some(snapshot),
+                    trace_id: run.trace_id.clone(),
+                })
+                .await?
+        };
         self.store
             .update_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
             .await?;
         self.audit_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
             .await;
         let summary = output.result_summary.clone();
+        self.append_runtime_messages(&run, &output).await?;
         self.store.finish_run(&run.id, output).await?;
         if lock_held {
             self.store.release_resource_lock(&run.id).await?;
         }
         Ok(summary)
+    }
+
+    async fn append_runtime_messages(
+        &self,
+        run: &agent_core::AgentRun,
+        output: &RuntimeOutput,
+    ) -> CoreResult<()> {
+        let Some(session_id) = run.session_id.as_deref() else {
+            return Ok(());
+        };
+        let mut messages = if output.messages.is_empty() {
+            let mut message = AgentSessionMessage::new(
+                session_id,
+                0,
+                MessageRole::Assistant,
+                Some(output.result_summary.clone()),
+                Some(run.id.clone()),
+                run.trace_id.clone(),
+            );
+            message.content_ref = output.result_ref.clone();
+            vec![message]
+        } else {
+            output.messages.clone()
+        };
+        for mut message in messages.drain(..) {
+            message.session_id = session_id.to_string();
+            message.sequence = self.store.next_message_sequence(session_id).await?;
+            message.run_id = Some(run.id.clone());
+            message.trace_id = run.trace_id.clone();
+            self.store.append_message(message).await?;
+        }
+        Ok(())
     }
 
     async fn audit_run_status(&self, run_id: &str, status: AgentRunStatus, trace_id: &str) {
@@ -216,41 +291,15 @@ impl Worker {
 
 pub async fn observer_tick(store: StoreRef, trace_id: &str) -> CoreResult<ObserverReport> {
     let snapshot = store.collect_observer_snapshot(trace_id).await?;
-    let dead_letters = snapshot
-        .run_counts
-        .get("dead_letter")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let health = if dead_letters > 0 {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Healthy
-    };
+    let assessment = assess_observer_snapshot(&snapshot);
     let report = ObserverReport::new(
         new_id("observer_run"),
-        health,
-        if dead_letters > 0 {
-            Some(RiskLevel::Medium)
-        } else {
-            Some(RiskLevel::Low)
-        },
-        format!("Observer generated read-only Agent Platform report; dead_letter={dead_letters}."),
-        json!({
-            "run_counts": snapshot.run_counts,
-            "agent_counts": snapshot.agent_counts,
-            "session_counts": snapshot.session_counts,
-        }),
-        json!([
-            {
-                "recommended_priority": if dead_letters > 0 { "medium" } else { "low" },
-                "recommendation": "Inspect audit and worker heartbeat summaries before any control-plane action."
-            }
-        ]),
-        json!({
-            "lock_summary": snapshot.lock_summary,
-            "audit_summary": snapshot.audit_summary,
-            "worker_summary": snapshot.worker_summary,
-        }),
+        assessment.health_status,
+        Some(assessment.risk_level),
+        assessment.summary,
+        assessment.findings,
+        assessment.recommendations,
+        assessment.evidence_refs,
         trace_id.to_string(),
     );
     let report = store.create_observer_report(report).await?;
@@ -265,6 +314,27 @@ pub async fn observer_tick(store: StoreRef, trace_id: &str) -> CoreResult<Observ
     let _ = store.append_audit(audit).await;
     metrics::counter!(metric_names::OBSERVER_REPORT_TOTAL, "health_status" => report.health_status.to_string()).increment(1);
     Ok(report)
+}
+
+fn latest_user_message(context: &agent_core::SessionContext) -> CoreResult<AgentSessionMessage> {
+    let recent = context
+        .recent_messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .cloned()
+        .ok_or_else(|| agent_store::store_error("session message missing"))?;
+    let mut message = AgentSessionMessage::new(
+        context.session_id.clone(),
+        0,
+        recent.role,
+        Some(recent.content_summary),
+        recent.run_id,
+        context.trace_id.clone(),
+    );
+    message.content_ref = recent.content_ref;
+    message.external_message_id = recent.external_message_id;
+    Ok(message)
 }
 
 pub async fn store_from_env() -> CoreResult<StoreRef> {
@@ -283,6 +353,37 @@ pub fn minimal_runtime() -> RuntimeRef {
     Arc::new(MinimalRuntimeClient::default())
 }
 
+pub fn runtime_from_env() -> CoreResult<RuntimeRef> {
+    match std::env::var("AGENT_RUNTIME_MODE")
+        .unwrap_or_else(|_| "minimal".to_string())
+        .as_str()
+    {
+        "minimal" => Ok(minimal_runtime()),
+        "hermes" => Ok(Arc::new(HermesRuntimeClient::from_env()?)),
+        other => Err(agent_core::AgentCoreError::coded(
+            agent_core::ErrorCode::Conflict,
+            format!("unsupported AGENT_RUNTIME_MODE={other}"),
+        )),
+    }
+}
+
+pub fn connector_from_env() -> CoreResult<ConnectorRef> {
+    if let Some(config) = HttpReadOnlyConnectorConfig::from_env() {
+        Ok(Arc::new(HttpReadOnlyConnector::new(config)?))
+    } else {
+        Ok(Arc::new(LocalReadOnlyConnector))
+    }
+}
+
+fn connector_name(agent: &agent_core::AgentInstance) -> &str {
+    agent
+        .config
+        .get("read_only_connector")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local")
+}
+
 pub async fn idle_heartbeat(
     store: StoreRef,
     worker_id: &str,
@@ -296,8 +397,65 @@ pub async fn idle_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{AgentInstance, AgentRun, TriggerType, new_trace_id};
+    use agent_core::{
+        AgentInstance, AgentRun, AgentSession, AgentSessionMessage, ConnectorSnapshot, MemoryStore,
+        MessageRole, RuntimeSessionInput, TriggerType, new_trace_id,
+    };
+    use async_trait::async_trait;
     use serde_json::json;
+
+    #[derive(Debug)]
+    struct RecordingRuntime;
+
+    #[async_trait]
+    impl RuntimeClient for RecordingRuntime {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            unreachable!("session message runs use send_session_message")
+        }
+
+        async fn send_session_message(
+            &self,
+            input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            assert!(input.agent.is_some());
+            assert_eq!(input.snapshot.as_ref().unwrap()["mode"], "read_only");
+            assert_eq!(
+                input.message.content_summary.as_deref(),
+                Some("please analyze this")
+            );
+            Ok(RuntimeOutput {
+                result_summary: "runtime assistant response".to_string(),
+                result_ref: Some("result://recording/session".to_string()),
+                messages: Vec::new(),
+                metadata: json!({"trace_id": input.trace_id}),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingConnector;
+
+    #[async_trait]
+    impl ConnectorClient for RecordingConnector {
+        async fn read_only_snapshot(
+            &self,
+            connector: &str,
+            resource: &str,
+            trace_id: &str,
+        ) -> CoreResult<ConnectorSnapshot> {
+            assert_eq!(connector, "local");
+            assert_eq!(resource, "resource:team/project-alpha");
+            Ok(ConnectorSnapshot {
+                connector: connector.to_string(),
+                resource: resource.to_string(),
+                payload_ref: "snapshot://recording".to_string(),
+                summary: json!({
+                    "mode": "read_only",
+                    "trace_id": trace_id,
+                }),
+            })
+        }
+    }
 
     #[tokio::test]
     async fn worker_claims_and_completes_run() {
@@ -325,5 +483,70 @@ mod tests {
         worker.tick().await.unwrap();
         let completed = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(completed.run_status, AgentRunStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn worker_appends_runtime_output_to_session_with_snapshot() {
+        let store = MemoryAgentStore::new();
+        store.bootstrap().await.unwrap();
+        let agent = store
+            .create_agent_instance(AgentInstance::new(
+                "user-1",
+                "background_worker",
+                "resource:team/project-alpha",
+                "hash",
+                json!({}),
+                new_trace_id(),
+            ))
+            .await
+            .unwrap();
+        let session = store
+            .create_session(AgentSession::new(
+                agent.id.clone(),
+                "user-1",
+                json!({"resource": "resource:team/project-alpha"}),
+                new_trace_id(),
+            ))
+            .await
+            .unwrap();
+        let user_message = AgentSessionMessage::new(
+            session.id.clone(),
+            1,
+            MessageRole::User,
+            Some("please analyze this".to_string()),
+            None,
+            new_trace_id(),
+        );
+        store.append_message(user_message).await.unwrap();
+        let run = AgentRun::new(
+            agent.id,
+            Some(session.id.clone()),
+            TriggerType::SessionMessage,
+            "resource:team/project-alpha",
+            new_trace_id(),
+        );
+        let run_id = run.id.clone();
+        store.create_run(run).await.unwrap();
+        let worker = Worker::with_connector(
+            Arc::new(store.clone()),
+            Arc::new(RecordingRuntime),
+            Arc::new(RecordingConnector),
+            "worker-test",
+        );
+
+        worker.tick().await.unwrap();
+
+        let completed = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(completed.run_status, AgentRunStatus::Completed);
+        let context = store
+            .session_context(&session.id, &new_trace_id())
+            .await
+            .unwrap();
+        assert!(context.recent_messages.iter().any(|message| {
+            message.role == MessageRole::Assistant
+                && message.content_summary == "runtime assistant response"
+                && message.run_id.as_deref() == Some(run_id.as_str())
+                && message.content_ref.as_deref() == Some("result://recording/session")
+        }));
     }
 }

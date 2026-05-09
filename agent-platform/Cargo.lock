@@ -21,6 +21,7 @@ name = "agent-manager"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-runtime",
  "agent-store",
  "anyhow",
  "async-trait",
@@ -81,6 +82,7 @@ dependencies = [
  "axum",
  "clap",
  "metrics",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",

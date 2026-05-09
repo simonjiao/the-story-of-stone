@@ -1,4 +1,6 @@
-use agent_worker::{Worker, idle_heartbeat, minimal_runtime, observer_tick, store_from_env};
+use agent_worker::{
+    Worker, connector_from_env, idle_heartbeat, observer_tick, runtime_from_env, store_from_env,
+};
 use clap::{Parser, Subcommand};
 use std::time::Duration;
 
@@ -45,7 +47,12 @@ async fn main() -> anyhow::Result<()> {
             once,
             interval_ms,
         } => {
-            let worker = Worker::new(store, minimal_runtime(), worker_id);
+            let worker = Worker::with_connector(
+                store,
+                runtime_from_env()?,
+                connector_from_env()?,
+                worker_id,
+            );
             loop {
                 worker.tick().await?;
                 if once {

@@ -1,6 +1,8 @@
 mod control_services;
+mod external_action_services;
 mod http_support;
 mod lifecycle_services;
+mod observer_services;
 mod request_services;
 mod run_admin_services;
 mod telemetry_support;
@@ -9,10 +11,14 @@ use agent_core::{
     AgentBridgeBinding, AgentBridgeBindingSummary, AgentCoreError, AgentGrant, AgentInstance,
     AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
     AgentSessionMessage, AppendMessageInput, ApprovalDecisionInput, ApprovalStatus, AuditDecision,
-    AuditLog, AuthContext, CoreResult, CreateChildSessionInput, CreateGrantInput, CreateRunInput,
-    CreateSessionInput, DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport,
-    Page, RiskLevel, RoleName, RunAdminDecisionInput, RunSummary, UpdateOpenWebUiBridgeRunInput,
-    UpsertOpenWebUiBridgeBindingInput, WebhookTriggerInput, actions, new_id,
+    AuditLog, AuthContext, ClaimOpenWebUiBridgeNonceInput, CoreResult, CreateChildSessionInput,
+    CreateGrantInput, CreateRunInput, CreateSessionInput, DenyDecisionInput, EmptyResponse,
+    ErrorCode, ExternalActionPlanApplyInput, ExternalActionPlanApplyResponse,
+    ExternalActionPlanCompensateInput, ExternalActionPlanCompensateResponse,
+    ExternalActionPlanDryRunInput, ExternalActionPlanDryRunResponse, ObserverReport,
+    ObserverReportDiscussionInput, Page, RoleName, RunAdminDecisionInput, RunSummary,
+    SystemStatusSessionInput, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
+    WebhookTriggerInput, actions, assess_observer_snapshot, new_id,
 };
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
 use axum::{
@@ -22,7 +28,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 pub use http_support::{ApiError, ManagerConfig, extract_auth};
-use http_support::{ensure_admin, ensure_service_allows};
+use http_support::{ensure_admin, ensure_operator_or_admin, ensure_service_allows};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -100,11 +106,35 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/grants", post(admin_create_grant))
         .route("/v1/admin/observer/reports", get(admin_observer_reports))
         .route(
+            "/v1/admin/observer/system-session",
+            post(admin_observer_system_session),
+        )
+        .route(
             "/v1/admin/observer/reports/{report_id}",
             get(admin_observer_report),
         )
+        .route(
+            "/v1/admin/observer/reports/{report_id}/discussions",
+            post(admin_observer_report_discussion),
+        )
         .route("/v1/admin/observer/runs", post(admin_observer_run))
+        .route(
+            "/v1/admin/runs/{run_id}/external-action-plans/dry-run",
+            post(admin_external_action_dry_run),
+        )
+        .route(
+            "/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply",
+            post(admin_external_action_apply),
+        )
+        .route(
+            "/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/compensate",
+            post(admin_external_action_compensate),
+        )
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
+        .route(
+            "/v1/internal/open-webui-bridge/nonces",
+            post(internal_claim_open_webui_bridge_nonce),
+        )
         .route(
             "/v1/internal/open-webui-bridge/bindings/{chat_id}",
             get(internal_open_webui_bridge_binding),
@@ -196,6 +226,30 @@ async fn audit(
             trace_id.to_string(),
         ))
         .await;
+}
+
+async fn audit_bridge_binding(
+    state: &AppState,
+    auth: &AuthContext,
+    action: &str,
+    binding: &AgentBridgeBinding,
+    run_id: Option<&str>,
+) {
+    let mut audit_log = AuditLog::new(
+        Some(auth),
+        action,
+        AuditDecision::Allowed,
+        Some(format!(
+            "chat_id={} model={} session_id={}",
+            binding.open_webui_chat_id, binding.model, binding.agent_session_id
+        )),
+        auth.trace_id.clone(),
+    );
+    audit_log.resource_type = Some("open_webui_bridge_binding".to_string());
+    audit_log.resource_id = Some(binding.id.clone());
+    audit_log.session_id = Some(binding.agent_session_id.clone());
+    audit_log.run_id = run_id.map(ToString::to_string);
+    let _ = state.store.append_audit(audit_log).await;
 }
 
 async fn create_agent_request(
@@ -917,6 +971,33 @@ async fn admin_observer_report(
     Ok(Json(report))
 }
 
+async fn admin_observer_report_discussion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(report_id): Path<String>,
+    Json(input): Json<ObserverReportDiscussionInput>,
+) -> Result<Json<agent_core::ObserverReportDiscussionResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_operator_or_admin(&auth, actions::ADMIN_OBSERVER_DISCUSS)?;
+    observer_services::create_report_discussion(&state.store, &auth, report_id, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
+async fn admin_observer_system_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SystemStatusSessionInput>,
+) -> Result<Json<agent_core::SystemStatusSessionResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_operator_or_admin(&auth, actions::ADMIN_OBSERVER_DISCUSS)?;
+    observer_services::create_system_status_session(&state.store, &auth, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
 async fn admin_observer_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -929,54 +1010,74 @@ async fn admin_observer_run(
         .map_err(|error| ApiError::from_core(error, auth.trace_id))
 }
 
+async fn admin_external_action_dry_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(input): Json<ExternalActionPlanDryRunInput>,
+) -> Result<Json<ExternalActionPlanDryRunResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_DRY_RUN)?;
+    external_action_services::dry_run_external_action_plan(&state.store, &auth, run_id, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
+async fn admin_external_action_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, plan_id)): Path<(String, String)>,
+    Json(input): Json<ExternalActionPlanApplyInput>,
+) -> Result<Json<ExternalActionPlanApplyResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_APPLY)?;
+    external_action_services::apply_external_action_plan(
+        &state.store,
+        &auth,
+        run_id,
+        plan_id,
+        input,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
+async fn admin_external_action_compensate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, plan_id)): Path<(String, String)>,
+    Json(input): Json<ExternalActionPlanCompensateInput>,
+) -> Result<Json<ExternalActionPlanCompensateResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_COMPENSATE)?;
+    external_action_services::compensate_external_action_plan(
+        &state.store,
+        &auth,
+        run_id,
+        plan_id,
+        input,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
 async fn create_observer_report_from_snapshot(
     state: &AppState,
     trace_id: &str,
 ) -> CoreResult<ObserverReport> {
     let snapshot = state.store.collect_observer_snapshot(trace_id).await?;
-    let dead_letters = snapshot
-        .run_counts
-        .get("dead_letter")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let failed = snapshot
-        .run_counts
-        .get("failed")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let health = if dead_letters > 0 || failed > 5 {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Healthy
-    };
+    let assessment = assess_observer_snapshot(&snapshot);
     let report = ObserverReport::new(
         new_id("observer_run"),
-        health,
-        if dead_letters > 0 {
-            Some(RiskLevel::Medium)
-        } else {
-            Some(RiskLevel::Low)
-        },
-        format!(
-            "Observer snapshot collected at {}. dead_letter={}, failed={}.",
-            snapshot.collected_at, dead_letters, failed
-        ),
-        json!({
-            "run_counts": snapshot.run_counts,
-            "agent_counts": snapshot.agent_counts,
-            "session_counts": snapshot.session_counts,
-        }),
-        json!([
-            {
-                "priority": if dead_letters > 0 { "medium" } else { "low" },
-                "recommendation": "Review dead_letter and timeout trends through agentctl audit before changing policy."
-            }
-        ]),
-        json!({
-            "lock_summary": snapshot.lock_summary,
-            "audit_summary": snapshot.audit_summary,
-            "worker_summary": snapshot.worker_summary,
-        }),
+        assessment.health_status,
+        Some(assessment.risk_level),
+        assessment.summary,
+        assessment.findings,
+        assessment.recommendations,
+        assessment.evidence_refs,
         trace_id.to_string(),
     );
     let report = state.store.create_observer_report(report).await?;
@@ -1028,7 +1129,7 @@ async fn internal_open_webui_bridge_binding(
     Query(query): Query<BridgeBindingQuery>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_READ)?;
     let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
     let binding = state
         .store
@@ -1044,13 +1145,35 @@ async fn internal_open_webui_bridge_binding(
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
+async fn internal_claim_open_webui_bridge_nonce(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ClaimOpenWebUiBridgeNonceInput>,
+) -> Result<Json<EmptyResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_NONCE)?;
+    let response = state
+        .store
+        .claim_open_webui_bridge_nonce(
+            &auth.user_id,
+            &input.open_webui_chat_id,
+            &input.model,
+            &input.nonce,
+            input.issued_at,
+            &auth.trace_id,
+        )
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(response))
+}
+
 async fn internal_upsert_open_webui_bridge_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<UpsertOpenWebUiBridgeBindingInput>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT)?;
     let mut binding = AgentBridgeBinding::new(
         auth.user_id.clone(),
         input.open_webui_chat_id,
@@ -1066,6 +1189,14 @@ async fn internal_upsert_open_webui_bridge_binding(
         .upsert_open_webui_bridge_binding(binding)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    audit_bridge_binding(
+        &state,
+        &auth,
+        actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT,
+        &binding,
+        None,
+    )
+    .await;
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
@@ -1076,13 +1207,28 @@ async fn internal_close_open_webui_bridge_binding(
     Query(query): Query<BridgeBindingQuery>,
 ) -> Result<Json<EmptyResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE)?;
     let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
+    let existing = state
+        .store
+        .get_open_webui_bridge_binding(&auth.user_id, &chat_id, &model)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
     let response = state
         .store
         .close_open_webui_bridge_binding(&auth.user_id, &chat_id, &model, &auth.trace_id)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    if let Some(binding) = existing {
+        audit_bridge_binding(
+            &state,
+            &auth,
+            actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE,
+            &binding,
+            None,
+        )
+        .await;
+    }
     Ok(Json(response))
 }
 
@@ -1093,7 +1239,7 @@ async fn internal_update_open_webui_bridge_run(
     Json(input): Json<UpdateOpenWebUiBridgeRunInput>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE)?;
     let binding = state
         .store
         .update_open_webui_bridge_run(
@@ -1105,6 +1251,14 @@ async fn internal_update_open_webui_bridge_run(
         )
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    audit_bridge_binding(
+        &state,
+        &auth,
+        actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE,
+        &binding,
+        Some(input.run_id.as_str()),
+    )
+    .await;
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
@@ -1276,10 +1430,18 @@ async fn internal_observer_tick(
 mod tests {
     use super::*;
     use agent_core::{
-        AGENT_TYPE_BACKGROUND_WORKER, AgentRunStatus, AgentSession, MessageRole, RequestType,
-        RoleAssignment, SideEffectMode, TriggerType, new_trace_id,
+        AGENT_TYPE_BACKGROUND_WORKER, AGENT_TYPE_OBSERVER, AgentRunStatus, AgentSession,
+        ApprovalRequest, ApprovalStatus, CredentialLease, CredentialLeaseRequest,
+        CredentialLeaseStatus, CredentialProvider, ErrorCode, ExternalActionMode,
+        ExternalActionPlanStatus, HealthStatus, MessageRole, ObserverReport, RequestType,
+        ResourceLock, RiskLevel, RoleAssignment, TriggerType, WriteConnector,
+        WriteConnectorCompensateInput, WriteConnectorCompensateOutput, WriteConnectorDryRunInput,
+        WriteConnectorDryRunOutput, WriteConnectorExecuteInput, WriteConnectorExecuteOutput,
+        new_id, new_trace_id,
     };
+    use std::{sync::Mutex, time::Duration};
     use time::OffsetDateTime;
+    use tokio::net::TcpListener;
 
     async fn test_state() -> AppState {
         let store = MemoryAgentStore::new();
@@ -1317,7 +1479,7 @@ mod tests {
                 structured_payload: json!({"mode": label}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1332,11 +1494,36 @@ mod tests {
                 idempotency_key: None,
                 target_resource: Some("resource:team/project-alpha".to_string()),
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
         .unwrap()
+    }
+
+    async fn approved_external_action_approval(state: &AppState, auth: &AuthContext) -> String {
+        let approval = ApprovalRequest {
+            id: new_id("approval"),
+            request_id: new_id("req"),
+            requested_by_user: auth.user_id.clone(),
+            approver_user: Some("approver-1".to_string()),
+            status: ApprovalStatus::Approved,
+            risk_level: Some(RiskLevel::Low),
+            reason: Some("external action dry-run approval".to_string()),
+            decision_reason: Some("test approval".to_string()),
+            created_at: OffsetDateTime::now_utc(),
+            decided_at: Some(OffsetDateTime::now_utc()),
+        };
+        state.store.create_approval(approval).await.unwrap().id
+    }
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     #[tokio::test]
@@ -1354,7 +1541,7 @@ mod tests {
                 structured_payload: json!({}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: None,
+                external_action_mode: None,
             },
         )
         .await
@@ -1379,7 +1566,7 @@ mod tests {
                 structured_payload: json!({"mode": "approved-owner"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: None,
+                external_action_mode: None,
             },
         )
         .await
@@ -1433,7 +1620,7 @@ mod tests {
                 structured_payload: json!({"mode": "read_only"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1467,7 +1654,7 @@ mod tests {
                 }),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1492,7 +1679,7 @@ mod tests {
                 }),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1521,6 +1708,97 @@ mod tests {
         assert_eq!(first_binding.last_message_id.as_deref(), Some("msg-1"));
     }
 
+    fn bridge_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-service", "agent-orchestrator".parse().unwrap());
+        headers.insert("x-agent-user", "openwebui:user-1".parse().unwrap());
+        headers.insert("x-agent-roles", "viewer".parse().unwrap());
+        headers.insert(
+            "x-agent-allowed-actions",
+            "internal:open_webui_bridge:*".parse().unwrap(),
+        );
+        headers.insert("x-agent-trace-id", new_trace_id().parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn bridge_nonce_claim_rejects_replay_through_manager() {
+        let state = test_state().await;
+        let input = ClaimOpenWebUiBridgeNonceInput {
+            open_webui_chat_id: "chat-1".to_string(),
+            model: "hermes-agent".to_string(),
+            nonce: "nonce-1".to_string(),
+            issued_at: OffsetDateTime::now_utc().unix_timestamp(),
+        };
+        let _ = internal_claim_open_webui_bridge_nonce(
+            State(state.clone()),
+            bridge_headers(),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+
+        let replay =
+            internal_claim_open_webui_bridge_nonce(State(state), bridge_headers(), Json(input))
+                .await;
+        assert!(replay.is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_binding_lifecycle_is_audited() {
+        let state = test_state().await;
+        let Json(binding) = internal_upsert_open_webui_bridge_binding(
+            State(state.clone()),
+            bridge_headers(),
+            Json(UpsertOpenWebUiBridgeBindingInput {
+                open_webui_chat_id: "chat-1".to_string(),
+                open_webui_session_id: Some("ow-session-1".to_string()),
+                model: "hermes-agent".to_string(),
+                agent_id: "agent-1".to_string(),
+                agent_session_id: "sess-1".to_string(),
+                last_message_id: Some("msg-1".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = internal_update_open_webui_bridge_run(
+            State(state.clone()),
+            bridge_headers(),
+            Path(binding.binding_id.clone()),
+            Json(UpdateOpenWebUiBridgeRunInput {
+                message_id: Some("msg-2".to_string()),
+                run_id: "run-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = internal_close_open_webui_bridge_binding(
+            State(state.clone()),
+            bridge_headers(),
+            Path("chat-1".to_string()),
+            Query(BridgeBindingQuery {
+                model: Some("hermes-agent".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let audits = state.store.list_audit(10).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT
+                && audit.resource_id.as_deref() == Some(binding.binding_id.as_str())
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE
+                && audit.run_id.as_deref() == Some("run-1")
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE
+                && audit.session_id.as_deref() == Some("sess-1")
+        }));
+    }
+
     #[tokio::test]
     async fn admin_grant_endpoint_persists_and_audits_grant() {
         let state = test_state().await;
@@ -1533,7 +1811,7 @@ mod tests {
                 action: "run:create".to_string(),
                 resource_type: "team".to_string(),
                 resource_id: "project-alpha".to_string(),
-                constraints: json!({"side_effect_mode": "read_only"}),
+                constraints: json!({"external_action_mode": "read_only"}),
                 expires_at: None,
             }),
         )
@@ -1547,6 +1825,865 @@ mod tests {
             audit.action == actions::ADMIN_GRANT_CREATE
                 && audit.decision == Some(AuditDecision::Allowed)
         }));
+    }
+
+    #[tokio::test]
+    async fn observer_report_discussion_creates_redacted_session_for_operator() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let agent = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create discussion worker".to_string()),
+                structured_payload: json!({"mode": "observer-discussion"}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        let report = create_observer_report_from_snapshot(&state, &new_trace_id())
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-roles", "operator".parse().unwrap());
+        let Json(response) = admin_observer_report_discussion(
+            State(state.clone()),
+            headers,
+            Path(report.id.clone()),
+            Json(ObserverReportDiscussionInput {
+                agent_id: agent.agent_id.unwrap(),
+                initial_message: "what should we do next?".to_string(),
+                idempotency_key: Some("discussion-1".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.report_id, report.id);
+        assert_eq!(response.session.owner_user, "dev-user");
+        assert!(
+            response
+                .session
+                .context_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Observer report discussion context")
+        );
+        assert_eq!(response.first_message.role, MessageRole::User);
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_OBSERVER_DISCUSS
+                && audit.observer_report_id.as_deref() == Some(report.id.as_str())
+                && audit.session_id.as_deref() == Some(response.session.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn observer_system_session_creates_dedicated_status_agent_with_redacted_report() {
+        let state = test_state().await;
+        let report = state
+            .store
+            .create_observer_report(ObserverReport::new(
+                new_id("observer_run"),
+                HealthStatus::Healthy,
+                Some(RiskLevel::Low),
+                "system is healthy",
+                json!({"run_counts": {"completed": 3}}),
+                json!([{"priority": "low", "recommendation": "continue observing"}]),
+                json!({
+                    "safe": "visible",
+                    "nested": {"credential_token": "secret-value"}
+                }),
+                new_trace_id(),
+            ))
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-roles", "operator".parse().unwrap());
+        let Json(response) = admin_observer_system_session(
+            State(state.clone()),
+            headers,
+            Json(SystemStatusSessionInput {
+                report_id: None,
+                initial_message: Some("give me the deep status".to_string()),
+                idempotency_key: Some("system-status".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.report_id, report.id);
+        assert_eq!(response.agent.agent_type, AGENT_TYPE_OBSERVER);
+        assert_eq!(
+            response.agent.display_name.as_deref(),
+            Some("System Observer")
+        );
+        assert_eq!(
+            response.session.source_conversation_id.as_deref(),
+            Some("system_observer:status")
+        );
+        assert_eq!(response.report_message.role, MessageRole::System);
+        let packet = response.report_message.content_summary.unwrap();
+        assert!(packet.contains("system is healthy"));
+        assert!(packet.contains("\"credential_token\":\"redacted\""));
+        assert!(!packet.contains("secret-value"));
+        assert_eq!(response.first_message.role, MessageRole::User);
+
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_OBSERVER_DISCUSS
+                && audit.observer_report_id.as_deref() == Some(report.id.as_str())
+                && audit.session_id.as_deref() == Some(response.session.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn p1_external_action_dry_run_creates_plan_and_noop_credential_lease() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-external-action-dry-run").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+
+        let Json(response) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id.clone()),
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: Some("payload://dry-run/1".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            ExternalActionPlanStatus::DryRunReady
+        );
+        assert!(response.credential_lease.is_some());
+        assert_eq!(
+            response.plan.approval_id.as_deref(),
+            Some(approval_id.as_str())
+        );
+        assert_eq!(response.plan.run_id, run.id);
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("noop://")
+        );
+        let plans = state
+            .store
+            .list_external_action_plans_by_run(&response.plan.run_id)
+            .await
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestCredentialProvider;
+
+    #[async_trait::async_trait]
+    impl CredentialProvider for TestCredentialProvider {
+        async fn dry_run_lease(
+            &self,
+            request: CredentialLeaseRequest,
+        ) -> CoreResult<CredentialLease> {
+            Ok(CredentialLease::dry_run(
+                request.external_action_plan_id,
+                request.credential_scope,
+                request.trace_id,
+            ))
+        }
+
+        async fn active_lease(
+            &self,
+            request: CredentialLeaseRequest,
+        ) -> CoreResult<CredentialLease> {
+            Ok(CredentialLease::active(
+                request.external_action_plan_id,
+                request.credential_scope,
+                "vault://leases/test-external-action",
+                60,
+                request.trace_id,
+            ))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingWriteConnector {
+        provider_ref: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteConnector for RecordingWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            *self.provider_ref.lock().unwrap() = input.credential_provider_ref.clone();
+            Ok(WriteConnectorExecuteOutput {
+                accepted: true,
+                status: "applied".to_string(),
+                result_ref: Some(format!("write://action-executions/{}", input.plan.id)),
+                compensation_ref: Some(format!("compensate://action-executions/{}", input.plan.id)),
+                error_code: None,
+                metadata: json!({"attempted": true}),
+            })
+        }
+
+        async fn compensate(
+            &self,
+            input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Ok(WriteConnectorCompensateOutput {
+                accepted: true,
+                status: "compensated".to_string(),
+                result_ref: Some(format!(
+                    "compensate-result://action-executions/{}",
+                    input.plan.id
+                )),
+                error_code: None,
+                metadata: json!({"compensated": true}),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct InvalidWriteConnector;
+
+    #[async_trait::async_trait]
+    impl WriteConnector for InvalidWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            Ok(WriteConnectorExecuteOutput {
+                accepted: true,
+                status: "applied".to_string(),
+                result_ref: Some(format!("write://action-executions/{}", input.plan.id)),
+                compensation_ref: None,
+                error_code: None,
+                metadata: json!({"invalid": "missing compensation_ref"}),
+            })
+        }
+
+        async fn compensate(
+            &self,
+            input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Ok(WriteConnectorCompensateOutput {
+                accepted: true,
+                status: "compensated".to_string(),
+                result_ref: Some(format!(
+                    "compensate-result://action-executions/{}",
+                    input.plan.id
+                )),
+                error_code: None,
+                metadata: json!({}),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingWriteConnector {
+        attempts: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteConnector for FailingWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            _input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            *self.attempts.lock().unwrap() += 1;
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "connector execution failed",
+            ))
+        }
+
+        async fn compensate(
+            &self,
+            _input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "connector compensation failed",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_uses_active_credential_lock_and_audit() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-apply").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/1".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+        let provider_ref = Arc::new(Mutex::new(None));
+        let connector = RecordingWriteConnector {
+            provider_ref: provider_ref.clone(),
+        };
+
+        let response = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.apply_status, ExternalActionPlanStatus::Applied);
+        assert_eq!(
+            response.credential_lease.status,
+            CredentialLeaseStatus::Active
+        );
+        assert_eq!(
+            response.credential_lease.provider_ref.as_deref(),
+            Some("vault://leases/test-external-action")
+        );
+        assert_eq!(
+            *provider_ref.lock().unwrap(),
+            Some("vault://leases/test-external-action".to_string())
+        );
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("write://action-executions/")
+        );
+        assert!(
+            response
+                .plan
+                .compensation_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("compensate://action-executions/")
+        );
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_APPLY
+                && audit.decision == Some(AuditDecision::Completed)
+                && audit.resource_id.as_deref() == Some(response.plan.id.as_str())
+                && audit.reason.as_deref().is_some_and(|reason| {
+                    reason.contains(&format!("lock_id={}", response.resource_lock.id))
+                })
+        }));
+
+        let compensated = external_action_services::compensate_external_action_plan_with_connector(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            response.plan.id.clone(),
+            ExternalActionPlanCompensateInput {
+                reason: Some("rollback test".to_string()),
+                payload: json!({"mode": "test"}),
+            },
+            &connector,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            compensated.compensate_status,
+            ExternalActionPlanStatus::Compensated
+        );
+        assert!(
+            compensated
+                .compensation_result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("compensate-result://action-executions/")
+        );
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_COMPENSATE
+                && audit.decision == Some(AuditDecision::Completed)
+                && audit.resource_id.as_deref() == Some(response.plan.id.as_str())
+                && audit
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("lock_id="))
+        }));
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_smokes_real_http_adapter_target() {
+        let target_log = std::env::temp_dir().join(format!(
+            "agent-platform-manager-action-gateway-smoke-{}.jsonl",
+            new_trace_id()
+        ));
+        let adapter_url = spawn_server(
+            agent_runtime::action_gateway_router(agent_runtime::ActionGatewayConfig {
+                target_log_path: target_log.clone(),
+                api_key: Some("secret-token".to_string()),
+                lease_ttl_seconds: 60,
+                connector: "action-journal".to_string(),
+                allowed_credential_scopes: vec!["agent-platform:action-gateway-smoke".to_string()],
+            })
+            .unwrap(),
+        )
+        .await;
+        let credential_provider = agent_runtime::HttpCredentialProvider::new(
+            agent_runtime::HttpCredentialProviderConfig {
+                base_url: adapter_url.clone(),
+                api_key: Some("secret-token".to_string()),
+                timeout: Duration::from_secs(2),
+                lease_ttl_seconds: 300,
+            },
+        )
+        .unwrap();
+        let write_connector =
+            agent_runtime::HttpWriteConnector::new(agent_runtime::HttpWriteConnectorConfig {
+                base_url: adapter_url,
+                api_key: Some("secret-token".to_string()),
+                timeout: Duration::from_secs(2),
+            })
+            .unwrap();
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-http-adapter-smoke").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "action-journal".to_string(),
+                action: "target.write".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("agent-platform:action-gateway-smoke".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("local smoke target write".to_string()),
+                input_ref: Some("payload://external-action-http-smoke".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let response = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id,
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"message": "external action manager HTTP adapter smoke"}),
+            },
+            &credential_provider,
+            &write_connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.apply_status, ExternalActionPlanStatus::Applied);
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("action-journal-target://")
+        );
+        assert!(
+            response
+                .plan
+                .compensation_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("action-journal-compensation://")
+        );
+        let log = std::fs::read_to_string(&target_log).unwrap();
+        assert_eq!(
+            log.matches("\"event_type\":\"credential_lease_issued\"")
+                .count(),
+            1
+        );
+        assert_eq!(log.matches("\"event_type\":\"action_executed\"").count(), 1);
+        assert!(log.contains("\"idempotency_key\""));
+        let _ = std::fs::remove_file(target_log);
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_rejects_invalid_connector_result() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-invalid-result").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/invalid".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &InvalidWriteConnector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("connector_invalid_result"));
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_dead_letters_run_after_connector_retries() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run =
+            create_read_only_run(&state, &auth, "external-action-connector-dead-letter").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/dead-letter".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+        let attempts = Arc::new(Mutex::new(0));
+        let connector = FailingWriteConnector {
+            attempts: attempts.clone(),
+        };
+
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 2,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*attempts.lock().unwrap(), 2);
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("connector_dead_letter"));
+        let run = state.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(run.run_status, AgentRunStatus::DeadLetter);
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_records_lock_conflict_from_precheck() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-apply-lock-conflict").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/locked".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+        state
+            .store
+            .acquire_resource_lock(
+                ResourceLock {
+                    id: new_id("lock"),
+                    resource_type: "team".to_string(),
+                    resource_id: "project-alpha".to_string(),
+                    lock_scope: "external_action".to_string(),
+                    holder_run_id: "run-other".to_string(),
+                    lease_until: OffsetDateTime::now_utc(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &RecordingWriteConnector {
+                provider_ref: Arc::new(Mutex::new(None)),
+            },
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("resource_locked"));
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_APPLY
+                && audit.decision == Some(AuditDecision::Conflict)
+                && audit.resource_id.as_deref() == Some(plan.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn p1_external_action_dry_run_rejects_missing_approval() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-external-action-no-approval").await;
+
+        let Json(response) = admin_external_action_dry_run(
+            State(state),
+            HeaderMap::new(),
+            Path(run.id),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: None,
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: None,
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            ExternalActionPlanStatus::DryRunRejected
+        );
+        assert_eq!(
+            response.plan.error_code.as_deref(),
+            Some("approval_required")
+        );
+        assert!(response.credential_lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn p1_external_action_dry_run_rejects_active_resource_lock() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-external-action-locked").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        state
+            .store
+            .acquire_resource_lock(
+                ResourceLock {
+                    id: new_id("lock"),
+                    resource_type: "team".to_string(),
+                    resource_id: "project-alpha".to_string(),
+                    lock_scope: "external_action".to_string(),
+                    holder_run_id: "run-other".to_string(),
+                    lease_until: OffsetDateTime::now_utc(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+
+        let Json(response) = admin_external_action_dry_run(
+            State(state),
+            HeaderMap::new(),
+            Path(run.id),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: None,
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            ExternalActionPlanStatus::DryRunRejected
+        );
+        assert_eq!(response.plan.error_code.as_deref(), Some("resource_locked"));
+        assert!(response.credential_lease.is_none());
     }
 
     #[tokio::test]
@@ -1632,7 +2769,7 @@ mod tests {
                 structured_payload: json!({"mode": "webhook"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1674,7 +2811,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.trigger_type, TriggerType::Webhook);
-        assert_eq!(run.side_effect_mode, SideEffectMode::ReadOnly);
+        assert_eq!(run.external_action_mode, ExternalActionMode::ReadOnly);
         assert_eq!(run.idempotency_key.as_deref(), Some("github-issue-1-42"));
     }
 
@@ -1693,7 +2830,7 @@ mod tests {
                 structured_payload: json!({"mode": "idempotency"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1733,7 +2870,7 @@ mod tests {
             idempotency_key: Some("run-key-1".to_string()),
             target_resource: Some("resource:team/project-alpha".to_string()),
             risk_level: Some(RiskLevel::Low),
-            side_effect_mode: Some(SideEffectMode::ReadOnly),
+            external_action_mode: Some(ExternalActionMode::ReadOnly),
         };
         let first_run = lifecycle_services::create_run(
             &state.store,
@@ -1778,6 +2915,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 content_summary: "runtime response".to_string(),
                 content_ref: None,
+                external_message_id: None,
                 run_id: None,
             }),
         )

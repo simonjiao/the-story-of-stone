@@ -2,8 +2,8 @@ use crate::StoreRef;
 use agent_core::{
     AgentCoreError, AgentGrant, AgentInstanceStatus, AgentRun, AgentSessionMessage, AgentSummary,
     AppendMessageInput, AuditDecision, AuditLog, AuthContext, CoreResult, CreateGrantInput,
-    ErrorCode, ResourceRef, RiskLevel, SideEffectMode, TriggerType, WebhookTriggerInput, actions,
-    new_id,
+    ErrorCode, ExternalActionMode, ResourceRef, RiskLevel, TriggerType, WebhookTriggerInput,
+    actions, new_id,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -75,6 +75,7 @@ pub(crate) async fn append_message_to_session(
         role,
         content_summary,
         content_ref,
+        external_message_id,
         run_id,
     } = input;
     let mut message = AgentSessionMessage::new(
@@ -86,6 +87,7 @@ pub(crate) async fn append_message_to_session(
         auth.trace_id.clone(),
     );
     message.content_ref = content_ref;
+    message.external_message_id = external_message_id;
     let message = store.append_message(message).await?;
     append_audit(
         store,
@@ -222,7 +224,7 @@ async fn create_webhook_runs(
         );
         run.idempotency_key = Some(input.dedupe_key.clone());
         run.risk_level = RiskLevel::Low;
-        run.side_effect_mode = SideEffectMode::ReadOnly;
+        run.external_action_mode = ExternalActionMode::ReadOnly;
         runs.push(store.create_run(run).await?);
     }
     Ok(runs)

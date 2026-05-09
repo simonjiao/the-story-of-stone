@@ -1,8 +1,9 @@
 use agent_core::{
     AgentBridgeBinding, AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus,
     AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSummary,
-    AgentTemplate, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, EmptyResponse,
-    ObserverReport, ObserverReportSummary, ResourceLock, RunSummary, SessionSummary,
+    AgentTemplate, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, CredentialLease,
+    EmptyResponse, ExternalActionPlan, ObserverReport, ObserverReportSummary, ResourceLock,
+    RunSummary, SessionSummary,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -112,6 +113,15 @@ pub trait AgentStore:
         run_id: &str,
         trace_id: &str,
     ) -> CoreResult<AgentBridgeBinding>;
+    async fn claim_open_webui_bridge_nonce(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        nonce: &str,
+        issued_at: i64,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse>;
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun>;
     async fn get_run(&self, run_id: &str) -> CoreResult<Option<AgentRun>>;
@@ -147,6 +157,39 @@ pub trait AgentStore:
     async fn list_observer_reports(&self, limit: i64) -> CoreResult<Vec<ObserverReportSummary>>;
     async fn get_observer_report(&self, report_id: &str) -> CoreResult<Option<ObserverReport>>;
 
+    async fn create_external_action_plan(
+        &self,
+        plan: ExternalActionPlan,
+    ) -> CoreResult<ExternalActionPlan>;
+    async fn get_external_action_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Option<ExternalActionPlan>>;
+    async fn list_external_action_plans_by_run(
+        &self,
+        run_id: &str,
+    ) -> CoreResult<Vec<ExternalActionPlan>>;
+    async fn update_external_action_plan_status(
+        &self,
+        plan_id: &str,
+        status: agent_core::ExternalActionPlanStatus,
+        result_ref: Option<&str>,
+        compensation_ref: Option<&str>,
+        error_code: Option<&str>,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan>;
+    async fn record_external_action_compensation(
+        &self,
+        plan_id: &str,
+        compensation_result_ref: &str,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan>;
+    async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease>;
+    async fn list_credential_leases_by_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Vec<CredentialLease>>;
+
     async fn create_grant(&self, grant: AgentGrant) -> CoreResult<AgentGrant>;
 
     async fn acquire_resource_lock(
@@ -154,6 +197,12 @@ pub trait AgentStore:
         lock: ResourceLock,
         lease: Duration,
     ) -> CoreResult<ResourceLock>;
+    async fn active_resource_lock(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+        lock_scope: &str,
+    ) -> CoreResult<Option<ResourceLock>>;
     async fn release_resource_lock(&self, run_id: &str) -> CoreResult<EmptyResponse>;
     async fn record_worker_heartbeat(
         &self,

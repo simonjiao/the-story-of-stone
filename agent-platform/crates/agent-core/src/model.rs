@@ -113,7 +113,7 @@ string_enum! {
         Executing => "executing",
         Validating => "validating",
         AwaitingApproval => "awaiting_approval",
-        ApplyingSideEffects => "applying_side_effects",
+        ApplyingExternalActions => "applying_external_actions",
         Completed => "completed",
         Failed => "failed",
         Cancelled => "cancelled",
@@ -162,11 +162,31 @@ string_enum! {
 }
 
 string_enum! {
-    pub enum SideEffectMode {
+    pub enum ExternalActionMode {
         Deny => "deny",
         ReadOnly => "read_only",
         ApprovalRequired => "approval_required",
         Authorized => "authorized",
+    }
+}
+
+string_enum! {
+    pub enum ExternalActionPlanStatus {
+        Draft => "draft",
+        DryRunReady => "dry_run_ready",
+        DryRunRejected => "dry_run_rejected",
+        Applied => "applied",
+        Compensated => "compensated",
+        Failed => "failed",
+    }
+}
+
+string_enum! {
+    pub enum CredentialLeaseStatus {
+        DryRun => "dry_run",
+        Active => "active",
+        Revoked => "revoked",
+        Expired => "expired",
     }
 }
 
@@ -341,7 +361,7 @@ impl AgentTemplate {
             allowed_triggers: json!(["manual", "scheduled", "webhook", "session_message"]),
             allowed_actions: json!(["analyze", "prepare_change", "run_checks"]),
             default_constraints: json!({
-                "default_side_effect_mode": "approval_required",
+                "default_external_action_mode": "approval_required",
                 "max_items_per_run": 8,
                 "max_runtime_seconds": 1800,
                 "max_concurrent_runs_per_agent": 1,
@@ -366,7 +386,7 @@ impl AgentTemplate {
             allowed_triggers: json!(["scheduled", "admin_manual"]),
             allowed_actions: json!(["read_status_snapshot", "write_observer_report"]),
             default_constraints: json!({
-                "default_side_effect_mode": "deny",
+                "default_external_action_mode": "deny",
                 "max_concurrent_observer_runs": 1,
                 "readable_scopes": [
                     "status_summary",
@@ -487,9 +507,18 @@ impl AgentInstance {
     ) -> Self {
         let now = OffsetDateTime::now_utc();
         let agent_type = agent_type.into();
+        let hermes_profile = config
+            .get("hermes_profile")
+            .or_else(|| config.pointer("/runtime/hermes_profile"))
+            .or_else(|| config.get("runtime_profile"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("{agent_type}:agent-platform-minimal"));
         Self {
             id: new_id("agent"),
-            hermes_profile: format!("{agent_type}:agent-platform-minimal"),
+            hermes_profile,
             agent_type,
             owner_user: owner_user.into(),
             target_resource: target_resource.into(),
@@ -562,6 +591,7 @@ pub struct AgentSessionMessage {
     pub role: MessageRole,
     pub content_ref: Option<String>,
     pub content_summary: Option<String>,
+    pub external_message_id: Option<String>,
     pub run_id: Option<String>,
     pub trace_id: String,
     pub created_at: OffsetDateTime,
@@ -583,6 +613,7 @@ impl AgentSessionMessage {
             role,
             content_ref: None,
             content_summary,
+            external_message_id: None,
             run_id,
             trace_id: trace_id.into(),
             created_at: OffsetDateTime::now_utc(),
@@ -600,7 +631,7 @@ pub struct AgentRun {
     pub target_resource: String,
     pub run_status: AgentRunStatus,
     pub risk_level: RiskLevel,
-    pub side_effect_mode: SideEffectMode,
+    pub external_action_mode: ExternalActionMode,
     pub lease_owner: Option<String>,
     pub lease_until: Option<OffsetDateTime>,
     pub next_retry_at: Option<OffsetDateTime>,
@@ -631,7 +662,7 @@ impl AgentRun {
             target_resource: target_resource.into(),
             run_status: AgentRunStatus::Queued,
             risk_level: RiskLevel::Low,
-            side_effect_mode: SideEffectMode::ReadOnly,
+            external_action_mode: ExternalActionMode::ReadOnly,
             lease_owner: None,
             lease_until: None,
             next_retry_at: None,
@@ -643,6 +674,120 @@ impl AgentRun {
             created_at: OffsetDateTime::now_utc(),
             claimed_at: None,
             finished_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlan {
+    pub id: String,
+    pub run_id: String,
+    pub connector: String,
+    pub action: String,
+    pub resource_ref: String,
+    pub risk_level: RiskLevel,
+    pub external_action_mode: ExternalActionMode,
+    pub approval_id: Option<String>,
+    pub credential_scope: Option<String>,
+    pub input_summary: Option<String>,
+    pub input_ref: Option<String>,
+    pub result_ref: Option<String>,
+    pub compensation_ref: Option<String>,
+    pub compensation_result_ref: Option<String>,
+    pub status: ExternalActionPlanStatus,
+    pub error_code: Option<String>,
+    pub trace_id: String,
+    pub version: i64,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+impl ExternalActionPlan {
+    pub fn new(
+        run_id: impl Into<String>,
+        connector: impl Into<String>,
+        action: impl Into<String>,
+        resource_ref: impl Into<String>,
+        risk_level: RiskLevel,
+        external_action_mode: ExternalActionMode,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            id: new_id("eaplan"),
+            run_id: run_id.into(),
+            connector: connector.into(),
+            action: action.into(),
+            resource_ref: resource_ref.into(),
+            risk_level,
+            external_action_mode,
+            approval_id: None,
+            credential_scope: None,
+            input_summary: None,
+            input_ref: None,
+            result_ref: None,
+            compensation_ref: None,
+            compensation_result_ref: None,
+            status: ExternalActionPlanStatus::Draft,
+            error_code: None,
+            trace_id: trace_id.into(),
+            version: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialLease {
+    pub id: String,
+    pub external_action_plan_id: String,
+    pub credential_scope: String,
+    pub provider_ref: Option<String>,
+    pub status: CredentialLeaseStatus,
+    pub expires_at: Option<OffsetDateTime>,
+    pub trace_id: String,
+    pub revoked_at: Option<OffsetDateTime>,
+    pub created_at: OffsetDateTime,
+}
+
+impl CredentialLease {
+    pub fn dry_run(
+        external_action_plan_id: impl Into<String>,
+        credential_scope: impl Into<String>,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: new_id("credlease"),
+            external_action_plan_id: external_action_plan_id.into(),
+            credential_scope: credential_scope.into(),
+            provider_ref: None,
+            status: CredentialLeaseStatus::DryRun,
+            expires_at: None,
+            trace_id: trace_id.into(),
+            revoked_at: None,
+            created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    pub fn active(
+        external_action_plan_id: impl Into<String>,
+        credential_scope: impl Into<String>,
+        provider_ref: impl Into<String>,
+        ttl_seconds: i64,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            id: new_id("credlease"),
+            external_action_plan_id: external_action_plan_id.into(),
+            credential_scope: credential_scope.into(),
+            provider_ref: Some(provider_ref.into()),
+            status: CredentialLeaseStatus::Active,
+            expires_at: Some(now + time::Duration::seconds(ttl_seconds.max(1))),
+            trace_id: trace_id.into(),
+            revoked_at: None,
+            created_at: now,
         }
     }
 }
@@ -827,9 +972,344 @@ pub struct ObserverSnapshot {
     pub agent_counts: Value,
     pub session_counts: Value,
     pub run_counts: Value,
+    pub runtime_summary: Value,
     pub lock_summary: Value,
     pub audit_summary: Value,
     pub worker_summary: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObserverSnapshotAssessment {
+    pub health_status: HealthStatus,
+    pub risk_level: RiskLevel,
+    pub summary: String,
+    pub findings: Value,
+    pub recommendations: Value,
+    pub evidence_refs: Value,
+}
+
+pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshotAssessment {
+    let dead_letters = json_i64(&snapshot.run_counts, "dead_letter");
+    let failed = json_i64(&snapshot.run_counts, "failed");
+    let timed_out = std::cmp::max(
+        json_i64(&snapshot.run_counts, "timed_out"),
+        json_i64(&snapshot.runtime_summary, "timed_out_runs"),
+    );
+    let retrying = json_i64(&snapshot.runtime_summary, "retrying_runs");
+    let max_retry = json_i64(&snapshot.runtime_summary, "max_retry_count");
+    let avg_runtime_ms = json_f64(&snapshot.runtime_summary, "avg_completed_runtime_ms");
+    let max_context_messages = json_i64(&snapshot.runtime_summary, "max_context_messages");
+    let dry_run_rejected = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "dry_run_rejected"))
+        .unwrap_or(0);
+    let external_action_applied = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "applied"))
+        .unwrap_or(0);
+    let external_action_compensated = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "compensated"))
+        .unwrap_or(0);
+    let external_action_failed = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "failed"))
+        .unwrap_or(0);
+    let external_action_errors = snapshot
+        .runtime_summary
+        .get("external_action_plan_error_counts")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let approval_bypass_attempts = json_i64(&external_action_errors, "approval_required")
+        + json_i64(&external_action_errors, "approval_not_found")
+        + json_i64(&external_action_errors, "approval_not_approved:denied");
+    let external_action_lock_conflicts = json_i64(&external_action_errors, "resource_locked");
+    let abnormal_external_action_results =
+        json_i64(&external_action_errors, "connector_invalid_result")
+            + json_i64(&external_action_errors, "connector_dead_letter");
+    let active_locks = json_i64(&snapshot.lock_summary, "active_locks");
+    let failed_audits = snapshot
+        .audit_summary
+        .get("recent_decisions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item.get("decision").and_then(Value::as_str),
+                        Some("failed" | "denied" | "conflict")
+                    )
+                })
+                .count() as i64
+        })
+        .unwrap_or(0);
+
+    let mut signals = Vec::new();
+    push_count_signal(
+        &mut signals,
+        "runtime_dead_letter",
+        dead_letters,
+        1,
+        5,
+        "dead_letter runs indicate exhausted retries or unrecoverable runtime failures",
+    );
+    push_count_signal(
+        &mut signals,
+        "runtime_failed",
+        failed,
+        5,
+        20,
+        "failed runs indicate runtime, policy or connector failures that did not complete",
+    );
+    push_count_signal(
+        &mut signals,
+        "runtime_timeout",
+        timed_out,
+        1,
+        5,
+        "timed_out runs indicate runtime latency or stuck execution",
+    );
+    push_count_signal(
+        &mut signals,
+        "runtime_retry_pressure",
+        retrying + max_retry,
+        3,
+        10,
+        "retry pressure indicates unstable runtime or worker execution",
+    );
+    push_f64_signal(
+        &mut signals,
+        "runtime_latency",
+        avg_runtime_ms,
+        30_000.0,
+        120_000.0,
+        "completed runtime latency is above the P1 review threshold",
+    );
+    push_count_signal(
+        &mut signals,
+        "context_growth",
+        max_context_messages,
+        100,
+        300,
+        "session context is growing enough to affect quality and cost",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_dry_run_rejection",
+        dry_run_rejected,
+        1,
+        10,
+        "External action readiness dry-runs are being rejected and need operator review",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_apply_failure",
+        external_action_failed,
+        1,
+        5,
+        "External action writes are failing and need connector, credential or approval review",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_approval_bypass_attempt",
+        approval_bypass_attempts,
+        1,
+        5,
+        "external-action apply attempts are missing or using invalid approvals",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_lock_conflict",
+        external_action_lock_conflicts,
+        1,
+        5,
+        "external-action apply attempts are colliding on resource locks",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_abnormal_write_result",
+        abnormal_external_action_results,
+        1,
+        5,
+        "write connector results are invalid or exhausted retry/dead-letter handling",
+    );
+    push_count_signal(
+        &mut signals,
+        "resource_lock_pressure",
+        active_locks,
+        5,
+        20,
+        "active resource locks may indicate long-running or stuck external-action preparation",
+    );
+    push_count_signal(
+        &mut signals,
+        "audit_failure_decisions",
+        failed_audits,
+        3,
+        10,
+        "recent audit decisions include failed, denied or conflict outcomes",
+    );
+
+    let risk_level = highest_signal_risk(&signals);
+    let health_status = match risk_level {
+        RiskLevel::Critical => HealthStatus::Unhealthy,
+        RiskLevel::High | RiskLevel::Medium => HealthStatus::Degraded,
+        RiskLevel::Low => HealthStatus::Healthy,
+    };
+    let summary = format!(
+        "Observer snapshot collected at {}. signals={}, dead_letter={}, failed={}, timed_out={}, retrying={}, avg_runtime_ms={:.0}, max_context_messages={}, dry_run_rejected={}, external_action_applied={}, external_action_compensated={}, external_action_failed={}, approval_bypass_attempts={}, external_action_lock_conflicts={}, abnormal_external_action_results={}.",
+        snapshot.collected_at,
+        signals.len(),
+        dead_letters,
+        failed,
+        timed_out,
+        retrying,
+        avg_runtime_ms,
+        max_context_messages,
+        dry_run_rejected,
+        external_action_applied,
+        external_action_compensated,
+        external_action_failed,
+        approval_bypass_attempts,
+        external_action_lock_conflicts,
+        abnormal_external_action_results
+    );
+    let recommendations = if signals.is_empty() {
+        json!([
+            {
+                "priority": "low",
+                "recommendation": "Continue normal P1 smoke and audit review; no runtime quality risk crossed the current threshold."
+            }
+        ])
+    } else {
+        Value::Array(
+            signals
+                .iter()
+                .map(|signal| {
+                    json!({
+                        "priority": signal.get("severity").and_then(Value::as_str).unwrap_or("medium"),
+                        "category": signal.get("category").and_then(Value::as_str).unwrap_or("runtime_quality"),
+                        "recommendation": "Inspect the linked run, audit, worker heartbeat and connector summaries before any control-plane change."
+                    })
+                })
+                .collect(),
+        )
+    };
+
+    ObserverSnapshotAssessment {
+        health_status,
+        risk_level,
+        summary,
+        findings: json!({
+            "run_counts": snapshot.run_counts.clone(),
+            "agent_counts": snapshot.agent_counts.clone(),
+            "session_counts": snapshot.session_counts.clone(),
+            "runtime_summary": snapshot.runtime_summary.clone(),
+            "quality_signals": signals,
+            "risk_taxonomy": {
+                "runtime_dead_letter": dead_letters,
+                "runtime_failed": failed,
+                "runtime_timeout": timed_out,
+                "runtime_retry_pressure": retrying,
+                "max_retry_count": max_retry,
+                "runtime_latency_ms": avg_runtime_ms,
+                "context_growth_messages": max_context_messages,
+                "external_action_dry_run_rejection": dry_run_rejected,
+                "external_action_applied": external_action_applied,
+                "external_action_compensated": external_action_compensated,
+                "external_action_apply_failure": external_action_failed,
+                "external_action_error_counts": external_action_errors,
+                "external_action_approval_bypass_attempt": approval_bypass_attempts,
+                "external_action_lock_conflict": external_action_lock_conflicts,
+                "external_action_abnormal_write_result": abnormal_external_action_results,
+                "resource_lock_pressure": active_locks,
+                "audit_failure_decisions": failed_audits
+            }
+        }),
+        recommendations,
+        evidence_refs: json!({
+            "lock_summary": snapshot.lock_summary.clone(),
+            "audit_summary": snapshot.audit_summary.clone(),
+            "worker_summary": snapshot.worker_summary.clone(),
+        }),
+    }
+}
+
+fn json_i64(value: &Value, key: &str) -> i64 {
+    value.get(key).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn json_f64(value: &Value, key: &str) -> f64 {
+    value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn push_count_signal(
+    signals: &mut Vec<Value>,
+    category: &str,
+    value: i64,
+    medium_threshold: i64,
+    high_threshold: i64,
+    summary: &str,
+) {
+    if value < medium_threshold {
+        return;
+    }
+    let severity = if value >= high_threshold {
+        "high"
+    } else {
+        "medium"
+    };
+    signals.push(json!({
+        "category": category,
+        "severity": severity,
+        "value": value,
+        "summary": summary,
+    }));
+}
+
+fn push_f64_signal(
+    signals: &mut Vec<Value>,
+    category: &str,
+    value: f64,
+    medium_threshold: f64,
+    high_threshold: f64,
+    summary: &str,
+) {
+    if value < medium_threshold {
+        return;
+    }
+    let severity = if value >= high_threshold {
+        "high"
+    } else {
+        "medium"
+    };
+    signals.push(json!({
+        "category": category,
+        "severity": severity,
+        "value": value,
+        "summary": summary,
+    }));
+}
+
+fn highest_signal_risk(signals: &[Value]) -> RiskLevel {
+    let high = signals.iter().any(|signal| {
+        signal
+            .get("severity")
+            .and_then(Value::as_str)
+            .is_some_and(|severity| severity == "high")
+    });
+    if high {
+        RiskLevel::High
+    } else if signals.is_empty() {
+        RiskLevel::Low
+    } else {
+        RiskLevel::Medium
+    }
 }
 
 pub fn validate_request_transition(
@@ -876,9 +1356,9 @@ pub fn validate_run_transition(from: AgentRunStatus, to: AgentRunStatus) -> Core
             | (Executing, Validating | Failed | TimedOut)
             | (
                 Validating,
-                ApplyingSideEffects | Completed | Failed | TimedOut
+                ApplyingExternalActions | Completed | Failed | TimedOut
             )
-            | (ApplyingSideEffects, Completed | Failed | TimedOut)
+            | (ApplyingExternalActions, Completed | Failed | TimedOut)
             | (AwaitingApproval, PolicyChecked | Cancelled | Failed)
             | (Failed, Queued | DeadLetter)
             | (TimedOut, Queued | DeadLetter)
@@ -933,6 +1413,53 @@ mod tests {
         assert!(validate_run_transition(AgentRunStatus::Queued, AgentRunStatus::Claimed).is_ok());
         assert!(
             validate_run_transition(AgentRunStatus::Queued, AgentRunStatus::Completed).is_err()
+        );
+    }
+
+    #[test]
+    fn agent_instance_uses_configured_hermes_profile() {
+        let agent = AgentInstance::new(
+            "user-1",
+            "background_worker",
+            "resource:team/project-alpha",
+            "hash",
+            json!({"runtime": {"hermes_profile": "background_worker:analysis"}}),
+            "trace-test",
+        );
+
+        assert_eq!(agent.hermes_profile, "background_worker:analysis");
+    }
+
+    #[test]
+    fn observer_assessment_flags_runtime_quality_signals() {
+        let snapshot = ObserverSnapshot {
+            collected_at: OffsetDateTime::now_utc(),
+            agent_counts: json!({"running": 1}),
+            session_counts: json!({"active": 1}),
+            run_counts: json!({"dead_letter": 1, "failed": 6}),
+            runtime_summary: json!({
+                "retrying_runs": 3,
+                "max_retry_count": 3,
+                "timed_out_runs": 1,
+                "avg_completed_runtime_ms": 31_000.0,
+                "max_context_messages": 101,
+                "external_action_plan_counts": {"dry_run_rejected": 1}
+            }),
+            lock_summary: json!({"active_locks": 0}),
+            audit_summary: json!({"recent_decisions": []}),
+            worker_summary: json!({"workers": []}),
+        };
+
+        let assessment = assess_observer_snapshot(&snapshot);
+
+        assert_eq!(assessment.health_status, HealthStatus::Degraded);
+        assert_eq!(assessment.risk_level, RiskLevel::Medium);
+        assert!(
+            assessment
+                .findings
+                .get("quality_signals")
+                .and_then(Value::as_array)
+                .is_some_and(|signals| signals.len() >= 4)
         );
     }
 }

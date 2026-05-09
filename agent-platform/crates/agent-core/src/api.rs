@@ -1,7 +1,8 @@
 use crate::{
     AgentBridgeBindingStatus, AgentInstanceStatus, AgentRequestStatus, AgentRunStatus,
-    AgentSessionStatus, HealthStatus, MessageRole, RequestType, RiskLevel, SideEffectMode,
-    TriggerType,
+    AgentSession, AgentSessionMessage, AgentSessionStatus, CredentialLease, ExternalActionMode,
+    ExternalActionPlan, ExternalActionPlanStatus, HealthStatus, MessageRole, RequestType,
+    ResourceLock, RiskLevel, TriggerType,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,7 +18,7 @@ pub struct AgentRequestInput {
     pub structured_payload: Value,
     pub idempotency_key: Option<String>,
     pub risk_level: Option<RiskLevel>,
-    pub side_effect_mode: Option<SideEffectMode>,
+    pub external_action_mode: Option<ExternalActionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,8 @@ pub struct AppendMessageInput {
     pub role: MessageRole,
     pub content_summary: String,
     pub content_ref: Option<String>,
+    #[serde(default)]
+    pub external_message_id: Option<String>,
     pub run_id: Option<String>,
 }
 
@@ -72,7 +75,7 @@ pub struct CreateRunInput {
     pub idempotency_key: Option<String>,
     pub target_resource: Option<String>,
     pub risk_level: Option<RiskLevel>,
-    pub side_effect_mode: Option<SideEffectMode>,
+    pub external_action_mode: Option<ExternalActionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +157,14 @@ pub struct UpdateOpenWebUiBridgeRunInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimOpenWebUiBridgeNonceInput {
+    pub open_webui_chat_id: String,
+    pub model: String,
+    pub nonce: String,
+    pub issued_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunAdminDecisionInput {
     pub reason: Option<String>,
 }
@@ -166,6 +177,93 @@ pub struct ObserverReportSummary {
     pub risk_level: Option<RiskLevel>,
     pub summary: String,
     pub created_at: OffsetDateTime,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverReportDiscussionInput {
+    pub agent_id: String,
+    pub initial_message: String,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverReportDiscussionResponse {
+    pub report_id: String,
+    pub session: AgentSession,
+    pub first_message: AgentSessionMessage,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatusSessionInput {
+    pub report_id: Option<String>,
+    pub initial_message: Option<String>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatusSessionResponse {
+    pub report_id: String,
+    pub agent: crate::AgentInstance,
+    pub session: AgentSession,
+    pub report_message: AgentSessionMessage,
+    pub first_message: AgentSessionMessage,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanDryRunInput {
+    pub connector: String,
+    pub action: String,
+    pub resource_ref: String,
+    pub credential_scope: Option<String>,
+    pub approval_id: Option<String>,
+    pub input_summary: Option<String>,
+    pub input_ref: Option<String>,
+    pub risk_level: Option<RiskLevel>,
+    pub external_action_mode: Option<ExternalActionMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanDryRunResponse {
+    pub plan: ExternalActionPlan,
+    pub credential_lease: Option<CredentialLease>,
+    pub dry_run_status: ExternalActionPlanStatus,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanApplyInput {
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanApplyResponse {
+    pub plan: ExternalActionPlan,
+    pub credential_lease: CredentialLease,
+    pub resource_lock: ResourceLock,
+    pub apply_status: ExternalActionPlanStatus,
+    #[serde(default)]
+    pub connector_metadata: Value,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanCompensateInput {
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanCompensateResponse {
+    pub plan: ExternalActionPlan,
+    pub compensate_status: ExternalActionPlanStatus,
+    pub compensation_result_ref: Option<String>,
+    #[serde(default)]
+    pub connector_metadata: Value,
     pub trace_id: String,
 }
 

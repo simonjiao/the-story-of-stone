@@ -9,8 +9,14 @@ pub mod metric_names {
     pub const RUN_HEARTBEAT_TOTAL: &str = "agent_platform_run_heartbeat_total";
     pub const RUN_RETRY_TOTAL: &str = "agent_platform_run_retry_total";
     pub const RUN_DEAD_LETTER_TOTAL: &str = "agent_platform_run_dead_letter_total";
+    pub const RUNTIME_CALL_TOTAL: &str = "agent_platform_runtime_call_total";
     pub const RUNTIME_DURATION_SECONDS: &str = "agent_platform_runtime_duration_seconds";
     pub const RUNTIME_TIMEOUT_TOTAL: &str = "agent_platform_runtime_timeout_total";
+    pub const CONNECTOR_SNAPSHOT_TOTAL: &str = "agent_platform_connector_snapshot_total";
+    pub const EXTERNAL_ACTION_DRY_RUN_TOTAL: &str = "agent_platform_external_action_dry_run_total";
+    pub const EXTERNAL_ACTION_APPLY_TOTAL: &str = "agent_platform_external_action_apply_total";
+    pub const EXTERNAL_ACTION_COMPENSATE_TOTAL: &str =
+        "agent_platform_external_action_compensate_total";
     pub const LOCK_WAIT_SECONDS: &str = "agent_platform_lock_wait_seconds";
     pub const OBSERVER_REPORT_TOTAL: &str = "agent_platform_observer_report_total";
 }

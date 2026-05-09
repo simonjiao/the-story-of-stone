@@ -53,6 +53,8 @@ class Filter:
             or _get(__metadata__, "conversation_id")
             or _get(body.get("metadata"), "chat_id")
             or _get(body.get("metadata"), "conversation_id")
+            or body.get("chat_id")
+            or body.get("conversation_id")
             or ""
         ).strip()
         if not secret or not user_id or not chat_id:
@@ -61,13 +63,16 @@ class Filter:
         session_id = str(
             _get(__metadata__, "session_id")
             or _get(body.get("metadata"), "session_id")
+            or body.get("session_id")
             or ""
         ).strip()
         message_id = str(
-            _get(__metadata__, "message_id")
-            or _get(__metadata__, "user_message_id")
-            or _get(body.get("metadata"), "message_id")
+            _get(__metadata__, "user_message_id")
+            or _get(__metadata__, "message_id")
             or _get(body.get("metadata"), "user_message_id")
+            or _get(body.get("metadata"), "message_id")
+            or body.get("user_message_id")
+            or body.get("message_id")
             or ""
         ).strip()
         user_role = str(_get(__user__, "role") or "user").strip() or "user"

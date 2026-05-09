@@ -104,6 +104,39 @@ enum RunsSubcommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    DryRunExternalAction {
+        run_id: String,
+        #[arg(long)]
+        connector: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        resource_ref: String,
+        #[arg(long)]
+        credential_scope: Option<String>,
+        #[arg(long)]
+        approval_id: Option<String>,
+        #[arg(long)]
+        input_summary: Option<String>,
+        #[arg(long)]
+        risk_level: Option<String>,
+        #[arg(long)]
+        external_action_mode: Option<String>,
+    },
+    ApplyExternalAction {
+        run_id: String,
+        plan_id: String,
+        #[arg(long)]
+        payload_json: Option<String>,
+    },
+    CompensateExternalAction {
+        run_id: String,
+        plan_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        payload_json: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -126,6 +159,23 @@ enum ObserverSubcommand {
     },
     Show {
         report_id: String,
+    },
+    Discuss {
+        report_id: String,
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    SystemSession {
+        #[arg(long)]
+        report_id: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
     Run,
 }
@@ -238,6 +288,74 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?
             }
+            RunsSubcommand::DryRunExternalAction {
+                run_id,
+                connector,
+                action,
+                resource_ref,
+                credential_scope,
+                approval_id,
+                input_summary,
+                risk_level,
+                external_action_mode,
+            } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/external-action-plans/dry-run"),
+                    json!({
+                        "connector": connector,
+                        "action": action,
+                        "resource_ref": resource_ref,
+                        "credential_scope": credential_scope,
+                        "approval_id": approval_id,
+                        "input_summary": input_summary,
+                        "risk_level": risk_level,
+                        "external_action_mode": external_action_mode,
+                    }),
+                )
+                .await?
+            }
+            RunsSubcommand::ApplyExternalAction {
+                run_id,
+                plan_id,
+                payload_json,
+            } => {
+                let payload = match payload_json {
+                    Some(value) => serde_json::from_str::<Value>(&value)
+                        .context("payload-json must be valid JSON")?,
+                    None => json!({}),
+                };
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply"),
+                    json!({ "payload": payload }),
+                )
+                .await?
+            }
+            RunsSubcommand::CompensateExternalAction {
+                run_id,
+                plan_id,
+                reason,
+                payload_json,
+            } => {
+                let payload = match payload_json {
+                    Some(value) => serde_json::from_str::<Value>(&value)
+                        .context("payload-json must be valid JSON")?,
+                    None => json!({}),
+                };
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/compensate"),
+                    json!({ "reason": reason, "payload": payload }),
+                )
+                .await?
+            }
         },
         Command::Audit(command) => {
             get(
@@ -264,6 +382,43 @@ async fn main() -> anyhow::Result<()> {
                     &manager_url,
                     &headers,
                     &format!("/v1/admin/observer/reports/{report_id}"),
+                )
+                .await?
+            }
+            ObserverSubcommand::Discuss {
+                report_id,
+                agent_id,
+                message,
+                idempotency_key,
+            } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/observer/reports/{report_id}/discussions"),
+                    json!({
+                        "agent_id": agent_id,
+                        "initial_message": message,
+                        "idempotency_key": idempotency_key,
+                    }),
+                )
+                .await?
+            }
+            ObserverSubcommand::SystemSession {
+                report_id,
+                message,
+                idempotency_key,
+            } => {
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    "/v1/admin/observer/system-session",
+                    json!({
+                        "report_id": report_id,
+                        "initial_message": message,
+                        "idempotency_key": idempotency_key,
+                    }),
                 )
                 .await?
             }

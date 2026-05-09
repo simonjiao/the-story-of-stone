@@ -1,8 +1,8 @@
 use crate::{StoreRef, control_services, request_services, telemetry_support};
 use agent_core::{
     AgentCoreError, AgentInstance, AgentRun, AgentSession, AuditDecision, AuthContext, CoreResult,
-    CreateChildSessionInput, CreateRunInput, CreateSessionInput, ErrorCode, PolicyDecision,
-    RequestType, RiskLevel, RoleName, SideEffectMode, actions,
+    CreateChildSessionInput, CreateRunInput, CreateSessionInput, ErrorCode, ExternalActionMode,
+    PolicyDecision, RequestType, RiskLevel, RoleName, actions,
 };
 use serde_json::json;
 
@@ -136,14 +136,16 @@ pub(crate) async fn create_run(
     );
     run.idempotency_key = input.idempotency_key;
     run.risk_level = input.risk_level.unwrap_or(RiskLevel::Low);
-    run.side_effect_mode = input.side_effect_mode.unwrap_or(SideEffectMode::ReadOnly);
+    run.external_action_mode = input
+        .external_action_mode
+        .unwrap_or(ExternalActionMode::ReadOnly);
     let policy = request_services::policy_ctx(
         actions::RUN_CREATE,
         Some(RequestType::CreateRun),
         Some(agent.agent_type.clone()),
         Some(run.target_resource.clone()),
         run.risk_level,
-        run.side_effect_mode,
+        run.external_action_mode,
     )?;
     let decision = agent_core::DefaultPolicy::authorize(auth, &policy);
     telemetry_support::record_policy_decision_metric(actions::RUN_CREATE, &decision);

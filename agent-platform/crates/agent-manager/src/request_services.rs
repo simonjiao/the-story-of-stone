@@ -3,7 +3,7 @@ use agent_core::{
     AGENT_TYPE_BACKGROUND_WORKER, AgentBridgeBinding, AgentCoreError, AgentInstance, AgentRequest,
     AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
     ApprovalRequest, ApprovalStatus, AuditDecision, AuditLog, AuthContext, CoreResult, ErrorCode,
-    PolicyContext, PolicyDecision, RequestType, ResourceRef, RiskLevel, SideEffectMode,
+    ExternalActionMode, PolicyContext, PolicyDecision, RequestType, ResourceRef, RiskLevel,
     TriggerType, new_id, request_action,
 };
 use serde_json::{Value, json};
@@ -45,11 +45,11 @@ pub(crate) async fn submit_request(
     request = store.update_agent_request(request).await?;
 
     let risk_level = input.risk_level.unwrap_or(RiskLevel::Low);
-    let side_effect_mode = input.side_effect_mode.unwrap_or_else(|| {
+    let external_action_mode = input.external_action_mode.unwrap_or_else(|| {
         if input.request_type == RequestType::CreateAgent {
-            SideEffectMode::ApprovalRequired
+            ExternalActionMode::ApprovalRequired
         } else {
-            SideEffectMode::ReadOnly
+            ExternalActionMode::ReadOnly
         }
     });
     let policy = policy_ctx(
@@ -58,7 +58,7 @@ pub(crate) async fn submit_request(
         input.agent_type.clone(),
         input.target_resource.clone(),
         risk_level,
-        side_effect_mode,
+        external_action_mode,
     )?;
     let decision = agent_core::DefaultPolicy::authorize(auth, &policy);
     telemetry_support::record_policy_decision_metric(action, &decision);
@@ -254,7 +254,7 @@ pub(crate) fn policy_ctx(
     agent_type: Option<String>,
     target_resource: Option<String>,
     risk_level: RiskLevel,
-    side_effect_mode: SideEffectMode,
+    external_action_mode: ExternalActionMode,
 ) -> CoreResult<PolicyContext> {
     Ok(PolicyContext {
         action: action.to_string(),
@@ -262,7 +262,7 @@ pub(crate) fn policy_ctx(
         agent_type,
         resource: target_resource.map(ResourceRef::parse).transpose()?,
         risk_level,
-        side_effect_mode,
+        external_action_mode,
         resource_attributes: Value::Null,
         observer_mode: false,
     })

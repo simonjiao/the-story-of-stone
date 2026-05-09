@@ -31,6 +31,7 @@ RUN apt-get update \
 COPY --from=builder /artifacts/agent-manager /usr/local/bin/agent-manager
 COPY --from=builder /artifacts/agent-orchestrator /usr/local/bin/agent-orchestrator
 COPY --from=builder /artifacts/agent-runtime /usr/local/bin/agent-runtime
+COPY --from=builder /artifacts/agent-runtime /usr/local/bin/agent-action-gateway
 COPY --from=builder /artifacts/agent-worker /usr/local/bin/agent-worker
 COPY --from=builder /artifacts/agentctl /usr/local/bin/agentctl
 
