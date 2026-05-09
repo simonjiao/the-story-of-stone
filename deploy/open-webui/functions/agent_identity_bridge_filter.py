@@ -29,7 +29,7 @@ class Filter:
     class Valves(BaseModel):
         AGENT_BRIDGE_SECRET: str = Field(default="")
         AGENT_BRIDGE_ISSUER: str = Field(default="open-webui")
-        TARGET_MODEL: str = Field(default="hermes-agent")
+        TARGET_MODEL: str = Field(default="tonglingyu")
 
     def __init__(self) -> None:
         self.valves = self.Valves()

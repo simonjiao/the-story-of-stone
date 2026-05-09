@@ -17,6 +17,7 @@ COPY --from=builder /workspace/target/release/agent-orchestrator /usr/local/bin/
 COPY --from=builder /workspace/target/release/agent-runtime /usr/local/bin/agent-runtime
 COPY --from=builder /workspace/target/release/agent-worker /usr/local/bin/agent-worker
 COPY --from=builder /workspace/target/release/agentctl /usr/local/bin/agentctl
+COPY --from=builder /workspace/target/release/tonglingyu-gateway /usr/local/bin/tonglingyu-gateway
 
 WORKDIR /app
 CMD ["agent-manager"]

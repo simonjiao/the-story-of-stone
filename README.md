@@ -13,14 +13,16 @@
 - B 站视频转录流水线：`scripts/bilibili_hlm_pipeline.py`
 - 风格资料：`resources/styles/buhongjushi/`
 - 设计文档：`docs/tonglingyu-agent-design/`
-- 实现入口骨架：`src/tonglingyu_agent/`
+- Rust 实现入口：`agent-platform/crates/tonglingyu-gateway/`
+- 第一批 Wikisource source snapshot：`resources/sources/wiki/`
+- SQLite/FTS 建库、证据卡片、证据包和 reviewer 最小闭环
+- 远程真实部署：`hhost` 上 Open WebUI 已通过内网连接 Rust `tonglingyu-gateway`
 
 未有：
 
-- 正式基础资料快照：`resources/sources/`
-- SQLite/FTS 建库、八类知识库、证据卡片和证据包
-- Gateway、内部 Agent profiles、reviewer 审校链路
-- Open WebUI “通灵玉”模型入口
+- 影印件或权威校注本复核层
+- 完整人物、关系、事件和评测题库标注
+- 多 flavor/styles 的生产化切换
 
 已废弃：旧基础库产物和旧专用抽取脚本。第一版不从已删除内容继续叠加。
 
@@ -70,4 +72,23 @@
 ```bash
 python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
 git diff --check
+```
+
+Rust 建库和本地 Gateway：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  build-kb \
+  --source-root resources/sources/wiki \
+  --db data/tonglingyu/tonglingyu.db \
+  --rebuild
+```
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  serve \
+  --bind 127.0.0.1:8090 \
+  --db data/tonglingyu/tonglingyu.db \
+  --model-id tonglingyu \
+  --model-name 通灵玉
 ```

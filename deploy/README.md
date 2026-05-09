@@ -11,13 +11,17 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
+- `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
+  SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
+  packages, runs reviewer checks, and calls Hermes as the upstream generation
+  layer when configured.
 - `agent-manager`: Agent Platform control plane, internal Docker network only.
-- `agent-orchestrator`: OpenAI-compatible gateway used by Open WebUI; ordinary
-  chat is passed through to Hermes, while agent control requests go to Manager.
+- `agent-orchestrator`: internal Agent Platform gateway for control-plane
+  workflows; ordinary 通灵玉 chat enters through `tonglingyu-gateway`.
 - `agent-worker`: Agent run worker.
 - `agent-observer`: read-only Observer Agent report loop.
 - `open-webui`: email/password login and chat UI. It connects only to
-  `agent-orchestrator`.
+  `tonglingyu-gateway` for the visible chat model.
 - `cloudflared`: Cloudflare Tunnel connector.
 - `agent-platform-postgres`: dedicated Agent Platform database, internal
   Docker network only.
@@ -45,8 +49,14 @@ Required changes:
   deploy node when `agent-platform/` is copied next to `docker-compose.yml`.
   The local default is `../agent-platform` when running from this `deploy/`
   directory.
+- `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
+  snapshots. The local default is `../resources/sources/wiki` when running from
+  this `deploy/` directory.
+- `TONGLINGYU_DATA_DIR`: persistent data directory for the generated SQLite/FTS
+  knowledge base. The local default is `./data/tonglingyu`.
+- `TONGLINGYU_MODEL_ID`: Open WebUI-visible model id. Default is `tonglingyu`.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
-  `agent_identity_bridge` Filter and `agent-orchestrator`.
+  `agent_identity_bridge` Filter and Agent Platform services.
 - `AGENT_JWT_SECRET`: Manager JWT signing secret shared by `agent-manager` and
   `agent-orchestrator`.
 - `AGENT_PLATFORM_ALLOW_DEV_HEADERS`: set to `false` after Bridge smoke passes
@@ -172,10 +182,20 @@ docker run --rm --network "${LOCAL_OPENAI_DOCKER_NETWORK}" curlimages/curl:lates
   "${LOCAL_OPENAI_BASE_URL}/models"
 ```
 
+Build the Tonglingyu knowledge base locally before deployment smoke tests:
+
+```bash
+cargo run --manifest-path ../agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  build-kb \
+  --source-root ../resources/sources/wiki \
+  --db data/tonglingyu/tonglingyu.db \
+  --rebuild
+```
+
 Start the stack:
 
 ```bash
-docker compose build agent-manager agent-orchestrator agent-worker agent-observer
+docker compose build tonglingyu-gateway agent-manager agent-orchestrator agent-worker agent-observer
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -191,6 +211,7 @@ Check logs:
 
 ```bash
 docker compose logs -f hermes
+docker compose logs -f tonglingyu-gateway
 docker compose logs -f agent-manager
 docker compose logs -f agent-orchestrator
 docker compose logs -f agent-worker
@@ -198,6 +219,13 @@ docker compose logs -f agent-observer
 docker compose logs -f open-webui
 docker compose logs -f cloudflared
 docker compose logs -f agent-platform-postgres
+```
+
+Check the Tonglingyu Gateway from the internal Docker network:
+
+```bash
+docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/healthz
+docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/v1/models
 ```
 
 Cloudflare Tunnel public hostname should point to:

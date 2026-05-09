@@ -7,9 +7,8 @@
 - `scripts/extract_epub.py` 和 `scripts/download_wikisource.py` 已输出
   source snapshot，并保留 `rare_char_annotations`。
 - `resources/styles/buhongjushi/` 风格转录保留，不作为主证据库。
-- `src/tonglingyu_agent/` 仍是骨架。
-- 正式 `resources/sources/` 基础资料、SQLite/FTS 证据型知识库、Gateway、
-  profiles、reviewer 和 Open WebUI 入口尚未实现。
+- `src/tonglingyu_agent/` 仍是旧 Python 骨架，不作为当前 Rust 主线入口。
+- Rust 主线入口为 `agent-platform/crates/tonglingyu-gateway/`。
 
 ## 已确认
 
@@ -32,13 +31,29 @@
   M2，必须先提升为 M1 P0。
 - 当前 `python3 scripts/validate_source_snapshots.py` 已通过：5 个来源和
   19 个抽样点满足 M1 source snapshot 闸门。
+- Rust `tonglingyu-gateway` 已实现 M2-M6 最小工程闭环：
+  source snapshot loader、SQLite/FTS、别名种子、证据卡片、证据包、
+  reviewer、OpenAI-compatible `/v1/models` 和 `/v1/chat/completions`。
+- 本地建库已验证：5 个来源、10419 个 blocks、10419 条 FTS 记录。
+- 本地 HTTP 验证已通过：`/healthz`、`/v1/models`、`/v1/evidence/search`
+  和 `/v1/chat/completions`。
+- `deploy/docker-compose.yml` 已加入真实 `tonglingyu-gateway` 服务，Open WebUI
+  默认连接该 Rust Gateway，Gateway 再按配置调用 Hermes 上游生成层。
+- 2026-05-09 已在远程 `hhost:/home/simon/hermes-home-deploy` 真实部署：
+  构建 `hermes-agent-platform:formal` 镜像，启动 `tonglingyu-gateway`
+  和现有 `hermes-open-webui`，远端 gateway healthcheck 为 healthy。
+- 远端 KB 由容器启动时从 source snapshot 构建，当前 `/healthz` 返回
+  5 个来源、10419 个 blocks；Open WebUI 容器内 `OPENAI_API_BASE_URL`
+  指向 `http://tonglingyu-gateway:8090/v1`，`DEFAULT_MODELS=tonglingyu`。
+- 远端容器内已验证 `/v1/models`、`/v1/evidence/search` 和
+  `/v1/chat/completions`；“通灵玉上的字是什么？”返回带证据包和 reviewer
+  约束的回答。
 
 ## 下一步
 
-1. 开始实现 source snapshot loader、SQLite schema、FTS、别名索引、
-   反证/限制索引和 `rare_char_annotations` 表。
-2. 定义证据卡片 schema，强制支持范围、不支持范围和校验状态。
-3. 建立正文、脂批、版本、人物别名、诗词判词、字形读音和证据不足评测。
-4. 再实现 Gateway、内部 Agent profiles、reviewer 审校和 Open WebUI 单入口。
-5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+1. 用 Open WebUI 页面侧做人工点击验证，确认登录态和 UI 中的模型选择
+   与容器内配置一致。
+2. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+3. 增加证据包回放、reviewer 失败样例和公开入口的 smoke 测试脚本。
+4. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。
