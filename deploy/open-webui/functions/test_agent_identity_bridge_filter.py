@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from agent_identity_bridge_filter import Filter, _signature, _target_models
+from agent_identity_bridge_filter import Filter, _signature
 
 
 class AgentIdentityBridgeFilterTest(unittest.TestCase):
@@ -18,20 +18,19 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
             "chat_id": "chat-1",
             "session_id": "session-1",
             "message_id": "message-1",
-            "model": "tonglingyu",
+            "model": "hermes-agent",
             "issued_at": 1778220000,
             "nonce": "nonce-1",
         }
         self.assertEqual(
             _signature("bridge-secret", context),
-            "c2b5b51c2e432b504341b9098fc8e5103710e445ec6ff099871b5cabdcb15e03",
+            "6185debba03afb3b99ac20a9ff87d93757940034dc9b3ccef7c83247004fbb10",
         )
 
     def test_inlet_injects_signed_context_for_target_model(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
-        filt.valves.TARGET_MODELS = "tonglingyu,other/default"
-        body = {"model": "tonglingyu", "messages": []}
+        body = {"model": "hermes-agent", "messages": []}
         result = asyncio.run(
             filt.inlet(
                 body,
@@ -49,11 +48,48 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         self.assertEqual(context["chat_id"], "chat-1")
         self.assertTrue(context["signature"])
 
-    def test_target_models_accepts_comma_allowlist(self) -> None:
-        self.assertEqual(
-            _target_models("tonglingyu, other/default", "legacy-model"),
-            {"tonglingyu", "other/default", "legacy-model"},
+    def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {"model": "hermes-agent", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "assistant-placeholder-1",
+                    "user_message_id": "user-message-1",
+                },
+            )
         )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["message_id"], "user-message-1")
+
+    def test_inlet_accepts_body_level_metadata_fallbacks(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {
+            "model": "hermes-agent",
+            "messages": [],
+            "chat_id": "chat-from-body",
+            "session_id": "session-from-body",
+            "user_message_id": "message-from-body",
+        }
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "admin"},
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["chat_id"], "chat-from-body")
+        self.assertEqual(context["session_id"], "session-from-body")
+        self.assertEqual(context["message_id"], "message-from-body")
+        self.assertEqual(context["user_role"], "admin")
 
 
 if __name__ == "__main__":
