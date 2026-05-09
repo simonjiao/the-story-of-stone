@@ -3,10 +3,10 @@ use agent_core::{
     AgentBridgeBinding, AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus,
     AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage,
     AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog,
-    CoreResult, EmptyResponse, ErrorCode, MemoryStore, ObserverReport, ObserverReportSummary,
-    ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary,
-    RuntimeOutput, SessionContext, SessionSummary, new_id, validate_run_transition,
-    validate_session_transition,
+    CoreResult, CredentialLease, EmptyResponse, ErrorCode, MemoryStore, ObserverReport,
+    ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim,
+    RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary, SideEffectPlan, new_id,
+    validate_run_transition, validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -275,6 +275,49 @@ fn map_report(row: &PgRow) -> CoreResult<ObserverReport> {
         recommendations: row.try_get("recommendations").map_err(store_error)?,
         evidence_refs: row.try_get("evidence_refs").map_err(store_error)?,
         trace_id: row.try_get("trace_id").map_err(store_error)?,
+        created_at: row.try_get("created_at").map_err(store_error)?,
+    })
+}
+
+fn map_side_effect_plan(row: &PgRow) -> CoreResult<SideEffectPlan> {
+    Ok(SideEffectPlan {
+        id: row.try_get("id").map_err(store_error)?,
+        run_id: row.try_get("run_id").map_err(store_error)?,
+        connector: row.try_get("connector").map_err(store_error)?,
+        action: row.try_get("action").map_err(store_error)?,
+        resource_ref: row.try_get("resource_ref").map_err(store_error)?,
+        risk_level: parse(
+            row.try_get::<String, _>("risk_level")
+                .map_err(store_error)?,
+        )?,
+        side_effect_mode: parse(
+            row.try_get::<String, _>("side_effect_mode")
+                .map_err(store_error)?,
+        )?,
+        approval_id: row.try_get("approval_id").map_err(store_error)?,
+        credential_scope: row.try_get("credential_scope").map_err(store_error)?,
+        input_summary: row.try_get("input_summary").map_err(store_error)?,
+        input_ref: row.try_get("input_ref").map_err(store_error)?,
+        result_ref: row.try_get("result_ref").map_err(store_error)?,
+        status: parse(row.try_get::<String, _>("status").map_err(store_error)?)?,
+        error_code: row.try_get("error_code").map_err(store_error)?,
+        trace_id: row.try_get("trace_id").map_err(store_error)?,
+        version: row.try_get("version").map_err(store_error)?,
+        created_at: row.try_get("created_at").map_err(store_error)?,
+        updated_at: row.try_get("updated_at").map_err(store_error)?,
+    })
+}
+
+fn map_credential_lease(row: &PgRow) -> CoreResult<CredentialLease> {
+    Ok(CredentialLease {
+        id: row.try_get("id").map_err(store_error)?,
+        side_effect_plan_id: row.try_get("side_effect_plan_id").map_err(store_error)?,
+        credential_scope: row.try_get("credential_scope").map_err(store_error)?,
+        provider_ref: row.try_get("provider_ref").map_err(store_error)?,
+        status: parse(row.try_get::<String, _>("status").map_err(store_error)?)?,
+        expires_at: row.try_get("expires_at").map_err(store_error)?,
+        trace_id: row.try_get("trace_id").map_err(store_error)?,
+        revoked_at: row.try_get("revoked_at").map_err(store_error)?,
         created_at: row.try_get("created_at").map_err(store_error)?,
     })
 }
@@ -1383,6 +1426,94 @@ impl AgentStore for PgAgentStore {
         row.as_ref().map(map_report).transpose()
     }
 
+    async fn create_side_effect_plan(&self, plan: SideEffectPlan) -> CoreResult<SideEffectPlan> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO side_effect_plans (
+                id, run_id, connector, action, resource_ref, risk_level,
+                side_effect_mode, approval_id, credential_scope, input_summary,
+                input_ref, result_ref, status, error_code, trace_id, version,
+                created_at, updated_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+            RETURNING *
+            "#,
+        )
+        .bind(&plan.id)
+        .bind(&plan.run_id)
+        .bind(&plan.connector)
+        .bind(&plan.action)
+        .bind(&plan.resource_ref)
+        .bind(plan.risk_level.to_string())
+        .bind(plan.side_effect_mode.to_string())
+        .bind(&plan.approval_id)
+        .bind(&plan.credential_scope)
+        .bind(&plan.input_summary)
+        .bind(&plan.input_ref)
+        .bind(&plan.result_ref)
+        .bind(plan.status.to_string())
+        .bind(&plan.error_code)
+        .bind(&plan.trace_id)
+        .bind(plan.version)
+        .bind(plan.created_at)
+        .bind(plan.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        map_side_effect_plan(&row)
+    }
+
+    async fn list_side_effect_plans_by_run(&self, run_id: &str) -> CoreResult<Vec<SideEffectPlan>> {
+        let rows = sqlx::query(
+            "SELECT * FROM side_effect_plans WHERE run_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store_error)?;
+        rows.iter().map(map_side_effect_plan).collect()
+    }
+
+    async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO credential_leases (
+                id, side_effect_plan_id, credential_scope, provider_ref, status,
+                expires_at, trace_id, revoked_at, created_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            RETURNING *
+            "#,
+        )
+        .bind(&lease.id)
+        .bind(&lease.side_effect_plan_id)
+        .bind(&lease.credential_scope)
+        .bind(&lease.provider_ref)
+        .bind(lease.status.to_string())
+        .bind(lease.expires_at)
+        .bind(&lease.trace_id)
+        .bind(lease.revoked_at)
+        .bind(lease.created_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        map_credential_lease(&row)
+    }
+
+    async fn list_credential_leases_by_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Vec<CredentialLease>> {
+        let rows = sqlx::query(
+            "SELECT * FROM credential_leases WHERE side_effect_plan_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(plan_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store_error)?;
+        rows.iter().map(map_credential_lease).collect()
+    }
+
     async fn create_grant(&self, grant: AgentGrant) -> CoreResult<AgentGrant> {
         sqlx::query(
             r#"
@@ -1459,6 +1590,45 @@ impl AgentStore for PgAgentStore {
             ));
         }
         Ok(lock)
+    }
+
+    async fn active_resource_lock(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+        lock_scope: &str,
+    ) -> CoreResult<Option<ResourceLock>> {
+        let row = sqlx::query(
+            r#"
+            SELECT *
+            FROM resource_locks
+            WHERE resource_type = $1
+              AND resource_id = $2
+              AND lock_scope = $3
+              AND lease_until > $4
+            ORDER BY lease_until DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(resource_type)
+        .bind(resource_id)
+        .bind(lock_scope)
+        .bind(OffsetDateTime::now_utc())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
+        row.map(|row| {
+            Ok(ResourceLock {
+                id: row.try_get("id").map_err(store_error)?,
+                resource_type: row.try_get("resource_type").map_err(store_error)?,
+                resource_id: row.try_get("resource_id").map_err(store_error)?,
+                lock_scope: row.try_get("lock_scope").map_err(store_error)?,
+                holder_run_id: row.try_get("holder_run_id").map_err(store_error)?,
+                lease_until: row.try_get("lease_until").map_err(store_error)?,
+                created_at: row.try_get("created_at").map_err(store_error)?,
+            })
+        })
+        .transpose()
     }
 
     async fn release_resource_lock(&self, run_id: &str) -> CoreResult<EmptyResponse> {
@@ -1888,6 +2058,37 @@ impl ObserverSnapshotStore for PgAgentStore {
             "SELECT run_status AS status, COUNT(*) AS count FROM agent_runs GROUP BY run_status",
         )
         .await?;
+        let runtime_row = sqlx::query(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE retry_count > 0) AS retrying_runs,
+                COALESCE(MAX(retry_count), 0)::BIGINT AS max_retry_count,
+                COUNT(*) FILTER (WHERE run_status = 'timed_out') AS timed_out_runs,
+                COALESCE(AVG(EXTRACT(EPOCH FROM (finished_at - claimed_at)) * 1000), 0)::DOUBLE PRECISION AS avg_completed_runtime_ms
+            FROM agent_runs
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        let context_row = sqlx::query(
+            r#"
+            SELECT COALESCE(MAX(message_count), 0)::BIGINT AS max_context_messages
+            FROM (
+                SELECT session_id, COUNT(*) AS message_count
+                FROM agent_session_messages
+                GROUP BY session_id
+            ) counts
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store_error)?;
+        let side_effect_plan_counts = counts(
+            &self.pool,
+            "SELECT status, COUNT(*) AS count FROM side_effect_plans GROUP BY status",
+        )
+        .await?;
         let lock_rows = sqlx::query(
             r#"
             SELECT resource_type, resource_id, lock_scope, holder_run_id, lease_until
@@ -1961,6 +2162,14 @@ impl ObserverSnapshotStore for PgAgentStore {
             agent_counts,
             session_counts,
             run_counts,
+            runtime_summary: json!({
+                "retrying_runs": runtime_row.try_get::<i64, _>("retrying_runs").map_err(store_error)?,
+                "max_retry_count": runtime_row.try_get::<i64, _>("max_retry_count").map_err(store_error)?,
+                "timed_out_runs": runtime_row.try_get::<i64, _>("timed_out_runs").map_err(store_error)?,
+                "avg_completed_runtime_ms": runtime_row.try_get::<f64, _>("avg_completed_runtime_ms").map_err(store_error)?,
+                "max_context_messages": context_row.try_get::<i64, _>("max_context_messages").map_err(store_error)?,
+                "side_effect_plan_counts": side_effect_plan_counts,
+            }),
             lock_summary: json!({
                 "active_locks": locks.len(),
                 "locks": locks,

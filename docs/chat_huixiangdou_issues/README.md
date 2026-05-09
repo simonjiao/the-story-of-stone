@@ -12,7 +12,8 @@
 | [ISSUE-006](ISSUE-006-stop-generation-control-unlabelled.md) | OPEN | P3 | `LONG-STOP-20260508` | 长回答停止生成可用，但生成中的停止控制在可访问 DOM 中无明确标签。 |
 | [ISSUE-007](ISSUE-007-approved-agent-owner-mismatch.md) | RESOLVED | P1 | `AGENT-APPROVAL-OWNER-20260508`, `AGENT-MULTI-SESSION-20260508`, `AGENT-WORKER-RUN-20260508` | 审批后 agent 曾归属审批人而不是原始请求人；已修复并通过多 session/Worker run 复测。 |
 | [ISSUE-008](ISSUE-008-open-webui-agent-identity-session-bridge.md) | RESOLVED | P2 | `BRIDGE-AUTH-20260508`, `BRIDGE-RUN-20260508`, `BRIDGE-MULTI-SESSION-20260508` | 已部署 Agent Identity Bridge baseline，Open WebUI 用户身份、chat binding、session run 和 Manager JWT 均通过正式远程 Docker 复测；hardening 见 ISSUE-009。 |
-| [ISSUE-009](ISSUE-009-agent-identity-bridge-hardening.md) | READY_FOR_DEPLOY | P1 | `BRIDGE-HARDEN-CODE-20260509`, `BRIDGE-HARDEN-DEPLOY-20260509` | Bridge hardening 已完成本地代码和测试，正式环境部署复测后才能宣告完整完成。 |
+| [ISSUE-009](ISSUE-009-agent-identity-bridge-hardening.md) | RESOLVED | P1 | `BRIDGE-HARDEN-CODE-20260509`, `BRIDGE-HARDEN-DEPLOY-20260509`, `BRIDGE-REAL-USER-MESSAGE-ID-PRIORITY-20260509` | Bridge hardening 已完成代码、正式环境部署和真实账号复测。 |
+| [ISSUE-010](ISSUE-010-open-webui-secret-env.md) | RESOLVED | P1 | `P1-OPENWEBUI-SECRET-20260509`, `P1-OPENWEBUI-SESSION-20260509` | Open WebUI session secret 已改为 `.env` 管理，重建后关键路径复测通过。 |
 
 ## 状态定义
 

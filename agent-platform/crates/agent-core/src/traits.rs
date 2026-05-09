@@ -1,6 +1,6 @@
 use crate::{
-    AgentCoreError, AgentRun, AgentSessionMessage, CoreResult, ObserverSnapshot, RunSummary,
-    SessionContext,
+    AgentCoreError, AgentInstance, AgentRun, AgentSessionMessage, CoreResult, CredentialLease,
+    ObserverSnapshot, RiskLevel, RunSummary, SessionContext, SideEffectMode, SideEffectPlan,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRunInput {
     pub run: AgentRun,
+    #[serde(default)]
+    pub agent: Option<AgentInstance>,
     pub context: Option<SessionContext>,
     pub snapshot: Option<Value>,
     pub trace_id: String,
@@ -19,8 +21,12 @@ pub struct RuntimeRunInput {
 pub struct RuntimeSessionInput {
     pub session_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub agent: Option<AgentInstance>,
     pub message: AgentSessionMessage,
     pub context: SessionContext,
+    #[serde(default)]
+    pub snapshot: Option<Value>,
     pub trace_id: String,
 }
 
@@ -78,6 +84,52 @@ pub trait ConnectorClient: Send + Sync {
         resource: &str,
         trace_id: &str,
     ) -> CoreResult<ConnectorSnapshot>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialLeaseRequest {
+    pub side_effect_plan_id: String,
+    pub credential_scope: String,
+    pub trace_id: String,
+}
+
+#[async_trait]
+pub trait CredentialProvider: Send + Sync {
+    async fn dry_run_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorDryRunInput {
+    pub plan: SideEffectPlan,
+    #[serde(default)]
+    pub payload: Value,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorDryRunOutput {
+    pub accepted: bool,
+    pub status: String,
+    pub result_ref: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[async_trait]
+pub trait WriteConnector: Send + Sync {
+    async fn dry_run(
+        &self,
+        input: WriteConnectorDryRunInput,
+    ) -> CoreResult<WriteConnectorDryRunOutput>;
+}
+
+pub fn side_effect_requires_credential(mode: SideEffectMode, risk: RiskLevel) -> bool {
+    matches!(
+        (mode, risk),
+        (SideEffectMode::Authorized, _)
+            | (SideEffectMode::ApprovalRequired, _)
+            | (_, RiskLevel::High | RiskLevel::Critical)
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

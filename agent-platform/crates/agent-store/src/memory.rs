@@ -3,10 +3,10 @@ use agent_core::{
     AgentBridgeBinding, AgentBridgeBindingStatus, AgentCoreError, AgentGrant, AgentInstance,
     AgentInstanceStatus, AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession,
     AgentSessionMessage, AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest,
-    ApprovalStatus, AuditLog, CoreResult, EmptyResponse, ErrorCode, MemoryStore, ObserverReport,
-    ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim,
-    RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary, validate_run_transition,
-    validate_session_transition,
+    ApprovalStatus, AuditLog, CoreResult, CredentialLease, EmptyResponse, ErrorCode, MemoryStore,
+    ObserverReport, ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore, ResourceLock,
+    RunClaim, RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary, SideEffectPlan,
+    validate_run_transition, validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -30,6 +30,8 @@ struct Inner {
     runs: HashMap<String, AgentRun>,
     audits: Vec<AuditLog>,
     reports: HashMap<String, ObserverReport>,
+    side_effect_plans: HashMap<String, SideEffectPlan>,
+    credential_leases: HashMap<String, CredentialLease>,
     grants: HashMap<String, AgentGrant>,
     locks: HashMap<(String, String, String), ResourceLock>,
     worker_heartbeats: HashMap<String, Value>,
@@ -719,6 +721,47 @@ impl AgentStore for MemoryAgentStore {
         Ok(self.read()?.reports.get(report_id).cloned())
     }
 
+    async fn create_side_effect_plan(&self, plan: SideEffectPlan) -> CoreResult<SideEffectPlan> {
+        self.write()?
+            .side_effect_plans
+            .insert(plan.id.clone(), plan.clone());
+        Ok(plan)
+    }
+
+    async fn list_side_effect_plans_by_run(&self, run_id: &str) -> CoreResult<Vec<SideEffectPlan>> {
+        let mut items: Vec<_> = self
+            .read()?
+            .side_effect_plans
+            .values()
+            .filter(|plan| plan.run_id == run_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|plan| std::cmp::Reverse(plan.created_at));
+        Ok(items)
+    }
+
+    async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease> {
+        self.write()?
+            .credential_leases
+            .insert(lease.id.clone(), lease.clone());
+        Ok(lease)
+    }
+
+    async fn list_credential_leases_by_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Vec<CredentialLease>> {
+        let mut items: Vec<_> = self
+            .read()?
+            .credential_leases
+            .values()
+            .filter(|lease| lease.side_effect_plan_id == plan_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|lease| std::cmp::Reverse(lease.created_at));
+        Ok(items)
+    }
+
     async fn create_grant(&self, grant: AgentGrant) -> CoreResult<AgentGrant> {
         self.write()?.grants.insert(grant.id.clone(), grant.clone());
         Ok(grant)
@@ -748,6 +791,26 @@ impl AgentStore for MemoryAgentStore {
         lock.lease_until = lease_until(lease);
         inner.locks.insert(key, lock.clone());
         Ok(lock)
+    }
+
+    async fn active_resource_lock(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+        lock_scope: &str,
+    ) -> CoreResult<Option<ResourceLock>> {
+        let key = (
+            resource_type.to_string(),
+            resource_id.to_string(),
+            lock_scope.to_string(),
+        );
+        let now = OffsetDateTime::now_utc();
+        Ok(self
+            .read()?
+            .locks
+            .get(&key)
+            .filter(|lock| lock.lease_until > now)
+            .cloned())
     }
 
     async fn release_resource_lock(&self, run_id: &str) -> CoreResult<EmptyResponse> {
@@ -1052,6 +1115,23 @@ impl ObserverSnapshotStore for MemoryAgentStore {
             }
             Value::Object(counts)
         };
+        let completed_latencies_ms: Vec<i128> = inner
+            .runs
+            .values()
+            .filter_map(|run| run.finished_at.zip(run.claimed_at))
+            .map(|(finished_at, claimed_at)| (finished_at - claimed_at).whole_milliseconds())
+            .collect();
+        let avg_runtime_ms = if completed_latencies_ms.is_empty() {
+            0.0
+        } else {
+            completed_latencies_ms.iter().sum::<i128>() as f64 / completed_latencies_ms.len() as f64
+        };
+        let max_context_messages = inner
+            .messages
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or_default();
         Ok(ObserverSnapshot {
             collected_at: OffsetDateTime::now_utc(),
             agent_counts: count_by(
@@ -1075,6 +1155,20 @@ impl ObserverSnapshotStore for MemoryAgentStore {
                     .map(|run| run.run_status.to_string())
                     .collect(),
             ),
+            runtime_summary: json!({
+                "retrying_runs": inner.runs.values().filter(|run| run.retry_count > 0).count(),
+                "max_retry_count": inner.runs.values().map(|run| run.retry_count).max().unwrap_or_default(),
+                "timed_out_runs": inner.runs.values().filter(|run| run.run_status == AgentRunStatus::TimedOut).count(),
+                "avg_completed_runtime_ms": avg_runtime_ms,
+                "max_context_messages": max_context_messages,
+                "side_effect_plan_counts": count_by(
+                    inner
+                        .side_effect_plans
+                        .values()
+                        .map(|plan| plan.status.to_string())
+                        .collect(),
+                ),
+            }),
             lock_summary: json!({
                 "active_locks": inner.locks.len(),
                 "locks": inner.locks.values().map(|lock| {

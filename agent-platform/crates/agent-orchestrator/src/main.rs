@@ -1,8 +1,8 @@
 use agent_core::{
     AgentBridgeBindingSummary, AgentRequestInput, AgentRequestResponse, AgentRunStatus,
     AppendMessageInput, ClaimOpenWebUiBridgeNonceInput, CreateRunInput, ErrorCode, MessageRole,
-    RequestType, RiskLevel, RunSummary, SafeError, SideEffectMode, TriggerType,
-    UpdateOpenWebUiBridgeRunInput, new_trace_id,
+    RequestType, RiskLevel, RunSummary, SafeError, SideEffectMode, SystemStatusSessionInput,
+    TriggerType, UpdateOpenWebUiBridgeRunInput, new_trace_id,
 };
 use axum::{
     Json, Router,
@@ -73,6 +73,12 @@ struct Args {
         default_value = "disabled"
     )]
     agent_bridge_admin_role_mapping: String,
+    #[arg(
+        long,
+        env = "AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING",
+        default_value = "operator"
+    )]
+    agent_bridge_observer_admin_role_mapping: String,
     #[arg(long, env = "AGENT_JWT_SECRET")]
     agent_jwt_secret: Option<String>,
     #[arg(
@@ -125,6 +131,7 @@ struct BridgeConfig {
     resource_allowlist: Vec<String>,
     user_role: String,
     admin_role_mapping: String,
+    observer_admin_role_mapping: String,
     run_wait_timeout: Duration,
     run_poll_interval: Duration,
 }
@@ -201,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
             resource_allowlist: parse_csv(&args.agent_bridge_resource_allowlist),
             user_role: args.agent_bridge_user_role,
             admin_role_mapping: args.agent_bridge_admin_role_mapping,
+            observer_admin_role_mapping: args.agent_bridge_observer_admin_role_mapping,
             run_wait_timeout: Duration::from_secs(args.agent_bridge_run_wait_timeout_seconds),
             run_poll_interval: Duration::from_millis(args.agent_bridge_run_poll_interval_ms),
         },
@@ -307,6 +315,22 @@ async fn chat_completions(
             model,
             stream,
             close_bridge_session(&state, bridge, &trace_id).await,
+            &trace_id,
+        );
+    }
+
+    if looks_like_system_status_request(&last_user) {
+        let bridge = match require_bridge(bridge.as_ref(), &state, &trace_id) {
+            Ok(bridge) => bridge,
+            Err(error) => return control_response(model, stream, Err(error), &trace_id),
+        };
+        if let Err(error) = claim_bridge_nonce(&state, bridge, &trace_id).await {
+            return control_response(model, stream, Err(error), &trace_id);
+        }
+        return control_response(
+            model,
+            stream,
+            open_system_observer_session(&state, bridge, &last_user, &trace_id).await,
             &trace_id,
         );
     }
@@ -474,6 +498,20 @@ fn looks_like_session_close(content: &str) -> bool {
             || direct_content.contains("关闭")
             || direct_content.contains("退出"))
         && direct_content.contains("session")
+}
+
+fn looks_like_system_status_request(content: &str) -> bool {
+    let direct_content = direct_user_control_text(content);
+    let lowered = direct_content.to_lowercase();
+    let mentions_observer = lowered.contains("observer")
+        || direct_content.contains("观察")
+        || direct_content.contains("系统状态")
+        || direct_content.contains("状态报告");
+    let asks_for_report = lowered.contains("report")
+        || direct_content.contains("报告")
+        || direct_content.contains("状态")
+        || direct_content.contains("健康");
+    mentions_observer && asks_for_report
 }
 
 fn direct_user_control_text(content: &str) -> &str {
@@ -669,12 +707,111 @@ fn mapped_agent_role(state: &AppState, bridge: &TrustedBridgeContext) -> String 
     }
 }
 
+fn mapped_observer_role(state: &AppState, bridge: &TrustedBridgeContext) -> String {
+    if bridge.user_role == "admin" && state.bridge.observer_admin_role_mapping != "disabled" {
+        state.bridge.observer_admin_role_mapping.clone()
+    } else {
+        state.bridge.user_role.clone()
+    }
+}
+
 fn bridge_idempotency_key(bridge: &TrustedBridgeContext, kind: &str) -> String {
     let message_key = bridge.message_id.as_deref().unwrap_or(&bridge.nonce);
     format!(
         "openwebui:{}:{}:{}:{}",
         bridge.subject, bridge.chat_id, kind, message_key
     )
+}
+
+fn manager_observer_headers(
+    state: &AppState,
+    bridge: &TrustedBridgeContext,
+    trace_id: &str,
+) -> Result<ReqHeaderMap, SafeError> {
+    manager_headers_with_role_and_actions(
+        state,
+        bridge,
+        trace_id,
+        mapped_observer_role(state, bridge),
+        vec![
+            "admin:observer_discuss".to_string(),
+            "session:*".to_string(),
+        ],
+    )
+}
+
+fn manager_headers_with_role_and_actions(
+    state: &AppState,
+    bridge: &TrustedBridgeContext,
+    trace_id: &str,
+    role: String,
+    allowed_actions: Vec<String>,
+) -> Result<ReqHeaderMap, SafeError> {
+    let mut headers = ReqHeaderMap::new();
+    if let Some(secret) = &state.manager_auth.jwt_secret {
+        let exp = (OffsetDateTime::now_utc()
+            + time::Duration::seconds(state.manager_auth.jwt_ttl_seconds))
+        .unix_timestamp() as usize;
+        let service = ServiceJwtClaims {
+            sub: state.manager_auth.service_id.clone(),
+            service_name: Some("agent-orchestrator".to_string()),
+            allowed_actions,
+            exp,
+        };
+        let user = UserJwtClaims {
+            sub: bridge.subject.clone(),
+            roles: vec![role],
+            resource_allowlist: state.bridge.resource_allowlist.clone(),
+            exp,
+        };
+        let key = EncodingKey::from_secret(secret.as_bytes());
+        let service_token = encode(&Header::default(), &service, &key)
+            .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?;
+        let user_token = encode(&Header::default(), &user, &key)
+            .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?;
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {service_token}"))
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-agent-user-token"),
+            HeaderValue::from_str(&user_token)
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+    } else {
+        headers.insert(
+            HeaderName::from_static("x-agent-service"),
+            HeaderValue::from_str(&state.manager_auth.service_id)
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-agent-user"),
+            HeaderValue::from_str(&bridge.subject)
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-agent-roles"),
+            HeaderValue::from_str(&role)
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-agent-resource-allowlist"),
+            HeaderValue::from_str(&state.bridge.resource_allowlist.join(","))
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+        headers.insert(
+            HeaderName::from_static("x-agent-allowed-actions"),
+            HeaderValue::from_str(&allowed_actions.join(","))
+                .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?,
+        );
+    }
+    headers.insert(
+        HeaderName::from_static("x-agent-trace-id"),
+        HeaderValue::from_str(trace_id)
+            .unwrap_or_else(|_| HeaderValue::from_static("trace_invalid")),
+    );
+    Ok(headers)
 }
 
 async fn claim_bridge_nonce(
@@ -707,6 +844,67 @@ async fn claim_bridge_nonce(
             .await
             .unwrap_or_else(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string())))
     }
+}
+
+async fn open_system_observer_session(
+    state: &AppState,
+    bridge: &TrustedBridgeContext,
+    content: &str,
+    trace_id: &str,
+) -> Result<String, SafeError> {
+    let body = SystemStatusSessionInput {
+        report_id: None,
+        initial_message: Some(content.to_string()),
+        idempotency_key: Some(format!(
+            "openwebui:{}:{}:system-observer",
+            bridge.subject, bridge.chat_id
+        )),
+    };
+    let response = state
+        .client
+        .post(format!(
+            "{}/v1/admin/observer/system-session",
+            state.manager_url
+        ))
+        .headers(manager_observer_headers(state, bridge, trace_id)?)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?;
+    if !response.status().is_success() {
+        return Err(response
+            .json::<SafeError>()
+            .await
+            .unwrap_or_else(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string())));
+    }
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?;
+    Ok(format_system_status_response(&value, trace_id))
+}
+
+fn format_system_status_response(value: &Value, trace_id: &str) -> String {
+    let report_id = value
+        .get("report_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session_id = value
+        .pointer("/session/id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let agent_id = value
+        .pointer("/agent/id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let packet = value
+        .pointer("/report_message/content_summary")
+        .and_then(Value::as_str)
+        .unwrap_or("System Observer report packet unavailable");
+    format!(
+        "System Observer session ready\nreport_id={report_id}\nagent_id={agent_id}\nsession_id={session_id}\ntrace_id={trace_id}\n\n{}",
+        truncate_text(packet, 2500)
+    )
 }
 
 async fn submit_agent_request(
@@ -1062,6 +1260,7 @@ mod tests {
                 resource_allowlist: vec!["resource:team/default".to_string()],
                 user_role: "viewer".to_string(),
                 admin_role_mapping: "disabled".to_string(),
+                observer_admin_role_mapping: "operator".to_string(),
                 run_wait_timeout: Duration::from_secs(1),
                 run_poll_interval: Duration::from_millis(10),
             },
@@ -1112,6 +1311,21 @@ ASSISTANT: 该请求需要资源负责人审批。
 </chat_history>"#;
 
         assert!(!looks_like_agent_request(prompt));
+    }
+
+    #[test]
+    fn detects_system_observer_status_requests_without_chat_history_false_positive() {
+        assert!(looks_like_system_status_request(
+            "查看最新 Observer 报告和系统状态"
+        ));
+        assert!(looks_like_system_status_request("系统状态报告：请总结风险"));
+
+        let prompt = r#"### Task:
+Suggest follow-up questions.
+### Chat History:
+USER: 查看最新 Observer 报告和系统状态
+"#;
+        assert!(!looks_like_system_status_request(prompt));
     }
 
     #[test]
@@ -1189,6 +1403,30 @@ ASSISTANT: 该请求需要资源负责人审批。
             Some("request:*,session:*,run:*,internal:open_webui_bridge:*")
         );
     }
+
+    #[test]
+    fn observer_headers_map_open_webui_admin_to_operator_only_for_status_sessions() {
+        let mut state = test_state(Some("bridge-secret"));
+        state.manager_auth.jwt_secret = None;
+        let mut context = signed_context("bridge-secret");
+        context.user_role = Some("admin".to_string());
+        context.signature = bridge_signature("bridge-secret", &context).unwrap();
+        let bridge = verify_bridge_context(&state, &context, "trace-test").unwrap();
+        let headers = manager_observer_headers(&state, &bridge, "trace-test").unwrap();
+
+        assert_eq!(
+            headers
+                .get("x-agent-roles")
+                .and_then(|value| value.to_str().ok()),
+            Some("operator")
+        );
+        assert_eq!(
+            headers
+                .get("x-agent-allowed-actions")
+                .and_then(|value| value.to_str().ok()),
+            Some("admin:observer_discuss,session:*")
+        );
+    }
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1211,6 +1449,10 @@ fn parse_csv(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

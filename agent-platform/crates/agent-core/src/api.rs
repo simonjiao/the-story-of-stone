@@ -1,6 +1,7 @@
 use crate::{
     AgentBridgeBindingStatus, AgentInstanceStatus, AgentRequestStatus, AgentRunStatus,
-    AgentSessionStatus, HealthStatus, MessageRole, RequestType, RiskLevel, SideEffectMode,
+    AgentSession, AgentSessionMessage, AgentSessionStatus, CredentialLease, HealthStatus,
+    MessageRole, RequestType, RiskLevel, SideEffectMode, SideEffectPlan, SideEffectPlanStatus,
     TriggerType,
 };
 use serde::{Deserialize, Serialize};
@@ -176,6 +177,59 @@ pub struct ObserverReportSummary {
     pub risk_level: Option<RiskLevel>,
     pub summary: String,
     pub created_at: OffsetDateTime,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverReportDiscussionInput {
+    pub agent_id: String,
+    pub initial_message: String,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverReportDiscussionResponse {
+    pub report_id: String,
+    pub session: AgentSession,
+    pub first_message: AgentSessionMessage,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatusSessionInput {
+    pub report_id: Option<String>,
+    pub initial_message: Option<String>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatusSessionResponse {
+    pub report_id: String,
+    pub agent: crate::AgentInstance,
+    pub session: AgentSession,
+    pub report_message: AgentSessionMessage,
+    pub first_message: AgentSessionMessage,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SideEffectPlanDryRunInput {
+    pub connector: String,
+    pub action: String,
+    pub resource_ref: String,
+    pub credential_scope: Option<String>,
+    pub approval_id: Option<String>,
+    pub input_summary: Option<String>,
+    pub input_ref: Option<String>,
+    pub risk_level: Option<RiskLevel>,
+    pub side_effect_mode: Option<SideEffectMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SideEffectPlanDryRunResponse {
+    pub plan: SideEffectPlan,
+    pub credential_lease: Option<CredentialLease>,
+    pub dry_run_status: SideEffectPlanStatus,
     pub trace_id: String,
 }
 
