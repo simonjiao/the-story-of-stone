@@ -49,7 +49,9 @@ direct_external_write
 observer_control_action
 ```
 
-用户可以通过自然语言表达创建、查询、继续会话等意图，但这些意图只能由 Orchestrator 转换成受控请求，再交给 Manager 判断。
+这里的 `view_observer_report` 指 Open WebUI 直接配置 tool/capability 或直连 Manager 查询原始 report。授权 admin/operator 在 Open WebUI 中用自然语言请求系统状态时，只能进入 Orchestrator 的 System Observer status session 窄口；该窄口返回脱敏报告摘要和会话引用，不暴露 Manager API、Observer 内部入口或原始 snapshot。
+
+用户可以通过自然语言表达创建、查询、继续会话或系统状态诊断等意图，但这些意图只能由 Orchestrator 转换成受控请求，再交给 Manager 判断。
 
 ## Orchestrator 边界
 
@@ -61,6 +63,7 @@ Agent intent 解析和 submit_agent_request
 Open WebUI bridge binding 的验证、查询和关闭请求
 agent_session message 转发
 agent/run/session 摘要查询
+System Observer status intent 路由
 安全错误摘要返回
 流式响应转发
 用户级和 session 级限流
@@ -75,7 +78,7 @@ Orchestrator 明确不得做：
 持有目标 Agent credential
 保存长期上下文
 读取完整内部日志
-调用 admin API
+调用未列明的 admin API
 调用 Observer 控制动作
 ```
 

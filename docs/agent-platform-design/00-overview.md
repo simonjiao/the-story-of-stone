@@ -4,7 +4,7 @@
 
 本文档集定义一套基于 Hermes Agent 的多 Agent 平台。平台目标是让用户可以在 Open WebUI 中发起普通聊天、创建或复用专用 Agent、与已启动 Agent 长时间交互、启动受控 child session，并由后台 Worker 执行 run，同时保持控制面、credential、审计和外部副作用不暴露给 Open WebUI。
 
-v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运行，生成建议和 `observer_report`，但不能审批、授权、暂停、恢复、删除、修改配置或执行外部写入。
+v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运行，生成建议、`observer_report` 和脱敏 System Observer status session，但不能审批、授权、暂停、恢复、删除、修改配置或执行外部写入。
 
 ## 组件边界
 
@@ -19,7 +19,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | Agent Runtime | 执行面，承载 session/run，调用 Hermes profile 和工具适配 |
 | Memory / Session Store | 保存 session、message、summary、result_ref 和上下文索引 |
 | Worker / Scheduler | claim run、heartbeat、timeout、retry、dead-letter 和调度 |
-| Observer Agent | 只读观察、评测和建议，不执行控制动作 |
+| Observer Agent | 只读观察、评测、报告和 System Observer status session，不执行控制动作 |
 | Default Hermes Agent Profile | 普通聊天和意图澄清 |
 | 专用 Hermes Agent Profile | 专用任务执行，由 Runtime 在授权上下文中调用 |
 | agentctl CLI | 管理员审批、查询、暂停、恢复和审计入口 |
@@ -37,7 +37,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 8. Agent instance 复用能力配置，不复用 session、run、credential、memory 或 workdir。
 9. 长交互用 `agent_session`，单次执行用 `agent_run`。
 10. Child session v1 只允许一层，不支持嵌套。
-11. Observer Agent 只读，只输出报告和建议。
+11. Observer Agent 只读，只产生报告、建议和脱敏状态会话。
 12. 所有副作用必须经过 Manager 策略、审批和资源锁。
 ```
 
@@ -51,13 +51,13 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 5. Agent Runtime 的 Minimal Runtime 闭环。
 6. Memory / Session Store 支持 session、message、summary 和 result_ref。
 7. Worker / Scheduler 支持 run claim、heartbeat、timeout、resource lock 和 dead-letter。
-8. agentctl CLI 支持 requests / agents / audit / observer reports。
+8. agentctl CLI 支持 requests / agents / audit / observer reports / observer system-session。
 9. service token + user claims 双主体授权。
 10. agent_requests / agent_instances / agent_sessions / agent_runs / audit_logs / observer_reports 核心状态。
 11. RuntimeClient / MemoryStore / ConnectorClient / RunQueue / Telemetry facade 扩展边界。
 12. P0 可观测性：trace_id、tracing span、metrics name/label、audit trace 关联。
 13. `background_worker` 通用 Agent template。
-14. `observer_agent` 只读系统观察 Agent template。
+14. `observer_agent` 只读系统观察 Agent template，支持 report 生成、report discussion 和 System Observer status session。
 15. resource allowlist。
 16. manual / scheduled / webhook / session message 四类触发入口。
 17. 默认禁止未审批外部写入。

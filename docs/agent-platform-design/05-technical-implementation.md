@@ -22,7 +22,7 @@ agent-platform/
 agent-core 不依赖 axum/sqlx/reqwest，只保存类型和纯逻辑。
 agent-store 只处理数据库和事务，不做产品策略。
 agent-manager 是唯一控制面服务。
-agent-orchestrator 不访问 admin API，不持有目标 Agent credential。
+agent-orchestrator 不访问通用 admin API，不持有目标 Agent credential；唯一例外是已验证 Open WebUI admin/operator 的 System Observer status session 窄口。
 agent-runtime 不决定授权，只执行已授权 session/run。
 agent-worker 只推进 Manager 已创建和授权的 run；状态推进必须写 audit。
 agentctl 只调用 admin API。
@@ -66,7 +66,14 @@ GET  /v1/agent-sessions/{session_id}/children
 POST /v1/agent-sessions/{session_id}/close
 ```
 
-Orchestrator 禁止调用 admin、observer report 查询和 observer discussion API。internal API 中只允许调用 `internal:open_webui_bridge:*` namespace 下的 Open WebUI Bridge endpoint，且必须先验证 `agent_bridge_context`。
+Orchestrator 默认禁止调用 admin、observer report 查询和普通 observer discussion API。它只允许两类 Manager 非 user API：
+
+```text
+1. `internal:open_webui_bridge:*` namespace 下的 Open WebUI Bridge endpoint，且必须先验证 `agent_bridge_context`。
+2. `POST /v1/admin/observer/system-session`，仅限已验证 bridge context、系统状态/Observer 报告意图、Open WebUI admin 经 observer-admin role mapping 映射为授权 operator/admin 的请求。
+```
+
+System Observer status session 窄口不得扩展为通用 admin proxy。Orchestrator 给该请求签发的 service JWT 只能包含 `admin:observer_discuss` 和必要的 `session:*`，user JWT 只能使用 observer-admin role mapping 生成的 operator/admin role。
 
 ### 管理员 API
 
@@ -89,13 +96,19 @@ GET    /v1/admin/observer/reports/{report_id}
 POST   /v1/admin/observer/runs
 ```
 
-P1 计划新增 admin API：
+P1 新增 admin API：
 
 ```http
 POST /v1/admin/observer/reports/{report_id}/discussions
+POST /v1/admin/observer/system-session
+POST /v1/admin/runs/{run_id}/side-effect-plans/dry-run
 ```
 
-该 API 只允许管理员或授权 operator 使用。它创建普通 `agent_session`，写入脱敏 report context 和 initial user message，并在 audit 中关联 `report_id / session_id / agent_id / trace_id`。它不得调用 Observer 控制动作，不得注入完整 snapshot、完整 prompt、完整 context、内部日志或 credential。
+Observer discussion API 只允许管理员或授权 operator 使用。它创建普通 `agent_session`，写入脱敏 report context 和 initial user message，并在 audit 中关联 `report_id / session_id / agent_id / trace_id`。它不得调用 Observer 控制动作，不得注入完整 snapshot、完整 prompt、完整 context、内部日志或 credential。
+
+System Observer status session API 只允许管理员或授权 operator 使用。它接受可选 `report_id`、`message` 和 `idempotency_key`，选择指定或最新 `observer_report`，确保 dedicated `observer_agent` 存在，创建普通 `agent_session`，并写入脱敏 report packet 与用户问题。返回只包含 `report_id / agent_id / session_id / health_status / risk_level / summary / trace_id` 等安全摘要。它不得查询或返回原始 snapshot，不得执行控制动作。
+
+`side-effect-plans/dry-run` 只允许管理员使用。它固定 P2 side-effect contract，创建 `side_effect_plan`，校验 approval 状态、active resource lock、credential_scope 和 critical risk，必要时通过 no-op `CredentialProvider` 创建 `credential_lease` dry-run 记录，并写 audit。P1 不获取真实 credential，不调用真实写 connector，不推进到真实外部写入。
 
 ### 系统内部 API
 
@@ -165,14 +178,16 @@ P0 使用 Postgres 作为 run queue、lease 和 resource lock 的一致性边界
 | `observer_reports` | `observer_run_id`、`health_status`、`risk_level`、`summary`、`findings`、`recommendations`、`evidence_refs` |
 | `audit_logs` | actor、`action`、resource、`decision`、`reason`、request/session/run/approval/report ids、`trace_id` |
 
-P1 计划新增 data model：
+System Observer status session 不新增专用表；它复用 `agent_instances` 中 dedicated `observer_agent`、`agent_sessions`、`agent_session_messages`、`observer_reports` 和 `audit_logs`，用 `idempotency_key`、`report_id`、`session_id`、`agent_id` 与 `trace_id` 建立关联。
+
+P1 新增 data model：
 
 | 表 | 关键字段 / 约束 |
 |---|---|
 | `side_effect_plans` | `run_id`、connector/action/resource、risk/mode、`approval_id`、`credential_scope`、input/result refs、`status`、`error_code`、`version`、`trace_id` |
 | `credential_leases` | `side_effect_plan_id`、`credential_scope`、opaque `provider_ref`、`status`、`expires_at`、`trace_id`、`revoked_at` |
 
-P1 计划新增 schema 只能用于 dry-run 和 contract test；P2 才能接真实 provider / connector。
+P1 新增 schema 只能用于 dry-run 和 contract test；P2 才能接真实 provider / connector。
 
 ## Open WebUI Bridge Contract
 
@@ -187,7 +202,8 @@ Open WebUI Bridge 已是当前实现基线：
 6. Manager 在 request fulfilled 或 approval fulfilled 后根据 `bridge_source` 创建/复用 `agent_session` 并写 `open_webui_bridge_bindings`。
 7. 后续消息通过 binding append session message、create read-only run、轮询 `GET /v1/my-runs/{run_id}`；`user_message_id` 优先映射为 `external_message_id` 做 append 幂等，缺失时退回 `message_id`。
 8. Bridge binding upsert、close 和 run update 写 audit；closed binding 不允许继续 update run。
-9. Open WebUI admin 只管理 Function 和 Valves，不默认映射为 Agent Platform admin。
+9. Open WebUI admin 只管理 Function 和 Valves，不默认映射为通用 Agent Platform admin。
+10. System Observer status session 使用独立 `AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING`；生产默认可把 Open WebUI admin 映射为 Agent Platform operator，仅用于 `POST /v1/admin/observer/system-session`。
 ```
 
 ## Webhook Trigger
@@ -252,11 +268,12 @@ constraints:
 ```yaml
 agent_type: observer_agent
 display_name: 系统观察 Agent
-supported_triggers: [scheduled, admin_manual]
+supported_triggers: [scheduled, admin_manual, system_status_session]
 allowed_resource_types: [agent_platform]
 constraints:
   default_side_effect_mode: deny
   max_concurrent_observer_runs: 1
   readable_scopes: [status_summary, audit_summary, worker_heartbeat_summary, lock_summary, error_metrics]
   forbidden_scopes: [secrets, credentials, full_prompt, full_context, raw_internal_logs]
+  status_session_context: redacted_report_packet_only
 ```

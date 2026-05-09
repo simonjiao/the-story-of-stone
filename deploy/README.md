@@ -37,6 +37,8 @@ Required changes:
 
 - `CLOUDFLARED_TOKEN`: paste the token from Cloudflare Zero Trust.
 - `HERMES_API_KEY`: replace with a long random value.
+- `OPEN_WEBUI_SECRET_KEY`: long random value used by Open WebUI to sign
+  browser/API sessions. Keep it stable across container rebuilds.
 - `AGENT_PLATFORM_POSTGRES_PASSWORD`: generated locally for the dedicated Agent
   Platform database; do not reuse `sub2api-postgres`.
 - `AGENT_PLATFORM_DATABASE_URL`: Postgres URL for Agent Platform services,
@@ -51,6 +53,25 @@ Required changes:
   `agent-orchestrator`.
 - `AGENT_PLATFORM_ALLOW_DEV_HEADERS`: set to `false` after Bridge smoke passes
   so Open WebUI control requests cannot fall back to default dev identity.
+- `AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING`: maps a signed Open WebUI admin
+  subject to a read-only Agent Platform role for System Observer status
+  sessions. Default `operator` allows report discussion without granting agent
+  admin control.
+- `AGENT_RUNTIME_MODE`: `hermes` for the P1 worker path, or `minimal` for the
+  local P0 runtime. The formal compose default is `hermes`.
+- `AGENT_RUNTIME_HERMES_BASE_URL`: internal OpenAI-compatible Hermes URL used
+  by `agent-worker`, default `http://hermes:8642/v1`.
+- `AGENT_RUNTIME_HERMES_MODEL`: model name sent to Hermes, default
+  `hermes-agent`.
+- `AGENT_RUNTIME_HERMES_PROFILE_MODELS`: optional profile-to-model override map
+  for `agent.hermes_profile`, either JSON such as
+  `{"background_worker:analysis":"hermes-agent"}` or comma syntax such as
+  `background_worker:analysis=hermes-agent`.
+- `AGENT_RUNTIME_TIMEOUT_SECONDS`: timeout for P1 Runtime calls.
+- Optional read-only connector values for P1 snapshot collection:
+  - `AGENT_READ_ONLY_CONNECTOR_BASE_URL`, serving `GET /snapshots`
+  - `AGENT_READ_ONLY_CONNECTOR_API_KEY`, if that read-only connector requires
+    auth. Leave both empty to use the built-in local read-only snapshot adapter.
 - Optional internal IP overrides: `HERMES_AGENT_IP`, `OPEN_WEBUI_ORIGIN_IP`,
   `AGENT_PLATFORM_POSTGRES_IP`, `AGENT_MANAGER_IP`,
   `AGENT_ORCHESTRATOR_IP`, `AGENT_WORKER_IP`, and `AGENT_OBSERVER_IP`.

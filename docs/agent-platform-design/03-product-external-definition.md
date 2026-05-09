@@ -30,10 +30,11 @@ Open WebUI 通过全局 `agent_identity_bridge` Filter 为 `hermes-agent` 请求
 权限边界：
 
 ```text
-1. Open WebUI admin 只管理 Open WebUI Function 和 Valves，不默认映射为 Agent Platform admin。
-2. Agent Platform 权限仍由 Manager 的 JWT、role、resource allowlist 和 policy 决定。
-3. `agent_bridge_context` 不包含 secret、signature 以外的敏感字段、email 原文或完整业务 payload。
-4. Bridge secret 只进入 `.env` 或 Open WebUI Function Valves，不进入文档示例值、prompt、日志或用户响应。
+1. Open WebUI admin 只管理 Open WebUI Function 和 Valves，不默认映射为通用 Agent Platform admin。
+2. System Observer status session 使用独立的 observer-admin role mapping；它只把已验证 Open WebUI admin 映射为授权 operator/admin 以创建只读状态会话，不授予审批、暂停、恢复、删除或其他 admin 能力。
+3. Agent Platform 权限仍由 Manager 的 JWT、role、resource allowlist 和 policy 决定。
+4. `agent_bridge_context` 不包含 secret、signature 以外的敏感字段、email 原文或完整业务 payload。
+5. Bridge secret 只进入 `.env` 或 Open WebUI Function Valves，不进入文档示例值、prompt、日志或用户响应。
 ```
 
 ## 创建 Agent
@@ -110,21 +111,23 @@ Child session 不继承完整上下文或 credential。P0/P1 只接收必要的 
 
 ## Observer Report
 
-系统内置 `observer_agent`。它持续评测平台运行，只输出 `observer_report`，不直接改变系统状态。
+系统内置 `observer_agent`。它持续评测平台运行，输出 `observer_report` 和脱敏 System Observer status session 上下文，不直接改变系统状态。
 
 用户可见边界：
 
 ```text
 1. 普通 Open WebUI 用户看不到 observer_report 入口。
-2. 管理员或明确授权的 operator 可以通过 agentctl / admin API 查看 report 列表和详情。
+2. 管理员或明确授权的 operator 可以通过 agentctl / admin API 查看 report 列表和详情，也可以通过 System Observer status session 获取脱敏报告上下文。
 3. report 只包含 health_status、risk_level、summary、findings、recommendations、evidence_refs、created_at。
 4. report 不包含完整 snapshot、完整 prompt、完整 context、内部日志、credential、token、私钥或 `.env`。
 5. report 建议不会自动执行；需要改变状态时必须转成 agent_request 或管理员操作。
 ```
 
-## Observer Report Discussion
+## Observer Report Discussion 与 System Observer Status Session
 
-P1 支持围绕 `observer_report` 发起受控讨论，但对话由目标 Agent 承载，Observer 不变成可对话控制面。
+P1 支持两类受控讨论入口。第一类围绕指定 `observer_report` 和目标 Agent 发起普通 discussion session；第二类为 Open WebUI 中的授权 admin/operator 创建专用 System Observer status session，用于快速深入查看系统状态、最新报告、风险和后续排查线索。两者都只读，Observer 不变成控制面。
+
+Report discussion：
 
 ```text
 1. 管理员或授权 operator 先获取 observer_report。
@@ -135,11 +138,22 @@ P1 支持围绕 `observer_report` 发起受控讨论，但对话由目标 Agent 
 6. 任何状态变更仍必须重新经过 Manager 策略、审批和审计。
 ```
 
+System Observer status session：
+
+```text
+1. 授权 admin/operator 在 Open WebUI 中提出系统状态、Observer 报告或平台健康诊断类问题。
+2. Orchestrator 验证 bridge context、识别系统状态意图，并只调用 Manager 的 System Observer status session 窄口。
+3. Manager 选择指定或最新 observer_report，创建或复用 dedicated `observer_agent` 和 `agent_session`。
+4. session 初始上下文只包含脱敏 report packet、health_status、risk_level、summary、findings、recommendations、evidence_refs 和 trace_id。
+5. 返回给 Open WebUI 的是 status summary、report_id、agent_id、session_id 和安全摘要；后续深入追问在该 session 中进行。
+6. 普通用户或未授权请求不能创建该 session；返回安全拒绝摘要，不泄露 report 是否存在。
+```
+
 禁止：
 
 ```text
-Open WebUI 直接查询 observer_report 或 Manager admin API。
-Observer Agent 直接参与对话、执行修复或创建高权限动作。
+Open WebUI 直接查询原始 observer_report 或 Manager admin API。
+Observer Agent 执行修复、创建高权限动作或调用控制 API。
 将完整 snapshot、完整 prompt、完整 context、内部日志、credential 或 token 注入 discussion session。
 ```
 
@@ -157,6 +171,7 @@ agentctl agents resume agent_001
 agentctl observer reports
 agentctl observer show obsr_001
 agentctl observer discuss obsr_001 --agent-id agent_001
+agentctl observer system-session --report-id obsr_001
 agentctl audit tail
 ```
 

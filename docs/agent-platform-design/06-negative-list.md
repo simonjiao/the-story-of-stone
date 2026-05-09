@@ -20,6 +20,8 @@ direct_external_write
 observer_control_action
 ```
 
+`view_observer_report` 指 Open WebUI 直接配置 report tool/capability 或直连 Manager 查询原始 report。System Observer status session 是受控例外：只能由 Orchestrator 在已验证 bridge context、系统状态意图和授权 operator/admin 条件下调用 Manager 窄口，且只返回脱敏状态摘要和会话引用。
+
 以下调用方向禁止：
 
 ```text
@@ -27,8 +29,8 @@ Open WebUI → Agent Manager
 Open WebUI → Agent Runtime
 Open WebUI → Worker / Scheduler
 Open WebUI → Observer Agent
-Orchestrator → Manager admin API
-Orchestrator → Observer admin report API
+Orchestrator → Manager 通用 admin API
+Orchestrator → Observer admin report/query/discussion API（System Observer status session 窄口除外）
 Runtime → Manager 授权绕过接口
 Worker → 外部写入接口（未持有授权和锁时）
 Observer Agent → 任何控制或写入 API
@@ -46,6 +48,7 @@ Observer Agent → 任何控制或写入 API
 让 Agent instance 持有长期 credential
 让 child session 继承完整 context 或 credential
 让 Observer Agent 审批、暂停、恢复、删除、授权或修改配置
+让 System Observer status session 暴露原始 snapshot、完整日志、credential、token 或 `.env`
 ```
 
 ## 不建议

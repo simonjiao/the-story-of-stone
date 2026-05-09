@@ -184,6 +184,28 @@ pub(crate) fn ensure_admin(auth: &AuthContext, action: &str) -> Result<(), ApiEr
     }
 }
 
+pub(crate) fn ensure_operator_or_admin(auth: &AuthContext, action: &str) -> Result<(), ApiError> {
+    let ctx = PolicyContext {
+        action: action.to_string(),
+        request_type: None,
+        agent_type: None,
+        resource: None,
+        risk_level: RiskLevel::Low,
+        side_effect_mode: SideEffectMode::Deny,
+        resource_attributes: Value::Null,
+        observer_mode: false,
+    };
+    match agent_core::DefaultPolicy::authorize(auth, &ctx) {
+        PolicyDecision::Allowed => Ok(()),
+        PolicyDecision::Denied { reason } | PolicyDecision::ApprovalRequired { reason } => {
+            Err(ApiError::from_core(
+                AgentCoreError::coded(ErrorCode::Forbidden, reason),
+                auth.trace_id.clone(),
+            ))
+        }
+    }
+}
+
 pub(crate) fn ensure_service_allows(auth: &AuthContext, action: &str) -> Result<(), ApiError> {
     if auth.service_allows(action) {
         Ok(())

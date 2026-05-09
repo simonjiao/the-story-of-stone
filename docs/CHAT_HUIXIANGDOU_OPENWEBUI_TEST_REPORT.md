@@ -15,7 +15,7 @@
 
 ## 当前状态
 
-基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。Open WebUI 管理员账号级 Function API、Admin Panel Function 更新和 admin 运行时权限边界补测已完成。2026-05-09 已完成 Agent Identity Bridge hardening 的正式环境部署复测。
+基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。Open WebUI 管理员账号级 Function API、Admin Panel Function 更新和 admin 运行时权限边界补测已完成。2026-05-09 已完成 Agent Identity Bridge hardening 和 P1 正式环境 smoke；Open WebUI 登录态、模型选择、基础聊天、会话保存、Bridge 后续 run、Observer discussion、System Observer status session、P2 dry-run readiness 和 Postgres migration 均通过。
 
 ## 阻断规则
 
@@ -61,6 +61,7 @@
 | [ISSUE-007](chat_huixiangdou_issues/ISSUE-007-approved-agent-owner-mismatch.md) | P1 | 审批后 agent 曾归属审批人而不是原始请求人。 | 原始请求人无法在 `my-agents` 中看到审批后的 agent，影响 agent 复用、多 session 和用户侧 run。 | RESOLVED: Manager fulfill 改用 `requested_by_user` 并通过正式多 session/Worker run 复测 |
 | [ISSUE-008](chat_huixiangdou_issues/ISSUE-008-open-webui-agent-identity-session-bridge.md) | P2 | Open WebUI 默认调用未透传动态 Agent Platform 用户身份和 agent session 元数据。 | 多用户审计和 UI 级 agent session 绑定不能依赖旧的默认聊天请求。 | RESOLVED: 已部署 Agent Identity Bridge，Open WebUI Filter 注入签名上下文，Manager 使用 `openwebui:<id>` 审计并支持 UI chat 到 agent session 绑定 |
 | [ISSUE-009](chat_huixiangdou_issues/ISSUE-009-agent-identity-bridge-hardening.md) | P1 | Bridge baseline 后仍缺少 replay、message append 幂等、lifecycle audit、internal 权限收窄和部署校验闭环。 | 可能导致窗口内重放、重复消息、审计不可追踪或过宽内部权限。 | RESOLVED: 已部署 hardening，正式环境复测覆盖 Function、migration、dedup、replay、subject isolation、Orchestrator 重启复用和日志 |
+| [ISSUE-010](chat_huixiangdou_issues/ISSUE-010-open-webui-secret-env.md) | P1 | Open WebUI session secret 未由 `.env` 注入，退回容器内生成文件。 | 容器重建可能导致会话签名不稳定，且不符合 secret 配置规则。 | RESOLVED: 已备份远端 `.env`，新增 `OPEN_WEBUI_SECRET_KEY`，重建 Open WebUI 并完成关键路径复测 |
 
 ## 修复记录
 
@@ -106,6 +107,8 @@
 | 2026-05-09 11:01 CST | 修复正式环境 Function 校验脚本差异。 | 远端没有 `OPEN_WEBUI_ADMIN_TOKEN`；`verify-openwebui-function.sh` 新增 compose DB fallback，输出 `source=compose-db`、Function 状态和 valve key names，不输出 secret 值。 |
 | 2026-05-09 11:03 CST | 执行 hardening 远端复测。 | 合成 Open WebUI subject/chat 覆盖审批建链、follow-up run、同 message_id 去重、nonce replay 冲突、关闭 session、不同 subject 隔离、Orchestrator 重启后 binding 复用；关键服务日志无错误关键词。 |
 | 2026-05-09 11:33 CST | 使用正式 Open WebUI 真实账号复测 Bridge。 | 用真实 admin 与普通 user 账号的 Open WebUI API auth 走 `/api/chat/completions`，确认 Function 注入真实账号上下文；两个测试 chat 已在复测后删除。 |
+| 2026-05-09 15:42 CST | 修复 Open WebUI session secret 配置来源。 | 远端 `.env` 已备份到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；新增 `OPEN_WEBUI_SECRET_KEY`，未输出 secret 值；Open WebUI 重建后健康。 |
+| 2026-05-09 16:26 CST | 增加 System Observer status session。 | Manager 新增专用 session 入口，Orchestrator 可识别“系统状态/Observer 报告”并为 Open WebUI admin 创建只读 `System Observer` agent/session；普通 user 被拒绝。 |
 
 ## 2026-05-08 正式部署验证
 
@@ -235,9 +238,41 @@
 | BRIDGE-REAL-CLOSE-20260509 | PASS | 两个真实账号的测试 binding 均可关闭，测试 chat 已清理。 | user/admin close 后 binding 状态均为 `closed`；`DELETE /api/v1/chats/{id}` 对两个测试 chat 均返回 HTTP 200。 | P1 |  |
 | BRIDGE-REAL-LOGS-20260509 | PASS | 修复恢复后的真实账号复测窗口内关键服务无新错误关键词。 | `docker compose logs --since=5m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`；`docker compose ps` 显示 Open WebUI、Manager、Orchestrator healthy，Worker/Observer running。 |  | 更早窗口包含 `updated_at` 类型错误，已由 `BRIDGE-FUNCTION-RECOVERY-20260509` 单独记录。 |
 
+## 2026-05-09 Agent Platform P1 正式环境 smoke
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| P1-REMOTE-UNIT-20260509 | PASS | P1 代码在远端 Docker Rust 环境通过 workspace 测试。 | `docker run --rm -v /home/simon/hermes-home-deploy/agent-platform:/workspace -w /workspace rust:1.95 cargo test --workspace` 通过。 | P1 | 本地 Docker 不可用，改用远端 Docker。 |
+| P1-DEPLOY-20260509 | PASS | 正式镜像 `hermes-agent-platform:formal` 已重建并重启。 | `docker compose ps` 显示 Manager/Orchestrator healthy，Worker/Observer running；Open WebUI、Hermes、Postgres healthy。 | P1 | `docker compose config --quiet` 通过。 |
+| P1-OPENWEBUI-SECRET-20260509 | FAIL->PASS | 初次 smoke 发现 Open WebUI JWT secret 未由 `.env` 注入；修复后来自环境变量。 | 变更前已备份远端 `.env` 到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；修复后容器内校验 `webui_secret_source=env`、`webui_secret_length_ok=True`。 | P1 | 见 `ISSUE-010`；未输出 secret 值。 |
+| P1-OPENWEBUI-AUTH-20260509 | PASS | Open WebUI auth 和模型选择关键路径通过。 | `GET /api/v1/auths/` 返回 HTTP 200；`GET /api/models` 返回 HTTP 200，包含并选择 `hermes-agent`。 | P1 | 使用服务器端短期 JWT 代表真实 admin 账号，未输出 token 或密码。 |
+| P1-OPENWEBUI-CHAT-20260509 | PASS | 基础聊天经正式 Open WebUI API、Function、Orchestrator 和 Hermes 返回。 | `POST /api/chat/completions` 返回 HTTP 200，修复前返回 18 字，修复后返回 9 字。 | P1 | 两次均使用 `model=hermes-agent`。 |
+| P1-OPENWEBUI-SESSION-20260509 | PASS | 会话保存可创建、读取并清理。 | 修复后临时 chat `b0404ab1-14ff-4ca7-9125-71d26d18e244` 创建后可通过 `/api/v1/chats/{id}` 读取，随后删除成功。 | P1 | 不保留测试聊天污染用户列表。 |
+| P1-BRIDGE-RUN-20260509 | PASS | Bridge 后续消息创建 run，Worker 完成执行，关闭 session 生效。 | follow-up 返回 `run_019e0ba96f8c74d3962c58c13a4bd24f`、`session_id=sess_019e0ba957e27ac38234cb625905cd65`；close 返回 `agent session closed`。 | P1 | 使用正式 Manager/Orchestrator/Worker/Postgres。 |
+| P1-HERMES-RUNTIME-20260509 | PASS | `agent_session` run 通过 P1 Hermes Runtime 完成。 | 直接 session run `run_019e0ba957f67db29d6aaa3e7a6e50c3` 完成；Open WebUI 基础聊天也返回 HTTP 200。 | P1 | 覆盖 Worker -> Runtime -> Hermes 路径。 |
+| P1-OBSERVER-DISCUSS-20260509 | PASS | Observer report discussion 可以创建普通 `agent_session`。 | Observer discussion session `sess_019e0ba97f787f43bc0bc38851c5bf0f` 创建成功。 | P1 | Observer 仍只生成报告与讨论上下文，不触发控制动作。 |
+| P1-P2-DRYRUN-20260509 | PASS | P2 readiness dry-run 在 no-op credential/write connector 下可返回 ready plan。 | side-effect dry-run 返回 `seplan_019e0ba97fab75d192e0c8f4591289ee`。 | P1 | 未获取真实 credential，未执行外部写入。 |
+| P1-POSTGRES-MIGRATION-20260509 | PASS | P1 readiness 表已存在。 | Postgres 校验返回 `side_effect_plans|credential_leases`。 | P1 | 覆盖正式数据库 migration。 |
+| P1-PUBLIC-20260509 | PASS | 公网和内网 Open WebUI config 均可访问。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200、464 bytes；`http://172.20.0.3:8080/api/config` 返回 HTTP 200、464 bytes。 | P1 | 远端 Python 访问公网曾收到 403，改由本地公网请求确认 200。 |
+| P1-LOGS-20260509 | PASS | 重启恢复后关键服务无新错误关键词。 | Open WebUI 重启后 30 秒窗口内，cloudflared/open-webui/Agent Platform 服务日志未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden/connection refused`。 |  | 重启瞬间 cloudflared 有 transient origin refused，公网 200 后已恢复。 |
+
+## 2026-05-09 System Observer status session
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| SYSTEM-OBSERVER-CODE-20260509 | PASS | Manager 可自动创建/复用专用 `System Observer` agent 和 status session，报告内容以 system message 进入 session context。 | 本地 `cargo test --manifest-path agent-platform/Cargo.toml` 通过；新增测试 `observer_system_session_creates_dedicated_status_agent_with_redacted_report`。 | P1 | 嵌套 credential/prompt/secret evidence 会脱敏。 |
+| SYSTEM-OBSERVER-INTENT-20260509 | PASS | Orchestrator 能识别“查看最新 Observer 报告和系统状态”类请求，并避免 Chat History 误触发。 | 本地与远端 `cargo test --workspace` 通过；新增测试 `detects_system_observer_status_requests_without_chat_history_false_positive`。 | P1 | 只处理直接用户文本。 |
+| SYSTEM-OBSERVER-ROLE-20260509 | PASS | Open WebUI admin 只映射为只读 `operator` 用于 status session，不获得 Agent Platform admin 控制权限。 | 新增 `AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING=operator`；测试 `observer_headers_map_open_webui_admin_to_operator_only_for_status_sessions` 通过。 | P1 | 现有 `AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled` 保持不变。 |
+| SYSTEM-OBSERVER-DEPLOY-20260509 | PASS | 正式镜像已重建并重启。 | `docker compose ps` 显示 Manager/Orchestrator healthy，Worker/Observer running，Open WebUI healthy。 | P1 | 远端 `rust:1.95 cargo test --workspace` 通过。 |
+| SYSTEM-OBSERVER-DIRECT-20260509 | PASS | 签名 Open WebUI admin context 直连 Orchestrator，可在聊天响应中看到报告 packet 和专用 session。 | 响应包含 `System Observer session ready`、`report_id=obsr_019e0bda3b99731080190def1644993c`、`agent_id=agent_019e0bda40307d70bc235e4569a83daf`、`session_id=sess_019e0bda40357303a3e9938dd8c64603`、`health: healthy`、`risk: low`。 | P1 | 使用真实 bridge 签名路径，不输出 secret。 |
+| SYSTEM-OBSERVER-USER-DENY-20260509 | PASS | 普通 Open WebUI user 不能读取 System Observer status session。 | 相同 direct Orchestrator smoke 中 `user_role=user` 返回 denied 内容。 | P1 | 防止普通聊天用户看到系统报告。 |
+| SYSTEM-OBSERVER-FUNCTION-20260509 | PASS | Open WebUI `agent_identity_bridge` Filter 已补 body-level metadata fallback 并更新到正式 DB。 | Function 校验 `status=ok`；DB 内容包含 body-level `chat_id/session_id/user_message_id` fallback；`updated_at` 为整数。 | P1 | 覆盖脚本/API 调用缺少 `__metadata__` 的兼容性。 |
+| SYSTEM-OBSERVER-UI-20260509 | PASS | 真实 Open WebUI 页面可视化确认：登录后模型为 `hermes-agent`，聊天窗口中发送 System Observer 请求，页面直接显示专用状态会话和脱敏报告 packet。 | 截图 `/tmp/system-observer-ui-2026-05-09T08-56-23-483Z/04-visible-report-markers.png`；页面文本包含 `System Observer session ready`、`report_id=obsr_019e0bf36cc47df0b86f5c6e1f72a29c`、`agent_id=agent_019e0bf3dbc571b3ae85721147797612`、`session_id=sess_019e0bf3dbc97dd3ab64318ba7186f40`、`health: healthy`、`risk: low`。 | P1 | 使用短期临时 Open WebUI admin 测试账号完成 UI 自动化；验证后已删除临时 `user/auth/chat/chat_message/tag` 记录和本地凭据文件。 |
+| SYSTEM-OBSERVER-LOGS-20260509 | PASS | 复测窗口内关键服务无新错误关键词。 | `docker compose logs --since=5m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`。 |  | 公网 `/api/config` 返回 HTTP 200。 |
+
 剩余未覆盖边界：
 
-1. 本轮未通过浏览器手动输入密码登录；已通过正式 Open WebUI auth 以真实 admin/user 账号调用真实聊天 API。
+1. 已补 UI 可视化确认，但执行方式是自动化浏览器和短期临时 admin 测试账号，不是人工手动键盘登录。
 2. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`，普通 passthrough 仍正常。
 
 ## 修复结论
@@ -253,3 +288,4 @@
 7. `ISSUE-007` 已在 Manager 中修复并部署，审批后的 agent 归属原始请求人，Worker 复用和多 session API 路径通过。
 8. `ISSUE-008` 已通过 Agent Identity Bridge 修复并部署：Open WebUI Function 注入签名上下文，Orchestrator 验签并签发 Manager JWT，Manager 持久化 Open WebUI chat 到 agent session binding，后续消息可自动创建 Worker run。
 9. `ISSUE-009` 已完成 hardening 代码、正式环境部署和复测：Function 校验、migration、message 去重、nonce replay、subject 隔离、Orchestrator 重启后复用和日志检查均通过。
+10. `ISSUE-010` 已修复 Open WebUI session secret 配置来源：`WEBUI_SECRET_KEY` 由远端 `.env` 中的 `OPEN_WEBUI_SECRET_KEY` 注入，Open WebUI 重建后关键路径复测通过。

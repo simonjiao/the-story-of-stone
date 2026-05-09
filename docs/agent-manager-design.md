@@ -15,12 +15,13 @@
 | 不做什么 | [06-negative-list.md](agent-platform-design/06-negative-list.md) |
 | 覆盖检查和验收 | [07-scenarios-decisions-acceptance.md](agent-platform-design/07-scenarios-decisions-acceptance.md) |
 | P0/P1/P2 路线图 | [08-implementation-roadmap.md](agent-platform-design/08-implementation-roadmap.md) |
+| P1 实现与 smoke 记录 | [P1_IMPLEMENTATION_CHECKLIST.md](agent-platform-design/P1_IMPLEMENTATION_CHECKLIST.md) |
 | Bridge hardening 执行记录 | [BRIDGE_HARDENING_CHECKLIST.md](agent-platform-design/BRIDGE_HARDENING_CHECKLIST.md) |
 
 阶段摘要：
 
 ```text
 P0 代码基线已实现：控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer 和 audit 最小闭环；Bridge 环境完成口径以 hardening checklist 和部署复测为准。
-P1 目标：在现有 Bridge/session/run 链路上接真实 Hermes Runtime，保持只读，并支持 observer_report discussion。
+P1 已完成实现和部署 smoke：在现有 Bridge/session/run 链路上接真实 Hermes Runtime，保持只读，支持 observer_report discussion，并提供面向授权 admin/operator 的 System Observer status session。
 P2 目标：沿用 P1 固定 contract，启用受控外部写入。
 ```

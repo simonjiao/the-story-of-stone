@@ -7,14 +7,14 @@
 | 阶段 | 状态 | 目标 | 不变边界 |
 |---|---|---|---|
 | P0 | 代码基线已实现 | 控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer、audit 形成最小闭环 | Postgres lease / SKIP LOCKED 是正确性边界；不接真实写 connector；不注入写权限 credential；Bridge 完成口径以 hardening checklist 和部署复测为准 |
-| P1 | TODO | 在现有 Bridge/session/run 链路上接入真实 Hermes Runtime，只做只读 session/run，并让 Observer report 可进入受控 discussion session | 不改 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema、audit contract |
+| P1 | 已完成实现和部署 smoke | 在现有 Bridge/session/run 链路上接入真实 Hermes Runtime，只做只读 session/run，让 Observer report 可进入受控 discussion session，并提供 System Observer status session | 不改 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema、audit contract；System Observer status session 只作为窄口例外，不扩展为通用 admin proxy |
 | P2 | TODO | 启用受控外部写入 | 只启用 P1 已固定的真实 WriteConnector / CredentialProvider adapter，不把 P2 变成重构阶段 |
 
 P1 会提前落地 P2 需要的 side-effect plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。P1 只 dry-run / validate / reject，不获取真实 credential，不调用真实写 connector，不把 run 推进到真实外部写入。
 
 ## P0 当前基线
 
-P0 代码基线已实现。路线图只保留 P1/P2 依赖的稳定基线；详细实施记录见 [P0_IMPLEMENTATION_CHECKLIST.md](P0_IMPLEMENTATION_CHECKLIST.md)，Bridge hardening 记录见 [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md)。
+P0 代码基线已实现。路线图只保留 P1/P2 依赖的稳定基线；详细实施记录见 [P0_IMPLEMENTATION_CHECKLIST.md](P0_IMPLEMENTATION_CHECKLIST.md)，P1 实现与 smoke 记录见 [P1_IMPLEMENTATION_CHECKLIST.md](P1_IMPLEMENTATION_CHECKLIST.md)，Bridge hardening 记录见 [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md)。
 
 ```text
 Open WebUI / Agent Identity Bridge
@@ -31,7 +31,7 @@ P1/P2 不应重写以下基线：
 1. Manager 授权、审批、生命周期、audit 和 `open_webui_bridge_bindings`。
 2. agent_session / agent_run 状态机、Worker claim / heartbeat / finish / dead-letter。
 3. Postgres lease / SKIP LOCKED、resource_locks、idempotency 和 trace_id 关联。
-4. Observer 只读 snapshot、observer_report 持久化和“只建议不控制”边界。
+4. Observer 只读 snapshot、observer_report 持久化、System Observer status session 脱敏上下文和“只建议不控制”边界。
 5. RuntimeClient、MemoryStore、ConnectorClient、RunQueue、Telemetry facade。
 ```
 
@@ -46,14 +46,14 @@ P1 目标是让平台开始使用真实 Hermes Runtime，同时复用现有 Open
 | 阶段 | 目标 | 主要交付 | 验证重点 |
 |---|---|---|---|
 | P1.0 Contract freeze | 固定不可改边界 | 为 RuntimeClient、ConnectorClient、Telemetry、安全错误、Open WebUI Bridge 增加 contract/regression test；确认 request/run/session/audit/bridge 无破坏性 schema change | `cargo test --manifest-path agent-platform/Cargo.toml`；schema diff 只允许新增配置或非破坏字段 |
-| P1.1 Hermes adapter | 新增真实 Runtime adapter | `HermesRuntimeClient`、Hermes HTTP client、profile config、timeout、safe error mapping、`AGENT_RUNTIME_MODE=minimal|hermes` | unit/wiremock 覆盖成功、timeout、5xx、malformed response 和 trace_id |
-| P1.2 Bridge-backed session path | 真实 Hermes 承载已绑定长 session | 复用 `open_webui_bridge_bindings`、`agent_session`、session message append 和 Orchestrator streaming；只替换 Runtime adapter | 登录、模型选择、基础聊天、会话保存；响应不含 prompt/context/credential；Bridge 绑定仍可复用 |
+| P1.1 Hermes adapter | 新增真实 Runtime adapter | `HermesRuntimeClient`、Hermes HTTP client、profile-to-model routing、timeout、safe error mapping、`AGENT_RUNTIME_MODE=minimal|hermes` | unit/wiremock 覆盖成功、profile routing、timeout、5xx、malformed response 和 trace_id |
+| P1.2 Bridge-backed session path | 真实 Hermes 承载已绑定长 session | 复用 `open_webui_bridge_bindings`、`agent_session`、session message append、Worker claim 和 OpenAI-compatible response/SSE wrapper；`session_message` run 调用 `RuntimeClient::send_session_message` | 登录、模型选择、基础聊天、会话保存；响应不含 prompt/context/credential；Bridge 绑定仍可复用 |
 | P1.3 Run path | 真实 Hermes 执行只读 run | Worker 按 profile 选择 Hermes adapter，构建上下文和只读 snapshot，finish 写 summary/result_ref/audit | claim、heartbeat、timeout、retry、dead_letter、finish audit 状态机不变 |
 | P1.4 Read-only connector adapter | 真实只读工具与外部 snapshot | 在既有 `ConnectorClient::read_only_snapshot` contract 上新增真实 read-only adapter；Runtime 只消费只读摘要或 payload_ref | `side_effect_mode=authorized` 仍拒绝真实写入；connector payload 不泄露 secrets |
-| P1.5 Observer upgrade | 评测真实 Runtime 行为 | observer snapshot 增加 latency、timeout、retry、context size、异常建议和结果质量摘要 | report 只生成 findings/recommendations，不触发控制动作 |
-| P1.6 Report discussion | 快速讨论报告并形成后续需求 | `POST /v1/admin/observer/reports/{report_id}/discussions` 和 agentctl 命令；Manager 创建普通 `agent_session` | 权限、脱敏、session/audit 关联；Observer 不参与对话 |
-| P1.7 P2 readiness | 避免 P2 重构 | SideEffectPlanner / CredentialProvider / WriteConnector contract，`side_effect_plans` / `credential_leases` migration，dry-run policy，no-op provider/write connector，审计事件 | P1 只能 dry-run 或拒绝；no-op provider 不产生 secret |
-| P1.8 Smoke | 本地和部署回归 | 示例 env / runbook 覆盖 Hermes URL、profile、mode、Bridge regression、report discussion、P2 readiness dry-run | 最小关键路径 + Bridge regression + Hermes smoke + report discussion + P2 readiness dry-run + Postgres smoke |
+| P1.5 Observer upgrade | 评测真实 Runtime 行为 | observer snapshot 增加 latency、timeout、retry、context size、runtime quality signal、risk taxonomy 和结果质量摘要 | report 只生成 findings/recommendations，不触发控制动作 |
+| P1.6 Report discussion / System Observer status session | 快速讨论报告并形成后续需求；在 Open WebUI 中快速进入系统状态诊断会话 | `POST /v1/admin/observer/reports/{report_id}/discussions`、`POST /v1/admin/observer/system-session` 和 agentctl 命令；Manager 创建普通 `agent_session` | 权限、脱敏、session/audit 关联；Observer 不执行控制动作；普通用户无法创建 System Observer session |
+| P1.7 P2 readiness | 避免 P2 重构 | SideEffectPlanner / CredentialProvider / WriteConnector contract，`side_effect_plans` / `credential_leases` migration，dry-run approval/lock/credential policy，no-op provider/write connector，审计事件 | P1 只能 dry-run 或拒绝；no-op provider 不产生 secret；缺审批、锁冲突、缺 credential_scope 和 critical risk 都有明确拒绝状态 |
+| P1.8 Smoke | 本地和部署回归 | 示例 env / runbook 覆盖 Hermes URL、profile、mode、Bridge regression、report discussion、System Observer status session、P2 readiness dry-run | 最小关键路径 + Bridge regression + Hermes smoke + report discussion + System Observer status session + P2 readiness dry-run + Postgres smoke |
 
 P1 验收：
 
@@ -65,7 +65,8 @@ P1 验收：
 5. 现有 Agent Identity Bridge 仍能完成签名校验、chat binding、session 复用、后续消息 create run 和关闭 session。
 6. Observer 能识别 Runtime 异常、性能退化、上下文膨胀和高风险建议。
 7. 授权 operator 可以围绕 observer_report 创建受控 discussion session，并与目标 Agent 讨论后续需求。
-8. P2 需要的 side-effect contract、credential lease、write connector contract、dry-run policy、no-op adapter 和 audit 事件已存在。
+8. 授权 admin/operator 可以通过 Open WebUI 系统状态意图创建 System Observer status session，快速看到最新脱敏 report、health、risk、findings、recommendations 和 session_id；普通用户被安全拒绝。
+9. P2 需要的 side-effect contract、credential lease、write connector contract、dry-run policy、no-op adapter 和 audit 事件已存在。
 ```
 
 ## P2 受控外部执行

@@ -1,8 +1,10 @@
 mod control_services;
 mod http_support;
 mod lifecycle_services;
+mod observer_services;
 mod request_services;
 mod run_admin_services;
+mod side_effect_services;
 mod telemetry_support;
 
 use agent_core::{
@@ -11,9 +13,10 @@ use agent_core::{
     AgentSessionMessage, AppendMessageInput, ApprovalDecisionInput, ApprovalStatus, AuditDecision,
     AuditLog, AuthContext, ClaimOpenWebUiBridgeNonceInput, CoreResult, CreateChildSessionInput,
     CreateGrantInput, CreateRunInput, CreateSessionInput, DenyDecisionInput, EmptyResponse,
-    ErrorCode, HealthStatus, ObserverReport, Page, RiskLevel, RoleName, RunAdminDecisionInput,
-    RunSummary, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
-    WebhookTriggerInput, actions, new_id,
+    ErrorCode, ObserverReport, ObserverReportDiscussionInput, Page, RoleName,
+    RunAdminDecisionInput, RunSummary, SideEffectPlanDryRunInput, SideEffectPlanDryRunResponse,
+    SystemStatusSessionInput, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
+    WebhookTriggerInput, actions, assess_observer_snapshot, new_id,
 };
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
 use axum::{
@@ -23,7 +26,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 pub use http_support::{ApiError, ManagerConfig, extract_auth};
-use http_support::{ensure_admin, ensure_service_allows};
+use http_support::{ensure_admin, ensure_operator_or_admin, ensure_service_allows};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -101,10 +104,22 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/grants", post(admin_create_grant))
         .route("/v1/admin/observer/reports", get(admin_observer_reports))
         .route(
+            "/v1/admin/observer/system-session",
+            post(admin_observer_system_session),
+        )
+        .route(
             "/v1/admin/observer/reports/{report_id}",
             get(admin_observer_report),
         )
+        .route(
+            "/v1/admin/observer/reports/{report_id}/discussions",
+            post(admin_observer_report_discussion),
+        )
         .route("/v1/admin/observer/runs", post(admin_observer_run))
+        .route(
+            "/v1/admin/runs/{run_id}/side-effect-plans/dry-run",
+            post(admin_side_effect_dry_run),
+        )
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
         .route(
             "/v1/internal/open-webui-bridge/nonces",
@@ -946,6 +961,33 @@ async fn admin_observer_report(
     Ok(Json(report))
 }
 
+async fn admin_observer_report_discussion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(report_id): Path<String>,
+    Json(input): Json<ObserverReportDiscussionInput>,
+) -> Result<Json<agent_core::ObserverReportDiscussionResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_operator_or_admin(&auth, actions::ADMIN_OBSERVER_DISCUSS)?;
+    observer_services::create_report_discussion(&state.store, &auth, report_id, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
+async fn admin_observer_system_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<SystemStatusSessionInput>,
+) -> Result<Json<agent_core::SystemStatusSessionResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_operator_or_admin(&auth, actions::ADMIN_OBSERVER_DISCUSS)?;
+    observer_services::create_system_status_session(&state.store, &auth, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
 async fn admin_observer_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -958,54 +1000,34 @@ async fn admin_observer_run(
         .map_err(|error| ApiError::from_core(error, auth.trace_id))
 }
 
+async fn admin_side_effect_dry_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(input): Json<SideEffectPlanDryRunInput>,
+) -> Result<Json<SideEffectPlanDryRunResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_SIDE_EFFECT_DRY_RUN)?;
+    side_effect_services::dry_run_side_effect_plan(&state.store, &auth, run_id, input)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
 async fn create_observer_report_from_snapshot(
     state: &AppState,
     trace_id: &str,
 ) -> CoreResult<ObserverReport> {
     let snapshot = state.store.collect_observer_snapshot(trace_id).await?;
-    let dead_letters = snapshot
-        .run_counts
-        .get("dead_letter")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let failed = snapshot
-        .run_counts
-        .get("failed")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    let health = if dead_letters > 0 || failed > 5 {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Healthy
-    };
+    let assessment = assess_observer_snapshot(&snapshot);
     let report = ObserverReport::new(
         new_id("observer_run"),
-        health,
-        if dead_letters > 0 {
-            Some(RiskLevel::Medium)
-        } else {
-            Some(RiskLevel::Low)
-        },
-        format!(
-            "Observer snapshot collected at {}. dead_letter={}, failed={}.",
-            snapshot.collected_at, dead_letters, failed
-        ),
-        json!({
-            "run_counts": snapshot.run_counts,
-            "agent_counts": snapshot.agent_counts,
-            "session_counts": snapshot.session_counts,
-        }),
-        json!([
-            {
-                "priority": if dead_letters > 0 { "medium" } else { "low" },
-                "recommendation": "Review dead_letter and timeout trends through agentctl audit before changing policy."
-            }
-        ]),
-        json!({
-            "lock_summary": snapshot.lock_summary,
-            "audit_summary": snapshot.audit_summary,
-            "worker_summary": snapshot.worker_summary,
-        }),
+        assessment.health_status,
+        Some(assessment.risk_level),
+        assessment.summary,
+        assessment.findings,
+        assessment.recommendations,
+        assessment.evidence_refs,
         trace_id.to_string(),
     );
     let report = state.store.create_observer_report(report).await?;
@@ -1358,9 +1380,12 @@ async fn internal_observer_tick(
 mod tests {
     use super::*;
     use agent_core::{
-        AGENT_TYPE_BACKGROUND_WORKER, AgentRunStatus, AgentSession, MessageRole, RequestType,
-        RoleAssignment, SideEffectMode, TriggerType, new_trace_id,
+        AGENT_TYPE_BACKGROUND_WORKER, AGENT_TYPE_OBSERVER, AgentRunStatus, AgentSession,
+        ApprovalRequest, ApprovalStatus, HealthStatus, MessageRole, ObserverReport, RequestType,
+        ResourceLock, RiskLevel, RoleAssignment, SideEffectMode, SideEffectPlanStatus, TriggerType,
+        new_id, new_trace_id,
     };
+    use std::time::Duration;
     use time::OffsetDateTime;
 
     async fn test_state() -> AppState {
@@ -1419,6 +1444,22 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    async fn approved_side_effect_approval(state: &AppState, auth: &AuthContext) -> String {
+        let approval = ApprovalRequest {
+            id: new_id("approval"),
+            request_id: new_id("req"),
+            requested_by_user: auth.user_id.clone(),
+            approver_user: Some("approver-1".to_string()),
+            status: ApprovalStatus::Approved,
+            risk_level: Some(RiskLevel::Low),
+            reason: Some("side effect dry-run approval".to_string()),
+            decision_reason: Some("test approval".to_string()),
+            created_at: OffsetDateTime::now_utc(),
+            decided_at: Some(OffsetDateTime::now_utc()),
+        };
+        state.store.create_approval(approval).await.unwrap().id
     }
 
     #[tokio::test]
@@ -1720,6 +1761,259 @@ mod tests {
             audit.action == actions::ADMIN_GRANT_CREATE
                 && audit.decision == Some(AuditDecision::Allowed)
         }));
+    }
+
+    #[tokio::test]
+    async fn observer_report_discussion_creates_redacted_session_for_operator() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let agent = request_services::submit_request(
+            &state.store,
+            &auth,
+            AgentRequestInput {
+                request_type: RequestType::CreateAgent,
+                agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
+                target_resource: Some("resource:team/project-alpha".to_string()),
+                intent_text: Some("create discussion worker".to_string()),
+                structured_payload: json!({"mode": "observer-discussion"}),
+                idempotency_key: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::ReadOnly),
+            },
+        )
+        .await
+        .unwrap();
+        let report = create_observer_report_from_snapshot(&state, &new_trace_id())
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-roles", "operator".parse().unwrap());
+        let Json(response) = admin_observer_report_discussion(
+            State(state.clone()),
+            headers,
+            Path(report.id.clone()),
+            Json(ObserverReportDiscussionInput {
+                agent_id: agent.agent_id.unwrap(),
+                initial_message: "what should we do next?".to_string(),
+                idempotency_key: Some("discussion-1".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.report_id, report.id);
+        assert_eq!(response.session.owner_user, "dev-user");
+        assert!(
+            response
+                .session
+                .context_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Observer report discussion context")
+        );
+        assert_eq!(response.first_message.role, MessageRole::User);
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_OBSERVER_DISCUSS
+                && audit.observer_report_id.as_deref() == Some(report.id.as_str())
+                && audit.session_id.as_deref() == Some(response.session.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn observer_system_session_creates_dedicated_status_agent_with_redacted_report() {
+        let state = test_state().await;
+        let report = state
+            .store
+            .create_observer_report(ObserverReport::new(
+                new_id("observer_run"),
+                HealthStatus::Healthy,
+                Some(RiskLevel::Low),
+                "system is healthy",
+                json!({"run_counts": {"completed": 3}}),
+                json!([{"priority": "low", "recommendation": "continue observing"}]),
+                json!({
+                    "safe": "visible",
+                    "nested": {"credential_token": "secret-value"}
+                }),
+                new_trace_id(),
+            ))
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-roles", "operator".parse().unwrap());
+        let Json(response) = admin_observer_system_session(
+            State(state.clone()),
+            headers,
+            Json(SystemStatusSessionInput {
+                report_id: None,
+                initial_message: Some("give me the deep status".to_string()),
+                idempotency_key: Some("system-status".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.report_id, report.id);
+        assert_eq!(response.agent.agent_type, AGENT_TYPE_OBSERVER);
+        assert_eq!(
+            response.agent.display_name.as_deref(),
+            Some("System Observer")
+        );
+        assert_eq!(
+            response.session.source_conversation_id.as_deref(),
+            Some("system_observer:status")
+        );
+        assert_eq!(response.report_message.role, MessageRole::System);
+        let packet = response.report_message.content_summary.unwrap();
+        assert!(packet.contains("system is healthy"));
+        assert!(packet.contains("\"credential_token\":\"redacted\""));
+        assert!(!packet.contains("secret-value"));
+        assert_eq!(response.first_message.role, MessageRole::User);
+
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_OBSERVER_DISCUSS
+                && audit.observer_report_id.as_deref() == Some(report.id.as_str())
+                && audit.session_id.as_deref() == Some(response.session.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn p1_side_effect_dry_run_creates_plan_and_noop_credential_lease() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-side-effect-dry-run").await;
+        let approval_id = approved_side_effect_approval(&state, &auth).await;
+
+        let Json(response) = admin_side_effect_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(SideEffectPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id.clone()),
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: Some("payload://dry-run/1".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.dry_run_status, SideEffectPlanStatus::DryRunReady);
+        assert!(response.credential_lease.is_some());
+        assert_eq!(
+            response.plan.approval_id.as_deref(),
+            Some(approval_id.as_str())
+        );
+        assert_eq!(response.plan.run_id, run.id);
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("noop://")
+        );
+        let plans = state
+            .store
+            .list_side_effect_plans_by_run(&response.plan.run_id)
+            .await
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn p1_side_effect_dry_run_rejects_missing_approval() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-side-effect-no-approval").await;
+
+        let Json(response) = admin_side_effect_dry_run(
+            State(state),
+            HeaderMap::new(),
+            Path(run.id),
+            Json(SideEffectPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: None,
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            SideEffectPlanStatus::DryRunRejected
+        );
+        assert_eq!(
+            response.plan.error_code.as_deref(),
+            Some("approval_required")
+        );
+        assert!(response.credential_lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn p1_side_effect_dry_run_rejects_active_resource_lock() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-side-effect-locked").await;
+        let approval_id = approved_side_effect_approval(&state, &auth).await;
+        state
+            .store
+            .acquire_resource_lock(
+                ResourceLock {
+                    id: new_id("lock"),
+                    resource_type: "team".to_string(),
+                    resource_id: "project-alpha".to_string(),
+                    lock_scope: "side_effect".to_string(),
+                    holder_run_id: "run-other".to_string(),
+                    lease_until: OffsetDateTime::now_utc(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+
+        let Json(response) = admin_side_effect_dry_run(
+            State(state),
+            HeaderMap::new(),
+            Path(run.id),
+            Json(SideEffectPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: None,
+                risk_level: Some(RiskLevel::Low),
+                side_effect_mode: Some(SideEffectMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            SideEffectPlanStatus::DryRunRejected
+        );
+        assert_eq!(response.plan.error_code.as_deref(), Some("resource_locked"));
+        assert!(response.credential_lease.is_none());
     }
 
     #[tokio::test]

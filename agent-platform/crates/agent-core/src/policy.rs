@@ -18,10 +18,12 @@ pub mod actions {
     pub const ADMIN_AGENT_RESUME: &str = "admin:agent_resume";
     pub const ADMIN_AUDIT_READ: &str = "admin:audit_read";
     pub const ADMIN_OBSERVER_READ: &str = "admin:observer_read";
+    pub const ADMIN_OBSERVER_DISCUSS: &str = "admin:observer_discuss";
     pub const ADMIN_GRANT_CREATE: &str = "admin:grant_create";
     pub const ADMIN_RUN_READ: &str = "admin:run_read";
     pub const ADMIN_RUN_RETRY: &str = "admin:run_retry";
     pub const ADMIN_RUN_TERMINATE: &str = "admin:run_terminate";
+    pub const ADMIN_SIDE_EFFECT_DRY_RUN: &str = "admin:side_effect_dry_run";
     pub const INTERNAL_RUN_CREATE: &str = "internal:run_create";
     pub const INTERNAL_RUN_CLAIM: &str = "internal:run_claim";
     pub const INTERNAL_RUN_HEARTBEAT: &str = "internal:run_heartbeat";
@@ -149,12 +151,26 @@ impl DefaultPolicy {
             | actions::ADMIN_GRANT_CREATE
             | actions::ADMIN_RUN_READ
             | actions::ADMIN_RUN_RETRY
-            | actions::ADMIN_RUN_TERMINATE => {
+            | actions::ADMIN_RUN_TERMINATE
+            | actions::ADMIN_SIDE_EFFECT_DRY_RUN => {
                 if auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin]) {
                     PolicyDecision::Allowed
                 } else {
                     PolicyDecision::Denied {
                         reason: "admin role required".to_string(),
+                    }
+                }
+            }
+            actions::ADMIN_OBSERVER_DISCUSS => {
+                if auth.has_any_role(&[
+                    RoleName::SystemAdmin,
+                    RoleName::AgentAdmin,
+                    RoleName::Operator,
+                ]) {
+                    PolicyDecision::Allowed
+                } else {
+                    PolicyDecision::Denied {
+                        reason: "admin or operator role required".to_string(),
                     }
                 }
             }

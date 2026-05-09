@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 agent-core.workspace = true
+agent-runtime.workspace = true
 agent-store.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
