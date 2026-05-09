@@ -30,6 +30,7 @@
 - [当前差距与实施方向](docs/tonglingyu-agent-design/16_现有架构差距与实施方向.md)
 - [运行手册](docs/RUNBOOK.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
+- [完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
 - [进展与决策记录](docs/PROGRESS.md)
 - [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
 
