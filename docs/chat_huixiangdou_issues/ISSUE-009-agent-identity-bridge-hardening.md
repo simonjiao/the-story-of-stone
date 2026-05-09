@@ -19,6 +19,9 @@ P1
 | `BRIDGE-HARDEN-ISOLATION-20260509` | PASS | 相同 chat/model 下不同签名 subject 不复用 binding，未向原 subject session append message。 |
 | `BRIDGE-HARDEN-RESTART-20260509` | PASS | Orchestrator 重启后仍从 Manager/Postgres 复用 active binding，并能继续创建 Worker run。 |
 | `BRIDGE-REAL-ACCOUNT-20260509` | PASS | 使用正式 Open WebUI 真实 admin/user 账号，经 `/api/chat/completions` 触发 Function 和 Bridge，验证独立 binding、cross-chat 隔离、follow-up、dedupe 和 close。 |
+| `BRIDGE-USER-MESSAGE-ID-20260509` | PASS | 复盘发现真实 Open WebUI 同时传入 assistant `message_id` 和 `user_message_id`；Filter 已改为优先使用 `user_message_id` 做 session message 幂等 key，并补回归测试。 |
+| `BRIDGE-REAL-USER-MESSAGE-ID-PRIORITY-20260509` | PASS | 用真实普通 user 账号复测同一 `user_message_id` 搭配不同 assistant placeholder `message_id`，session message 计数保持 `0 -> 1 -> 1`。 |
+| `BRIDGE-FUNCTION-RECOVERY-20260509` | PASS | 正式 Function 更新过程中发现 `updated_at` 类型写错会阻断 Open WebUI 启动，已修复为整数 epoch 并验证 Function active/global、`user_message_id` 优先级和服务健康。 |
 
 ## 背景
 
@@ -56,11 +59,12 @@ python3 -m unittest deploy/open-webui/functions/test_agent_identity_bridge_filte
 8. 重启：Orchestrator 重启后从 Manager/Postgres 复用 active binding。
 9. 清理：合成 binding 关闭后状态为 `closed`。
 10. 日志：复测窗口内 Manager/Orchestrator/Worker/Observer 无错误关键词。
-11. 真实账号：Open WebUI admin/user 真实账号均通过 Open WebUI auth；admin 不自动获得 Agent Platform admin；两个真实账号拥有独立 binding/session；admin 使用 user 的测试 chat id 不复用 user binding；重复 message id 不重复 append；测试 chat 已删除。
+11. 真实账号：Open WebUI admin/user 真实账号均通过 Open WebUI auth；admin 不自动获得 Agent Platform admin；两个真实账号拥有独立 binding/session；admin 使用 user 的测试 chat id 不复用 user binding；重复 user_message_id 不重复 append；追加复测已证明同一 user_message_id 搭配不同 assistant placeholder message_id 仍只 append 一次；测试 chat 已删除。
+12. 恢复验证：正式 Function `updated_at` 为整数，Open WebUI healthy，Function active/global，部署内容中 `user_message_id` 优先于 `message_id`。
 ```
 
 ## 完成口径
 
-已满足：不是仅凭代码合并关闭，正式环境部署复测证据已写回 `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md`。
+已满足：不是仅凭代码合并关闭，正式环境部署复测证据已写回 `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md`；完成前反思发现的 `user_message_id` 优先级缺口已修复并用真实账号补测。
 
 残余边界：本轮没有通过浏览器手动输入密码登录；已使用正式 Open WebUI auth 代表真实 admin/user 账号调用真实聊天 API。

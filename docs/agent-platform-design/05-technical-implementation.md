@@ -185,7 +185,7 @@ Open WebUI Bridge 已是当前实现基线：
 4. 控制请求和已绑定 session 消息必须有有效 context；普通聊天可 passthrough，但必须先删除内部 bridge 字段。
 5. Orchestrator 向 Manager 签发 service/user JWT；service token 只允许 user/session/run API 和 `internal:open_webui_bridge:*`。
 6. Manager 在 request fulfilled 或 approval fulfilled 后根据 `bridge_source` 创建/复用 `agent_session` 并写 `open_webui_bridge_bindings`。
-7. 后续消息通过 binding append session message、create read-only run、轮询 `GET /v1/my-runs/{run_id}`；`message_id` 映射为 `external_message_id` 做 append 幂等。
+7. 后续消息通过 binding append session message、create read-only run、轮询 `GET /v1/my-runs/{run_id}`；`user_message_id` 优先映射为 `external_message_id` 做 append 幂等，缺失时退回 `message_id`。
 8. Bridge binding upsert、close 和 run update 写 audit；closed binding 不允许继续 update run。
 9. Open WebUI admin 只管理 Function 和 Valves，不默认映射为 Agent Platform admin。
 ```

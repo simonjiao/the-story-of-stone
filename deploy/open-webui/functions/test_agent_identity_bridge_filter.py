@@ -48,6 +48,26 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         self.assertEqual(context["chat_id"], "chat-1")
         self.assertTrue(context["signature"])
 
+    def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {"model": "hermes-agent", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "assistant-placeholder-1",
+                    "user_message_id": "user-message-1",
+                },
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["message_id"], "user-message-1")
+
 
 if __name__ == "__main__":
     unittest.main()

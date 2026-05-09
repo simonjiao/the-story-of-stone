@@ -19,9 +19,9 @@
 |---|---|---|---|
 | B1 Orchestrator internal 权限收窄 | DONE | 不是只改文档；Orchestrator service token 和 dev header 都已从 `internal:*` 收窄到 `internal:open_webui_bridge:*`。仍需依赖 Manager 侧 action 常量保持 namespace 隔离。 | 已补代码和测试：`dev_manager_headers_only_allow_bridge_internal_namespace`。 |
 | B2 Bridge nonce replay 防护 | DONE | HMAC + clock skew 不足以防窗口内重放；mutating Bridge 请求现在必须先在 Manager/Store claim nonce。残余风险：claim 成功后如果下游网络失败，同一请求重试会被当成 replay，需要用户重新发起。 | 已新增 `open_webui_bridge_nonces` migration、Manager nonce endpoint、Memory/Pg store 实现和 replay 测试。 |
-| B3 Open WebUI message append 去重 | DONE | run idempotency 不等于 message append 幂等；现在 `message_id` 映射为 `external_message_id`，同一 session 内重复 append 返回既有 message。残余风险：Open WebUI 不提供稳定 `message_id` 时只能退回 nonce 级保护。 | 已新增 `agent_session_messages.external_message_id`、唯一索引、append 去重和测试。 |
+| B3 Open WebUI message append 去重 | DONE | run idempotency 不等于 message append 幂等；真实 Open WebUI 同时提供 assistant placeholder `message_id` 和用户消息 `user_message_id`，去重必须优先使用 `user_message_id`。残余风险：Open WebUI 不提供任何稳定 message id 时只能退回 nonce 级保护。 | 已新增 `agent_session_messages.external_message_id`、唯一索引、append 去重；Filter 已优先选择 `user_message_id`，本地回归和真实账号复测均覆盖，同一 `user_message_id` 搭配不同 assistant id 的计数为 `0 -> 1 -> 1`。 |
 | B4 Bridge lifecycle 审计 | DONE | run/message audit 不能替代 binding 生命周期审计；现在 binding upsert、run update、close 都写 audit，且 closed binding 不能继续 update run。 | 已补 Manager audit 记录、active binding guard 和 lifecycle audit 测试。 |
-| B5 部署和完成口径 | DONE | 不只停留在 code-ready；已在正式远端环境重建镜像、重启服务并执行 hardening 复测。追加真实账号复测后，admin/user 两个 Open WebUI 真实账号均通过真实聊天 API 覆盖 Bridge 隔离。残余风险：未通过浏览器手动输入密码登录，本轮使用正式 Open WebUI auth 代表真实账号。 | `verify-openwebui-function.sh` 支持 Admin API 和 compose DB fallback；正式环境复测通过 Function、migration、dedup、replay、subject isolation、Orchestrator restart reuse、真实账号 Bridge 回归和日志检查。 |
+| B5 部署和完成口径 | DONE | 不只停留在 code-ready；已在正式远端环境重建镜像、重启服务并执行 hardening 复测。追加真实账号复测后，admin/user 两个 Open WebUI 真实账号均通过真实聊天 API 覆盖 Bridge 隔离。残余风险：未通过浏览器手动输入密码登录，本轮使用正式 Open WebUI auth 代表真实账号。 | `verify-openwebui-function.sh` 支持 Admin API 和 compose DB fallback；正式环境复测通过 Function、migration、dedup、replay、subject isolation、Orchestrator restart reuse、真实账号 Bridge 回归和日志检查；Function 元数据类型错误已修复并记录到报告。 |
 
 ## 验证记录
 

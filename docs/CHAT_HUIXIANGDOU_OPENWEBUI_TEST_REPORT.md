@@ -229,9 +229,11 @@
 | BRIDGE-REAL-BINDING-20260509 | PASS | 审批后两个真实账号各自创建独立 binding/session。 | user session `sess_019e0acbc8877a70a382dd3b163585ae`，admin session `sess_019e0acbcaaa74639eadff79c6beb161`，二者不同。 | P1 |  |
 | BRIDGE-REAL-CROSS-CHAT-20260509 | PASS | admin 使用 user 的测试 chat id 发普通消息时，不会复用或污染 user 的 agent session binding。 | user session 对 admin cross message 的 count `0 -> 0`；`admin + user_chat` 没有生成 binding。 | P1 | 覆盖真实账号维度的 subject 隔离。 |
 | BRIDGE-REAL-FOLLOWUP-20260509 | PASS | 两个真实账号的后续消息只 append 到各自 session。 | user follow-up own count `0 -> 1`、other count `0 -> 0`；admin follow-up own count `0 -> 1`、other count `0 -> 0`。 | P1 |  |
-| BRIDGE-REAL-DEDUP-20260509 | PASS | 真实 Open WebUI user 重复发送同一 message id，不重复 append session message。 | user duplicate count `1 -> 1`。 | P1 | 真实 Open WebUI 后台任务传入 Bridge 的稳定 message id 为 assistant placeholder id。 |
+| BRIDGE-REAL-DEDUP-20260509 | PASS | 真实 Open WebUI user 重复发送同一 `user_message_id`，不重复 append session message。 | user duplicate count `1 -> 1`。 | P1 | 复盘后已修正 Filter：优先使用 `user_message_id`，缺失时才退回 assistant placeholder `message_id`。 |
+| BRIDGE-REAL-USER-MESSAGE-ID-PRIORITY-20260509 | PASS | 复盘发现此前去重测试没有证明 `user_message_id` 优先于 assistant placeholder `message_id`；修复后已用真实普通 user 账号复测同一 `user_message_id` 搭配不同 assistant id。 | request `req_019e0b67510b7013a436b3c5fa9b4253`、session `sess_019e0b6754e77892afc0b4baf2534d55`；`external_message_id=openwebui:<user_message_id>` 计数 `0 -> 1 -> 1`；测试 binding closed，测试 chat 删除 HTTP 200。 | P1 | 这条是完成前反思补测，覆盖真实 Open WebUI 元数据形态。 |
+| BRIDGE-FUNCTION-RECOVERY-20260509 | PASS | 更新正式 Function 时曾将 `function.updated_at` 写成字符串，导致 Open WebUI 启动校验失败；已修复为整数 epoch 并重新健康检查。 | Open WebUI `healthy`；`verify-openwebui-function.sh` 返回 `status=ok`；DB 校验 `FUNCTION_UPDATED_AT_IS_INT=True`、`USER_MESSAGE_ID_PRIORITY=True`。 | P1 | 记录部署操作缺口，避免只看最终 PASS。 |
 | BRIDGE-REAL-CLOSE-20260509 | PASS | 两个真实账号的测试 binding 均可关闭，测试 chat 已清理。 | user/admin close 后 binding 状态均为 `closed`；`DELETE /api/v1/chats/{id}` 对两个测试 chat 均返回 HTTP 200。 | P1 |  |
-| BRIDGE-REAL-LOGS-20260509 | PASS | 真实账号复测窗口内关键服务无错误关键词。 | `docker compose logs --since=12m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`。 |  |  |
+| BRIDGE-REAL-LOGS-20260509 | PASS | 修复恢复后的真实账号复测窗口内关键服务无新错误关键词。 | `docker compose logs --since=5m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`；`docker compose ps` 显示 Open WebUI、Manager、Orchestrator healthy，Worker/Observer running。 |  | 更早窗口包含 `updated_at` 类型错误，已由 `BRIDGE-FUNCTION-RECOVERY-20260509` 单独记录。 |
 
 剩余未覆盖边界：
 

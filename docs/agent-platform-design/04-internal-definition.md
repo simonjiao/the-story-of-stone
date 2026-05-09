@@ -85,7 +85,7 @@ binding value:
 4. 同一 Open WebUI user/chat/model 只能有一个 active binding。
 5. 同一 reusable agent 可以被多个 Open WebUI chat 复用，但每个 chat 使用独立 agent_session。
 6. 后续消息通过 binding 追加 session message，并创建 read-only session_message run。
-7. Open WebUI `message_id` 映射为 session message `external_message_id`，同一 session 内重复 message 不重复 append。
+7. Open WebUI `user_message_id` 优先映射为 session message `external_message_id`，缺失时退回 `message_id`；同一 session 内重复用户消息不重复 append。
 8. 关闭 session 时必须把 binding 标记为 closed。
 9. binding upsert、close、run update 必须写 audit；closed binding 不允许继续 update run。
 10. Bridge source 不参与 agent 复用 hash，避免同一 agent 因 chat id 不同被重复创建。
