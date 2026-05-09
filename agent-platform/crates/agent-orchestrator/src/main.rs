@@ -1,8 +1,8 @@
 use agent_core::{
     AgentBridgeBindingSummary, AgentRequestInput, AgentRequestResponse, AgentRunStatus,
-    AppendMessageInput, ClaimOpenWebUiBridgeNonceInput, CreateRunInput, ErrorCode, MessageRole,
-    RequestType, RiskLevel, RunSummary, SafeError, SideEffectMode, SystemStatusSessionInput,
-    TriggerType, UpdateOpenWebUiBridgeRunInput, new_trace_id,
+    AppendMessageInput, ClaimOpenWebUiBridgeNonceInput, CreateRunInput, ErrorCode,
+    ExternalActionMode, MessageRole, RequestType, RiskLevel, RunSummary, SafeError,
+    SystemStatusSessionInput, TriggerType, UpdateOpenWebUiBridgeRunInput, new_trace_id,
 };
 use axum::{
     Json, Router,
@@ -923,7 +923,7 @@ async fn submit_agent_request(
             "constraints": {
                 "trigger_mode": "manual",
                 "allowed_actions": ["analyze", "prepare_change", "run_checks"],
-                "require_approval_for_side_effects": true
+                "require_approval_for_external_actions": true
             },
             "bridge_source": {
                 "kind": "open_webui",
@@ -935,7 +935,7 @@ async fn submit_agent_request(
         }),
         idempotency_key: Some(bridge_idempotency_key(bridge, "request")),
         risk_level: Some(RiskLevel::Low),
-        side_effect_mode: Some(SideEffectMode::ApprovalRequired),
+        external_action_mode: Some(ExternalActionMode::ApprovalRequired),
     };
     let response = state
         .client
@@ -1022,7 +1022,7 @@ async fn append_session_message_and_run(
         idempotency_key: Some(bridge_idempotency_key(bridge, "run")),
         target_resource: None,
         risk_level: Some(RiskLevel::Low),
-        side_effect_mode: Some(SideEffectMode::ReadOnly),
+        external_action_mode: Some(ExternalActionMode::ReadOnly),
     };
     let response = state
         .client

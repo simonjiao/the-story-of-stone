@@ -1,7 +1,7 @@
 use agent_core::{
     AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient, CoreResult,
-    EmptyResponse, MessageRole, ObserverReport, ResourceLock, RuntimeClient, RuntimeOutput,
-    RuntimeRunInput, RuntimeSessionInput, SideEffectMode, TriggerType, assess_observer_snapshot,
+    EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ResourceLock, RuntimeClient,
+    RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, TriggerType, assess_observer_snapshot,
     metric_names, new_id,
 };
 use agent_runtime::{
@@ -155,7 +155,7 @@ impl Worker {
             .await;
 
         let mut lock_held = false;
-        if matches!(run.side_effect_mode, SideEffectMode::Authorized) {
+        if matches!(run.external_action_mode, ExternalActionMode::Authorized) {
             let resource = agent_core::ResourceRef::parse(run.target_resource.clone())?;
             self.store
                 .acquire_resource_lock(
@@ -163,7 +163,7 @@ impl Worker {
                         id: new_id("lock"),
                         resource_type: resource.resource_type,
                         resource_id: resource.resource_id,
-                        lock_scope: "side_effect".to_string(),
+                        lock_scope: "external_action".to_string(),
                         holder_run_id: run.id.clone(),
                         lease_until: OffsetDateTime::now_utc(),
                         created_at: OffsetDateTime::now_utc(),

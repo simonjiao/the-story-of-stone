@@ -113,7 +113,7 @@ string_enum! {
         Executing => "executing",
         Validating => "validating",
         AwaitingApproval => "awaiting_approval",
-        ApplyingSideEffects => "applying_side_effects",
+        ApplyingExternalActions => "applying_external_actions",
         Completed => "completed",
         Failed => "failed",
         Cancelled => "cancelled",
@@ -162,7 +162,7 @@ string_enum! {
 }
 
 string_enum! {
-    pub enum SideEffectMode {
+    pub enum ExternalActionMode {
         Deny => "deny",
         ReadOnly => "read_only",
         ApprovalRequired => "approval_required",
@@ -171,7 +171,7 @@ string_enum! {
 }
 
 string_enum! {
-    pub enum SideEffectPlanStatus {
+    pub enum ExternalActionPlanStatus {
         Draft => "draft",
         DryRunReady => "dry_run_ready",
         DryRunRejected => "dry_run_rejected",
@@ -360,7 +360,7 @@ impl AgentTemplate {
             allowed_triggers: json!(["manual", "scheduled", "webhook", "session_message"]),
             allowed_actions: json!(["analyze", "prepare_change", "run_checks"]),
             default_constraints: json!({
-                "default_side_effect_mode": "approval_required",
+                "default_external_action_mode": "approval_required",
                 "max_items_per_run": 8,
                 "max_runtime_seconds": 1800,
                 "max_concurrent_runs_per_agent": 1,
@@ -385,7 +385,7 @@ impl AgentTemplate {
             allowed_triggers: json!(["scheduled", "admin_manual"]),
             allowed_actions: json!(["read_status_snapshot", "write_observer_report"]),
             default_constraints: json!({
-                "default_side_effect_mode": "deny",
+                "default_external_action_mode": "deny",
                 "max_concurrent_observer_runs": 1,
                 "readable_scopes": [
                     "status_summary",
@@ -630,7 +630,7 @@ pub struct AgentRun {
     pub target_resource: String,
     pub run_status: AgentRunStatus,
     pub risk_level: RiskLevel,
-    pub side_effect_mode: SideEffectMode,
+    pub external_action_mode: ExternalActionMode,
     pub lease_owner: Option<String>,
     pub lease_until: Option<OffsetDateTime>,
     pub next_retry_at: Option<OffsetDateTime>,
@@ -661,7 +661,7 @@ impl AgentRun {
             target_resource: target_resource.into(),
             run_status: AgentRunStatus::Queued,
             risk_level: RiskLevel::Low,
-            side_effect_mode: SideEffectMode::ReadOnly,
+            external_action_mode: ExternalActionMode::ReadOnly,
             lease_owner: None,
             lease_until: None,
             next_retry_at: None,
@@ -678,20 +678,21 @@ impl AgentRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SideEffectPlan {
+pub struct ExternalActionPlan {
     pub id: String,
     pub run_id: String,
     pub connector: String,
     pub action: String,
     pub resource_ref: String,
     pub risk_level: RiskLevel,
-    pub side_effect_mode: SideEffectMode,
+    pub external_action_mode: ExternalActionMode,
     pub approval_id: Option<String>,
     pub credential_scope: Option<String>,
     pub input_summary: Option<String>,
     pub input_ref: Option<String>,
     pub result_ref: Option<String>,
-    pub status: SideEffectPlanStatus,
+    pub compensation_ref: Option<String>,
+    pub status: ExternalActionPlanStatus,
     pub error_code: Option<String>,
     pub trace_id: String,
     pub version: i64,
@@ -699,31 +700,32 @@ pub struct SideEffectPlan {
     pub updated_at: OffsetDateTime,
 }
 
-impl SideEffectPlan {
+impl ExternalActionPlan {
     pub fn new(
         run_id: impl Into<String>,
         connector: impl Into<String>,
         action: impl Into<String>,
         resource_ref: impl Into<String>,
         risk_level: RiskLevel,
-        side_effect_mode: SideEffectMode,
+        external_action_mode: ExternalActionMode,
         trace_id: impl Into<String>,
     ) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
-            id: new_id("seplan"),
+            id: new_id("eaplan"),
             run_id: run_id.into(),
             connector: connector.into(),
             action: action.into(),
             resource_ref: resource_ref.into(),
             risk_level,
-            side_effect_mode,
+            external_action_mode,
             approval_id: None,
             credential_scope: None,
             input_summary: None,
             input_ref: None,
             result_ref: None,
-            status: SideEffectPlanStatus::Draft,
+            compensation_ref: None,
+            status: ExternalActionPlanStatus::Draft,
             error_code: None,
             trace_id: trace_id.into(),
             version: 0,
@@ -736,7 +738,7 @@ impl SideEffectPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialLease {
     pub id: String,
-    pub side_effect_plan_id: String,
+    pub external_action_plan_id: String,
     pub credential_scope: String,
     pub provider_ref: Option<String>,
     pub status: CredentialLeaseStatus,
@@ -748,13 +750,13 @@ pub struct CredentialLease {
 
 impl CredentialLease {
     pub fn dry_run(
-        side_effect_plan_id: impl Into<String>,
+        external_action_plan_id: impl Into<String>,
         credential_scope: impl Into<String>,
         trace_id: impl Into<String>,
     ) -> Self {
         Self {
             id: new_id("credlease"),
-            side_effect_plan_id: side_effect_plan_id.into(),
+            external_action_plan_id: external_action_plan_id.into(),
             credential_scope: credential_scope.into(),
             provider_ref: None,
             status: CredentialLeaseStatus::DryRun,
@@ -762,6 +764,27 @@ impl CredentialLease {
             trace_id: trace_id.into(),
             revoked_at: None,
             created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    pub fn active(
+        external_action_plan_id: impl Into<String>,
+        credential_scope: impl Into<String>,
+        provider_ref: impl Into<String>,
+        ttl_seconds: i64,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        Self {
+            id: new_id("credlease"),
+            external_action_plan_id: external_action_plan_id.into(),
+            credential_scope: credential_scope.into(),
+            provider_ref: Some(provider_ref.into()),
+            status: CredentialLeaseStatus::Active,
+            expires_at: Some(now + time::Duration::seconds(ttl_seconds.max(1))),
+            trace_id: trace_id.into(),
+            revoked_at: None,
+            created_at: now,
         }
     }
 }
@@ -975,9 +998,31 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
     let max_context_messages = json_i64(&snapshot.runtime_summary, "max_context_messages");
     let dry_run_rejected = snapshot
         .runtime_summary
-        .get("side_effect_plan_counts")
+        .get("external_action_plan_counts")
         .map(|counts| json_i64(counts, "dry_run_rejected"))
         .unwrap_or(0);
+    let external_action_applied = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "applied"))
+        .unwrap_or(0);
+    let external_action_failed = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "failed"))
+        .unwrap_or(0);
+    let external_action_errors = snapshot
+        .runtime_summary
+        .get("external_action_plan_error_counts")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let approval_bypass_attempts = json_i64(&external_action_errors, "approval_required")
+        + json_i64(&external_action_errors, "approval_not_found")
+        + json_i64(&external_action_errors, "approval_not_approved:denied");
+    let external_action_lock_conflicts = json_i64(&external_action_errors, "resource_locked");
+    let abnormal_external_action_results =
+        json_i64(&external_action_errors, "connector_invalid_result")
+            + json_i64(&external_action_errors, "connector_dead_letter");
     let active_locks = json_i64(&snapshot.lock_summary, "active_locks");
     let failed_audits = snapshot
         .audit_summary
@@ -1047,11 +1092,43 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
     );
     push_count_signal(
         &mut signals,
-        "side_effect_dry_run_rejection",
+        "external_action_dry_run_rejection",
         dry_run_rejected,
         1,
         10,
-        "P2 readiness dry-runs are being rejected and need operator review",
+        "External action readiness dry-runs are being rejected and need operator review",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_apply_failure",
+        external_action_failed,
+        1,
+        5,
+        "External action writes are failing and need connector, credential or approval review",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_approval_bypass_attempt",
+        approval_bypass_attempts,
+        1,
+        5,
+        "external-action apply attempts are missing or using invalid approvals",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_lock_conflict",
+        external_action_lock_conflicts,
+        1,
+        5,
+        "external-action apply attempts are colliding on resource locks",
+    );
+    push_count_signal(
+        &mut signals,
+        "external_action_abnormal_write_result",
+        abnormal_external_action_results,
+        1,
+        5,
+        "write connector results are invalid or exhausted retry/dead-letter handling",
     );
     push_count_signal(
         &mut signals,
@@ -1059,7 +1136,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         active_locks,
         5,
         20,
-        "active resource locks may indicate long-running or stuck side-effect preparation",
+        "active resource locks may indicate long-running or stuck external-action preparation",
     );
     push_count_signal(
         &mut signals,
@@ -1077,7 +1154,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         RiskLevel::Low => HealthStatus::Healthy,
     };
     let summary = format!(
-        "Observer snapshot collected at {}. signals={}, dead_letter={}, failed={}, timed_out={}, retrying={}, avg_runtime_ms={:.0}, max_context_messages={}, dry_run_rejected={}.",
+        "Observer snapshot collected at {}. signals={}, dead_letter={}, failed={}, timed_out={}, retrying={}, avg_runtime_ms={:.0}, max_context_messages={}, dry_run_rejected={}, external_action_applied={}, external_action_failed={}, approval_bypass_attempts={}, external_action_lock_conflicts={}, abnormal_external_action_results={}.",
         snapshot.collected_at,
         signals.len(),
         dead_letters,
@@ -1086,7 +1163,12 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         retrying,
         avg_runtime_ms,
         max_context_messages,
-        dry_run_rejected
+        dry_run_rejected,
+        external_action_applied,
+        external_action_failed,
+        approval_bypass_attempts,
+        external_action_lock_conflicts,
+        abnormal_external_action_results
     );
     let recommendations = if signals.is_empty() {
         json!([
@@ -1128,7 +1210,13 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
                 "max_retry_count": max_retry,
                 "runtime_latency_ms": avg_runtime_ms,
                 "context_growth_messages": max_context_messages,
-                "side_effect_dry_run_rejection": dry_run_rejected,
+                "external_action_dry_run_rejection": dry_run_rejected,
+                "external_action_applied": external_action_applied,
+                "external_action_apply_failure": external_action_failed,
+                "external_action_error_counts": external_action_errors,
+                "external_action_approval_bypass_attempt": approval_bypass_attempts,
+                "external_action_lock_conflict": external_action_lock_conflicts,
+                "external_action_abnormal_write_result": abnormal_external_action_results,
                 "resource_lock_pressure": active_locks,
                 "audit_failure_decisions": failed_audits
             }
@@ -1258,9 +1346,9 @@ pub fn validate_run_transition(from: AgentRunStatus, to: AgentRunStatus) -> Core
             | (Executing, Validating | Failed | TimedOut)
             | (
                 Validating,
-                ApplyingSideEffects | Completed | Failed | TimedOut
+                ApplyingExternalActions | Completed | Failed | TimedOut
             )
-            | (ApplyingSideEffects, Completed | Failed | TimedOut)
+            | (ApplyingExternalActions, Completed | Failed | TimedOut)
             | (AwaitingApproval, PolicyChecked | Cancelled | Failed)
             | (Failed, Queued | DeadLetter)
             | (TimedOut, Queued | DeadLetter)
@@ -1345,7 +1433,7 @@ mod tests {
                 "timed_out_runs": 1,
                 "avg_completed_runtime_ms": 31_000.0,
                 "max_context_messages": 101,
-                "side_effect_plan_counts": {"dry_run_rejected": 1}
+                "external_action_plan_counts": {"dry_run_rejected": 1}
             }),
             lock_summary: json!({"active_locks": 0}),
             audit_summary: json!({"recent_decisions": []}),

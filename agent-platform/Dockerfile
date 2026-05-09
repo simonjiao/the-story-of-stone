@@ -15,6 +15,7 @@ RUN apt-get update \
 COPY --from=builder /workspace/target/release/agent-manager /usr/local/bin/agent-manager
 COPY --from=builder /workspace/target/release/agent-orchestrator /usr/local/bin/agent-orchestrator
 COPY --from=builder /workspace/target/release/agent-runtime /usr/local/bin/agent-runtime
+COPY --from=builder /workspace/target/release/agent-action-gateway /usr/local/bin/agent-action-gateway
 COPY --from=builder /workspace/target/release/agent-worker /usr/local/bin/agent-worker
 COPY --from=builder /workspace/target/release/agentctl /usr/local/bin/agentctl
 

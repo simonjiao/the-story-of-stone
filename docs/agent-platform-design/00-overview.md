@@ -2,7 +2,7 @@
 
 ## 目标
 
-本文档集定义一套基于 Hermes Agent 的多 Agent 平台。平台目标是让用户可以在 Open WebUI 中发起普通聊天、创建或复用专用 Agent、与已启动 Agent 长时间交互、启动受控 child session，并由后台 Worker 执行 run，同时保持控制面、credential、审计和外部副作用不暴露给 Open WebUI。
+本文档集定义一套基于 Hermes Agent 的多 Agent 平台。平台目标是让用户可以在 Open WebUI 中发起普通聊天、创建或复用专用 Agent、与已启动 Agent 长时间交互、启动受控 child session，并由后台 Worker 执行 run，同时保持控制面、credential、审计和外部动作能力不暴露给 Open WebUI。
 
 v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运行，生成建议、`observer_report` 和脱敏 System Observer status session，但不能审批、授权、暂停、恢复、删除、修改配置或执行外部写入。
 
@@ -38,7 +38,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 9. 长交互用 `agent_session`，单次执行用 `agent_run`。
 10. Child session v1 只允许一层，不支持嵌套。
 11. Observer Agent 只读，只产生报告、建议和脱敏状态会话。
-12. 所有副作用必须经过 Manager 策略、审批和资源锁。
+12. 所有外部动作必须经过 Manager 策略、审批和资源锁。
 ```
 
 ## v1 最小落地范围
@@ -76,6 +76,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | [06-negative-list.md](06-negative-list.md) | 明确禁止、不建议、延期实现和延期原因 |
 | [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、决策清单和验收标准 |
 | [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 阶段边界、交付顺序和验收 |
+| [P2_IMPLEMENTATION_CHECKLIST.md](P2_IMPLEMENTATION_CHECKLIST.md) | P2 部分实现、前提复盘、缺口和 smoke 验证 |
 | [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md) | Agent Identity Bridge hardening 执行记录和完成口径 |
 
 一致性规则：

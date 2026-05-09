@@ -1,6 +1,6 @@
 use agent_core::{
-    AgentCoreError, AuthContext, ErrorCode, PolicyContext, PolicyDecision, RiskLevel,
-    RoleAssignment, RoleName, SafeError, SideEffectMode, new_trace_id,
+    AgentCoreError, AuthContext, ErrorCode, ExternalActionMode, PolicyContext, PolicyDecision,
+    RiskLevel, RoleAssignment, RoleName, SafeError, new_trace_id,
 };
 use axum::{
     Json,
@@ -169,7 +169,7 @@ pub(crate) fn ensure_admin(auth: &AuthContext, action: &str) -> Result<(), ApiEr
         agent_type: None,
         resource: None,
         risk_level: RiskLevel::Low,
-        side_effect_mode: SideEffectMode::Deny,
+        external_action_mode: ExternalActionMode::Deny,
         resource_attributes: Value::Null,
         observer_mode: false,
     };
@@ -191,7 +191,7 @@ pub(crate) fn ensure_operator_or_admin(auth: &AuthContext, action: &str) -> Resu
         agent_type: None,
         resource: None,
         risk_level: RiskLevel::Low,
-        side_effect_mode: SideEffectMode::Deny,
+        external_action_mode: ExternalActionMode::Deny,
         resource_attributes: Value::Null,
         observer_mode: false,
     };

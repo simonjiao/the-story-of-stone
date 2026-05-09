@@ -1,6 +1,6 @@
 use crate::{
     AGENT_TYPE_BACKGROUND_WORKER, AGENT_TYPE_OBSERVER, AgentCoreError, AuditDecision, AuthContext,
-    CoreResult, ErrorCode, RequestType, ResourceRef, RiskLevel, RoleName, SideEffectMode,
+    CoreResult, ErrorCode, ExternalActionMode, RequestType, ResourceRef, RiskLevel, RoleName,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +23,8 @@ pub mod actions {
     pub const ADMIN_RUN_READ: &str = "admin:run_read";
     pub const ADMIN_RUN_RETRY: &str = "admin:run_retry";
     pub const ADMIN_RUN_TERMINATE: &str = "admin:run_terminate";
-    pub const ADMIN_SIDE_EFFECT_DRY_RUN: &str = "admin:side_effect_dry_run";
+    pub const ADMIN_EXTERNAL_ACTION_DRY_RUN: &str = "admin:external_action_dry_run";
+    pub const ADMIN_EXTERNAL_ACTION_APPLY: &str = "admin:external_action_apply";
     pub const INTERNAL_RUN_CREATE: &str = "internal:run_create";
     pub const INTERNAL_RUN_CLAIM: &str = "internal:run_claim";
     pub const INTERNAL_RUN_HEARTBEAT: &str = "internal:run_heartbeat";
@@ -52,7 +53,7 @@ pub struct PolicyContext {
     pub agent_type: Option<String>,
     pub resource: Option<ResourceRef>,
     pub risk_level: RiskLevel,
-    pub side_effect_mode: SideEffectMode,
+    pub external_action_mode: ExternalActionMode,
     #[serde(default)]
     pub resource_attributes: Value,
     pub observer_mode: bool,
@@ -119,16 +120,20 @@ impl DefaultPolicy {
             };
         }
 
-        if matches!(ctx.side_effect_mode, SideEffectMode::Authorized) {
+        if matches!(ctx.external_action_mode, ExternalActionMode::Authorized) {
             return PolicyDecision::Denied {
-                reason: "Agent Platform read-only policy does not allow authorized external side effects"
-                    .to_string(),
+                reason:
+                    "Agent Platform read-only policy does not allow authorized external actions"
+                        .to_string(),
             };
         }
 
-        if matches!(ctx.side_effect_mode, SideEffectMode::ApprovalRequired) {
+        if matches!(
+            ctx.external_action_mode,
+            ExternalActionMode::ApprovalRequired
+        ) {
             return PolicyDecision::ApprovalRequired {
-                reason: "side effects require resource owner approval".to_string(),
+                reason: "external actions require resource owner approval".to_string(),
             };
         }
 
@@ -152,7 +157,8 @@ impl DefaultPolicy {
             | actions::ADMIN_RUN_READ
             | actions::ADMIN_RUN_RETRY
             | actions::ADMIN_RUN_TERMINATE
-            | actions::ADMIN_SIDE_EFFECT_DRY_RUN => {
+            | actions::ADMIN_EXTERNAL_ACTION_DRY_RUN
+            | actions::ADMIN_EXTERNAL_ACTION_APPLY => {
                 if auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin]) {
                     PolicyDecision::Allowed
                 } else {
@@ -268,7 +274,7 @@ mod tests {
             agent_type: Some(AGENT_TYPE_OBSERVER.to_string()),
             resource: Some(ResourceRef::parse("resource:team/project-alpha").unwrap()),
             risk_level: RiskLevel::Low,
-            side_effect_mode: SideEffectMode::Deny,
+            external_action_mode: ExternalActionMode::Deny,
             resource_attributes: Value::Null,
             observer_mode: true,
         };
@@ -286,7 +292,7 @@ mod tests {
             agent_type: Some(AGENT_TYPE_BACKGROUND_WORKER.to_string()),
             resource: Some(ResourceRef::parse("resource:team/project-alpha").unwrap()),
             risk_level: RiskLevel::Low,
-            side_effect_mode: SideEffectMode::ReadOnly,
+            external_action_mode: ExternalActionMode::ReadOnly,
             resource_attributes: Value::Null,
             observer_mode: false,
         };

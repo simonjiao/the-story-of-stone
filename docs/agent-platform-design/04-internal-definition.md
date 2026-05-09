@@ -14,8 +14,8 @@
 | `agent_run` | 一次执行，默认异步，带 lease、heartbeat 和状态 |
 | `agent_bridge_binding` | Open WebUI user/chat/model 到 `agent_session` 的持久绑定 |
 | `agent_bridge_nonce` | 已消费的 Open WebUI Bridge nonce，用于阻止签名 context 重放 |
-| `resource_lock` | 外部副作用并发锁 |
-| `side_effect_plan` | P1 预置的副作用计划；P1 dry-run，P2 才执行 |
+| `resource_lock` | 外部动作并发锁 |
+| `external_action_plan` | P1 预置的外部动作计划；P1 dry-run，P2 才执行 |
 | `credential_lease` | 最小权限 credential 的短期租约引用；不保存明文 secret |
 | `approval_request` | 需要人工审批的动作 |
 | `audit_log` | 控制面和执行面的审计记录 |
@@ -29,12 +29,12 @@ v1 内置两个 template：
 ```text
 background_worker:
   用途：后台任务、监控、分析、准备变更、运行检查
-  默认副作用：approval_required
+  默认外部动作模式：approval_required
   触发方式：manual / scheduled / webhook / session_message
 
 observer_agent:
   用途：系统监控、评测、建议和只读状态诊断
-  默认副作用：deny
+  默认外部动作模式：deny
   触发方式：scheduled / admin_manual / system_status_session
   credential：只读 snapshot，不持有写权限 credential
 ```
@@ -113,7 +113,7 @@ action
 agent_type
 resource_type / resource_id / resource_owner / resource_attributes
 scope / protected_scopes / environment
-risk_level / side_effect_mode / side_effect_intent
+risk_level / external_action_mode / external_action_intent
 credential_scope
 source_service / source_gateway / user_id
 session_id / parent_session_id
@@ -125,7 +125,7 @@ observer_mode
 ```text
 authorize(service, user, action, resource, context):
   1. 校验 service 和 user。
-  2. 校验 action、resource allowlist、template、policy、risk_level、side_effect_mode。
+  2. 校验 action、resource allowlist、template、policy、risk_level、external_action_mode。
   3. 需要人工审批时返回 approval_required。
   4. 需要资源锁时必须先获取 resource_lock。
   5. 所有允许、拒绝、冲突和审批结果都写 audit。
@@ -136,14 +136,14 @@ authorize(service, user, action, resource, context):
 P1 先固定 P2 所需 contract，但不执行真实外部写入。
 
 ```text
-side_effect_plan:
+external_action_plan:
   run_id / connector / action / resource_ref
-  risk_level / side_effect_mode / credential_scope / approval_id
+  risk_level / external_action_mode / credential_scope / approval_id
   input_summary / input_ref / result_ref
   status / trace_id
 
 credential_lease:
-  side_effect_plan_id / credential_scope / provider_ref
+  external_action_plan_id / credential_scope / provider_ref
   status / expires_at / trace_id
 ```
 
@@ -151,14 +151,14 @@ credential_lease:
 
 ```text
 P1:
-  - 可创建 side_effect_plan 草案、执行 policy dry-run、校验 approval / lock / credential_scope。
+  - 可创建 external_action_plan 草案、执行 policy dry-run、校验 approval / lock / credential_scope。
   - 可实现 no-op CredentialProvider 和 no-op WriteConnector。
-  - 不进入真实 applying_side_effects，不获取真实 credential，不调用真实写 connector。
+  - 不进入真实 applying_external_actions，不获取真实 credential，不调用真实写 connector。
   - dry-run、拒绝、缺少审批、缺少 lock、缺少 credential_scope 都写 audit。
 
 P2:
   - 只新增真实 CredentialProvider 和 WriteConnector adapter。
-  - 只推进 P1 已存在的 side_effect_plan 状态。
+  - 只推进 P1 已存在的 external_action_plan 状态。
   - 不改 request、run、session、audit、resource_lock、observer_report 的基线模型。
 ```
 
@@ -183,7 +183,7 @@ agent_session:
 agent_run:
   queued → claimed → context_built → policy_checked → executing → validating
     ├─ awaiting_approval
-    ├─ applying_side_effects
+    ├─ applying_external_actions
     └─ completed
   any → failed / cancelled / timed_out / dead_letter
 
@@ -251,7 +251,7 @@ Agent 唯一性：
 owner_user + agent_type + target_resource + core_constraints_hash
 ```
 
-`core_constraints_hash` 只包含影响权限边界、资源范围、触发模式和副作用能力的约束。展示名称、描述文案、非权限标签不进入 hash。
+`core_constraints_hash` 只包含影响权限边界、资源范围、触发模式和外部动作能力的约束。展示名称、描述文案、非权限标签不进入 hash。
 
 处理规则：
 
@@ -259,7 +259,7 @@ owner_user + agent_type + target_resource + core_constraints_hash
 1. 同一唯一键且 existing agent 为 provisioning / running / paused / failed 时，默认复用。
 2. 请求配置一致时返回 existing agent 摘要。
 3. 请求配置不一致但唯一键一致时创建 change_request，不覆盖 existing agent。
-4. 权限、资源范围或副作用扩大时进入审批。
+4. 权限、资源范围或外部动作权限扩大时进入审批。
 5. existing agent 为 terminated 时不复用，允许重新创建 request。
 ```
 

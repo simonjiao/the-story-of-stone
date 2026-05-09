@@ -2,8 +2,8 @@ use agent_core::{
     AgentBridgeBinding, AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus,
     AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSummary,
     AgentTemplate, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult, CredentialLease,
-    EmptyResponse, ObserverReport, ObserverReportSummary, ResourceLock, RunSummary, SessionSummary,
-    SideEffectPlan,
+    EmptyResponse, ExternalActionPlan, ObserverReport, ObserverReportSummary, ResourceLock,
+    RunSummary, SessionSummary,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -157,8 +157,27 @@ pub trait AgentStore:
     async fn list_observer_reports(&self, limit: i64) -> CoreResult<Vec<ObserverReportSummary>>;
     async fn get_observer_report(&self, report_id: &str) -> CoreResult<Option<ObserverReport>>;
 
-    async fn create_side_effect_plan(&self, plan: SideEffectPlan) -> CoreResult<SideEffectPlan>;
-    async fn list_side_effect_plans_by_run(&self, run_id: &str) -> CoreResult<Vec<SideEffectPlan>>;
+    async fn create_external_action_plan(
+        &self,
+        plan: ExternalActionPlan,
+    ) -> CoreResult<ExternalActionPlan>;
+    async fn get_external_action_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Option<ExternalActionPlan>>;
+    async fn list_external_action_plans_by_run(
+        &self,
+        run_id: &str,
+    ) -> CoreResult<Vec<ExternalActionPlan>>;
+    async fn update_external_action_plan_status(
+        &self,
+        plan_id: &str,
+        status: agent_core::ExternalActionPlanStatus,
+        result_ref: Option<&str>,
+        compensation_ref: Option<&str>,
+        error_code: Option<&str>,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan>;
     async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease>;
     async fn list_credential_leases_by_plan(
         &self,

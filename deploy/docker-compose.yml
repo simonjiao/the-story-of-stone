@@ -120,6 +120,32 @@ services:
       retries: 5
       start_period: 20s
 
+  agent-action-gateway:
+    <<: *agent-platform-image
+    profiles: ["action-gateway-smoke"]
+    container_name: agent-action-gateway
+    command: ["agent-action-gateway", "--bind", "0.0.0.0:8091"]
+    environment:
+      AGENT_ACTION_GATEWAY_TARGET_LOG: "${AGENT_ACTION_GATEWAY_TARGET_LOG:-/app/data/actions.jsonl}"
+      AGENT_ACTION_GATEWAY_API_KEY: "${AGENT_ACTION_GATEWAY_API_KEY:-}"
+      AGENT_ACTION_GATEWAY_ALLOWED_SCOPES: "${AGENT_ACTION_GATEWAY_ALLOWED_SCOPES:-agent-platform:action-gateway-smoke}"
+      AGENT_ACTION_GATEWAY_CONNECTOR: "${AGENT_ACTION_GATEWAY_CONNECTOR:-action-journal}"
+      AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS: "${AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS:-300}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    volumes:
+      - "${AGENT_ACTION_GATEWAY_DATA_DIR:-./data/agent-action-gateway}:/app/data"
+    expose:
+      - "8091"
+    networks:
+      hermes-internal:
+        ipv4_address: "${AGENT_ACTION_GATEWAY_IP:-172.20.0.14}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8091/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
   agent-manager:
     <<: *agent-platform-image
     container_name: agent-manager
@@ -131,6 +157,15 @@ services:
       DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
       AGENT_ALLOW_DEV_HEADERS: "${AGENT_PLATFORM_ALLOW_DEV_HEADERS:-true}"
       AGENT_JWT_SECRET: "${AGENT_JWT_SECRET:-}"
+      AGENT_CREDENTIAL_PROVIDER_BASE_URL: "${AGENT_CREDENTIAL_PROVIDER_BASE_URL:-}"
+      AGENT_CREDENTIAL_PROVIDER_API_KEY: "${AGENT_CREDENTIAL_PROVIDER_API_KEY:-}"
+      AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS: "${AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS:-10}"
+      AGENT_CREDENTIAL_LEASE_TTL_SECONDS: "${AGENT_CREDENTIAL_LEASE_TTL_SECONDS:-300}"
+      AGENT_WRITE_CONNECTOR_BASE_URL: "${AGENT_WRITE_CONNECTOR_BASE_URL:-}"
+      AGENT_WRITE_CONNECTOR_API_KEY: "${AGENT_WRITE_CONNECTOR_API_KEY:-}"
+      AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS: "${AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS:-30}"
+      AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS: "${AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS:-3}"
+      AGENT_EXTERNAL_ACTION_LOCK_LEASE_SECONDS: "${AGENT_EXTERNAL_ACTION_LOCK_LEASE_SECONDS:-300}"
       RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
     expose:
       - "8088"

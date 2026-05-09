@@ -1,10 +1,10 @@
 mod control_services;
+mod external_action_services;
 mod http_support;
 mod lifecycle_services;
 mod observer_services;
 mod request_services;
 mod run_admin_services;
-mod side_effect_services;
 mod telemetry_support;
 
 use agent_core::{
@@ -13,8 +13,9 @@ use agent_core::{
     AgentSessionMessage, AppendMessageInput, ApprovalDecisionInput, ApprovalStatus, AuditDecision,
     AuditLog, AuthContext, ClaimOpenWebUiBridgeNonceInput, CoreResult, CreateChildSessionInput,
     CreateGrantInput, CreateRunInput, CreateSessionInput, DenyDecisionInput, EmptyResponse,
-    ErrorCode, ObserverReport, ObserverReportDiscussionInput, Page, RoleName,
-    RunAdminDecisionInput, RunSummary, SideEffectPlanDryRunInput, SideEffectPlanDryRunResponse,
+    ErrorCode, ExternalActionPlanApplyInput, ExternalActionPlanApplyResponse,
+    ExternalActionPlanDryRunInput, ExternalActionPlanDryRunResponse, ObserverReport,
+    ObserverReportDiscussionInput, Page, RoleName, RunAdminDecisionInput, RunSummary,
     SystemStatusSessionInput, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
     WebhookTriggerInput, actions, assess_observer_snapshot, new_id,
 };
@@ -117,8 +118,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/admin/observer/runs", post(admin_observer_run))
         .route(
-            "/v1/admin/runs/{run_id}/side-effect-plans/dry-run",
-            post(admin_side_effect_dry_run),
+            "/v1/admin/runs/{run_id}/external-action-plans/dry-run",
+            post(admin_external_action_dry_run),
+        )
+        .route(
+            "/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply",
+            post(admin_external_action_apply),
         )
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
         .route(
@@ -1000,18 +1005,38 @@ async fn admin_observer_run(
         .map_err(|error| ApiError::from_core(error, auth.trace_id))
 }
 
-async fn admin_side_effect_dry_run(
+async fn admin_external_action_dry_run(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
-    Json(input): Json<SideEffectPlanDryRunInput>,
-) -> Result<Json<SideEffectPlanDryRunResponse>, ApiError> {
+    Json(input): Json<ExternalActionPlanDryRunInput>,
+) -> Result<Json<ExternalActionPlanDryRunResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_admin(&auth, actions::ADMIN_SIDE_EFFECT_DRY_RUN)?;
-    side_effect_services::dry_run_side_effect_plan(&state.store, &auth, run_id, input)
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_DRY_RUN)?;
+    external_action_services::dry_run_external_action_plan(&state.store, &auth, run_id, input)
         .await
         .map(Json)
         .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
+async fn admin_external_action_apply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, plan_id)): Path<(String, String)>,
+    Json(input): Json<ExternalActionPlanApplyInput>,
+) -> Result<Json<ExternalActionPlanApplyResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_APPLY)?;
+    external_action_services::apply_external_action_plan(
+        &state.store,
+        &auth,
+        run_id,
+        plan_id,
+        input,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| ApiError::from_core(error, auth.trace_id))
 }
 
 async fn create_observer_report_from_snapshot(
@@ -1381,12 +1406,16 @@ mod tests {
     use super::*;
     use agent_core::{
         AGENT_TYPE_BACKGROUND_WORKER, AGENT_TYPE_OBSERVER, AgentRunStatus, AgentSession,
-        ApprovalRequest, ApprovalStatus, HealthStatus, MessageRole, ObserverReport, RequestType,
-        ResourceLock, RiskLevel, RoleAssignment, SideEffectMode, SideEffectPlanStatus, TriggerType,
-        new_id, new_trace_id,
+        ApprovalRequest, ApprovalStatus, CredentialLease, CredentialLeaseRequest,
+        CredentialLeaseStatus, CredentialProvider, ErrorCode, ExternalActionMode,
+        ExternalActionPlanStatus, HealthStatus, MessageRole, ObserverReport, RequestType,
+        ResourceLock, RiskLevel, RoleAssignment, TriggerType, WriteConnector,
+        WriteConnectorDryRunInput, WriteConnectorDryRunOutput, WriteConnectorExecuteInput,
+        WriteConnectorExecuteOutput, new_id, new_trace_id,
     };
-    use std::time::Duration;
+    use std::{sync::Mutex, time::Duration};
     use time::OffsetDateTime;
+    use tokio::net::TcpListener;
 
     async fn test_state() -> AppState {
         let store = MemoryAgentStore::new();
@@ -1424,7 +1453,7 @@ mod tests {
                 structured_payload: json!({"mode": label}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1439,14 +1468,14 @@ mod tests {
                 idempotency_key: None,
                 target_resource: Some("resource:team/project-alpha".to_string()),
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
         .unwrap()
     }
 
-    async fn approved_side_effect_approval(state: &AppState, auth: &AuthContext) -> String {
+    async fn approved_external_action_approval(state: &AppState, auth: &AuthContext) -> String {
         let approval = ApprovalRequest {
             id: new_id("approval"),
             request_id: new_id("req"),
@@ -1454,12 +1483,21 @@ mod tests {
             approver_user: Some("approver-1".to_string()),
             status: ApprovalStatus::Approved,
             risk_level: Some(RiskLevel::Low),
-            reason: Some("side effect dry-run approval".to_string()),
+            reason: Some("external action dry-run approval".to_string()),
             decision_reason: Some("test approval".to_string()),
             created_at: OffsetDateTime::now_utc(),
             decided_at: Some(OffsetDateTime::now_utc()),
         };
         state.store.create_approval(approval).await.unwrap().id
+    }
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     #[tokio::test]
@@ -1477,7 +1515,7 @@ mod tests {
                 structured_payload: json!({}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: None,
+                external_action_mode: None,
             },
         )
         .await
@@ -1502,7 +1540,7 @@ mod tests {
                 structured_payload: json!({"mode": "approved-owner"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: None,
+                external_action_mode: None,
             },
         )
         .await
@@ -1556,7 +1594,7 @@ mod tests {
                 structured_payload: json!({"mode": "read_only"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1590,7 +1628,7 @@ mod tests {
                 }),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1615,7 +1653,7 @@ mod tests {
                 }),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1747,7 +1785,7 @@ mod tests {
                 action: "run:create".to_string(),
                 resource_type: "team".to_string(),
                 resource_id: "project-alpha".to_string(),
-                constraints: json!({"side_effect_mode": "read_only"}),
+                constraints: json!({"external_action_mode": "read_only"}),
                 expires_at: None,
             }),
         )
@@ -1778,7 +1816,7 @@ mod tests {
                 structured_payload: json!({"mode": "observer-discussion"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -1882,17 +1920,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn p1_side_effect_dry_run_creates_plan_and_noop_credential_lease() {
+    async fn p1_external_action_dry_run_creates_plan_and_noop_credential_lease() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);
-        let run = create_read_only_run(&state, &auth, "p1-side-effect-dry-run").await;
-        let approval_id = approved_side_effect_approval(&state, &auth).await;
+        let run = create_read_only_run(&state, &auth, "p1-external-action-dry-run").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
 
-        let Json(response) = admin_side_effect_dry_run(
+        let Json(response) = admin_external_action_dry_run(
             State(state.clone()),
             HeaderMap::new(),
             Path(run.id.clone()),
-            Json(SideEffectPlanDryRunInput {
+            Json(ExternalActionPlanDryRunInput {
                 connector: "github".to_string(),
                 action: "issue.comment".to_string(),
                 resource_ref: "resource:team/project-alpha".to_string(),
@@ -1901,13 +1939,16 @@ mod tests {
                 input_summary: Some("would comment on an issue".to_string()),
                 input_ref: Some("payload://dry-run/1".to_string()),
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::Authorized),
+                external_action_mode: Some(ExternalActionMode::Authorized),
             }),
         )
         .await
         .unwrap();
 
-        assert_eq!(response.dry_run_status, SideEffectPlanStatus::DryRunReady);
+        assert_eq!(
+            response.dry_run_status,
+            ExternalActionPlanStatus::DryRunReady
+        );
         assert!(response.credential_lease.is_some());
         assert_eq!(
             response.plan.approval_id.as_deref(),
@@ -1924,54 +1965,479 @@ mod tests {
         );
         let plans = state
             .store
-            .list_side_effect_plans_by_run(&response.plan.run_id)
+            .list_external_action_plans_by_run(&response.plan.run_id)
             .await
             .unwrap();
         assert_eq!(plans.len(), 1);
     }
 
+    #[derive(Debug, Clone)]
+    struct TestCredentialProvider;
+
+    #[async_trait::async_trait]
+    impl CredentialProvider for TestCredentialProvider {
+        async fn dry_run_lease(
+            &self,
+            request: CredentialLeaseRequest,
+        ) -> CoreResult<CredentialLease> {
+            Ok(CredentialLease::dry_run(
+                request.external_action_plan_id,
+                request.credential_scope,
+                request.trace_id,
+            ))
+        }
+
+        async fn active_lease(
+            &self,
+            request: CredentialLeaseRequest,
+        ) -> CoreResult<CredentialLease> {
+            Ok(CredentialLease::active(
+                request.external_action_plan_id,
+                request.credential_scope,
+                "vault://leases/test-external-action",
+                60,
+                request.trace_id,
+            ))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingWriteConnector {
+        provider_ref: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteConnector for RecordingWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            *self.provider_ref.lock().unwrap() = input.credential_provider_ref.clone();
+            Ok(WriteConnectorExecuteOutput {
+                accepted: true,
+                status: "applied".to_string(),
+                result_ref: Some(format!("write://action-executions/{}", input.plan.id)),
+                compensation_ref: Some(format!("compensate://action-executions/{}", input.plan.id)),
+                error_code: None,
+                metadata: json!({"attempted": true}),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct InvalidWriteConnector;
+
+    #[async_trait::async_trait]
+    impl WriteConnector for InvalidWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            Ok(WriteConnectorExecuteOutput {
+                accepted: true,
+                status: "applied".to_string(),
+                result_ref: Some(format!("write://action-executions/{}", input.plan.id)),
+                compensation_ref: None,
+                error_code: None,
+                metadata: json!({"invalid": "missing compensation_ref"}),
+            })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingWriteConnector {
+        attempts: Arc<Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteConnector for FailingWriteConnector {
+        async fn dry_run(
+            &self,
+            input: WriteConnectorDryRunInput,
+        ) -> CoreResult<WriteConnectorDryRunOutput> {
+            Ok(WriteConnectorDryRunOutput {
+                accepted: true,
+                status: "dry_run_ready".to_string(),
+                result_ref: Some(format!("test://dry-run/{}", input.plan.id)),
+                metadata: json!({}),
+            })
+        }
+
+        async fn execute(
+            &self,
+            _input: WriteConnectorExecuteInput,
+        ) -> CoreResult<WriteConnectorExecuteOutput> {
+            *self.attempts.lock().unwrap() += 1;
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "connector execution failed",
+            ))
+        }
+    }
+
     #[tokio::test]
-    async fn p1_side_effect_dry_run_rejects_missing_approval() {
+    async fn external_action_apply_uses_active_credential_lock_and_audit() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);
-        let run = create_read_only_run(&state, &auth, "p1-side-effect-no-approval").await;
-
-        let Json(response) = admin_side_effect_dry_run(
-            State(state),
+        let run = create_read_only_run(&state, &auth, "external-action-apply").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
             HeaderMap::new(),
-            Path(run.id),
-            Json(SideEffectPlanDryRunInput {
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
                 connector: "github".to_string(),
                 action: "issue.comment".to_string(),
                 resource_ref: "resource:team/project-alpha".to_string(),
                 credential_scope: Some("github:issues:write".to_string()),
-                approval_id: None,
-                input_summary: Some("would comment on an issue".to_string()),
-                input_ref: None,
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/1".to_string()),
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::Authorized),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+        let provider_ref = Arc::new(Mutex::new(None));
+        let connector = RecordingWriteConnector {
+            provider_ref: provider_ref.clone(),
+        };
+
+        let response = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.apply_status, ExternalActionPlanStatus::Applied);
+        assert_eq!(
+            response.credential_lease.status,
+            CredentialLeaseStatus::Active
+        );
+        assert_eq!(
+            response.credential_lease.provider_ref.as_deref(),
+            Some("vault://leases/test-external-action")
+        );
+        assert_eq!(
+            *provider_ref.lock().unwrap(),
+            Some("vault://leases/test-external-action".to_string())
+        );
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("write://action-executions/")
+        );
+        assert!(
+            response
+                .plan
+                .compensation_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("compensate://action-executions/")
+        );
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_APPLY
+                && audit.decision == Some(AuditDecision::Completed)
+                && audit.resource_id.as_deref() == Some(response.plan.id.as_str())
+                && audit.reason.as_deref().is_some_and(|reason| {
+                    reason.contains(&format!("lock_id={}", response.resource_lock.id))
+                })
+        }));
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_smokes_real_http_adapter_target() {
+        let target_log = std::env::temp_dir().join(format!(
+            "agent-platform-manager-action-gateway-smoke-{}.jsonl",
+            new_trace_id()
+        ));
+        let adapter_url = spawn_server(
+            agent_runtime::action_gateway_router(agent_runtime::ActionGatewayConfig {
+                target_log_path: target_log.clone(),
+                api_key: Some("secret-token".to_string()),
+                lease_ttl_seconds: 60,
+                connector: "action-journal".to_string(),
+                allowed_credential_scopes: vec!["agent-platform:action-gateway-smoke".to_string()],
+            })
+            .unwrap(),
+        )
+        .await;
+        let credential_provider = agent_runtime::HttpCredentialProvider::new(
+            agent_runtime::HttpCredentialProviderConfig {
+                base_url: adapter_url.clone(),
+                api_key: Some("secret-token".to_string()),
+                timeout: Duration::from_secs(2),
+                lease_ttl_seconds: 300,
+            },
+        )
+        .unwrap();
+        let write_connector =
+            agent_runtime::HttpWriteConnector::new(agent_runtime::HttpWriteConnectorConfig {
+                base_url: adapter_url,
+                api_key: Some("secret-token".to_string()),
+                timeout: Duration::from_secs(2),
+            })
+            .unwrap();
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-http-adapter-smoke").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "action-journal".to_string(),
+                action: "target.write".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("agent-platform:action-gateway-smoke".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("local smoke target write".to_string()),
+                input_ref: Some("payload://external-action-http-smoke".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
             }),
         )
         .await
         .unwrap();
 
-        assert_eq!(
-            response.dry_run_status,
-            SideEffectPlanStatus::DryRunRejected
+        let response = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id,
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"message": "external action manager HTTP adapter smoke"}),
+            },
+            &credential_provider,
+            &write_connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.apply_status, ExternalActionPlanStatus::Applied);
+        assert!(
+            response
+                .plan
+                .result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("action-journal-target://")
         );
-        assert_eq!(
-            response.plan.error_code.as_deref(),
-            Some("approval_required")
+        assert!(
+            response
+                .plan
+                .compensation_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("action-journal-compensation://")
         );
-        assert!(response.credential_lease.is_none());
+        let log = std::fs::read_to_string(&target_log).unwrap();
+        assert_eq!(
+            log.matches("\"event_type\":\"credential_lease_issued\"")
+                .count(),
+            1
+        );
+        assert_eq!(log.matches("\"event_type\":\"action_executed\"").count(), 1);
+        assert!(log.contains("\"idempotency_key\""));
+        let _ = std::fs::remove_file(target_log);
     }
 
     #[tokio::test]
-    async fn p1_side_effect_dry_run_rejects_active_resource_lock() {
+    async fn external_action_apply_rejects_invalid_connector_result() {
         let state = test_state().await;
         let auth = test_auth(RoleName::ResourceMaintainer);
-        let run = create_read_only_run(&state, &auth, "p1-side-effect-locked").await;
-        let approval_id = approved_side_effect_approval(&state, &auth).await;
+        let run = create_read_only_run(&state, &auth, "external-action-invalid-result").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/invalid".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &InvalidWriteConnector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("connector_invalid_result"));
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_dead_letters_run_after_connector_retries() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run =
+            create_read_only_run(&state, &auth, "external-action-connector-dead-letter").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/dead-letter".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+        let attempts = Arc::new(Mutex::new(0));
+        let connector = FailingWriteConnector {
+            attempts: attempts.clone(),
+        };
+
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &connector,
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 2,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*attempts.lock().unwrap(), 2);
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("connector_dead_letter"));
+        let run = state.store.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(run.run_status, AgentRunStatus::DeadLetter);
+    }
+
+    #[tokio::test]
+    async fn external_action_apply_records_lock_conflict_from_precheck() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "external-action-apply-lock-conflict").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        let Json(dry_run) = admin_external_action_dry_run(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path(run.id.clone()),
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: Some(approval_id),
+                input_summary: Some("comment on an issue".to_string()),
+                input_ref: Some("payload://apply/locked".to_string()),
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
         state
             .store
             .acquire_resource_lock(
@@ -1979,7 +2445,7 @@ mod tests {
                     id: new_id("lock"),
                     resource_type: "team".to_string(),
                     resource_id: "project-alpha".to_string(),
-                    lock_scope: "side_effect".to_string(),
+                    lock_scope: "external_action".to_string(),
                     holder_run_id: "run-other".to_string(),
                     lease_until: OffsetDateTime::now_utc(),
                     created_at: OffsetDateTime::now_utc(),
@@ -1989,11 +2455,106 @@ mod tests {
             .await
             .unwrap();
 
-        let Json(response) = admin_side_effect_dry_run(
+        let result = external_action_services::apply_external_action_plan_with_adapters(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            dry_run.plan.id.clone(),
+            ExternalActionPlanApplyInput {
+                payload: json!({"body": "approved external write"}),
+            },
+            &TestCredentialProvider,
+            &RecordingWriteConnector {
+                provider_ref: Arc::new(Mutex::new(None)),
+            },
+            external_action_services::ExternalActionApplyConfig {
+                lock_lease: Duration::from_secs(30),
+                max_attempts: 1,
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let plan = state
+            .store
+            .get_external_action_plan(&dry_run.plan.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.status, ExternalActionPlanStatus::Failed);
+        assert_eq!(plan.error_code.as_deref(), Some("resource_locked"));
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_APPLY
+                && audit.decision == Some(AuditDecision::Conflict)
+                && audit.resource_id.as_deref() == Some(plan.id.as_str())
+        }));
+    }
+
+    #[tokio::test]
+    async fn p1_external_action_dry_run_rejects_missing_approval() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-external-action-no-approval").await;
+
+        let Json(response) = admin_external_action_dry_run(
             State(state),
             HeaderMap::new(),
             Path(run.id),
-            Json(SideEffectPlanDryRunInput {
+            Json(ExternalActionPlanDryRunInput {
+                connector: "github".to_string(),
+                action: "issue.comment".to_string(),
+                resource_ref: "resource:team/project-alpha".to_string(),
+                credential_scope: Some("github:issues:write".to_string()),
+                approval_id: None,
+                input_summary: Some("would comment on an issue".to_string()),
+                input_ref: None,
+                risk_level: Some(RiskLevel::Low),
+                external_action_mode: Some(ExternalActionMode::Authorized),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.dry_run_status,
+            ExternalActionPlanStatus::DryRunRejected
+        );
+        assert_eq!(
+            response.plan.error_code.as_deref(),
+            Some("approval_required")
+        );
+        assert!(response.credential_lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn p1_external_action_dry_run_rejects_active_resource_lock() {
+        let state = test_state().await;
+        let auth = test_auth(RoleName::ResourceMaintainer);
+        let run = create_read_only_run(&state, &auth, "p1-external-action-locked").await;
+        let approval_id = approved_external_action_approval(&state, &auth).await;
+        state
+            .store
+            .acquire_resource_lock(
+                ResourceLock {
+                    id: new_id("lock"),
+                    resource_type: "team".to_string(),
+                    resource_id: "project-alpha".to_string(),
+                    lock_scope: "external_action".to_string(),
+                    holder_run_id: "run-other".to_string(),
+                    lease_until: OffsetDateTime::now_utc(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+
+        let Json(response) = admin_external_action_dry_run(
+            State(state),
+            HeaderMap::new(),
+            Path(run.id),
+            Json(ExternalActionPlanDryRunInput {
                 connector: "github".to_string(),
                 action: "issue.comment".to_string(),
                 resource_ref: "resource:team/project-alpha".to_string(),
@@ -2002,7 +2563,7 @@ mod tests {
                 input_summary: Some("would comment on an issue".to_string()),
                 input_ref: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::Authorized),
+                external_action_mode: Some(ExternalActionMode::Authorized),
             }),
         )
         .await
@@ -2010,7 +2571,7 @@ mod tests {
 
         assert_eq!(
             response.dry_run_status,
-            SideEffectPlanStatus::DryRunRejected
+            ExternalActionPlanStatus::DryRunRejected
         );
         assert_eq!(response.plan.error_code.as_deref(), Some("resource_locked"));
         assert!(response.credential_lease.is_none());
@@ -2099,7 +2660,7 @@ mod tests {
                 structured_payload: json!({"mode": "webhook"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -2141,7 +2702,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.trigger_type, TriggerType::Webhook);
-        assert_eq!(run.side_effect_mode, SideEffectMode::ReadOnly);
+        assert_eq!(run.external_action_mode, ExternalActionMode::ReadOnly);
         assert_eq!(run.idempotency_key.as_deref(), Some("github-issue-1-42"));
     }
 
@@ -2160,7 +2721,7 @@ mod tests {
                 structured_payload: json!({"mode": "idempotency"}),
                 idempotency_key: None,
                 risk_level: Some(RiskLevel::Low),
-                side_effect_mode: Some(SideEffectMode::ReadOnly),
+                external_action_mode: Some(ExternalActionMode::ReadOnly),
             },
         )
         .await
@@ -2200,7 +2761,7 @@ mod tests {
             idempotency_key: Some("run-key-1".to_string()),
             target_resource: Some("resource:team/project-alpha".to_string()),
             risk_level: Some(RiskLevel::Low),
-            side_effect_mode: Some(SideEffectMode::ReadOnly),
+            external_action_mode: Some(ExternalActionMode::ReadOnly),
         };
         let first_run = lifecycle_services::create_run(
             &state.store,

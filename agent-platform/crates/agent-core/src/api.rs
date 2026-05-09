@@ -1,8 +1,8 @@
 use crate::{
     AgentBridgeBindingStatus, AgentInstanceStatus, AgentRequestStatus, AgentRunStatus,
-    AgentSession, AgentSessionMessage, AgentSessionStatus, CredentialLease, HealthStatus,
-    MessageRole, RequestType, RiskLevel, SideEffectMode, SideEffectPlan, SideEffectPlanStatus,
-    TriggerType,
+    AgentSession, AgentSessionMessage, AgentSessionStatus, CredentialLease, ExternalActionMode,
+    ExternalActionPlan, ExternalActionPlanStatus, HealthStatus, MessageRole, RequestType,
+    ResourceLock, RiskLevel, TriggerType,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,7 +18,7 @@ pub struct AgentRequestInput {
     pub structured_payload: Value,
     pub idempotency_key: Option<String>,
     pub risk_level: Option<RiskLevel>,
-    pub side_effect_mode: Option<SideEffectMode>,
+    pub external_action_mode: Option<ExternalActionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +75,7 @@ pub struct CreateRunInput {
     pub idempotency_key: Option<String>,
     pub target_resource: Option<String>,
     pub risk_level: Option<RiskLevel>,
-    pub side_effect_mode: Option<SideEffectMode>,
+    pub external_action_mode: Option<ExternalActionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,7 +213,7 @@ pub struct SystemStatusSessionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SideEffectPlanDryRunInput {
+pub struct ExternalActionPlanDryRunInput {
     pub connector: String,
     pub action: String,
     pub resource_ref: String,
@@ -222,14 +222,31 @@ pub struct SideEffectPlanDryRunInput {
     pub input_summary: Option<String>,
     pub input_ref: Option<String>,
     pub risk_level: Option<RiskLevel>,
-    pub side_effect_mode: Option<SideEffectMode>,
+    pub external_action_mode: Option<ExternalActionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SideEffectPlanDryRunResponse {
-    pub plan: SideEffectPlan,
+pub struct ExternalActionPlanDryRunResponse {
+    pub plan: ExternalActionPlan,
     pub credential_lease: Option<CredentialLease>,
-    pub dry_run_status: SideEffectPlanStatus,
+    pub dry_run_status: ExternalActionPlanStatus,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanApplyInput {
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanApplyResponse {
+    pub plan: ExternalActionPlan,
+    pub credential_lease: CredentialLease,
+    pub resource_lock: ResourceLock,
+    pub apply_status: ExternalActionPlanStatus,
+    #[serde(default)]
+    pub connector_metadata: Value,
     pub trace_id: String,
 }
 

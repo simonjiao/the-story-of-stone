@@ -142,7 +142,7 @@ networks:
 5. agent-runtime、agent-worker、agent-observer、agentctl 可以访问 agent-manager；Worker 通过受控 `RunQueue` 推进已授权 run。
 6. agent-observer 可以通过 Manager 只读 report API 或内部 `ObserverSnapshotStore` port 读取聚合 snapshot。
 7. agent-orchestrator 只有在验证 Open WebUI bridge context、识别系统状态意图且用户映射为授权 operator/admin 时，才能调用 Manager 的 System Observer status session 窄口。
-8. 外部 connector 的写入 API 只能由已授权 side-effect run 经 Manager 策略后使用。
+8. 外部 connector 的写入 API 只能由已授权 external-action run 经 Manager 策略后使用。
 ```
 
 ## 调用方向

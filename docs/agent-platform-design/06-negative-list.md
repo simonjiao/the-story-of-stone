@@ -62,7 +62,7 @@ Observer Agent → 任何控制或写入 API
 6. 不建议在 P0 引入 Redis 作为正确性依赖；P0 用 Postgres lease 先闭环。
 7. 不建议让 ORM、GraphQL、gRPC 或外部 memory provider 决定 P0 架构；P0 应先固定 trait / adapter 边界。
 8. 不建议跳过 P0 可观测性埋点；trace_id、tracing span、metrics name/label 必须从 P0 开始。
-9. 不建议把 P2 当作重构阶段；P1 应先固定 side-effect plan、credential lease、write connector contract 和 no-op adapter，P2 只启用真实 provider / connector。
+9. 不建议把 P2 当作重构阶段；P1 应先固定 external-action plan、credential lease、write connector contract 和 no-op adapter，P2 只启用真实 provider / connector。
 ```
 
 ## v1 暂不实现
@@ -73,7 +73,7 @@ Observer Agent → 任何控制或写入 API
 | Open WebUI Manager 页面 | Open WebUI 必须保持不知道控制面；前台管理页会破坏 Gateway 边界 | 明确需要普通用户自助管理，且能通过 Gateway 安全代理 |
 | 多租户复杂计费 | 当前目标是单平台控制面、安全边界和运行闭环 | 出现多个组织或商业计费需求 |
 | 跨组织 / 跨系统复杂授权 | 第一版只做 resource allowlist 和基础 RBAC / ABAC | 单组织 / 单系统授权模型稳定后 |
-| 自动 merge / release / deploy | 通用高风险生产副作用，第一版默认审批或硬拒绝 | 具备完整审批、回滚、环境隔离和发布审计 |
+| 自动 merge / release / deploy | 通用高风险生产外部动作，第一版默认审批或硬拒绝 | 具备完整审批、回滚、环境隔离和发布审计 |
 | 动态无限 Agent 创建 | 任意 template、任意权限或无限数量会造成资源耗尽和权限扩散 | 配额、唯一性、预算、回收机制稳定后 |
 | 外部 memory provider 深度集成 | 会引入一致性、隐私和召回质量问题 | 内部 Memory / Session Store 模型稳定后 |
 | 多级 child session | 多级嵌套会造成权限链、预算、上下文和审计链失控 | 一层 child session 的回传、预算和审计模型稳定后 |

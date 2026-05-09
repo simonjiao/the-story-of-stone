@@ -251,8 +251,8 @@
 | P1-BRIDGE-RUN-20260509 | PASS | Bridge 后续消息创建 run，Worker 完成执行，关闭 session 生效。 | follow-up 返回 `run_019e0ba96f8c74d3962c58c13a4bd24f`、`session_id=sess_019e0ba957e27ac38234cb625905cd65`；close 返回 `agent session closed`。 | P1 | 使用正式 Manager/Orchestrator/Worker/Postgres。 |
 | P1-HERMES-RUNTIME-20260509 | PASS | `agent_session` run 通过 P1 Hermes Runtime 完成。 | 直接 session run `run_019e0ba957f67db29d6aaa3e7a6e50c3` 完成；Open WebUI 基础聊天也返回 HTTP 200。 | P1 | 覆盖 Worker -> Runtime -> Hermes 路径。 |
 | P1-OBSERVER-DISCUSS-20260509 | PASS | Observer report discussion 可以创建普通 `agent_session`。 | Observer discussion session `sess_019e0ba97f787f43bc0bc38851c5bf0f` 创建成功。 | P1 | Observer 仍只生成报告与讨论上下文，不触发控制动作。 |
-| P1-P2-DRYRUN-20260509 | PASS | P2 readiness dry-run 在 no-op credential/write connector 下可返回 ready plan。 | side-effect dry-run 返回 `seplan_019e0ba97fab75d192e0c8f4591289ee`。 | P1 | 未获取真实 credential，未执行外部写入。 |
-| P1-POSTGRES-MIGRATION-20260509 | PASS | P1 readiness 表已存在。 | Postgres 校验返回 `side_effect_plans|credential_leases`。 | P1 | 覆盖正式数据库 migration。 |
+| P1-P2-DRYRUN-20260509 | PASS | P2 readiness dry-run 在 no-op credential/write connector 下可返回 ready plan。 | external-action dry-run 返回 `eaplan_019e0ba97fab75d192e0c8f4591289ee`。 | P1 | 未获取真实 credential，未执行外部写入。 |
+| P1-POSTGRES-MIGRATION-20260509 | PASS | P1 readiness 表已存在。 | Postgres 校验返回 `external_action_plans|credential_leases`。 | P1 | 覆盖正式数据库 migration。 |
 | P1-PUBLIC-20260509 | PASS | 公网和内网 Open WebUI config 均可访问。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200、464 bytes；`http://172.20.0.3:8080/api/config` 返回 HTTP 200、464 bytes。 | P1 | 远端 Python 访问公网曾收到 403，改由本地公网请求确认 200。 |
 | P1-LOGS-20260509 | PASS | 重启恢复后关键服务无新错误关键词。 | Open WebUI 重启后 30 秒窗口内，cloudflared/open-webui/Agent Platform 服务日志未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden/connection refused`。 |  | 重启瞬间 cloudflared 有 transient origin refused，公网 200 后已恢复。 |
 

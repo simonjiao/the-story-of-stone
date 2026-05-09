@@ -3,10 +3,10 @@ use agent_core::{
     AgentBridgeBinding, AgentBridgeBindingStatus, AgentCoreError, AgentGrant, AgentInstance,
     AgentInstanceStatus, AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession,
     AgentSessionMessage, AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest,
-    ApprovalStatus, AuditLog, CoreResult, CredentialLease, EmptyResponse, ErrorCode, MemoryStore,
-    ObserverReport, ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore, ResourceLock,
-    RunClaim, RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary, SideEffectPlan,
-    validate_run_transition, validate_session_transition,
+    ApprovalStatus, AuditLog, CoreResult, CredentialLease, EmptyResponse, ErrorCode,
+    ExternalActionPlan, MemoryStore, ObserverReport, ObserverReportSummary, ObserverSnapshot,
+    ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary, RuntimeOutput,
+    SessionContext, SessionSummary, validate_run_transition, validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ struct Inner {
     runs: HashMap<String, AgentRun>,
     audits: Vec<AuditLog>,
     reports: HashMap<String, ObserverReport>,
-    side_effect_plans: HashMap<String, SideEffectPlan>,
+    external_action_plans: HashMap<String, ExternalActionPlan>,
     credential_leases: HashMap<String, CredentialLease>,
     grants: HashMap<String, AgentGrant>,
     locks: HashMap<(String, String, String), ResourceLock>,
@@ -721,23 +721,62 @@ impl AgentStore for MemoryAgentStore {
         Ok(self.read()?.reports.get(report_id).cloned())
     }
 
-    async fn create_side_effect_plan(&self, plan: SideEffectPlan) -> CoreResult<SideEffectPlan> {
+    async fn create_external_action_plan(
+        &self,
+        plan: ExternalActionPlan,
+    ) -> CoreResult<ExternalActionPlan> {
         self.write()?
-            .side_effect_plans
+            .external_action_plans
             .insert(plan.id.clone(), plan.clone());
         Ok(plan)
     }
 
-    async fn list_side_effect_plans_by_run(&self, run_id: &str) -> CoreResult<Vec<SideEffectPlan>> {
+    async fn get_external_action_plan(
+        &self,
+        plan_id: &str,
+    ) -> CoreResult<Option<ExternalActionPlan>> {
+        Ok(self.read()?.external_action_plans.get(plan_id).cloned())
+    }
+
+    async fn list_external_action_plans_by_run(
+        &self,
+        run_id: &str,
+    ) -> CoreResult<Vec<ExternalActionPlan>> {
         let mut items: Vec<_> = self
             .read()?
-            .side_effect_plans
+            .external_action_plans
             .values()
             .filter(|plan| plan.run_id == run_id)
             .cloned()
             .collect();
         items.sort_by_key(|plan| std::cmp::Reverse(plan.created_at));
         Ok(items)
+    }
+
+    async fn update_external_action_plan_status(
+        &self,
+        plan_id: &str,
+        status: agent_core::ExternalActionPlanStatus,
+        result_ref: Option<&str>,
+        compensation_ref: Option<&str>,
+        error_code: Option<&str>,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan> {
+        let mut inner = self.write()?;
+        let plan = inner
+            .external_action_plans
+            .get_mut(plan_id)
+            .ok_or_else(|| {
+                agent_core::AgentCoreError::coded(agent_core::ErrorCode::NotFound, "not found")
+            })?;
+        plan.status = status;
+        plan.result_ref = result_ref.map(ToString::to_string);
+        plan.compensation_ref = compensation_ref.map(ToString::to_string);
+        plan.error_code = error_code.map(ToString::to_string);
+        plan.trace_id = trace_id.to_string();
+        plan.version += 1;
+        plan.updated_at = OffsetDateTime::now_utc();
+        Ok(plan.clone())
     }
 
     async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease> {
@@ -755,7 +794,7 @@ impl AgentStore for MemoryAgentStore {
             .read()?
             .credential_leases
             .values()
-            .filter(|lease| lease.side_effect_plan_id == plan_id)
+            .filter(|lease| lease.external_action_plan_id == plan_id)
             .cloned()
             .collect();
         items.sort_by_key(|lease| std::cmp::Reverse(lease.created_at));
@@ -1080,7 +1119,7 @@ impl RunQueue for MemoryAgentStore {
                     | AgentRunStatus::PolicyChecked
                     | AgentRunStatus::Executing
                     | AgentRunStatus::Validating
-                    | AgentRunStatus::ApplyingSideEffects
+                    | AgentRunStatus::ApplyingExternalActions
             ) && run.lease_until.is_some_and(|lease| lease < now)
             {
                 if run.retry_count >= max_retries {
@@ -1161,11 +1200,18 @@ impl ObserverSnapshotStore for MemoryAgentStore {
                 "timed_out_runs": inner.runs.values().filter(|run| run.run_status == AgentRunStatus::TimedOut).count(),
                 "avg_completed_runtime_ms": avg_runtime_ms,
                 "max_context_messages": max_context_messages,
-                "side_effect_plan_counts": count_by(
+                "external_action_plan_counts": count_by(
                     inner
-                        .side_effect_plans
+                        .external_action_plans
                         .values()
                         .map(|plan| plan.status.to_string())
+                        .collect(),
+                ),
+                "external_action_plan_error_counts": count_by(
+                    inner
+                        .external_action_plans
+                        .values()
+                        .filter_map(|plan| plan.error_code.clone())
                         .collect(),
                 ),
             }),

@@ -5,7 +5,7 @@
 ## 1. Contract Freeze
 
 - [x] 保持 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema 和 audit contract 不变。
-- [x] 只新增 P1/P2 readiness schema：`side_effect_plans`、`credential_leases`。
+- [x] 只新增 P1/P2 readiness schema：`external_action_plans`、`credential_leases`。
 - [x] 为 Runtime safe error、Bridge regression、P2 readiness dry-run 和 report discussion 增加回归测试。
 
 总结：P1 通过新增 adapter、schema 和 API 扩展 P0，没有改写 P0 控制面或 Worker 状态机。
@@ -41,7 +41,7 @@
 
 ## 5. Observer Upgrade
 
-- [x] Observer snapshot 增加 retry、timeout、completed runtime latency、context size 和 side-effect plan 状态摘要。
+- [x] Observer snapshot 增加 retry、timeout、completed runtime latency、context size 和 external-action plan 状态摘要。
 - [x] Observer report findings/recommendations 纳入 runtime quality signal 和 risk taxonomy。
 - [x] Observer 仍只生成报告和建议，不触发控制动作。
 - [x] 新增 System Observer status session，授权 admin/operator 可快速把最新报告、findings、recommendations 和脱敏 evidence 带入专用会话。
@@ -59,9 +59,9 @@
 
 ## 7. P2 Readiness
 
-- [x] 新增 `SideEffectPlan`、`CredentialLease`、`CredentialProvider`、`WriteConnector` contract。
+- [x] 新增 `ExternalActionPlan`、`CredentialLease`、`CredentialProvider`、`WriteConnector` contract。
 - [x] 新增 no-op credential provider 和 no-op write connector。
-- [x] 新增 `POST /v1/admin/runs/{run_id}/side-effect-plans/dry-run` 和 `agentctl runs dry-run-side-effect`。
+- [x] 新增 `POST /v1/admin/runs/{run_id}/external-action-plans/dry-run` 和 `agentctl runs dry-run-external-action`。
 - [x] dry-run 校验 approval 状态、credential_scope、active resource lock 和 critical-risk deny。
 - [x] P1 只产生 dry-run ready/rejected 状态；不获取真实 credential，不调用真实写 connector，不进入真实 external write。
 

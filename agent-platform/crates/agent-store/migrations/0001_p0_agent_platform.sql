@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     target_resource TEXT NOT NULL,
     run_status TEXT NOT NULL,
     risk_level TEXT NOT NULL,
-    side_effect_mode TEXT NOT NULL,
+    external_action_mode TEXT NOT NULL,
     lease_owner TEXT,
     lease_until TIMESTAMPTZ,
     retry_count INT NOT NULL DEFAULT 0,
@@ -262,7 +262,7 @@ INSERT INTO agent_templates (
     '["manual","scheduled","webhook","session_message"]'::jsonb,
     '["analyze","prepare_change","run_checks"]'::jsonb,
     '{
-      "default_side_effect_mode": "approval_required",
+      "default_external_action_mode": "approval_required",
       "max_items_per_run": 8,
       "max_runtime_seconds": 1800,
       "max_concurrent_runs_per_agent": 1,
@@ -284,7 +284,7 @@ INSERT INTO agent_templates (
     '["scheduled","admin_manual"]'::jsonb,
     '["read_status_snapshot","write_observer_report"]'::jsonb,
     '{
-      "default_side_effect_mode": "deny",
+      "default_external_action_mode": "deny",
       "max_concurrent_observer_runs": 1,
       "readable_scopes": ["status_summary","audit_summary","worker_heartbeat_summary","lock_summary","error_metrics"],
       "forbidden_scopes": ["secrets","credentials","full_prompt","full_context","raw_internal_logs"]

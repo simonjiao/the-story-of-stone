@@ -270,14 +270,14 @@ async fn ensure_system_observer_agent(
         json!({
             "mode": "system_status",
             "hermes_profile": "observer_agent:system-status",
-            "side_effect_mode": "deny",
+            "external_action_mode": "deny",
             "readable_scopes": [
                 "observer_reports",
                 "audit_summary",
                 "worker_heartbeat_summary",
                 "run_quality_signals",
                 "resource_lock_summary",
-                "side_effect_plan_summary"
+                "external_action_plan_summary"
             ],
             "forbidden_scopes": [
                 "secrets",

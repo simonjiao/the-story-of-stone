@@ -1,6 +1,7 @@
 use crate::{
     AgentCoreError, AgentInstance, AgentRun, AgentSessionMessage, CoreResult, CredentialLease,
-    ObserverSnapshot, RiskLevel, RunSummary, SessionContext, SideEffectMode, SideEffectPlan,
+    ExternalActionMode, ExternalActionPlan, ObserverSnapshot, RiskLevel, RunSummary,
+    SessionContext,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -88,7 +89,7 @@ pub trait ConnectorClient: Send + Sync {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialLeaseRequest {
-    pub side_effect_plan_id: String,
+    pub external_action_plan_id: String,
     pub credential_scope: String,
     pub trace_id: String,
 }
@@ -96,11 +97,12 @@ pub struct CredentialLeaseRequest {
 #[async_trait]
 pub trait CredentialProvider: Send + Sync {
     async fn dry_run_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease>;
+    async fn active_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteConnectorDryRunInput {
-    pub plan: SideEffectPlan,
+    pub plan: ExternalActionPlan,
     #[serde(default)]
     pub payload: Value,
     pub trace_id: String,
@@ -115,19 +117,44 @@ pub struct WriteConnectorDryRunOutput {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorExecuteInput {
+    pub plan: ExternalActionPlan,
+    pub idempotency_key: String,
+    pub credential_provider_ref: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorExecuteOutput {
+    pub accepted: bool,
+    pub status: String,
+    pub result_ref: Option<String>,
+    pub compensation_ref: Option<String>,
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
 #[async_trait]
 pub trait WriteConnector: Send + Sync {
     async fn dry_run(
         &self,
         input: WriteConnectorDryRunInput,
     ) -> CoreResult<WriteConnectorDryRunOutput>;
+    async fn execute(
+        &self,
+        input: WriteConnectorExecuteInput,
+    ) -> CoreResult<WriteConnectorExecuteOutput>;
 }
 
-pub fn side_effect_requires_credential(mode: SideEffectMode, risk: RiskLevel) -> bool {
+pub fn external_action_requires_credential(mode: ExternalActionMode, risk: RiskLevel) -> bool {
     matches!(
         (mode, risk),
-        (SideEffectMode::Authorized, _)
-            | (SideEffectMode::ApprovalRequired, _)
+        (ExternalActionMode::Authorized, _)
+            | (ExternalActionMode::ApprovalRequired, _)
             | (_, RiskLevel::High | RiskLevel::Critical)
     )
 }

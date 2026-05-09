@@ -25,13 +25,13 @@
 | Agent lifecycle | 创建、审批、拒绝、复用、配置冲突、无权限访问 | Orchestrator 只提交 request；Manager 返回安全摘要并写 audit | 03, 04, 05 |
 | 查询边界 | 查询 Agent / Session / Run / Observer report / System Observer status session | 普通用户只看摘要；report 仅 admin/operator 通过 admin API、agentctl 或受控 status session 查看脱敏上下文 | 03, 05, 06 |
 | Session/run | 长交互、child session、manual/scheduled/webhook/session_message run | child v1 只允许一层；run 由 Manager 创建、Worker claim、Runtime 执行 | 03, 04, 05 |
-| 并发与失败 | Worker crash、lease 过期、retry、dead-letter、资源争用 | lease 可接管；同一资源副作用串行；状态迁移写 audit | 05 |
+| 并发与失败 | Worker crash、lease 过期、retry、dead-letter、资源争用 | lease 可接管；同一资源外部动作串行；状态迁移写 audit | 05 |
 | Memory/security | 上下文增长、summary、result_ref、错误摘要 | 不保存 secrets；不返回完整 prompt/context/log；错误只暴露安全摘要和 trace_id | 01, 03, 04, 05 |
 | Observer | 定期评测、手动触发、report 生成、status session context、越权控制动作 | 只读 snapshot；只写 report、脱敏 session context 和 audit；控制动作硬拒绝 | 01, 03, 04, 06 |
 | Report discussion | 围绕 report 快速讨论后续需求 | Manager 创建普通 agent_session；只注入脱敏 report 摘要；Observer 不作为目标 Agent 参与该 discussion | 03, 04, 05, 08 |
 | System Observer status session | Open WebUI admin/operator 询问系统状态、最新 Observer 报告或平台健康 | Orchestrator 只能调用 Manager 窄口；Manager 创建 dedicated observer_agent session；普通用户拒绝；只注入脱敏 report packet | 01, 02, 03, 04, 05, 06 |
 | P1 真实 Runtime | Hermes adapter、只读 run、只读 connector、Runtime 质量评测 | 复用 P0 Bridge/session/run/Worker/audit；不持有写 credential，不执行外部写入 | 01, 05, 08 |
-| P2 readiness / execution | side-effect plan、credential lease、write connector、resource lock | P1 只 dry-run / validate / reject；P2 才启用真实 provider/connector | 04, 05, 08 |
+| P2 readiness / execution | external-action plan、credential lease、write connector、resource lock | P1 只 dry-run / validate / reject；P2 才启用真实 provider/connector | 04, 05, 08 |
 | 后续 adapter | transport、memory、queue、telemetry 或 connector 替换 | 只新增 adapter/feature，不重写 domain model、API contract、状态机或 audit contract | 05, 08 |
 
 新增覆盖项只有在暴露新的权限、状态机、隔离、执行或审计边界时才加入。
@@ -71,19 +71,19 @@ P1 验收：
 ```text
 1. 真实 Hermes Runtime 可以承载长 session 和只读 run。
 2. Hermes Runtime 复用现有 Bridge、agent_session、agent_run、Worker 和 audit 链路。
-3. Runtime 不持有写权限 credential，不执行外部 side effect。
+3. Runtime 不持有写权限 credential，不执行外部动作。
 4. Observer 可以评测 Runtime 延迟、失败、重试、上下文膨胀和质量风险。
 5. 授权 operator 可以围绕 observer_report 创建受控 discussion session。
 6. 授权 admin/operator 可以通过 Open WebUI 系统状态意图创建 System Observer status session；普通用户被安全拒绝。
-7. P1 已提供 side-effect plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。
+7. P1 已提供 external-action plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。
 ```
 
 P2 验收：
 
 ```text
 1. 外部执行必须经过审批、最小权限 credential、resource lock 和 audit。
-2. 并发写同一 resource 时只有一个 active side-effect run 持有锁。
+2. 并发写同一 resource 时只有一个 active external-action run 持有锁。
 3. 审批拒绝、锁冲突、超时和 connector 失败有明确状态。
-4. Observer 只能报告副作用风险，不能自动修复。
+4. Observer 只能报告外部动作风险，不能自动修复。
 5. P2 不重写 P0/P1 的 Manager 授权、Open WebUI Bridge、Worker claim、run/session 状态机、Memory schema 或 audit contract。
 ```

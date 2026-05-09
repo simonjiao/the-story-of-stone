@@ -101,14 +101,22 @@ P1 新增 admin API：
 ```http
 POST /v1/admin/observer/reports/{report_id}/discussions
 POST /v1/admin/observer/system-session
-POST /v1/admin/runs/{run_id}/side-effect-plans/dry-run
+POST /v1/admin/runs/{run_id}/external-action-plans/dry-run
+```
+
+P2 新增 admin API：
+
+```http
+POST /v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply
 ```
 
 Observer discussion API 只允许管理员或授权 operator 使用。它创建普通 `agent_session`，写入脱敏 report context 和 initial user message，并在 audit 中关联 `report_id / session_id / agent_id / trace_id`。它不得调用 Observer 控制动作，不得注入完整 snapshot、完整 prompt、完整 context、内部日志或 credential。
 
 System Observer status session API 只允许管理员或授权 operator 使用。它接受可选 `report_id`、`message` 和 `idempotency_key`，选择指定或最新 `observer_report`，确保 dedicated `observer_agent` 存在，创建普通 `agent_session`，并写入脱敏 report packet 与用户问题。返回只包含 `report_id / agent_id / session_id / health_status / risk_level / summary / trace_id` 等安全摘要。它不得查询或返回原始 snapshot，不得执行控制动作。
 
-`side-effect-plans/dry-run` 只允许管理员使用。它固定 P2 side-effect contract，创建 `side_effect_plan`，校验 approval 状态、active resource lock、credential_scope 和 critical risk，必要时通过 no-op `CredentialProvider` 创建 `credential_lease` dry-run 记录，并写 audit。P1 不获取真实 credential，不调用真实写 connector，不推进到真实外部写入。
+`external-action-plans/dry-run` 只允许管理员使用。它固定 P2 external-action contract，创建 `external_action_plan`，校验 approval 状态、active resource lock、credential_scope 和 critical risk，必要时通过 no-op `CredentialProvider` 创建 `credential_lease` dry-run 记录，并写 audit。P1 不获取真实 credential，不调用真实写 connector，不推进到真实外部写入。
+
+`external-action-plans/{plan_id}/apply` 只允许管理员使用。它只接受 `dry_run_ready` plan，重新校验 approval、credential_scope、critical risk 和 resource lock，通过 CredentialProvider 获取 active opaque `provider_ref`，再调用 WriteConnector execute。execute 请求必须携带以 `external_action_plan.id` 派生的 `idempotency_key`。connector 成功响应必须包含 `status=applied`、`result_ref` 和 `compensation_ref`；缺失时 Manager 将 plan 标记为 `connector_invalid_result`。credential secret 不进入 Manager、Runtime、Memory 或 audit 明文；失败会推进 `external_action_plan.status=failed` 并写入安全 `error_code`。当前实现提供通用 HTTP adapter，并提供可部署的 `action-journal` provider/connector/JSONL target adapter 用于低风险 external action smoke；第三方生产 provider / connector 必须按同一 contract 单独配置并复测。当前只在 adapter 层验证 `compensation_ref` 可执行，尚未实现 Manager 级 compensation API / 工作流。
 
 ### 系统内部 API
 
@@ -143,8 +151,8 @@ P0 使用 Postgres 作为 run queue、lease 和 resource lock 的一致性边界
 2. Worker 使用 SELECT ... FOR UPDATE SKIP LOCKED claim queued run。
 3. claim 必须写 lease_owner、lease_until、claimed_at。
 4. heartbeat 延长 lease_until；lease 过期后允许接管或标记 timed_out。
-5. 同一 agent 默认只允许一个带副作用 active run。
-6. 同一 resource 默认只允许一个带副作用 active run。
+5. 同一 agent 默认只允许一个带外部动作 active run。
+6. 同一 resource 默认只允许一个带外部动作 active run。
 7. resource lock 以 resource_type + resource_id + lock_scope 建模，必须有 lease_until。
 8. 审批、取消、暂停、finish 必须使用条件更新和 version 字段。
 9. session message 必须按 session_id + sequence 顺序追加。
@@ -169,7 +177,7 @@ P0 使用 Postgres 作为 run queue、lease 和 resource lock 的一致性边界
 | `approval_requests` | `request_id`、`requested_by_user`、`approver_user`、`status`、`risk_level`、decision fields |
 | `agent_sessions` | `agent_id`、`owner_user`、`source_conversation_id`、parent/creator session ids、`status`、`depth`、`resource_scope`、`context_summary`、`version` |
 | `agent_session_messages` | `session_id`、`sequence`、`role`、`content_ref`、`content_summary`、`external_message_id`、`run_id`；`session_id + sequence` 唯一，`session_id + external_message_id` 在非空时唯一 |
-| `agent_runs` | `idempotency_key`、`agent_id`、`session_id`、`trigger_type`、`target_resource`、`run_status`、`risk_level`、`side_effect_mode`、lease fields、retry fields、result fields、`version`；run 幂等和 retry-ready 索引 |
+| `agent_runs` | `idempotency_key`、`agent_id`、`session_id`、`trigger_type`、`target_resource`、`run_status`、`risk_level`、`external_action_mode`、lease fields、retry fields、result fields、`version`；run 幂等和 retry-ready 索引 |
 | `open_webui_bridge_bindings` | `open_webui_subject`、`open_webui_chat_id`、`open_webui_session_id`、`model`、`agent_id`、`agent_session_id`、`status`、`last_message_id`、`last_run_id`、`trace_id`、`version`；active binding 唯一键为 subject + chat + model |
 | `open_webui_bridge_nonces` | `open_webui_subject`、`open_webui_chat_id`、`model`、`nonce`、`issued_at`、`trace_id`；唯一键为 subject + chat + model + nonce |
 | `agent_run_steps` | `run_id`、`step_name`、`status`、`summary`、timestamps |
@@ -184,10 +192,10 @@ P1 新增 data model：
 
 | 表 | 关键字段 / 约束 |
 |---|---|
-| `side_effect_plans` | `run_id`、connector/action/resource、risk/mode、`approval_id`、`credential_scope`、input/result refs、`status`、`error_code`、`version`、`trace_id` |
-| `credential_leases` | `side_effect_plan_id`、`credential_scope`、opaque `provider_ref`、`status`、`expires_at`、`trace_id`、`revoked_at` |
+| `external_action_plans` | `run_id`、connector/action/resource、risk/mode、`approval_id`、`credential_scope`、input/result refs、`compensation_ref`、`status`、`error_code`、`version`、`trace_id` |
+| `credential_leases` | `external_action_plan_id`、`credential_scope`、opaque `provider_ref`、`status`、`expires_at`、`trace_id`、`revoked_at` |
 
-P1 新增 schema 只能用于 dry-run 和 contract test；P2 才能接真实 provider / connector。
+P1 新增 schema 先用于 dry-run 和 contract test；P2 使用同一 schema 推进 `dry_run_ready -> applied|failed`，并通过 active `credential_leases.provider_ref` 调用真实 provider / connector。
 
 ## Open WebUI Bridge Contract
 
@@ -251,7 +259,7 @@ display_name: 通用后台执行 Agent
 supported_triggers: [manual, scheduled, webhook, session_message]
 allowed_resource_types: [workspace, repository, issue_tracker, database]
 constraints:
-  default_side_effect_mode: approval_required
+  default_external_action_mode: approval_required
   max_items_per_run: 8
   max_runtime_seconds: 1800
   max_concurrent_runs_per_agent: 1
@@ -271,7 +279,7 @@ display_name: 系统观察 Agent
 supported_triggers: [scheduled, admin_manual, system_status_session]
 allowed_resource_types: [agent_platform]
 constraints:
-  default_side_effect_mode: deny
+  default_external_action_mode: deny
   max_concurrent_observer_runs: 1
   readable_scopes: [status_summary, audit_summary, worker_heartbeat_summary, lock_summary, error_metrics]
   forbidden_scopes: [secrets, credentials, full_prompt, full_context, raw_internal_logs]

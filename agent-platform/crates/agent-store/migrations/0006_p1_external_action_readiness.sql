@@ -1,11 +1,11 @@
-CREATE TABLE IF NOT EXISTS side_effect_plans (
+CREATE TABLE IF NOT EXISTS external_action_plans (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
     connector TEXT NOT NULL,
     action TEXT NOT NULL,
     resource_ref TEXT NOT NULL,
     risk_level TEXT NOT NULL,
-    side_effect_mode TEXT NOT NULL,
+    external_action_mode TEXT NOT NULL,
     approval_id TEXT,
     credential_scope TEXT,
     input_summary TEXT,
@@ -19,15 +19,15 @@ CREATE TABLE IF NOT EXISTS side_effect_plans (
     updated_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS ix_side_effect_plans_run
-ON side_effect_plans(run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_external_action_plans_run
+ON external_action_plans(run_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS ix_side_effect_plans_status
-ON side_effect_plans(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_external_action_plans_status
+ON external_action_plans(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS credential_leases (
     id TEXT PRIMARY KEY,
-    side_effect_plan_id TEXT NOT NULL,
+    external_action_plan_id TEXT NOT NULL,
     credential_scope TEXT NOT NULL,
     provider_ref TEXT,
     status TEXT NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS credential_leases (
 );
 
 CREATE INDEX IF NOT EXISTS ix_credential_leases_plan
-ON credential_leases(side_effect_plan_id, created_at DESC);
+ON credential_leases(external_action_plan_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS ix_credential_leases_status
 ON credential_leases(status, expires_at);

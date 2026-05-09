@@ -71,7 +71,7 @@
 - [x] 实现 `MinimalRuntimeClient`。
 - [x] 支持 run execution 和 session message 两条 Runtime 路径。
 - [x] 默认 read-only echo/local profile。
-- [x] P0 硬拒绝 authorized side effect。
+- [x] P0 硬拒绝 authorized external action。
 
 总结：Runtime 只执行已授权输入，不做权限判断，也不持有 credential。
 
@@ -80,7 +80,7 @@
 - [x] Worker sweep expired lease。
 - [x] Worker claim run、heartbeat、推进状态、调用 Runtime、finish。
 - [x] Worker 支持 retry 和 dead_letter。
-- [x] Worker side-effect lock 路径存在，但 P0 Runtime 仍拒绝写副作用。
+- [x] Worker external-action lock 路径存在，但 P0 Runtime 仍拒绝外部动作。
 - [x] Worker 对 run claim/status/final/retry/dead_letter 写 audit。
 - [x] Worker retry 进入 delayed queued，避免失败后被立即重新 claim。
 - [x] Observer tick 只读聚合 snapshot 并写 observer_report。
@@ -105,7 +105,7 @@
 - [x] `agentctl audit`。
 - [x] `agentctl observer reports/show/run`。
 - [x] `agentctl runs list/show(inspect)/retry/terminate`。
-- [x] 单元测试覆盖状态机、policy、runtime side-effect 拒绝、queue claim、observer snapshot、worker completion。
+- [x] 单元测试覆盖状态机、policy、runtime external-action 拒绝、queue claim、observer snapshot、worker completion。
 - [x] 单元测试覆盖 admin grant、webhook 幂等 run 创建、session/run 创建幂等、internal append message service gate、retry 退避、dead_letter admin 管理闭环。
 - [x] `cargo test` 通过。
 - [x] hhost 远程环境使用 `rust:1.95` 系列镜像完成 `cargo test --workspace` 和隔离 Postgres smoke；未修改现有 deploy 服务。

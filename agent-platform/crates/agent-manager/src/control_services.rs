@@ -2,8 +2,8 @@ use crate::StoreRef;
 use agent_core::{
     AgentCoreError, AgentGrant, AgentInstanceStatus, AgentRun, AgentSessionMessage, AgentSummary,
     AppendMessageInput, AuditDecision, AuditLog, AuthContext, CoreResult, CreateGrantInput,
-    ErrorCode, ResourceRef, RiskLevel, SideEffectMode, TriggerType, WebhookTriggerInput, actions,
-    new_id,
+    ErrorCode, ExternalActionMode, ResourceRef, RiskLevel, TriggerType, WebhookTriggerInput,
+    actions, new_id,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -224,7 +224,7 @@ async fn create_webhook_runs(
         );
         run.idempotency_key = Some(input.dedupe_key.clone());
         run.risk_level = RiskLevel::Low;
-        run.side_effect_mode = SideEffectMode::ReadOnly;
+        run.external_action_mode = ExternalActionMode::ReadOnly;
         runs.push(store.create_run(run).await?);
     }
     Ok(runs)

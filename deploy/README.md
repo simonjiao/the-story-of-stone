@@ -72,6 +72,34 @@ Required changes:
   - `AGENT_READ_ONLY_CONNECTOR_BASE_URL`, serving `GET /snapshots`
   - `AGENT_READ_ONLY_CONNECTOR_API_KEY`, if that read-only connector requires
     auth. Leave both empty to use the built-in local read-only snapshot adapter.
+- Optional controlled external action values. Leave these empty unless the
+  target environment has a credential provider and write connector ready. For
+  the repository-provided low-risk action journal target, enable the
+  `action-gateway-smoke` compose profile and set both base URLs to
+  `http://agent-action-gateway:8091`:
+  - `AGENT_CREDENTIAL_PROVIDER_BASE_URL`, serving `POST /credential-leases`
+    and returning only an opaque `provider_ref`.
+  - `AGENT_CREDENTIAL_PROVIDER_API_KEY`, if the credential provider requires
+    auth.
+  - `AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS` and
+    `AGENT_CREDENTIAL_LEASE_TTL_SECONDS`.
+  - `AGENT_WRITE_CONNECTOR_BASE_URL`, serving `POST /action-executions/execute`.
+    Successful responses must include `status=applied`, `result_ref`, and
+    `compensation_ref`.
+  - `AGENT_WRITE_CONNECTOR_API_KEY`, if the write connector requires auth.
+  - `AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS`,
+    `AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS`, and
+    `AGENT_EXTERNAL_ACTION_LOCK_LEASE_SECONDS`.
+  - `AGENT_ACTION_GATEWAY_TARGET_LOG`,
+    `AGENT_ACTION_GATEWAY_API_KEY`,
+    `AGENT_ACTION_GATEWAY_ALLOWED_SCOPES`,
+    `AGENT_ACTION_GATEWAY_CONNECTOR`, and
+    `AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS` configure the optional
+    `agent-action-gateway` service. Keep API keys in `.env`; do not put
+    them in compose or logs.
+  - `agent-platform/scripts/action-gateway-smoke.sh` runs a local Manager plus
+    the action journal target and verifies approval, dry-run, apply, target
+    write, result_ref, compensation_ref, and compensation.
 - Optional internal IP overrides: `HERMES_AGENT_IP`, `OPEN_WEBUI_ORIGIN_IP`,
   `AGENT_PLATFORM_POSTGRES_IP`, `AGENT_MANAGER_IP`,
   `AGENT_ORCHESTRATOR_IP`, `AGENT_WORKER_IP`, and `AGENT_OBSERVER_IP`.
