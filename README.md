@@ -14,9 +14,10 @@
 - 风格资料：`resources/styles/buhongjushi/`
 - 设计文档：`docs/tonglingyu-agent-design/`
 - Rust 实现入口：`agent-platform/crates/tonglingyu-gateway/`
+- Open WebUI 路由入口：`agent-platform/crates/global-router/`
 - 第一批 Wikisource source snapshot：`resources/sources/wiki/`
 - SQLite/FTS 建库、证据卡片、证据包和 reviewer 最小闭环
-- 远程真实部署：`hhost` 上 Open WebUI 已通过内网连接 Rust `tonglingyu-gateway`
+- 远程真实部署：`hhost` 上 Open WebUI 已通过内网连接 Rust `global-router`
 
 未有：
 

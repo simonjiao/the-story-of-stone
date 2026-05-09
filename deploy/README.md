@@ -11,6 +11,8 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
+- `global-router`: Rust OpenAI-compatible model allowlist and routing gateway.
+  Open WebUI connects only to this service.
 - `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
   SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
   packages, runs reviewer checks, and calls Hermes as the upstream generation
@@ -21,7 +23,7 @@ Services:
 - `agent-worker`: Agent run worker.
 - `agent-observer`: read-only Observer Agent report loop.
 - `open-webui`: email/password login and chat UI. It connects only to
-  `tonglingyu-gateway` for the visible chat model.
+  `global-router`; visible models come from the router allowlist.
 - `cloudflared`: Cloudflare Tunnel connector.
 - `agent-platform-postgres`: dedicated Agent Platform database, internal
   Docker network only.
@@ -54,6 +56,15 @@ Required changes:
   The local default is `../agent-platform`.
 - `TONGLINGYU_GATEWAY_IMAGE_TAG`: standalone gateway image tag. Default is
   `formal`.
+- `GLOBAL_ROUTER_BUILD_CONTEXT`: build context for the standalone Global Router
+  image. Set to `./agent-platform` on the remote deploy node. The local default
+  is `../agent-platform`.
+- `GLOBAL_ROUTER_IMAGE_TAG`: standalone Global Router image tag. Default is
+  `formal`.
+- `GLOBAL_ROUTER_ROUTES_JSON`: optional JSON array that declares the Open WebUI
+  visible model allowlist and route targets. If empty, only `tonglingyu` is
+  exposed and routed to `http://tonglingyu-gateway:8090/v1`.
+- `GLOBAL_ROUTER_IP`: optional stable internal IP for `global-router`.
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
@@ -200,12 +211,42 @@ cargo run --manifest-path ../agent-platform/Cargo.toml -p tonglingyu-gateway -- 
 Start the stack:
 
 ```bash
+docker compose build global-router
 docker compose build tonglingyu-gateway
 docker compose build agent-manager agent-orchestrator agent-worker agent-observer
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
+
+`global-router` is built from `agent-platform/crates/global-router/Dockerfile`
+as a standalone image. It only exposes configured allowlist models and rewrites
+visible model ids to backend model ids before forwarding. Example route config:
+
+```json
+[
+  {
+    "model": "tonglingyu",
+    "name": "通灵玉",
+    "base_url": "http://tonglingyu-gateway:8090/v1",
+    "upstream_model": "tonglingyu",
+    "requires_bridge": false
+  },
+  {
+    "model": "other/default",
+    "name": "Other Gateway",
+    "base_url": "http://other-gateway:8090/v1",
+    "upstream_model": "default",
+    "requires_bridge": true,
+    "api_key_env": "OTHER_GATEWAY_API_KEY"
+  }
+]
+```
+
+Use namespaced visible model ids such as `other/default` to avoid collisions.
+Set the Open WebUI `agent_identity_bridge` Function valve `TARGET_MODELS` to
+the comma-separated subset that requires identity context, for example
+`other/default`.
 
 `tonglingyu-gateway` is built from
 `agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
@@ -236,6 +277,8 @@ docker compose logs -f agent-platform-postgres
 Check the Tonglingyu Gateway from the internal Docker network:
 
 ```bash
+docker compose exec global-router curl -fsS http://127.0.0.1:8099/healthz
+docker compose exec global-router curl -fsS http://127.0.0.1:8099/v1/models
 docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/healthz
 docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/v1/models
 ```

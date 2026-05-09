@@ -30,6 +30,7 @@ class Filter:
         AGENT_BRIDGE_SECRET: str = Field(default="")
         AGENT_BRIDGE_ISSUER: str = Field(default="open-webui")
         TARGET_MODEL: str = Field(default="tonglingyu")
+        TARGET_MODELS: str = Field(default="tonglingyu")
 
     def __init__(self) -> None:
         self.valves = self.Valves()
@@ -42,7 +43,7 @@ class Filter:
         __model__: Optional[Any] = None,
     ) -> dict:
         model = str(body.get("model") or _get(__model__, "id") or "")
-        if model != self.valves.TARGET_MODEL:
+        if model not in _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL):
             return body
 
         secret = self.valves.AGENT_BRIDGE_SECRET
@@ -93,6 +94,17 @@ def _get(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)
     return getattr(value, key, None)
+
+
+def _target_models(target_models: str, target_model: str) -> set[str]:
+    values = [target_models, target_model]
+    models: set[str] = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            item = item.strip()
+            if item:
+                models.add(item)
+    return models
 
 
 def _signature(secret: str, context: dict) -> str:

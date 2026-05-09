@@ -8,6 +8,7 @@ members = [
     "crates/agent-runtime",
     "crates/agent-worker",
     "crates/agentctl",
+    "crates/global-router",
     "crates/tonglingyu-gateway",
 ]
 

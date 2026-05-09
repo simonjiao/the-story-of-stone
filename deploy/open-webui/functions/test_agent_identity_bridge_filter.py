@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from agent_identity_bridge_filter import Filter, _signature
+from agent_identity_bridge_filter import Filter, _signature, _target_models
 
 
 class AgentIdentityBridgeFilterTest(unittest.TestCase):
@@ -30,6 +30,7 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_injects_signed_context_for_target_model(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODELS = "tonglingyu,other/default"
         body = {"model": "tonglingyu", "messages": []}
         result = asyncio.run(
             filt.inlet(
@@ -47,6 +48,12 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         self.assertEqual(context["subject"], "openwebui:user-1")
         self.assertEqual(context["chat_id"], "chat-1")
         self.assertTrue(context["signature"])
+
+    def test_target_models_accepts_comma_allowlist(self) -> None:
+        self.assertEqual(
+            _target_models("tonglingyu, other/default", "legacy-model"),
+            {"tonglingyu", "other/default", "legacy-model"},
+        )
 
 
 if __name__ == "__main__":

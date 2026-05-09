@@ -49,9 +49,17 @@
 - 远端已验证第二次 `docker compose build tonglingyu-gateway` 全部命中
   Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制，
   `hermes-agent-platform:formal` 不含 gateway 二进制。
-- 远端 KB 由容器启动时从 source snapshot 构建，当前 `/healthz` 返回
-  5 个来源、10419 个 blocks；Open WebUI 容器内 `OPENAI_API_BASE_URL`
-  指向 `http://tonglingyu-gateway:8090/v1`，`DEFAULT_MODELS=tonglingyu`。
+- 新增 Rust `global-router` 作为 Open WebUI 单入口：它只暴露显式 allowlist
+  中的模型，按唯一可见模型名路由到后端 gateway，并可按 route 要求
+  `agent_bridge_context`。默认只暴露 `tonglingyu`；新增 gateway 时通过
+  `GLOBAL_ROUTER_ROUTES_JSON` 配置 namespaced 模型名避免重名。
+- 远端 `hhost` 已真实部署 `global-router:formal`，Open WebUI 当前
+  `OPENAI_API_BASE_URL=http://global-router:8099/v1`；容器内验证
+  `/v1/models` 只返回 allowlist 中的 `tonglingyu`，未知模型
+  `other/default` 返回 `model_not_allowed`。
+- 远端 KB 由 `tonglingyu-gateway` 容器启动时从 source snapshot 构建，
+  当前 `/healthz` 返回 5 个来源、10419 个 blocks；Open WebUI 容器内
+  `DEFAULT_MODELS=tonglingyu`。
 - 远端容器内已验证 `/v1/models`、`/v1/evidence/search` 和
   `/v1/chat/completions`；“通灵玉上的字是什么？”返回带证据包和 reviewer
   约束的回答。
