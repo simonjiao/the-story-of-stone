@@ -1,145 +1,120 @@
-# 多机器多 Agent 校验服务方案
+# 通灵玉知识库实现计划
 
-本服务尚未实现。本文件记录已确定的实现方向，供后续开发直接执行。
+本文件描述通灵玉第一版知识库的实现方向。当前仓库尚未实现建库服务；本文中的数据库、API 和 CLI 是下一阶段要实现的目标，不代表当前已有命令。
 
-新的“通灵玉”第一版知识库与 RAG 设计入口为 `docs/tonglingyu-agent-design/08_知识库与RAG设计.md`。本文件保留为校验服务技术计划草案；若两者出现冲突，以 `docs/tonglingyu-agent-design/` 中已冻结的产品/架构设计为准。
+主设计入口仍是 `docs/tonglingyu-agent-design/08_知识库与RAG设计.md`。如有冲突，以 `docs/tonglingyu-agent-design/` 中的产品和架构约束为准。
 
-## 目标
+## 当前现实
 
-构建 Docker 化的《红楼梦》校验服务，支持多机器、多 agent 共同访问同一套已登记文本证据、研究资料、风格资料和校订记录。旧的 EPUB 抽取基础库路径已删除；服务端主证据库应从 `resources/sources/` 下的新资料 source snapshot 构建。
+已有：
 
-## 技术选型
+- 通用 EPUB source snapshot 抽取脚本；
+- 维基文库/MediaWiki source snapshot 下载脚本；
+- source snapshot 中的 ruby 注音保留字段 `rare_char_annotations`；
+- “不红居士”风格转录资料；
+- `src/tonglingyu_agent/` 实现入口。
 
-- 语言：Python。
-- 项目管理：`uv`，后续新增 `pyproject.toml` 和 `uv.lock`。
-- 主证据库：SQLite + FTS5，输入来自已批准的 source snapshot。
-- 向量粗召回：v1 使用 SQLite 内嵌 embedding 表，由 Python 计算相似度。
-- HTTP API：FastAPI + uvicorn。
-- Agent 接入：远程 HTTP MCP。
-- 部署：Docker + docker-compose。
-- 鉴权：API Token，环境变量 `HLDM_KB_TOKEN`。
+未有：
+
+- 正式 `resources/sources/` 基础资料快照；
+- SQLite/FTS 数据库；
+- 建库 CLI；
+- 检索 API；
+- 证据卡片和证据包持久化；
+- Gateway 与 reviewer 调用链路。
+
+## 建库输入
+
+知识库只接受已登记的 source snapshot。每个 source snapshot 必须包含：
+
+- `source_id`
+- `source_category`
+- `format`
+- `title`
+- `work`
+- `edition`
+- `language`
+- 来源 URL、文件 hash 或等价来源说明
+- 抽取时间
+- `documents/blocks.jsonl`
+
+当前允许的 `source_category`：
+
+- `base_material`
+- `extended_base_material`
+- `commentary_material`
+- `research_material`
+- `style_material`
+- `evaluation_material`
 
 ## 数据模型
 
-主库只读、可重建，至少包含：
+第一版 SQLite 至少包含：
 
-- `sources`: 资料来源，必须标记 `source_category`，取值为 `base_material`、`extended_base_material`、`research_material`、`style_material`。
-- `editions`: 《红楼梦》发行版本信息；v1 等待新的基础资料来源确定后记录。
-- `chapters`: 回目、标题、章节序号。
-- `blocks`: 文本块、类型、章节、段落号、来源路径。
+- `sources`: 来源登记和来源边界。
+- `editions`: 作品版本、校本、批本和来源说明。
+- `chapters`: 回目、章节序号、标题和版本归属。
+- `blocks`: 文本块、类型、章节、段落号、来源路径和原始文本。
 - `blocks_fts`: FTS5 精确检索索引。
-- `terms`: 术语、出现章节、例句、规则说明。
-- `evidence_assets`: 已批准来源附带的非文本证据路径、上下文和确认状态。
-- `block_embeddings`: `block_id`、embedding、模型名、维度、生成版本。
-- `styles`: 风格档案，记录风格名、来源语料、适用场景和表达约束。
-- `kb_version`: 数据源集合、生成时间、代码 commit、embedding 模型。
+- `rare_char_annotations`: 生僻字、异体字、旧字形及其可追溯读音，关联具体 `block_id` 和来源位置。
+- `terms`: 人名、器物、术语、异名、例句和规则说明。
+- `evidence_cards`: 可返回给 Gateway 的证据卡片。
+- `kb_version`: 数据源集合、生成时间、代码 commit、索引版本。
 
-资料分类规则：
+本地生成物写入 `data/tonglingyu/`，默认不提交。
 
-- `base_material`: 重新选定并登记来源的《红楼梦》文本证据，可直接引用和用于校订。
-- `extended_base_material`: 后续新增的其他《红楼梦》发行版本，可直接引用，用于版本比较和异文校验。
-- `research_material`: 研究资料，可引用观点和出处，但不覆盖基础资料。
-- `style_material`: 风格资料，只影响表达方式、讲解路径和用户偏好的对话风格，不能作为原文校订的最高证据。
+## 证据规则
 
-校订记录单独保存，服务端追加写入：
+- 原始字形必须保留；规范化文本只能作为检索辅助字段。
+- `rare_char_annotations` 必须从 source snapshot 进入独立表，证据卡片返回时原样带出。
+- 向量或语义召回只负责候选发现，不直接成为事实依据。
+- 脂批、正文、版本说明、研究观点必须保持不同证据类型。
+- 模型生成内容不得反写为知识库事实。
+- 风格资料只影响表达方式，不覆盖正文、脂批或版本证据。
 
-- `record_id`
-- `created_at`
-- `agent_id`
-- `video_id`
-- `segment_id`
-- `timestamp`
-- `original_text`
-- `corrected_text`
-- `evidence_refs`
-- `confidence`
-- `note`
+## 检索流程
 
-## Hybrid Search
+第一版检索采用保守 hybrid 流程：
 
-默认检索流程：
+1. FTS 按回目、人名、诗句、关键词和术语召回；
+2. 语义检索召回解释性问题候选；
+3. 以章节线索、精确词命中、来源等级和证据类型重排；
+4. 返回证据卡片；
+5. Gateway 基于证据卡片组织证据包；
+6. reviewer 审校证据是否足够、是否过度推断。
 
-1. 向量检索召回 Top N 语义相关文本块。
-2. SQLite FTS 按关键词、术语、章节、人名、器物名召回精确候选。
-3. 合并候选，用章节线索、词项命中、字符串相似度、术语规则重排。
-4. 返回 Top K 证据，包含回目、段落、原文、差异和建议。
+## 计划 API
 
-约束：
-
-- 向量结果只用于候选召回。
-- 最终校订建议必须落到 SQLite 中可追溯的原文、注释、批语、术语或其他已批准证据。
-- `verify_transcript_quote` 必须跨章节查找，不默认锁定单一章节。
-
-## HTTP API
+第一版服务化后再提供 HTTP API。候选接口：
 
 - `GET /health`
-- `GET /search?q=&chapter=&kind=&mode=hybrid|fts|vector&limit=`
-- `GET /chapter/{chapter_no}`
-- `GET /term/{term}`
-- `GET /evidence-assets/{asset_id}`
-- `GET /styles`
-- `GET /styles/{style_id}`
 - `GET /sources`
-- `GET /sources?category=base_material|extended_base_material|research_material|style_material`
-- `POST /verify-candidates`
-- `POST /records`
+- `GET /sources?category=base_material`
+- `GET /search?q=&kind=&chapter=&limit=`
+- `GET /chapter/{chapter_no}`
+- `GET /terms/{term}`
+- `GET /evidence/{evidence_id}`
+- `POST /evidence-packages`
+- `POST /review`
 
-`POST /verify-candidates` 输入包括：
+这些接口名是通灵玉知识库/Gateway 边界，不沿用旧的 `hongloumeng_*` 工具命名。
 
-- `video_id`
-- `segment_id`
-- `timestamp`
-- `line`
-- `context_before`
-- `context_after`
+## 计划 CLI
 
-返回包括：
-
-- 候选章节和文本块。
-- 原文证据。
-- 差异说明。
-- 建议改法。
-- 置信度。
-
-## MCP Tools
-
-- `search_hongloumeng_text`
-- `get_hongloumeng_chapter`
-- `lookup_hongloumeng_term`
-- `get_text_evidence_context`
-- `list_dialogue_styles`
-- `get_dialogue_style`
-- `verify_transcript_quote`
-- `append_verification_record`
-
-MCP tools 与 HTTP API 共用同一服务逻辑，避免两套校订规则分叉。
-
-## Docker 部署
-
-目标形态：
-
-- 服务容器只读挂载主证据库。
-- 服务容器读取已批准的数据源快照。
-- 校订记录挂载为单独可写目录。
-- `HLDM_KB_TOKEN` 通过环境变量注入。
-
-计划命令：
+当前不可执行。实现时使用通灵玉命名：
 
 ```bash
-uv run hlm-kb-build --source <approved-source> --out data/hongloumeng.sqlite
-uv run hlm-kb-serve --db data/hongloumeng.sqlite --records data/verification_records.jsonl --host 0.0.0.0 --port 8000
-docker compose up
+uv run tonglingyu-kb-build --source resources/sources/wiki/hongloumeng-wikisource --out data/tonglingyu/kb.sqlite
+uv run tonglingyu-kb-query --db data/tonglingyu/kb.sqlite search "官中的钱"
+uv run tonglingyu-kb-serve --db data/tonglingyu/kb.sqlite --host 0.0.0.0 --port 8000
 ```
 
-## 实现 TODO
+## 实施顺序
 
-- 建立 `src/tonglingyu_agent/` 下的知识服务、证据 schema 和 Gateway 调用边界。
-- 新增 `pyproject.toml`、`uv.lock` 和 CLI entry points。
-- 实现建库脚本、FTS 查询、向量查询、hybrid 重排。
-- 建立 `不红居士` 风格档案，来源为 B 站“红楼梦文本探究”视频转录。
-- 下载维基文库《红楼梦》全本、脂批本等资料，并将其登记为 `base_material`、`commentary_material` 或 `extended_base_material`。
-- 将 `不红居士` 视频转录登记为 `style_material`。
-- 预留多发行版本和研究资料接入字段，但 v1 不强制实现版本比较。
-- 实现 HTTP API、MCP tools、API Token 鉴权。
-- 实现校订记录追加写入。
-- 增加 Dockerfile 和 compose 配置。
+1. 下载并登记维基文库《红楼梦》全本、脂批本和版本说明资料。
+2. 定义 `src/tonglingyu_agent/` 下的 source snapshot loader。
+3. 实现 SQLite schema 和建库 CLI。
+4. 将 `rare_char_annotations` 建入独立表。
+5. 实现 FTS 查询和证据卡片 schema。
+6. 增加最小评测集，覆盖正文定位、脂批定位、版本说明、字形读音和证据不足。
+7. 再实现 Gateway 调用、证据包记录和 reviewer 审校。

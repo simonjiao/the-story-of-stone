@@ -1,6 +1,6 @@
 # 运行手册
 
-本仓库当前已有 `.venv` 和 `requirements.txt`。后续校验服务实现时，Python 项目和依赖统一迁移到 `uv` 管理。
+本手册只记录当前仓库可执行或明确尚未实现的命令。知识库、Gateway 和 reviewer 服务仍未实现；不要把计划命令当作当前可运行入口。
 
 ## 环境准备
 
@@ -8,19 +8,10 @@
 
 ```bash
 .venv/bin/python --version
-```
-
-如需重新安装当前依赖：
-
-```bash
 .venv/bin/pip install -r requirements.txt
 ```
 
-后续服务实现后的标准方式将改为：
-
-```bash
-uv sync --locked
-```
+后续服务化实现后再迁移到 `uv`、`pyproject.toml` 和 `uv.lock`。
 
 ## 视频处理
 
@@ -38,12 +29,6 @@ uv sync --locked
 .venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 3 --asr-model base
 ```
 
-用更高质量模型处理单条视频：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 1 --asr-model small
-```
-
 带红楼术语词表重转录：
 
 ```bash
@@ -55,11 +40,9 @@ uv sync --locked
   --force-transcript
 ```
 
-## 通用 EPUB 资料抽取
+## EPUB Source Snapshot
 
-`scripts/extract_epub.py` 将任意 EPUB 抽取为规范化 source snapshot。它只负责资料标准化，不直接构造知识库。
-
-示例：
+`scripts/extract_epub.py` 将任意 EPUB 抽取为规范化 source snapshot。它只做资料标准化，不构造知识库。
 
 ```bash
 .venv/bin/python scripts/extract_epub.py path/to/source.epub \
@@ -71,18 +54,20 @@ uv sync --locked
 
 主要输出：
 
-- `resources/sources/epub/<source_id>/metadata/source.json`
-- `resources/sources/epub/<source_id>/metadata/manifest.json`
-- `resources/sources/epub/<source_id>/metadata/spine.json`
-- `resources/sources/epub/<source_id>/documents/documents.jsonl`
-- `resources/sources/epub/<source_id>/documents/blocks.jsonl`
-- `resources/sources/epub/<source_id>/combined/all_sections.txt`
-- `resources/sources/epub/<source_id>/combined/all_sections.md`
-- `resources/sources/epub/<source_id>/assets/`
+- `metadata/source.json`
+- `metadata/manifest.json`
+- `metadata/spine.json`
+- `documents/documents.jsonl`
+- `documents/blocks.jsonl`
+- `combined/all_sections.txt`
+- `combined/all_sections.md`
+- `assets/`
 
-## 维基文库资料下载
+若 EPUB 中包含 ruby 注音，脚本会在文本中渲染为 `字形（读音）`，并在对应 block 写入 `rare_char_annotations`。
 
-维基文库资料通过 MediaWiki API 下载为 source snapshot。全本《红楼梦》可用根页面加子页前缀：
+## 维基文库 Source Snapshot
+
+全本《红楼梦》可用根页面加子页前缀：
 
 ```bash
 .venv/bin/python scripts/download_wikisource.py \
@@ -95,7 +80,7 @@ uv sync --locked
   --out resources/sources/wiki
 ```
 
-脂批本或其他版本使用对应页面名或前缀单独登记，例如：
+脂批本或其他版本使用独立来源快照：
 
 ```bash
 .venv/bin/python scripts/download_wikisource.py \
@@ -111,22 +96,20 @@ uv sync --locked
 
 如果本机 Python 证书链不完整，可临时加 `--insecure-skip-tls-verify` 做本地调试；正式流程不要默认使用该参数。
 
-主要输出：
+维基文库页面如包含 ruby 注音，脚本同样写入 `rare_char_annotations`。后续建库不得只保留规范化检索文本而丢弃该字段。
 
-- `resources/sources/wiki/<source_id>/metadata/source.json`
-- `resources/sources/wiki/<source_id>/metadata/pages.json`
-- `resources/sources/wiki/<source_id>/documents/documents.jsonl`
-- `resources/sources/wiki/<source_id>/documents/blocks.jsonl`
-- `resources/sources/wiki/<source_id>/combined/all_sections.txt`
-- `resources/sources/wiki/<source_id>/combined/all_sections.md`
-- `resources/sources/wiki/<source_id>/raw/`
-
-## 常用验证命令
+## 验证命令
 
 检查 Python 脚本语法：
 
 ```bash
 python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
+```
+
+检查 Markdown 和空白：
+
+```bash
+git diff --check
 ```
 
 检查第一条视频转录 JSON：
@@ -170,12 +153,15 @@ sys.exit(0 if txt == srt == segments else 1)
 PY
 ```
 
-## 计划中的校验服务命令
+## 尚未实现
 
-后续建库命令应显式传入已批准的 `resources/sources/` 快照，并继续把校订记录作为单独可写文件保存。
+以下能力还没有可执行命令：
 
-```bash
-uv run hlm-kb-build --source <approved-source> --out data/hongloumeng.sqlite
-uv run hlm-kb-serve --db data/hongloumeng.sqlite --records data/verification_records.jsonl --host 0.0.0.0 --port 8000
-uv run hlm-kb-query search "官中的钱"
-```
+- `tonglingyu-kb-build`
+- `tonglingyu-kb-query`
+- `tonglingyu-kb-serve`
+- Gateway 服务
+- reviewer 审校链路
+- Open WebUI “通灵玉”模型注册
+
+实现计划见 [知识库实现计划](KB_SERVICE_PLAN.md) 和 [通灵玉设计文档](tonglingyu-agent-design/00_阅读路径与文档地图.md)。

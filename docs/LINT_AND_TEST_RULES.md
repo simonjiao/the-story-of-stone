@@ -1,139 +1,92 @@
 # Lint and Test Rules
 
-This document defines the default lint and test path for code changes. Run the
-smallest check set that covers the files touched by the change, then expand only
-when shared contracts, generated outputs, or deployment behavior are affected.
+Run the smallest check set that covers the files touched by the change. Expand only when shared contracts, generated data, deployment behavior, or source snapshot formats are affected.
 
-## General Rules
+## General
 
-- Keep checks scoped to the touched files or package first; run workspace-wide
-  checks when changing shared APIs, build config, or cross-module behavior.
-- Do not run broad formatters over unrelated files. After any formatter, inspect
-  `git diff --stat` and keep unrelated churn out of the change.
-- Do not print secrets from `.env`, compose files, or logs. Report variable
-  names, command status, paths, and sanitized evidence only.
-- Treat `resources/sources/` and bulk transcript outputs as data. Lint or
-  rewrite them only when the task explicitly changes that corpus.
-- If a required tool, external service, model, network, or credential is missing,
-  stop that check and report it as `BLOCKED` with the exact command and reason.
-
-## Bash and Shell
-
-Targets: `deploy/scripts/*.sh` and any other shell script changed in the task.
-
-Lint:
-
-```bash
-bash -n path/to/script.sh
-shellcheck path/to/script.sh
-```
-
-Use `bash -n` as the minimum required check. Use `shellcheck` when it is
-installed; if unavailable, record that explicitly instead of installing tooling
-as part of an unrelated change.
-
-Test:
-
-```bash
-path/to/script.sh --help
-```
-
-For scripts that mutate files, run smoke tests against a temporary directory or
-throwaway copied fixture. Never run a destructive restore, deploy, or overwrite
-against live config unless the user explicitly requested it.
+- Do not run broad formatters over unrelated files.
+- Do not print secrets from `.env`, compose files, logs, or local credentials.
+- Treat `resources/sources/`, `resources/styles/`, and bulk transcript outputs as data. Rewrite them only when the task explicitly changes that corpus.
+- If a required tool, external service, model, network, or credential is missing, mark the check as `BLOCKED` with the exact command and reason.
+- After generated-output or formatter runs, inspect `git diff --stat`.
 
 ## Python
 
-Targets: `scripts/*.py`, `src/**/*.py`, and Python helpers introduced for tests
-or verification.
+Targets: `scripts/*.py`, `src/**/*.py`, and Python verification helpers.
 
-Lint:
+Minimum syntax gate:
+
+```bash
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
+```
+
+Broader check when touching many Python files:
 
 ```bash
 python3 -m compileall scripts src
+```
+
+Use `ruff` and `pytest` when the repo later adds config or tests:
+
+```bash
 python3 -m ruff check scripts src
-```
-
-`compileall` is the minimum syntax gate. Run `ruff` when available or when the
-repo later adds a `pyproject.toml`/lint config.
-
-Test:
-
-```bash
 python3 -m pytest
-python3 -m pytest path/to/test_file.py
 ```
 
-If no pytest suite covers the change, use an import or CLI smoke test for the
-changed module. Avoid network downloads, large ASR/model runs, or corpus rewrites
-unless they are the purpose of the task.
-
-## Rust
-
-Targets: `agent-platform/` workspace and changed crates under
-`agent-platform/crates/`.
-
-Lint:
-
-```bash
-cd agent-platform
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-Use crate-scoped clippy while iterating when only one crate changed:
-
-```bash
-cargo clippy -p agent-manager --all-targets -- -D warnings
-```
-
-Test:
-
-```bash
-cd agent-platform
-cargo test --workspace
-cargo test -p agent-manager
-```
-
-For API, store, queue, runtime, or concurrency changes, include tests or manual
-evidence for lease ownership, heartbeat expiry, idempotency, lock behavior, and
-error propagation. If Postgres, Docker, or another service is required and not
-available, mark the service-backed test as `BLOCKED` and still run the pure unit
-or compile checks that do not require it.
+For source snapshot changes, include a small temp-dir smoke test rather than rewriting the full corpus.
 
 ## Markdown
 
-Targets: `AGENTS.md`, `README.md`, and `docs/**/*.md` changed in the task.
+Targets: `AGENTS.md`, `README.md`, and `docs/**/*.md`.
 
-Lint:
-
-```bash
-npx --yes markdownlint-cli2 "AGENTS.md" "README.md" "docs/**/*.md"
-```
-
-Use markdownlint when Node/npm access is available. For documentation-only
-changes where markdownlint is unavailable, run `git diff --check` and manually
-check heading order, fenced code block languages, relative links, and wrapped
-secret-free examples.
-
-Test:
+Minimum gate:
 
 ```bash
 git diff --check -- AGENTS.md README.md docs/
 ```
 
-For docs that contain commands, validate commands that are local, cheap, and
-non-destructive. For operational docs, prefer a dry-run, config render, syntax
-check, or temporary-directory smoke test over touching live deployment state.
+Use markdownlint when available:
+
+```bash
+npx --yes markdownlint-cli2 "AGENTS.md" "README.md" "docs/**/*.md"
+```
+
+For documentation commands, validate local, cheap, non-destructive examples. Do not run network downloads unless the task is about the download path.
+
+## Shell and Deploy
+
+Targets: `deploy/scripts/*.sh` and other shell scripts.
+
+Minimum syntax gate:
+
+```bash
+bash -n path/to/script.sh
+```
+
+Use `shellcheck` when installed:
+
+```bash
+shellcheck path/to/script.sh
+```
+
+For deployment config, use dry-runs or render checks first. Back up `deploy/.env` before editing it and never output secret values.
+
+## Rust
+
+Current Tonglingyu work does not require Rust changes. If a future task explicitly touches Rust code, use the Rust workspace’s own local commands and keep the check scoped to the changed crates first:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+For state, queue, runtime, or concurrency changes, tests or manual evidence must cover lease ownership, heartbeat expiry, idempotency, lock behavior, and error propagation.
 
 ## Minimum Gate by Change Type
 
-- Shell-only change: `bash -n`, `shellcheck` if available, and one safe smoke
-  test.
-- Python-only change: `compileall`, `ruff` if available, and targeted pytest or
-  import/CLI smoke.
-- Rust-only change: `cargo fmt --check`, targeted `cargo clippy`, and targeted
-  `cargo test`; run workspace checks for shared contracts.
-- Markdown-only change: `git diff --check` plus markdownlint if available.
-- Deployment config change: back up `deploy/.env` when relevant, validate compose
-  or render syntax, and do not expose secrets in output.
+- Markdown-only change: `git diff --check`.
+- Python-only change: `py_compile` or `compileall`, plus a targeted smoke test.
+- Source snapshot script change: Python syntax check plus temp-dir extraction/download parser smoke.
+- Shell change: `bash -n`, and `shellcheck` if available.
+- Deployment change: backup first, then syntax/render checks, with secrets sanitized.

@@ -144,6 +144,8 @@ class HtmlBlockParser(HTMLParser):
         self._current_kind = "paragraph"
         self._skip_depth = 0
         self._link_stack: list[dict[str, Any]] = []
+        self._ruby_stack: list[dict[str, Any]] = []
+        self._pending_rare_char_annotations: list[dict[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -152,6 +154,22 @@ class HtmlBlockParser(HTMLParser):
             self._skip_depth += 1
             return
         if self._skip_depth:
+            return
+        if tag == "ruby":
+            self._ruby_stack.append(
+                {
+                    "base_parts": [],
+                    "pronunciation_parts": [],
+                    "in_rt": False,
+                    "rp_depth": 0,
+                }
+            )
+            return
+        if self._ruby_stack and tag == "rt":
+            self._ruby_stack[-1]["in_rt"] = True
+            return
+        if self._ruby_stack and tag == "rp":
+            self._ruby_stack[-1]["rp_depth"] += 1
             return
         if tag in HEADING_TAGS:
             self._flush()
@@ -184,6 +202,31 @@ class HtmlBlockParser(HTMLParser):
             return
         if self._skip_depth:
             return
+        if self._ruby_stack and tag == "rt":
+            self._ruby_stack[-1]["in_rt"] = False
+            return
+        if self._ruby_stack and tag == "rp":
+            self._ruby_stack[-1]["rp_depth"] = max(self._ruby_stack[-1]["rp_depth"] - 1, 0)
+            return
+        if self._ruby_stack and tag == "ruby":
+            ruby = self._ruby_stack.pop()
+            glyph = normalize_spaces("".join(ruby["base_parts"]))
+            pronunciation = normalize_spaces("".join(ruby["pronunciation_parts"]))
+            rendered = f"{glyph}（{pronunciation}）" if glyph and pronunciation else glyph or pronunciation
+            if self._ruby_stack:
+                self._add_ruby_text(rendered)
+            else:
+                self._parts.append(rendered)
+                if glyph:
+                    self._pending_rare_char_annotations.append(
+                        {
+                            "glyph": glyph,
+                            "pronunciation": pronunciation,
+                            "source": "ruby",
+                            "rendered": rendered,
+                        }
+                    )
+            return
         if tag == "a" and self._link_stack:
             link = self._link_stack.pop()
             text = normalize_spaces("".join(link["text"]))
@@ -195,6 +238,11 @@ class HtmlBlockParser(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth:
+            return
+        if self._ruby_stack:
+            self._add_ruby_text(data)
+            for link in self._link_stack:
+                link["text"].append(data)
             return
         self._parts.append(data)
         for link in self._link_stack:
@@ -208,15 +256,30 @@ class HtmlBlockParser(HTMLParser):
         text = normalize_spaces("".join(self._parts))
         self._parts = []
         if not text:
+            self._pending_rare_char_annotations = []
             return
-        self.blocks.append(
-            {
-                "index": len(self.blocks) + 1,
-                "tag": self._current_tag,
-                "kind": self._current_kind,
-                "text": text,
-            }
-        )
+        block = {
+            "index": len(self.blocks) + 1,
+            "tag": self._current_tag,
+            "kind": self._current_kind,
+            "text": text,
+        }
+        if self._pending_rare_char_annotations:
+            block["rare_char_annotations"] = self._pending_rare_char_annotations
+            self._pending_rare_char_annotations = []
+        self.blocks.append(block)
+
+    def _add_ruby_text(self, data: str) -> None:
+        if not self._ruby_stack:
+            self._parts.append(data)
+            return
+        ruby = self._ruby_stack[-1]
+        if ruby["rp_depth"]:
+            return
+        if ruby["in_rt"]:
+            ruby["pronunciation_parts"].append(data)
+        else:
+            ruby["base_parts"].append(data)
 
 
 def read_container_rootfile(zf: zipfile.ZipFile) -> str:
@@ -433,6 +496,15 @@ def build_snapshot(args: argparse.Namespace) -> int:
                     "text": block["text"],
                     "source_file": item["file"],
                 }
+                if block.get("rare_char_annotations"):
+                    block_record["rare_char_annotations"] = [
+                        {
+                            **annotation,
+                            "block_id": block_id,
+                            "source_file": item["file"],
+                        }
+                        for annotation in block["rare_char_annotations"]
+                    ]
                 blocks.append(block_record)
                 document_blocks.append(block_record)
             documents.append(
@@ -495,6 +567,7 @@ def build_snapshot(args: argparse.Namespace) -> int:
         "documents": len(documents),
         "blocks": len(blocks),
         "assets": len(assets),
+        "rare_char_annotations": sum(len(block.get("rare_char_annotations", [])) for block in blocks),
         "manifest_items": len(package["manifest"]),
         "spine_items": len(package["spine"]),
     }

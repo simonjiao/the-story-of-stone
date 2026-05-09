@@ -1,52 +1,46 @@
-# 红楼梦文本与视频校验项目
+# 通灵玉 Agent 项目
 
-本项目的目标是构建一个可修订、可追溯、可自定义风格的《红楼梦》交互机器人。当前阶段围绕《红楼梦》相关视频，完成下载、音频提取、机器转录、术语校订和后续多 agent 校验工作流建设。
+本仓库当前主线是“通灵玉”：一个面向《红楼梦》的研究型 Hermes Agent。目标不是泛泛聊天，也不是继续维护旧的 EPUB 基础库，而是建立一条可追溯的资料链路：
 
-当前重点不是做泛泛的问答库，而是建立可追溯的校订流程和可扩展的风格语料体系：每条转录中的原文引用、脂批、章回名、人物名、器物名和同音词，都要能回到明确登记的文本证据或校订记录确认；用户后续可以选择不同文本版本、研究视角和对话风格进行探讨。
+`source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`
 
-## 当前状态
+## 当前现实
 
-- 已处理“红楼梦文本探究”合集全部 60 个视频。
-- 已生成每条视频的 `.txt`、`.srt`、`.transcript.json`。
-- 旧的 `resources/base/hongloumeng/` 基础资料产物已删除，不再作为后续校验知识库的数据来源。
-- EPUB 抽取已改为通用 source snapshot 脚本，用于后续新资料入库前的规范化。
-- 新增维基文库 source snapshot 下载脚本，用于下载《红楼梦》全本、脂批本等基础资料。
-- 第一条视频已做重点术语校订，并确认三份转录文件文本内容一致。
-- 视频转录被定位为一种讲解风格语料，风格名为“不红居士”。
-- 已导入“通灵玉”红楼研究型 Hermes Agent 第一版渐进式设计文档。
-- 多机器多 agent 校验服务方案需等待新的基础资料来源确定后再实现主证据库。
+已具备：
 
-## 目录入口
+- `scripts/extract_epub.py`: 通用 EPUB source snapshot 抽取脚本。
+- `scripts/download_wikisource.py`: 维基文库/MediaWiki source snapshot 下载脚本。
+- `scripts/bilibili_hlm_pipeline.py`: B 站视频下载、音频处理和转录脚本。
+- `resources/styles/buhongjushi/`: 已提交的“不红居士”风格转录和元数据。
+- `docs/tonglingyu-agent-design/`: 通灵玉第一版产品和架构设计文档。
+- `src/tonglingyu_agent/`: 通灵玉实现入口，目前仍是骨架。
+
+尚未具备：
+
+- `resources/sources/` 下的正式基础资料快照。
+- SQLite/FTS 知识库建库脚本。
+- Gateway、四个内部 Agent profile、证据 schema、reviewer 审校链路。
+- Open WebUI 中的“通灵玉”模型注册和路由。
+
+已废弃：
+
+- 旧 `resources/base/hongloumeng/` 基础资料产物。
+- 旧红楼梦专用资料抽取脚本。
+- 旧平台化测试文档不作为通灵玉第一版依据。
+
+## 文档入口
 
 - [项目概览](docs/PROJECT_OVERVIEW.md)
-- [交互机器人愿景](docs/INTERACTIVE_BOT_VISION.md)
-- [通灵玉 Agent 设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
 - [目录结构](docs/DIRECTORY_STRUCTURE.md)
 - [运行手册](docs/RUNBOOK.md)
+- [知识库实现计划](docs/KB_SERVICE_PLAN.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
-- [校验知识库服务方案](docs/KB_SERVICE_PLAN.md)
 - [进展与决策记录](docs/PROGRESS.md)
+- [通灵玉设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
 
-## 快速命令
+## 资料处理
 
-只查看会选中哪些视频：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
-```
-
-按词表重转录视频：
-
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py \
-  --limit 1 \
-  --asr-model small \
-  --asr-glossary resources/hongloumeng_asr_glossary.txt \
-  --prefer-asr \
-  --force-transcript
-```
-
-抽取新的 EPUB 资料快照：
+抽取 EPUB：
 
 ```bash
 .venv/bin/python scripts/extract_epub.py path/to/source.epub \
@@ -56,7 +50,7 @@
   --out resources/sources/epub
 ```
 
-下载维基文库《红楼梦》全本资料快照：
+下载维基文库《红楼梦》全本：
 
 ```bash
 .venv/bin/python scripts/download_wikisource.py \
@@ -69,43 +63,34 @@
   --out resources/sources/wiki
 ```
 
-检查第一条视频三份转录文本是否一致：
+下载脂批本或其他版本资料时，使用独立 `source_id` 和合适的 `source_category`，不要混入同一个来源快照。
+
+## 风格资料
+
+“不红居士”是当前第一批讲解风格资料的项目内名称，来源于 B 站“红楼梦文本探究”视频转录。它只影响表达方式和讲解路径，不作为正文、脂批或版本校勘的最高证据。
+
+转录文本里的讲解者自称按原文保留，例如 `不红君` 不因风格名而替换。
+
+## 验证
+
+Python 语法检查：
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-import json, re, hashlib, sys
-
-stem = '001_BV1qSjdz5ET2_司棋大闹大观园厨房，一碗炖鸡蛋，埋伏着曹雪芹精心设置的妙笔'
-base = Path('resources/styles/buhongjushi/transcripts')
-txt = [line.strip() for line in (base / f'{stem}.txt').read_text(encoding='utf-8').splitlines() if line.strip()]
-
-def srt_lines(text):
-    out = []
-    for block in re.split(r'\n\s*\n', text.strip()):
-        parts = block.splitlines()
-        if len(parts) >= 3:
-            out.append(' '.join(line.strip() for line in parts[2:] if line.strip()))
-    return [line for line in out if line]
-
-srt = srt_lines((base / f'{stem}.srt').read_text(encoding='utf-8'))
-data = json.loads((base / f'{stem}.transcript.json').read_text(encoding='utf-8'))
-segments = [str(seg.get('content', '')).strip() for seg in data.get('segments', []) if str(seg.get('content', '')).strip()]
-
-def digest(lines):
-    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
-
-print(len(txt), digest(txt))
-print(len(srt), digest(srt))
-print(len(segments), digest(segments))
-sys.exit(0 if txt == srt == segments else 1)
-PY
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
 ```
+
+Markdown 和空白检查：
+
+```bash
+git diff --check
+```
+
+第一条视频三份转录一致性检查见 [运行手册](docs/RUNBOOK.md)。
 
 ## 关键原则
 
-- `官中` 是前八十回表示荣国府公家钱物/供应体系的常用词，不要误校为 `公中` 或 `宫中`。
-- `不红君` 是讲解者自称，应原样保留。
-- 原文引用、脂批和章回名必须基于明确登记的文本证据跨章节交叉验证，不能只查视频标题对应章节。
-- 新资料先抽取为 `resources/sources/` 下的 source snapshot，再进入知识库构造。
+- 新资料先进入 `resources/sources/` source snapshot，再进入知识库构造。
+- 基础资料必须可追溯；视频转录只是风格语料或待校订初稿。
+- 生僻字、异体字、旧字形和来源中已有读音必须保留，不得只留下规范化检索文本。
+- `官中`、`宫中`、`公中` 等高风险同音词必须回到已登记文本证据确认。
 - 音频、视频、原始大文件和临时缓存不提交。
