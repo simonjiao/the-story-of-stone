@@ -25,6 +25,7 @@ pub mod actions {
     pub const ADMIN_RUN_TERMINATE: &str = "admin:run_terminate";
     pub const ADMIN_EXTERNAL_ACTION_DRY_RUN: &str = "admin:external_action_dry_run";
     pub const ADMIN_EXTERNAL_ACTION_APPLY: &str = "admin:external_action_apply";
+    pub const ADMIN_EXTERNAL_ACTION_COMPENSATE: &str = "admin:external_action_compensate";
     pub const INTERNAL_RUN_CREATE: &str = "internal:run_create";
     pub const INTERNAL_RUN_CLAIM: &str = "internal:run_claim";
     pub const INTERNAL_RUN_HEARTBEAT: &str = "internal:run_heartbeat";
@@ -158,7 +159,8 @@ impl DefaultPolicy {
             | actions::ADMIN_RUN_RETRY
             | actions::ADMIN_RUN_TERMINATE
             | actions::ADMIN_EXTERNAL_ACTION_DRY_RUN
-            | actions::ADMIN_EXTERNAL_ACTION_APPLY => {
+            | actions::ADMIN_EXTERNAL_ACTION_APPLY
+            | actions::ADMIN_EXTERNAL_ACTION_COMPENSATE => {
                 if auth.has_any_role(&[RoleName::SystemAdmin, RoleName::AgentAdmin]) {
                     PolicyDecision::Allowed
                 } else {

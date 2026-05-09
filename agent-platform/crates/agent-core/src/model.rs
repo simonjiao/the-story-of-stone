@@ -176,6 +176,7 @@ string_enum! {
         DryRunReady => "dry_run_ready",
         DryRunRejected => "dry_run_rejected",
         Applied => "applied",
+        Compensated => "compensated",
         Failed => "failed",
     }
 }
@@ -692,6 +693,7 @@ pub struct ExternalActionPlan {
     pub input_ref: Option<String>,
     pub result_ref: Option<String>,
     pub compensation_ref: Option<String>,
+    pub compensation_result_ref: Option<String>,
     pub status: ExternalActionPlanStatus,
     pub error_code: Option<String>,
     pub trace_id: String,
@@ -725,6 +727,7 @@ impl ExternalActionPlan {
             input_ref: None,
             result_ref: None,
             compensation_ref: None,
+            compensation_result_ref: None,
             status: ExternalActionPlanStatus::Draft,
             error_code: None,
             trace_id: trace_id.into(),
@@ -1006,6 +1009,11 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         .get("external_action_plan_counts")
         .map(|counts| json_i64(counts, "applied"))
         .unwrap_or(0);
+    let external_action_compensated = snapshot
+        .runtime_summary
+        .get("external_action_plan_counts")
+        .map(|counts| json_i64(counts, "compensated"))
+        .unwrap_or(0);
     let external_action_failed = snapshot
         .runtime_summary
         .get("external_action_plan_counts")
@@ -1154,7 +1162,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         RiskLevel::Low => HealthStatus::Healthy,
     };
     let summary = format!(
-        "Observer snapshot collected at {}. signals={}, dead_letter={}, failed={}, timed_out={}, retrying={}, avg_runtime_ms={:.0}, max_context_messages={}, dry_run_rejected={}, external_action_applied={}, external_action_failed={}, approval_bypass_attempts={}, external_action_lock_conflicts={}, abnormal_external_action_results={}.",
+        "Observer snapshot collected at {}. signals={}, dead_letter={}, failed={}, timed_out={}, retrying={}, avg_runtime_ms={:.0}, max_context_messages={}, dry_run_rejected={}, external_action_applied={}, external_action_compensated={}, external_action_failed={}, approval_bypass_attempts={}, external_action_lock_conflicts={}, abnormal_external_action_results={}.",
         snapshot.collected_at,
         signals.len(),
         dead_letters,
@@ -1165,6 +1173,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         max_context_messages,
         dry_run_rejected,
         external_action_applied,
+        external_action_compensated,
         external_action_failed,
         approval_bypass_attempts,
         external_action_lock_conflicts,
@@ -1212,6 +1221,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
                 "context_growth_messages": max_context_messages,
                 "external_action_dry_run_rejection": dry_run_rejected,
                 "external_action_applied": external_action_applied,
+                "external_action_compensated": external_action_compensated,
                 "external_action_apply_failure": external_action_failed,
                 "external_action_error_counts": external_action_errors,
                 "external_action_approval_bypass_attempt": approval_bypass_attempts,

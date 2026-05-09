@@ -83,9 +83,11 @@ Required changes:
     auth.
   - `AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS` and
     `AGENT_CREDENTIAL_LEASE_TTL_SECONDS`.
-  - `AGENT_WRITE_CONNECTOR_BASE_URL`, serving `POST /action-executions/execute`.
-    Successful responses must include `status=applied`, `result_ref`, and
-    `compensation_ref`.
+  - `AGENT_WRITE_CONNECTOR_BASE_URL`, serving `POST /action-executions/execute`
+    and `POST /action-executions/compensate`. Successful execute responses
+    must include `status=applied`, `result_ref`, and `compensation_ref`.
+    Successful compensate responses must include `status=compensated` and
+    `result_ref`.
   - `AGENT_WRITE_CONNECTOR_API_KEY`, if the write connector requires auth.
   - `AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS`,
     `AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS`, and
@@ -100,6 +102,11 @@ Required changes:
   - `agent-platform/scripts/action-gateway-smoke.sh` runs a local Manager plus
     the action journal target and verifies approval, dry-run, apply, target
     write, result_ref, compensation_ref, and compensation.
+  - `agent-platform/scripts/external-action-contract-smoke.sh` runs the same
+    Manager workflow against any configured third-party provider/connector.
+    Set `EXTERNAL_ACTION_CONNECTOR`, `EXTERNAL_ACTION_NAME`,
+    `EXTERNAL_ACTION_RESOURCE_REF`, and `EXTERNAL_ACTION_CREDENTIAL_SCOPE`;
+    keep provider/connector URLs and API keys in `.env`.
 - Optional internal IP overrides: `HERMES_AGENT_IP`, `OPEN_WEBUI_ORIGIN_IP`,
   `AGENT_PLATFORM_POSTGRES_IP`, `AGENT_MANAGER_IP`,
   `AGENT_ORCHESTRATOR_IP`, `AGENT_WORKER_IP`, and `AGENT_OBSERVER_IP`.

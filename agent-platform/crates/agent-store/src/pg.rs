@@ -300,6 +300,9 @@ fn map_external_action_plan(row: &PgRow) -> CoreResult<ExternalActionPlan> {
         input_ref: row.try_get("input_ref").map_err(store_error)?,
         result_ref: row.try_get("result_ref").map_err(store_error)?,
         compensation_ref: row.try_get("compensation_ref").map_err(store_error)?,
+        compensation_result_ref: row
+            .try_get("compensation_result_ref")
+            .map_err(store_error)?,
         status: parse(row.try_get::<String, _>("status").map_err(store_error)?)?,
         error_code: row.try_get("error_code").map_err(store_error)?,
         trace_id: row.try_get("trace_id").map_err(store_error)?,
@@ -1438,10 +1441,10 @@ impl AgentStore for PgAgentStore {
             INSERT INTO external_action_plans (
                 id, run_id, connector, action, resource_ref, risk_level,
                 external_action_mode, approval_id, credential_scope, input_summary,
-                input_ref, result_ref, compensation_ref, status, error_code,
+                input_ref, result_ref, compensation_ref, compensation_result_ref, status, error_code,
                 trace_id, version, created_at, updated_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
             RETURNING *
             "#,
         )
@@ -1458,6 +1461,7 @@ impl AgentStore for PgAgentStore {
         .bind(&plan.input_ref)
         .bind(&plan.result_ref)
         .bind(&plan.compensation_ref)
+        .bind(&plan.compensation_result_ref)
         .bind(plan.status.to_string())
         .bind(&plan.error_code)
         .bind(&plan.trace_id)
@@ -1524,6 +1528,37 @@ impl AgentStore for PgAgentStore {
         .bind(result_ref)
         .bind(compensation_ref)
         .bind(error_code)
+        .bind(trace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?
+        .ok_or_else(|| {
+            agent_core::AgentCoreError::coded(agent_core::ErrorCode::NotFound, "not found")
+        })?;
+        map_external_action_plan(&row)
+    }
+
+    async fn record_external_action_compensation(
+        &self,
+        plan_id: &str,
+        compensation_result_ref: &str,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan> {
+        let row = sqlx::query(
+            r#"
+            UPDATE external_action_plans
+            SET status = 'compensated',
+                compensation_result_ref = $2,
+                error_code = NULL,
+                trace_id = $3,
+                version = version + 1,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(plan_id)
+        .bind(compensation_result_ref)
         .bind(trace_id)
         .fetch_optional(&self.pool)
         .await

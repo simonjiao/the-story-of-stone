@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS external_action_plans (
     input_summary TEXT,
     input_ref TEXT,
     result_ref TEXT,
+    compensation_ref TEXT,
+    compensation_result_ref TEXT,
     status TEXT NOT NULL,
     error_code TEXT,
     trace_id TEXT NOT NULL,

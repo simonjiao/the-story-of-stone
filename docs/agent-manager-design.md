@@ -24,5 +24,5 @@
 ```text
 P0 代码基线已实现：控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer 和 audit 最小闭环；Bridge 环境完成口径以 hardening checklist 和部署复测为准。
 P1 已完成实现和部署 smoke：在现有 Bridge/session/run 链路上接真实 Hermes Runtime，保持只读，支持 observer_report discussion，并提供面向授权 admin/operator 的 System Observer status session。
-P2 部分实现：沿用 P1 固定 contract，已新增 apply API、HTTP CredentialProvider / WriteConnector、action-journal 低风险 target、resource lock、状态推进、审计、CLI、部署 profile 和本地端到端 smoke；默认部署仍关闭写入，第三方生产 adapter、Manager compensation workflow 和目标环境 smoke 尚未完成。
+P2 仓库侧实现完成：沿用 P1 固定 contract，已新增 apply / compensate API、HTTP CredentialProvider / WriteConnector、action-journal 低风险 target、resource lock、状态推进、审计、CLI、部署 profile、本地端到端 smoke 和第三方 contract smoke 入口；默认部署仍关闭写入，真实第三方目标以目标环境 smoke 输出为准。
 ```

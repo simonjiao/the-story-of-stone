@@ -15,6 +15,8 @@ pub mod metric_names {
     pub const CONNECTOR_SNAPSHOT_TOTAL: &str = "agent_platform_connector_snapshot_total";
     pub const EXTERNAL_ACTION_DRY_RUN_TOTAL: &str = "agent_platform_external_action_dry_run_total";
     pub const EXTERNAL_ACTION_APPLY_TOTAL: &str = "agent_platform_external_action_apply_total";
+    pub const EXTERNAL_ACTION_COMPENSATE_TOTAL: &str =
+        "agent_platform_external_action_compensate_total";
     pub const LOCK_WAIT_SECONDS: &str = "agent_platform_lock_wait_seconds";
     pub const OBSERVER_REPORT_TOTAL: &str = "agent_platform_observer_report_total";
 }

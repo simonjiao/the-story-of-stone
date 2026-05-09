@@ -8,7 +8,7 @@
 |---|---|---|---|
 | P0 | 代码基线已实现 | 控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer、audit 形成最小闭环 | Postgres lease / SKIP LOCKED 是正确性边界；不接真实写 connector；不注入写权限 credential；Bridge 完成口径以 hardening checklist 和部署复测为准 |
 | P1 | 已完成实现和部署 smoke | 在现有 Bridge/session/run 链路上接入真实 Hermes Runtime，只做只读 session/run，让 Observer report 可进入受控 discussion session，并提供 System Observer status session | 不改 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema、audit contract；System Observer status session 只作为窄口例外，不扩展为通用 admin proxy |
-| P2 | 部分实现 | 启用受控外部写入 | 已完成 apply API、HTTP provider/connector、`action-journal` provider/connector/target adapter、锁、审计、补偿引用、本地回归和端到端 smoke；默认部署仍关闭写入，第三方生产 adapter、Manager compensation workflow 和目标环境 smoke 尚未完成 |
+| P2 | 仓库侧实现完成 | 启用受控外部写入 | 已完成 apply / compensate API、HTTP provider/connector、`action-journal` provider/connector/target adapter、锁、审计、补偿状态、本地回归和端到端 smoke；默认部署仍关闭写入，真实第三方目标以目标环境 contract smoke 证明 |
 
 P1 会提前落地 P2 需要的 external-action plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。P1 只 dry-run / validate / reject，不获取真实 credential，不调用真实写 connector，不把 run 推进到真实外部写入。
 
@@ -71,7 +71,7 @@ P1 验收：
 
 ## P2 受控外部执行
 
-P2 目标是启用真实外部写入，但只沿用 P1 已固定的 contract。
+P2 目标是启用真实外部写入，但只沿用 P1 已固定的 contract。仓库侧提供通用 HTTP CredentialProvider / WriteConnector 和仓库内低风险 `action-journal` target；真实第三方系统不在仓库内硬编码，必须在目标环境配置 provider / connector 后运行 `agent-platform/scripts/external-action-contract-smoke.sh` 验收。
 
 必须实现：
 
@@ -82,7 +82,7 @@ P2 目标是启用真实外部写入，但只沿用 P1 已固定的 contract。
 4. 启用 resource_locks 写入侧强制校验。
 5. external_action_plan 状态推进、前后审计、结果校验和错误归一化。
 6. connector retry / timeout / dead_letter，复用 P0/P1 run queue 和 audit 语义。
-7. connector adapter 层的最小 rollback / compensation 策略。
+7. connector adapter 层的最小 rollback / compensation 策略，并由 Manager compensation API 统一审计和推进状态。
 8. Observer 评测外部动作失败率、审批绕过尝试、锁冲突和异常写入模式。
 ```
 

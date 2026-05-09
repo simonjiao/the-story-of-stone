@@ -251,6 +251,23 @@ pub struct ExternalActionPlanApplyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanCompensateInput {
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalActionPlanCompensateResponse {
+    pub plan: ExternalActionPlan,
+    pub compensate_status: ExternalActionPlanStatus,
+    pub compensation_result_ref: Option<String>,
+    #[serde(default)]
+    pub connector_metadata: Value,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionContext {
     pub session_id: String,
     pub agent_id: String,

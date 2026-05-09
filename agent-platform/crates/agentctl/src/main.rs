@@ -129,6 +129,14 @@ enum RunsSubcommand {
         #[arg(long)]
         payload_json: Option<String>,
     },
+    CompensateExternalAction {
+        run_id: String,
+        plan_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        payload_json: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -325,6 +333,26 @@ async fn main() -> anyhow::Result<()> {
                     &headers,
                     &format!("/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply"),
                     json!({ "payload": payload }),
+                )
+                .await?
+            }
+            RunsSubcommand::CompensateExternalAction {
+                run_id,
+                plan_id,
+                reason,
+                payload_json,
+            } => {
+                let payload = match payload_json {
+                    Some(value) => serde_json::from_str::<Value>(&value)
+                        .context("payload-json must be valid JSON")?,
+                    None => json!({}),
+                };
+                post(
+                    &client,
+                    &manager_url,
+                    &headers,
+                    &format!("/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/compensate"),
+                    json!({ "reason": reason, "payload": payload }),
                 )
                 .await?
             }

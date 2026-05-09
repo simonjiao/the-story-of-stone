@@ -779,6 +779,28 @@ impl AgentStore for MemoryAgentStore {
         Ok(plan.clone())
     }
 
+    async fn record_external_action_compensation(
+        &self,
+        plan_id: &str,
+        compensation_result_ref: &str,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan> {
+        let mut inner = self.write()?;
+        let plan = inner
+            .external_action_plans
+            .get_mut(plan_id)
+            .ok_or_else(|| {
+                agent_core::AgentCoreError::coded(agent_core::ErrorCode::NotFound, "not found")
+            })?;
+        plan.status = agent_core::ExternalActionPlanStatus::Compensated;
+        plan.compensation_result_ref = Some(compensation_result_ref.to_string());
+        plan.error_code = None;
+        plan.trace_id = trace_id.to_string();
+        plan.version += 1;
+        plan.updated_at = OffsetDateTime::now_utc();
+        Ok(plan.clone())
+    }
+
     async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease> {
         self.write()?
             .credential_leases

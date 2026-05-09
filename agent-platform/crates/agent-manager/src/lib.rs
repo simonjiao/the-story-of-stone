@@ -14,6 +14,7 @@ use agent_core::{
     AuditLog, AuthContext, ClaimOpenWebUiBridgeNonceInput, CoreResult, CreateChildSessionInput,
     CreateGrantInput, CreateRunInput, CreateSessionInput, DenyDecisionInput, EmptyResponse,
     ErrorCode, ExternalActionPlanApplyInput, ExternalActionPlanApplyResponse,
+    ExternalActionPlanCompensateInput, ExternalActionPlanCompensateResponse,
     ExternalActionPlanDryRunInput, ExternalActionPlanDryRunResponse, ObserverReport,
     ObserverReportDiscussionInput, Page, RoleName, RunAdminDecisionInput, RunSummary,
     SystemStatusSessionInput, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
@@ -124,6 +125,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/apply",
             post(admin_external_action_apply),
+        )
+        .route(
+            "/v1/admin/runs/{run_id}/external-action-plans/{plan_id}/compensate",
+            post(admin_external_action_compensate),
         )
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
         .route(
@@ -1039,6 +1044,26 @@ async fn admin_external_action_apply(
     .map_err(|error| ApiError::from_core(error, auth.trace_id))
 }
 
+async fn admin_external_action_compensate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((run_id, plan_id)): Path<(String, String)>,
+    Json(input): Json<ExternalActionPlanCompensateInput>,
+) -> Result<Json<ExternalActionPlanCompensateResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_admin(&auth, actions::ADMIN_EXTERNAL_ACTION_COMPENSATE)?;
+    external_action_services::compensate_external_action_plan(
+        &state.store,
+        &auth,
+        run_id,
+        plan_id,
+        input,
+    )
+    .await
+    .map(Json)
+    .map_err(|error| ApiError::from_core(error, auth.trace_id))
+}
+
 async fn create_observer_report_from_snapshot(
     state: &AppState,
     trace_id: &str,
@@ -1410,8 +1435,9 @@ mod tests {
         CredentialLeaseStatus, CredentialProvider, ErrorCode, ExternalActionMode,
         ExternalActionPlanStatus, HealthStatus, MessageRole, ObserverReport, RequestType,
         ResourceLock, RiskLevel, RoleAssignment, TriggerType, WriteConnector,
-        WriteConnectorDryRunInput, WriteConnectorDryRunOutput, WriteConnectorExecuteInput,
-        WriteConnectorExecuteOutput, new_id, new_trace_id,
+        WriteConnectorCompensateInput, WriteConnectorCompensateOutput, WriteConnectorDryRunInput,
+        WriteConnectorDryRunOutput, WriteConnectorExecuteInput, WriteConnectorExecuteOutput,
+        new_id, new_trace_id,
     };
     use std::{sync::Mutex, time::Duration};
     use time::OffsetDateTime;
@@ -2034,6 +2060,22 @@ mod tests {
                 metadata: json!({"attempted": true}),
             })
         }
+
+        async fn compensate(
+            &self,
+            input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Ok(WriteConnectorCompensateOutput {
+                accepted: true,
+                status: "compensated".to_string(),
+                result_ref: Some(format!(
+                    "compensate-result://action-executions/{}",
+                    input.plan.id
+                )),
+                error_code: None,
+                metadata: json!({"compensated": true}),
+            })
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -2066,6 +2108,22 @@ mod tests {
                 metadata: json!({"invalid": "missing compensation_ref"}),
             })
         }
+
+        async fn compensate(
+            &self,
+            input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Ok(WriteConnectorCompensateOutput {
+                accepted: true,
+                status: "compensated".to_string(),
+                result_ref: Some(format!(
+                    "compensate-result://action-executions/{}",
+                    input.plan.id
+                )),
+                error_code: None,
+                metadata: json!({}),
+            })
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -2095,6 +2153,16 @@ mod tests {
             Err(AgentCoreError::coded(
                 ErrorCode::InternalError,
                 "connector execution failed",
+            ))
+        }
+
+        async fn compensate(
+            &self,
+            _input: WriteConnectorCompensateInput,
+        ) -> CoreResult<WriteConnectorCompensateOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "connector compensation failed",
             ))
         }
     }
@@ -2189,6 +2257,47 @@ mod tests {
                 && audit.reason.as_deref().is_some_and(|reason| {
                     reason.contains(&format!("lock_id={}", response.resource_lock.id))
                 })
+        }));
+
+        let compensated = external_action_services::compensate_external_action_plan_with_connector(
+            &state.store,
+            &auth,
+            run.id.clone(),
+            response.plan.id.clone(),
+            ExternalActionPlanCompensateInput {
+                reason: Some("rollback test".to_string()),
+                payload: json!({"mode": "test"}),
+            },
+            &connector,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            compensated.compensate_status,
+            ExternalActionPlanStatus::Compensated
+        );
+        assert!(
+            compensated
+                .compensation_result_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("compensate-result://action-executions/")
+        );
+        let lock = state
+            .store
+            .active_resource_lock("team", "project-alpha", "external_action")
+            .await
+            .unwrap();
+        assert!(lock.is_none());
+        let audits = state.store.list_audit(20).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::ADMIN_EXTERNAL_ACTION_COMPENSATE
+                && audit.decision == Some(AuditDecision::Completed)
+                && audit.resource_id.as_deref() == Some(response.plan.id.as_str())
+                && audit
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("lock_id="))
         }));
     }
 

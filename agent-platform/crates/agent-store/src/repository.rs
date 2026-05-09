@@ -178,6 +178,12 @@ pub trait AgentStore:
         error_code: Option<&str>,
         trace_id: &str,
     ) -> CoreResult<ExternalActionPlan>;
+    async fn record_external_action_compensation(
+        &self,
+        plan_id: &str,
+        compensation_result_ref: &str,
+        trace_id: &str,
+    ) -> CoreResult<ExternalActionPlan>;
     async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease>;
     async fn list_credential_leases_by_plan(
         &self,

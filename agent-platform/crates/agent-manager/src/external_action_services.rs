@@ -3,10 +3,11 @@ use agent_core::{
     AgentCoreError, AgentRun, AgentRunStatus, ApprovalStatus, AuditDecision, AuditLog, AuthContext,
     CoreResult, CredentialLease, CredentialLeaseRequest, CredentialLeaseStatus, CredentialProvider,
     ErrorCode, ExternalActionMode, ExternalActionPlan, ExternalActionPlanApplyInput,
-    ExternalActionPlanApplyResponse, ExternalActionPlanDryRunInput,
+    ExternalActionPlanApplyResponse, ExternalActionPlanCompensateInput,
+    ExternalActionPlanCompensateResponse, ExternalActionPlanDryRunInput,
     ExternalActionPlanDryRunResponse, ExternalActionPlanStatus, ResourceLock, ResourceRef,
-    RiskLevel, WriteConnector, WriteConnectorDryRunInput, WriteConnectorExecuteInput, actions,
-    external_action_requires_credential, metric_names, new_id,
+    RiskLevel, WriteConnector, WriteConnectorCompensateInput, WriteConnectorDryRunInput,
+    WriteConnectorExecuteInput, actions, external_action_requires_credential, metric_names, new_id,
 };
 use agent_runtime::{
     HttpCredentialProvider, HttpCredentialProviderConfig, HttpWriteConnector,
@@ -390,6 +391,247 @@ pub(crate) async fn apply_external_action_plan_with_adapters(
     }
 }
 
+pub(crate) async fn compensate_external_action_plan(
+    store: &StoreRef,
+    auth: &AuthContext,
+    run_id: String,
+    plan_id: String,
+    input: ExternalActionPlanCompensateInput,
+) -> CoreResult<ExternalActionPlanCompensateResponse> {
+    let write_connector =
+        HttpWriteConnector::new(HttpWriteConnectorConfig::from_env().ok_or_else(|| {
+            AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "external action write connector is not configured",
+            )
+        })?)?;
+    compensate_external_action_plan_with_connector(
+        store,
+        auth,
+        run_id,
+        plan_id,
+        input,
+        &write_connector,
+    )
+    .await
+}
+
+pub(crate) async fn compensate_external_action_plan_with_connector(
+    store: &StoreRef,
+    auth: &AuthContext,
+    run_id: String,
+    plan_id: String,
+    input: ExternalActionPlanCompensateInput,
+    write_connector: &dyn WriteConnector,
+) -> CoreResult<ExternalActionPlanCompensateResponse> {
+    let run = store
+        .get_run(&run_id)
+        .await?
+        .ok_or_else(|| AgentCoreError::coded(ErrorCode::NotFound, "not found"))?;
+    let plan = store
+        .get_external_action_plan(&plan_id)
+        .await?
+        .ok_or_else(|| AgentCoreError::coded(ErrorCode::NotFound, "not found"))?;
+    if plan.run_id != run.id {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "external-action plan does not belong to run",
+        ));
+    }
+    if plan.status != ExternalActionPlanStatus::Applied {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "only applied external-action plans can be compensated",
+        ));
+    }
+    let compensation_ref = plan.compensation_ref.clone().ok_or_else(|| {
+        AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "external-action plan is missing compensation_ref",
+        )
+    })?;
+    let resource = ResourceRef::parse(plan.resource_ref.clone())?;
+    let lock = match store
+        .acquire_resource_lock(
+            ResourceLock {
+                id: new_id("lock"),
+                resource_type: resource.resource_type,
+                resource_id: resource.resource_id,
+                lock_scope: "external_action".to_string(),
+                holder_run_id: run.id.clone(),
+                lease_until: OffsetDateTime::now_utc(),
+                created_at: OffsetDateTime::now_utc(),
+            },
+            ExternalActionApplyConfig::from_env().lock_lease,
+        )
+        .await
+    {
+        Ok(lock) => lock,
+        Err(error) if error.code() == ErrorCode::Conflict => {
+            append_compensation_audit(
+                store,
+                auth,
+                &plan,
+                AuditDecision::Conflict,
+                Some(format!(
+                    "plan_id={} run_id={} status=resource_locked",
+                    plan.id, run.id
+                )),
+            )
+            .await;
+            metrics::counter!(
+                metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+                "status" => "resource_locked".to_string()
+            )
+            .increment(1);
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    let plan = store
+        .get_external_action_plan(&plan.id)
+        .await?
+        .ok_or_else(|| AgentCoreError::coded(ErrorCode::NotFound, "not found"))?;
+    if plan.status != ExternalActionPlanStatus::Applied {
+        let _ = store.release_resource_lock(&run.id).await;
+        append_compensation_audit(
+            store,
+            auth,
+            &plan,
+            AuditDecision::Conflict,
+            Some(format!(
+                "plan_id={} run_id={} lock_id={} status=not_applied",
+                plan.id, run.id, lock.id
+            )),
+        )
+        .await;
+        metrics::counter!(
+            metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+            "status" => "not_applied".to_string()
+        )
+        .increment(1);
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "only applied external-action plans can be compensated",
+        ));
+    }
+    append_compensation_audit(
+        store,
+        auth,
+        &plan,
+        AuditDecision::Allowed,
+        Some(format!(
+            "plan_id={} run_id={} lock_id={} lock_scope={} status=started",
+            plan.id, run.id, lock.id, lock.lock_scope
+        )),
+    )
+    .await;
+    let output = match write_connector
+        .compensate(WriteConnectorCompensateInput {
+            plan: plan.clone(),
+            compensation_ref,
+            reason: input.reason,
+            payload: input.payload,
+            trace_id: auth.trace_id.clone(),
+        })
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = store.release_resource_lock(&run.id).await;
+            append_compensation_audit(
+                store,
+                auth,
+                &plan,
+                AuditDecision::Failed,
+                Some(format!(
+                    "plan_id={} run_id={} lock_id={} status=connector_dead_letter",
+                    plan.id, run.id, lock.id
+                )),
+            )
+            .await;
+            metrics::counter!(
+                metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+                "status" => "connector_dead_letter".to_string()
+            )
+            .increment(1);
+            return Err(error);
+        }
+    };
+    let _ = store.release_resource_lock(&run.id).await;
+    if !output.accepted {
+        let error_code = output
+            .error_code
+            .as_deref()
+            .unwrap_or("compensation_rejected");
+        append_compensation_audit(
+            store,
+            auth,
+            &plan,
+            AuditDecision::Denied,
+            Some(format!(
+                "plan_id={} run_id={} lock_id={} status={error_code}",
+                plan.id, run.id, lock.id
+            )),
+        )
+        .await;
+        metrics::counter!(
+            metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+            "status" => "rejected".to_string()
+        )
+        .increment(1);
+        return Err(AgentCoreError::coded(ErrorCode::Conflict, error_code));
+    }
+    let result_ref = match validate_compensation_success(&output) {
+        Ok(result_ref) => result_ref,
+        Err(error) => {
+            append_compensation_audit(
+                store,
+                auth,
+                &plan,
+                AuditDecision::Failed,
+                Some(format!(
+                    "plan_id={} run_id={} lock_id={} status=connector_invalid_result",
+                    plan.id, run.id, lock.id
+                )),
+            )
+            .await;
+            metrics::counter!(
+                metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+                "status" => "connector_invalid_result".to_string()
+            )
+            .increment(1);
+            return Err(error);
+        }
+    };
+    let compensated = store
+        .record_external_action_compensation(&plan.id, &result_ref, &auth.trace_id)
+        .await?;
+    append_compensation_audit(
+        store,
+        auth,
+        &compensated,
+        AuditDecision::Completed,
+        Some(format!(
+            "plan_id={} run_id={} lock_id={} status=compensated result_ref={}",
+            compensated.id, compensated.run_id, lock.id, result_ref
+        )),
+    )
+    .await;
+    metrics::counter!(
+        metric_names::EXTERNAL_ACTION_COMPENSATE_TOTAL,
+        "status" => compensated.status.to_string()
+    )
+    .increment(1);
+    Ok(ExternalActionPlanCompensateResponse {
+        compensate_status: compensated.status,
+        compensation_result_ref: compensated.compensation_result_ref.clone(),
+        connector_metadata: output.metadata,
+        trace_id: auth.trace_id.clone(),
+        plan: compensated,
+    })
+}
+
 enum DryRunDecision {
     Ready,
     Rejected(String),
@@ -559,6 +801,27 @@ fn validate_connector_success(
     Ok(output)
 }
 
+fn validate_compensation_success(
+    output: &agent_core::WriteConnectorCompensateOutput,
+) -> CoreResult<String> {
+    if output.status != "compensated" {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "write connector accepted compensation without compensated status",
+        ));
+    }
+    output
+        .result_ref
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "write connector accepted compensation without result_ref",
+            )
+        })
+}
+
 async fn active_credential_lease(
     store: &StoreRef,
     credential_provider: &dyn CredentialProvider,
@@ -659,6 +922,27 @@ async fn append_apply_audit(
     let mut audit = AuditLog::new(
         Some(auth),
         actions::ADMIN_EXTERNAL_ACTION_APPLY,
+        decision,
+        reason,
+        auth.trace_id.clone(),
+    );
+    audit.run_id = Some(plan.run_id.clone());
+    audit.approval_id = plan.approval_id.clone();
+    audit.resource_type = Some("external_action_plan".to_string());
+    audit.resource_id = Some(plan.id.clone());
+    let _ = store.append_audit(audit).await;
+}
+
+async fn append_compensation_audit(
+    store: &StoreRef,
+    auth: &AuthContext,
+    plan: &ExternalActionPlan,
+    decision: AuditDecision,
+    reason: Option<String>,
+) {
+    let mut audit = AuditLog::new(
+        Some(auth),
+        actions::ADMIN_EXTERNAL_ACTION_COMPENSATE,
         decision,
         reason,
         auth.trace_id.clone(),

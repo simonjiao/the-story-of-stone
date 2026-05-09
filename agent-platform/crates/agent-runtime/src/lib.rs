@@ -2,8 +2,9 @@ use agent_core::{
     AgentCoreError, AgentSessionMessage, ConnectorClient, ConnectorSnapshot, CoreResult,
     CredentialLease, CredentialLeaseRequest, CredentialProvider, ErrorCode, ExternalActionMode,
     MessageRole, RuntimeClient, RuntimeOutput, RuntimeRunInput, RuntimeSessionInput,
-    WriteConnector, WriteConnectorDryRunInput, WriteConnectorDryRunOutput,
-    WriteConnectorExecuteInput, WriteConnectorExecuteOutput, metric_names, new_id, runtime_failure,
+    WriteConnector, WriteConnectorCompensateInput, WriteConnectorCompensateOutput,
+    WriteConnectorDryRunInput, WriteConnectorDryRunOutput, WriteConnectorExecuteInput,
+    WriteConnectorExecuteOutput, metric_names, new_id, runtime_failure,
 };
 use async_trait::async_trait;
 use axum::{
@@ -495,6 +496,16 @@ impl WriteConnector for NoopWriteConnector {
             "no-op write connector cannot execute external actions",
         ))
     }
+
+    async fn compensate(
+        &self,
+        _input: WriteConnectorCompensateInput,
+    ) -> CoreResult<WriteConnectorCompensateOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "no-op write connector cannot compensate external actions",
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -616,6 +627,7 @@ pub struct HttpWriteConnector {
     client: reqwest::Client,
     dry_run_url: Url,
     execute_url: Url,
+    compensate_url: Url,
 }
 
 impl HttpWriteConnector {
@@ -624,11 +636,15 @@ impl HttpWriteConnector {
             .map_err(|_| runtime_failure("invalid write connector dry-run URL"))?;
         let execute_url = Url::parse(&format!("{}/action-executions/execute", config.base_url))
             .map_err(|_| runtime_failure("invalid write connector execute URL"))?;
+        let compensate_url =
+            Url::parse(&format!("{}/action-executions/compensate", config.base_url))
+                .map_err(|_| runtime_failure("invalid write connector compensate URL"))?;
         Ok(Self {
             config,
             client: reqwest::Client::new(),
             dry_run_url,
             execute_url,
+            compensate_url,
         })
     }
 }
@@ -684,6 +700,31 @@ impl WriteConnector for HttpWriteConnector {
             .await
             .map_err(|_| runtime_failure("write connector execute response was malformed"))
     }
+
+    async fn compensate(
+        &self,
+        input: WriteConnectorCompensateInput,
+    ) -> CoreResult<WriteConnectorCompensateOutput> {
+        let response = post_json(
+            &self.client,
+            self.compensate_url.clone(),
+            self.config.api_key.as_deref(),
+            &input.trace_id,
+            self.config.timeout,
+            &input,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "write connector compensate failed",
+            ));
+        }
+        response
+            .json::<WriteConnectorCompensateOutput>()
+            .await
+            .map_err(|_| runtime_failure("write connector compensate response was malformed"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,28 +771,11 @@ impl ActionGatewayConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionCompensationInput {
-    pub compensation_ref: String,
-    pub reason: Option<String>,
-    pub trace_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionCompensationOutput {
-    pub accepted: bool,
-    pub status: String,
-    pub result_ref: Option<String>,
-    pub error_code: Option<String>,
-    #[serde(default)]
-    pub metadata: Value,
-}
-
 #[derive(Clone)]
 struct ActionGatewayState {
     config: ActionGatewayConfig,
     executions: Arc<Mutex<BTreeMap<String, WriteConnectorExecuteOutput>>>,
-    compensations: Arc<Mutex<BTreeMap<String, ActionCompensationOutput>>>,
+    compensations: Arc<Mutex<BTreeMap<String, WriteConnectorCompensateOutput>>>,
     file_lock: Arc<Mutex<()>>,
 }
 
@@ -1081,7 +1105,7 @@ fn rejected_write_output(
 async fn gateway_action_compensate(
     State(state): State<ActionGatewayState>,
     headers: HeaderMap,
-    Json(input): Json<ActionCompensationInput>,
+    Json(input): Json<WriteConnectorCompensateInput>,
 ) -> Response {
     match gateway_action_compensate_inner(state, headers, input).await {
         Ok(output) => (HttpStatusCode::OK, Json(output)).into_response(),
@@ -1092,8 +1116,8 @@ async fn gateway_action_compensate(
 async fn gateway_action_compensate_inner(
     state: ActionGatewayState,
     headers: HeaderMap,
-    input: ActionCompensationInput,
-) -> Result<ActionCompensationOutput, ActionGatewayError> {
+    input: WriteConnectorCompensateInput,
+) -> Result<WriteConnectorCompensateOutput, ActionGatewayError> {
     state.authorize(&headers)?;
     if !input
         .compensation_ref
@@ -1120,7 +1144,7 @@ async fn gateway_action_compensate_inner(
     }
     let compensation_id = new_id("gatewaycomp");
     let result_ref = format!("action-journal-compensation-result://events/{compensation_id}");
-    let output = ActionCompensationOutput {
+    let output = WriteConnectorCompensateOutput {
         accepted: true,
         status: "compensated".to_string(),
         result_ref: Some(result_ref.clone()),
@@ -1136,7 +1160,10 @@ async fn gateway_action_compensate_inner(
             "event_type": "action_compensated",
             "compensation_id": compensation_id,
             "compensation_ref": input.compensation_ref,
+            "plan_id": input.plan.id,
+            "run_id": input.plan.run_id,
             "reason": input.reason,
+            "payload": input.payload,
             "result_ref": result_ref,
             "trace_id": input.trace_id,
             "output": output,
@@ -1151,7 +1178,7 @@ fn load_action_gateway_log(
     path: &PathBuf,
 ) -> CoreResult<(
     BTreeMap<String, WriteConnectorExecuteOutput>,
-    BTreeMap<String, ActionCompensationOutput>,
+    BTreeMap<String, WriteConnectorCompensateOutput>,
 )> {
     if !path.exists() {
         return Ok((BTreeMap::new(), BTreeMap::new()));
@@ -1183,7 +1210,7 @@ fn load_action_gateway_log(
                         "action gateway compensation event is missing compensation_ref",
                     ));
                 };
-                let output = serde_json::from_value::<ActionCompensationOutput>(
+                let output = serde_json::from_value::<WriteConnectorCompensateOutput>(
                     event.get("output").cloned().unwrap_or(Value::Null),
                 )
                 .map_err(|_| runtime_failure("action gateway compensation output is malformed"))?;
@@ -1899,9 +1926,11 @@ mod tests {
         let invalid_compensation = client
             .post(format!("{base_url}/action-executions/compensate"))
             .bearer_auth("secret-token")
-            .json(&ActionCompensationInput {
+            .json(&WriteConnectorCompensateInput {
+                plan: plan.clone(),
                 compensation_ref: "action-journal-compensation://unknown".to_string(),
                 reason: Some("test compensation".to_string()),
+                payload: json!({}),
                 trace_id: trace_id.clone(),
             })
             .send()
@@ -1912,15 +1941,17 @@ mod tests {
         let compensation = client
             .post(format!("{base_url}/action-executions/compensate"))
             .bearer_auth("secret-token")
-            .json(&ActionCompensationInput {
+            .json(&WriteConnectorCompensateInput {
+                plan,
                 compensation_ref,
                 reason: Some("test compensation".to_string()),
+                payload: json!({}),
                 trace_id,
             })
             .send()
             .await
             .unwrap()
-            .json::<ActionCompensationOutput>()
+            .json::<WriteConnectorCompensateOutput>()
             .await
             .unwrap();
 

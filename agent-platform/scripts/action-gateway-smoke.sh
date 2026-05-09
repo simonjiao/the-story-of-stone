@@ -175,6 +175,10 @@ DRY_RUN_RESPONSE="$(manager_post "/v1/admin/runs/${RUN_ID}/external-action-plans
 }")"
 PLAN_ID="$(printf '%s' "${DRY_RUN_RESPONSE}" | json_get "plan.id")"
 DRY_RUN_STATUS="$(printf '%s' "${DRY_RUN_RESPONSE}" | json_get "dry_run_status")"
+if [[ "${DRY_RUN_STATUS}" != "dry_run_ready" ]]; then
+  echo "unexpected dry_run_status=${DRY_RUN_STATUS}" >&2
+  exit 1
+fi
 
 APPLY_RESPONSE="$(manager_post "/v1/admin/runs/${RUN_ID}/external-action-plans/${PLAN_ID}/apply" '{
   "payload": {
@@ -185,18 +189,29 @@ APPLY_RESPONSE="$(manager_post "/v1/admin/runs/${RUN_ID}/external-action-plans/$
 APPLY_STATUS="$(printf '%s' "${APPLY_RESPONSE}" | json_get "apply_status")"
 RESULT_REF="$(printf '%s' "${APPLY_RESPONSE}" | json_get "plan.result_ref")"
 COMPENSATION_REF="$(printf '%s' "${APPLY_RESPONSE}" | json_get "plan.compensation_ref")"
+if [[ "${APPLY_STATUS}" != "applied" ]]; then
+  echo "unexpected apply_status=${APPLY_STATUS}" >&2
+  exit 1
+fi
+if [[ -z "${RESULT_REF}" || -z "${COMPENSATION_REF}" ]]; then
+  echo "apply response is missing result_ref or compensation_ref" >&2
+  exit 1
+fi
 
-COMPENSATION_RESPONSE="$(curl -fsS \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer ${SMOKE_TOKEN}" \
-  -X POST \
-  -d "{
-    \"compensation_ref\": \"${COMPENSATION_REF}\",
-    \"reason\": \"external action smoke compensation verification\",
-    \"trace_id\": \"action-gateway-smoke\"
-  }" \
-  "${GATEWAY_URL}/action-executions/compensate")"
-COMPENSATION_STATUS="$(printf '%s' "${COMPENSATION_RESPONSE}" | json_get "status")"
+COMPENSATION_RESPONSE="$(manager_post "/v1/admin/runs/${RUN_ID}/external-action-plans/${PLAN_ID}/compensate" '{
+  "reason": "external action smoke compensation verification",
+  "payload": {"mode": "smoke"}
+}')"
+COMPENSATION_STATUS="$(printf '%s' "${COMPENSATION_RESPONSE}" | json_get "compensate_status")"
+COMPENSATION_RESULT_REF="$(printf '%s' "${COMPENSATION_RESPONSE}" | json_get "compensation_result_ref")"
+if [[ "${COMPENSATION_STATUS}" != "compensated" ]]; then
+  echo "unexpected compensation_status=${COMPENSATION_STATUS}" >&2
+  exit 1
+fi
+if [[ -z "${COMPENSATION_RESULT_REF}" ]]; then
+  echo "compensate response is missing compensation_result_ref" >&2
+  exit 1
+fi
 
 python3 - "${TARGET_LOG}" "${PLAN_ID}" <<'PY'
 import json
@@ -241,3 +256,4 @@ echo "apply_status=${APPLY_STATUS}"
 echo "result_ref=${RESULT_REF}"
 echo "compensation_ref=${COMPENSATION_REF}"
 echo "compensation_status=${COMPENSATION_STATUS}"
+echo "compensation_result_ref=${COMPENSATION_RESULT_REF}"

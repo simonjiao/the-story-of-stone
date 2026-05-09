@@ -138,6 +138,26 @@ pub struct WriteConnectorExecuteOutput {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorCompensateInput {
+    pub plan: ExternalActionPlan,
+    pub compensation_ref: String,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteConnectorCompensateOutput {
+    pub accepted: bool,
+    pub status: String,
+    pub result_ref: Option<String>,
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
 #[async_trait]
 pub trait WriteConnector: Send + Sync {
     async fn dry_run(
@@ -148,6 +168,10 @@ pub trait WriteConnector: Send + Sync {
         &self,
         input: WriteConnectorExecuteInput,
     ) -> CoreResult<WriteConnectorExecuteOutput>;
+    async fn compensate(
+        &self,
+        input: WriteConnectorCompensateInput,
+    ) -> CoreResult<WriteConnectorCompensateOutput>;
 }
 
 pub fn external_action_requires_credential(mode: ExternalActionMode, risk: RiskLevel) -> bool {
