@@ -33,6 +33,14 @@ pub mod actions {
     pub const INTERNAL_OBSERVER_TICK: &str = "internal:observer_tick";
     pub const INTERNAL_WEBHOOK: &str = "internal:webhook";
     pub const INTERNAL_OPEN_WEBUI_BRIDGE: &str = "internal:open_webui_bridge";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE_NONCE: &str = "internal:open_webui_bridge:nonce";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_READ: &str =
+        "internal:open_webui_bridge:binding_read";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT: &str =
+        "internal:open_webui_bridge:binding_upsert";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE: &str =
+        "internal:open_webui_bridge:binding_close";
+    pub const INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE: &str = "internal:open_webui_bridge:run_update";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

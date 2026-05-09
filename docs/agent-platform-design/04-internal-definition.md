@@ -13,6 +13,7 @@
 | `agent_session_message` | session 内顺序追加的消息、摘要或 result_ref |
 | `agent_run` | 一次执行，默认异步，带 lease、heartbeat 和状态 |
 | `agent_bridge_binding` | Open WebUI user/chat/model 到 `agent_session` 的持久绑定 |
+| `agent_bridge_nonce` | 已消费的 Open WebUI Bridge nonce，用于阻止签名 context 重放 |
 | `resource_lock` | 外部副作用并发锁 |
 | `side_effect_plan` | P1 预置的副作用计划；P1 dry-run，P2 才执行 |
 | `credential_lease` | 最小权限 credential 的短期租约引用；不保存明文 secret |
@@ -79,12 +80,15 @@ binding value:
 
 ```text
 1. Orchestrator 只有在验证 `agent_bridge_context` 后才能读写 binding。
-2. Manager 按 `auth.user_id` 约束 subject；调用者不能传入任意 subject 读取他人 binding。
-3. 同一 Open WebUI user/chat/model 只能有一个 active binding。
-4. 同一 reusable agent 可以被多个 Open WebUI chat 复用，但每个 chat 使用独立 agent_session。
-5. 后续消息通过 binding 追加 session message，并创建 read-only session_message run。
-6. 关闭 session 时必须把 binding 标记为 closed。
-7. Bridge source 不参与 agent 复用 hash，避免同一 agent 因 chat id 不同被重复创建。
+2. Mutating Bridge 请求必须先 claim `agent_bridge_nonce`；同一 subject/chat/model/nonce 只能消费一次。
+3. Manager 按 `auth.user_id` 约束 subject；调用者不能传入任意 subject 读取他人 binding。
+4. 同一 Open WebUI user/chat/model 只能有一个 active binding。
+5. 同一 reusable agent 可以被多个 Open WebUI chat 复用，但每个 chat 使用独立 agent_session。
+6. 后续消息通过 binding 追加 session message，并创建 read-only session_message run。
+7. Open WebUI `message_id` 映射为 session message `external_message_id`，同一 session 内重复 message 不重复 append。
+8. 关闭 session 时必须把 binding 标记为 closed。
+9. binding upsert、close、run update 必须写 audit；closed binding 不允许继续 update run。
+10. Bridge source 不参与 agent 复用 hash，避免同一 agent 因 chat id 不同被重复创建。
 ```
 
 ## 权限模型

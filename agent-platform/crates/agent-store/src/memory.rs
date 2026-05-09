@@ -1,11 +1,11 @@
 use crate::{AgentStore, store_error};
 use agent_core::{
-    AgentBridgeBinding, AgentBridgeBindingStatus, AgentGrant, AgentInstance, AgentInstanceStatus,
-    AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage,
-    AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog,
-    CoreResult, EmptyResponse, MemoryStore, ObserverReport, ObserverReportSummary,
-    ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary,
-    RuntimeOutput, SessionContext, SessionSummary, validate_run_transition,
+    AgentBridgeBinding, AgentBridgeBindingStatus, AgentCoreError, AgentGrant, AgentInstance,
+    AgentInstanceStatus, AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession,
+    AgentSessionMessage, AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest,
+    ApprovalStatus, AuditLog, CoreResult, EmptyResponse, ErrorCode, MemoryStore, ObserverReport,
+    ObserverReportSummary, ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim,
+    RunQueue, RunSummary, RuntimeOutput, SessionContext, SessionSummary, validate_run_transition,
     validate_session_transition,
 };
 use async_trait::async_trait;
@@ -25,6 +25,7 @@ struct Inner {
     agents: HashMap<String, AgentInstance>,
     sessions: HashMap<String, AgentSession>,
     open_webui_bridge_bindings: HashMap<String, AgentBridgeBinding>,
+    open_webui_bridge_nonces: HashMap<(String, String, String, String), OffsetDateTime>,
     messages: HashMap<String, Vec<AgentSessionMessage>>,
     runs: HashMap<String, AgentRun>,
     audits: Vec<AuditLog>,
@@ -501,7 +502,9 @@ impl AgentStore for MemoryAgentStore {
             .open_webui_bridge_bindings
             .get_mut(binding_id)
             .ok_or_else(|| store_error("bridge binding not found"))?;
-        if binding.open_webui_subject != open_webui_subject {
+        if binding.open_webui_subject != open_webui_subject
+            || binding.status != AgentBridgeBindingStatus::Active
+        {
             return Err(store_error("bridge binding not found"));
         }
         binding.last_message_id = message_id.map(ToString::to_string);
@@ -510,6 +513,46 @@ impl AgentStore for MemoryAgentStore {
         binding.updated_at = OffsetDateTime::now_utc();
         binding.version += 1;
         Ok(binding.clone())
+    }
+
+    async fn claim_open_webui_bridge_nonce(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        nonce: &str,
+        issued_at: i64,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse> {
+        if open_webui_subject.trim().is_empty()
+            || open_webui_chat_id.trim().is_empty()
+            || model.trim().is_empty()
+            || nonce.trim().is_empty()
+        {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "bridge nonce fields must not be empty",
+            ));
+        }
+        let issued_at = OffsetDateTime::from_unix_timestamp(issued_at).map_err(store_error)?;
+        let key = (
+            open_webui_subject.to_string(),
+            open_webui_chat_id.to_string(),
+            model.to_string(),
+            nonce.to_string(),
+        );
+        let mut inner = self.write()?;
+        if inner.open_webui_bridge_nonces.contains_key(&key) {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "bridge nonce replay",
+            ));
+        }
+        inner.open_webui_bridge_nonces.insert(key, issued_at);
+        Ok(EmptyResponse {
+            status: "claimed".to_string(),
+            trace_id: trace_id.to_string(),
+        })
     }
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun> {
@@ -749,11 +792,18 @@ impl MemoryStore for MemoryAgentStore {
         message: AgentSessionMessage,
     ) -> CoreResult<AgentSessionMessage> {
         let mut inner = self.write()?;
-        inner
+        let messages = inner
             .messages
             .entry(message.session_id.clone())
-            .or_default()
-            .push(message.clone());
+            .or_default();
+        if let Some(external_message_id) = message.external_message_id.as_deref()
+            && let Some(existing) = messages.iter().find(|existing| {
+                existing.external_message_id.as_deref() == Some(external_message_id)
+            })
+        {
+            return Ok(existing.clone());
+        }
+        messages.push(message.clone());
         if let Some(session) = inner.sessions.get_mut(&message.session_id) {
             session.updated_at = OffsetDateTime::now_utc();
             session.trace_id = message.trace_id.clone();
@@ -784,6 +834,7 @@ impl MemoryStore for MemoryAgentStore {
                 role: message.role,
                 content_summary: message.content_summary.unwrap_or_default(),
                 content_ref: message.content_ref,
+                external_message_id: message.external_message_id,
                 run_id: message.run_id,
             })
             .collect();
@@ -1224,6 +1275,18 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(
+            store
+                .update_open_webui_bridge_run(
+                    "openwebui:user-1",
+                    &binding.id,
+                    Some("msg-closed"),
+                    "run-closed",
+                    &trace_id,
+                )
+                .await
+                .is_err()
+        );
 
         let reopened = AgentBridgeBinding::new(
             "openwebui:user-1",
@@ -1239,5 +1302,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reopened.agent_session_id, "sess-2");
+    }
+
+    #[tokio::test]
+    async fn bridge_nonce_claim_rejects_replay() {
+        let store = MemoryAgentStore::new();
+        let trace_id = new_trace_id();
+        store
+            .claim_open_webui_bridge_nonce(
+                "openwebui:user-1",
+                "chat-1",
+                "hermes-agent",
+                "nonce-1",
+                OffsetDateTime::now_utc().unix_timestamp(),
+                &trace_id,
+            )
+            .await
+            .unwrap();
+
+        let replay = store
+            .claim_open_webui_bridge_nonce(
+                "openwebui:user-1",
+                "chat-1",
+                "hermes-agent",
+                "nonce-1",
+                OffsetDateTime::now_utc().unix_timestamp(),
+                &trace_id,
+            )
+            .await;
+        assert!(replay.is_err());
+    }
+
+    #[tokio::test]
+    async fn append_message_dedupes_external_message_id() {
+        let store = MemoryAgentStore::new();
+        let trace_id = new_trace_id();
+        let mut first = AgentSessionMessage::new(
+            "sess-1",
+            1,
+            agent_core::MessageRole::User,
+            Some("hello".to_string()),
+            None,
+            trace_id.clone(),
+        );
+        first.external_message_id = Some("openwebui:msg-1".to_string());
+        let first = store.append_message(first).await.unwrap();
+
+        let mut duplicate = AgentSessionMessage::new(
+            "sess-1",
+            2,
+            agent_core::MessageRole::User,
+            Some("hello again".to_string()),
+            None,
+            trace_id,
+        );
+        duplicate.external_message_id = Some("openwebui:msg-1".to_string());
+        let duplicate = store.append_message(duplicate).await.unwrap();
+
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(
+            store.read().unwrap().messages.get("sess-1").map(Vec::len),
+            Some(1)
+        );
     }
 }

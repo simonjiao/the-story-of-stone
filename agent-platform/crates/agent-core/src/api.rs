@@ -62,6 +62,8 @@ pub struct AppendMessageInput {
     pub role: MessageRole,
     pub content_summary: String,
     pub content_ref: Option<String>,
+    #[serde(default)]
+    pub external_message_id: Option<String>,
     pub run_id: Option<String>,
 }
 
@@ -151,6 +153,14 @@ pub struct UpsertOpenWebUiBridgeBindingInput {
 pub struct UpdateOpenWebUiBridgeRunInput {
     pub message_id: Option<String>,
     pub run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimOpenWebUiBridgeNonceInput {
+    pub open_webui_chat_id: String,
+    pub model: String,
+    pub nonce: String,
+    pub issued_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

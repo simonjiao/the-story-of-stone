@@ -196,12 +196,19 @@
 | OPENWEBUI-ADMIN-BRIDGE-ROLE-20260508 | PASS | Open WebUI admin 登录用户通过 Bridge 发起控制请求时，默认不会映射为 Agent Platform admin。 | UI/API 请求返回 `request_id=req_019e0814ba0e71d393fe0c915fce02de` 且包含 `approval_required`；Manager DB 行为 `requested_by_user=openwebui:e85ce153-bdd3-4ef1-a82a-e107c0a12a53`、`requested_by_service=agent-orchestrator`、`status=approval_required`。 |  | Orchestrator 环境为 `AGENT_BRIDGE_USER_ROLE=viewer`、`AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled`。 |
 | OPENWEBUI-ADMIN-BRIDGE-LOGS-20260508 | PASS | 管理员实账号补测窗口内关键服务无错误日志。 | `docker compose logs --since=15m open-webui agent-orchestrator agent-manager` 未检出 `error/panic/failed/forbidden/unauthorized`。 |  |  |
 
+## 2026-05-09 Agent Identity Bridge hardening 本地验证
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-HARDEN-CODE-20260509 | PASS | 本地代码已补 internal action 收窄、nonce replay 防护、message append 去重、binding lifecycle audit 和 closed binding guard。 | `cargo test --manifest-path agent-platform/Cargo.toml` 通过；覆盖 `bridge_nonce_claim_rejects_replay_through_manager`、`bridge_binding_lifecycle_is_audited`、`append_message_dedupes_external_message_id`、`dev_manager_headers_only_allow_bridge_internal_namespace`。 | P1 | 仅代表本地代码验证，未代表正式环境已部署。 |
+| BRIDGE-HARDEN-VERIFY-SCRIPT-20260509 | PASS | 新增 Open WebUI Function 校验脚本，输出 valve key names，不输出 secret 值。 | `bash -n deploy/scripts/verify-openwebui-function.sh` 通过。 | P1 | 正式环境仍需执行脚本取得真实验证结果。 |
+
 未做专项远程 smoke 的边界：
 
 1. 第二个 Open WebUI 登录用户隔离未做远程账号级复测；当前代码和 store 测试覆盖 binding subject 隔离。
 2. Orchestrator 重启后 binding 复用未单独重启复测；正式代码路径已移除 Orchestrator 内存 binding，运行时每次从 Manager/Postgres 读取 active binding。
 3. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`。
-4. Open WebUI 同一 user message 重试时，run 幂等已覆盖；session message append 去重尚未做 schema 扩展。
+4. Open WebUI 同一 user message 重试时，本地代码已补 session message append 去重；仍需正式环境部署后复测。
 
 ## 修复结论
 
@@ -215,3 +222,4 @@
 6. `ISSUE-006` 不阻断核心路径；建议后续补充停止生成按钮可访问标签。
 7. `ISSUE-007` 已在 Manager 中修复并部署，审批后的 agent 归属原始请求人，Worker 复用和多 session API 路径通过。
 8. `ISSUE-008` 已通过 Agent Identity Bridge 修复并部署：Open WebUI Function 注入签名上下文，Orchestrator 验签并签发 Manager JWT，Manager 持久化 Open WebUI chat 到 agent session binding，后续消息可自动创建 Worker run。
+9. `ISSUE-009` 已完成本地 hardening 代码和测试，但未做正式环境部署复测，不能宣告完整完成。

@@ -9,10 +9,11 @@ use agent_core::{
     AgentBridgeBinding, AgentBridgeBindingSummary, AgentCoreError, AgentGrant, AgentInstance,
     AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
     AgentSessionMessage, AppendMessageInput, ApprovalDecisionInput, ApprovalStatus, AuditDecision,
-    AuditLog, AuthContext, CoreResult, CreateChildSessionInput, CreateGrantInput, CreateRunInput,
-    CreateSessionInput, DenyDecisionInput, EmptyResponse, ErrorCode, HealthStatus, ObserverReport,
-    Page, RiskLevel, RoleName, RunAdminDecisionInput, RunSummary, UpdateOpenWebUiBridgeRunInput,
-    UpsertOpenWebUiBridgeBindingInput, WebhookTriggerInput, actions, new_id,
+    AuditLog, AuthContext, ClaimOpenWebUiBridgeNonceInput, CoreResult, CreateChildSessionInput,
+    CreateGrantInput, CreateRunInput, CreateSessionInput, DenyDecisionInput, EmptyResponse,
+    ErrorCode, HealthStatus, ObserverReport, Page, RiskLevel, RoleName, RunAdminDecisionInput,
+    RunSummary, UpdateOpenWebUiBridgeRunInput, UpsertOpenWebUiBridgeBindingInput,
+    WebhookTriggerInput, actions, new_id,
 };
 use agent_store::{AgentStore, MemoryAgentStore, PgAgentStore};
 use axum::{
@@ -106,6 +107,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/observer/runs", post(admin_observer_run))
         .route("/v1/internal/webhooks/{connector}", post(internal_webhook))
         .route(
+            "/v1/internal/open-webui-bridge/nonces",
+            post(internal_claim_open_webui_bridge_nonce),
+        )
+        .route(
             "/v1/internal/open-webui-bridge/bindings/{chat_id}",
             get(internal_open_webui_bridge_binding),
         )
@@ -196,6 +201,30 @@ async fn audit(
             trace_id.to_string(),
         ))
         .await;
+}
+
+async fn audit_bridge_binding(
+    state: &AppState,
+    auth: &AuthContext,
+    action: &str,
+    binding: &AgentBridgeBinding,
+    run_id: Option<&str>,
+) {
+    let mut audit_log = AuditLog::new(
+        Some(auth),
+        action,
+        AuditDecision::Allowed,
+        Some(format!(
+            "chat_id={} model={} session_id={}",
+            binding.open_webui_chat_id, binding.model, binding.agent_session_id
+        )),
+        auth.trace_id.clone(),
+    );
+    audit_log.resource_type = Some("open_webui_bridge_binding".to_string());
+    audit_log.resource_id = Some(binding.id.clone());
+    audit_log.session_id = Some(binding.agent_session_id.clone());
+    audit_log.run_id = run_id.map(ToString::to_string);
+    let _ = state.store.append_audit(audit_log).await;
 }
 
 async fn create_agent_request(
@@ -1028,7 +1057,7 @@ async fn internal_open_webui_bridge_binding(
     Query(query): Query<BridgeBindingQuery>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_READ)?;
     let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
     let binding = state
         .store
@@ -1044,13 +1073,35 @@ async fn internal_open_webui_bridge_binding(
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
+async fn internal_claim_open_webui_bridge_nonce(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ClaimOpenWebUiBridgeNonceInput>,
+) -> Result<Json<EmptyResponse>, ApiError> {
+    let auth = auth(&headers, &state)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_NONCE)?;
+    let response = state
+        .store
+        .claim_open_webui_bridge_nonce(
+            &auth.user_id,
+            &input.open_webui_chat_id,
+            &input.model,
+            &input.nonce,
+            input.issued_at,
+            &auth.trace_id,
+        )
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    Ok(Json(response))
+}
+
 async fn internal_upsert_open_webui_bridge_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<UpsertOpenWebUiBridgeBindingInput>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT)?;
     let mut binding = AgentBridgeBinding::new(
         auth.user_id.clone(),
         input.open_webui_chat_id,
@@ -1066,6 +1117,14 @@ async fn internal_upsert_open_webui_bridge_binding(
         .upsert_open_webui_bridge_binding(binding)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    audit_bridge_binding(
+        &state,
+        &auth,
+        actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT,
+        &binding,
+        None,
+    )
+    .await;
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
@@ -1076,13 +1135,28 @@ async fn internal_close_open_webui_bridge_binding(
     Query(query): Query<BridgeBindingQuery>,
 ) -> Result<Json<EmptyResponse>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE)?;
     let model = query.model.unwrap_or_else(|| "hermes-agent".to_string());
+    let existing = state
+        .store
+        .get_open_webui_bridge_binding(&auth.user_id, &chat_id, &model)
+        .await
+        .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
     let response = state
         .store
         .close_open_webui_bridge_binding(&auth.user_id, &chat_id, &model, &auth.trace_id)
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    if let Some(binding) = existing {
+        audit_bridge_binding(
+            &state,
+            &auth,
+            actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE,
+            &binding,
+            None,
+        )
+        .await;
+    }
     Ok(Json(response))
 }
 
@@ -1093,7 +1167,7 @@ async fn internal_update_open_webui_bridge_run(
     Json(input): Json<UpdateOpenWebUiBridgeRunInput>,
 ) -> Result<Json<AgentBridgeBindingSummary>, ApiError> {
     let auth = auth(&headers, &state)?;
-    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE)?;
+    ensure_service_allows(&auth, actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE)?;
     let binding = state
         .store
         .update_open_webui_bridge_run(
@@ -1105,6 +1179,14 @@ async fn internal_update_open_webui_bridge_run(
         )
         .await
         .map_err(|error| ApiError::from_core(error, auth.trace_id.clone()))?;
+    audit_bridge_binding(
+        &state,
+        &auth,
+        actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE,
+        &binding,
+        Some(input.run_id.as_str()),
+    )
+    .await;
     Ok(Json(bridge_binding_summary(&binding)))
 }
 
@@ -1521,6 +1603,97 @@ mod tests {
         assert_eq!(first_binding.last_message_id.as_deref(), Some("msg-1"));
     }
 
+    fn bridge_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-service", "agent-orchestrator".parse().unwrap());
+        headers.insert("x-agent-user", "openwebui:user-1".parse().unwrap());
+        headers.insert("x-agent-roles", "viewer".parse().unwrap());
+        headers.insert(
+            "x-agent-allowed-actions",
+            "internal:open_webui_bridge:*".parse().unwrap(),
+        );
+        headers.insert("x-agent-trace-id", new_trace_id().parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn bridge_nonce_claim_rejects_replay_through_manager() {
+        let state = test_state().await;
+        let input = ClaimOpenWebUiBridgeNonceInput {
+            open_webui_chat_id: "chat-1".to_string(),
+            model: "hermes-agent".to_string(),
+            nonce: "nonce-1".to_string(),
+            issued_at: OffsetDateTime::now_utc().unix_timestamp(),
+        };
+        let _ = internal_claim_open_webui_bridge_nonce(
+            State(state.clone()),
+            bridge_headers(),
+            Json(input.clone()),
+        )
+        .await
+        .unwrap();
+
+        let replay =
+            internal_claim_open_webui_bridge_nonce(State(state), bridge_headers(), Json(input))
+                .await;
+        assert!(replay.is_err());
+    }
+
+    #[tokio::test]
+    async fn bridge_binding_lifecycle_is_audited() {
+        let state = test_state().await;
+        let Json(binding) = internal_upsert_open_webui_bridge_binding(
+            State(state.clone()),
+            bridge_headers(),
+            Json(UpsertOpenWebUiBridgeBindingInput {
+                open_webui_chat_id: "chat-1".to_string(),
+                open_webui_session_id: Some("ow-session-1".to_string()),
+                model: "hermes-agent".to_string(),
+                agent_id: "agent-1".to_string(),
+                agent_session_id: "sess-1".to_string(),
+                last_message_id: Some("msg-1".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = internal_update_open_webui_bridge_run(
+            State(state.clone()),
+            bridge_headers(),
+            Path(binding.binding_id.clone()),
+            Json(UpdateOpenWebUiBridgeRunInput {
+                message_id: Some("msg-2".to_string()),
+                run_id: "run-1".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = internal_close_open_webui_bridge_binding(
+            State(state.clone()),
+            bridge_headers(),
+            Path("chat-1".to_string()),
+            Query(BridgeBindingQuery {
+                model: Some("hermes-agent".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let audits = state.store.list_audit(10).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_UPSERT
+                && audit.resource_id.as_deref() == Some(binding.binding_id.as_str())
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_RUN_UPDATE
+                && audit.run_id.as_deref() == Some("run-1")
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == actions::INTERNAL_OPEN_WEBUI_BRIDGE_BINDING_CLOSE
+                && audit.session_id.as_deref() == Some("sess-1")
+        }));
+    }
+
     #[tokio::test]
     async fn admin_grant_endpoint_persists_and_audits_grant() {
         let state = test_state().await;
@@ -1778,6 +1951,7 @@ mod tests {
                 role: MessageRole::Assistant,
                 content_summary: "runtime response".to_string(),
                 content_ref: None,
+                external_message_id: None,
                 run_id: None,
             }),
         )

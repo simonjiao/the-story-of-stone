@@ -76,6 +76,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | [06-negative-list.md](06-negative-list.md) | 明确禁止、不建议、延期实现和延期原因 |
 | [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、决策清单和验收标准 |
 | [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 阶段边界、交付顺序和验收 |
+| [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md) | Agent Identity Bridge hardening 执行记录和完成口径 |
 
 一致性规则：
 

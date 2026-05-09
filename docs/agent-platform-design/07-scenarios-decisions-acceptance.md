@@ -52,16 +52,17 @@
 
 ## 验收标准
 
-P0 已实现基线：
+P0 代码基线验收：
 
 ```text
 1. Open WebUI 中看不到 Manager、Runtime、Worker、Observer 的工具或页面。
 2. Agent Identity Bridge 能验证签名 context，Manager 能持久化 chat/session binding。
-3. Manager 能按用户、服务、资源、动作和 policy 做权限判断，并写 audit。
-4. agentctl 能审批、拒绝、暂停、恢复、查询 audit 和 observer_report。
-5. background_worker 能按策略创建 run，Worker 能通过 Postgres lease claim、heartbeat、timeout 和 dead-letter 推进 run。
-6. observer_agent 能生成 observer_report，且不能改变系统状态。
-7. run 可追溯到 request、user/service、session、resource、result、audit 和 trace_id。
+3. Bridge nonce replay、message append 幂等和 binding lifecycle audit 有代码与测试覆盖。
+4. Manager 能按用户、服务、资源、动作和 policy 做权限判断，并写 audit。
+5. agentctl 能审批、拒绝、暂停、恢复、查询 audit 和 observer_report。
+6. background_worker 能按策略创建 run，Worker 能通过 Postgres lease claim、heartbeat、timeout 和 dead-letter 推进 run。
+7. observer_agent 能生成 observer_report，且不能改变系统状态。
+8. run 可追溯到 request、user/service、session、resource、result、audit 和 trace_id。
 ```
 
 P1 验收：

@@ -1,7 +1,8 @@
 use agent_core::{
     AgentBridgeBindingSummary, AgentRequestInput, AgentRequestResponse, AgentRunStatus,
-    AppendMessageInput, CreateRunInput, ErrorCode, MessageRole, RequestType, RiskLevel, RunSummary,
-    SafeError, SideEffectMode, TriggerType, UpdateOpenWebUiBridgeRunInput, new_trace_id,
+    AppendMessageInput, ClaimOpenWebUiBridgeNonceInput, CreateRunInput, ErrorCode, MessageRole,
+    RequestType, RiskLevel, RunSummary, SafeError, SideEffectMode, TriggerType,
+    UpdateOpenWebUiBridgeRunInput, new_trace_id,
 };
 use axum::{
     Json, Router,
@@ -162,6 +163,7 @@ struct TrustedBridgeContext {
     message_id: Option<String>,
     model: String,
     nonce: String,
+    issued_at: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,6 +284,9 @@ async fn chat_completions(
             Ok(bridge) => bridge,
             Err(error) => return control_response(model, stream, Err(error), &trace_id),
         };
+        if let Err(error) = claim_bridge_nonce(&state, bridge, &trace_id).await {
+            return control_response(model, stream, Err(error), &trace_id);
+        }
         return control_response(
             model,
             stream,
@@ -295,6 +300,9 @@ async fn chat_completions(
             Ok(bridge) => bridge,
             Err(error) => return control_response(model, stream, Err(error), &trace_id),
         };
+        if let Err(error) = claim_bridge_nonce(&state, bridge, &trace_id).await {
+            return control_response(model, stream, Err(error), &trace_id);
+        }
         return control_response(
             model,
             stream,
@@ -306,6 +314,9 @@ async fn chat_completions(
     if let Some(bridge) = bridge.as_ref() {
         match load_bridge_binding(&state, bridge, &trace_id).await {
             Ok(Some(binding)) => {
+                if let Err(error) = claim_bridge_nonce(&state, bridge, &trace_id).await {
+                    return control_response(model, stream, Err(error), &trace_id);
+                }
                 return control_response(
                     model,
                     stream,
@@ -525,6 +536,7 @@ fn verify_bridge_context(
         message_id: context.message_id.clone(),
         model: context.model.clone(),
         nonce: context.nonce.clone(),
+        issued_at: context.issued_at,
     })
 }
 
@@ -586,7 +598,7 @@ fn manager_headers(
                 "request:*".to_string(),
                 "session:*".to_string(),
                 "run:*".to_string(),
-                "internal:*".to_string(),
+                "internal:open_webui_bridge:*".to_string(),
             ],
             exp,
         };
@@ -634,7 +646,7 @@ fn manager_headers(
         );
         headers.insert(
             HeaderName::from_static("x-agent-allowed-actions"),
-            HeaderValue::from_static("request:*,session:*,run:*,internal:*"),
+            HeaderValue::from_static("request:*,session:*,run:*,internal:open_webui_bridge:*"),
         );
     }
     headers.insert(
@@ -659,6 +671,38 @@ fn bridge_idempotency_key(bridge: &TrustedBridgeContext, kind: &str) -> String {
         "openwebui:{}:{}:{}:{}",
         bridge.subject, bridge.chat_id, kind, message_key
     )
+}
+
+async fn claim_bridge_nonce(
+    state: &AppState,
+    bridge: &TrustedBridgeContext,
+    trace_id: &str,
+) -> Result<(), SafeError> {
+    let input = ClaimOpenWebUiBridgeNonceInput {
+        open_webui_chat_id: bridge.chat_id.clone(),
+        model: bridge.model.clone(),
+        nonce: bridge.nonce.clone(),
+        issued_at: bridge.issued_at,
+    };
+    let response = state
+        .client
+        .post(format!(
+            "{}/v1/internal/open-webui-bridge/nonces",
+            state.manager_url
+        ))
+        .headers(manager_headers(state, bridge, trace_id)?)
+        .json(&input)
+        .send()
+        .await
+        .map_err(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string()))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(response
+            .json::<SafeError>()
+            .await
+            .unwrap_or_else(|_| SafeError::new(ErrorCode::InternalError, trace_id.to_string())))
+    }
 }
 
 async fn submit_agent_request(
@@ -746,6 +790,10 @@ async fn append_session_message_and_run(
         role: MessageRole::User,
         content_summary: content.to_string(),
         content_ref: None,
+        external_message_id: Some(format!(
+            "openwebui:{}",
+            bridge.message_id.as_deref().unwrap_or(&bridge.nonce)
+        )),
         run_id: None,
     };
     let response = state
@@ -1110,6 +1158,21 @@ ASSISTANT: 该请求需要资源负责人审批。
         });
         strip_bridge_context(&mut payload);
         assert!(payload.get("agent_bridge_context").is_none());
+    }
+
+    #[test]
+    fn dev_manager_headers_only_allow_bridge_internal_namespace() {
+        let mut state = test_state(Some("bridge-secret"));
+        state.manager_auth.jwt_secret = None;
+        let bridge =
+            verify_bridge_context(&state, &signed_context("bridge-secret"), "trace-test").unwrap();
+        let headers = manager_headers(&state, &bridge, "trace-test").unwrap();
+        assert_eq!(
+            headers
+                .get("x-agent-allowed-actions")
+                .and_then(|value| value.to_str().ok()),
+            Some("request:*,session:*,run:*,internal:open_webui_bridge:*")
+        );
     }
 }
 

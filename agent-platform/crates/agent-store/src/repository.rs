@@ -112,6 +112,15 @@ pub trait AgentStore:
         run_id: &str,
         trace_id: &str,
     ) -> CoreResult<AgentBridgeBinding>;
+    async fn claim_open_webui_bridge_nonce(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        nonce: &str,
+        issued_at: i64,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse>;
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun>;
     async fn get_run(&self, run_id: &str) -> CoreResult<Option<AgentRun>>;

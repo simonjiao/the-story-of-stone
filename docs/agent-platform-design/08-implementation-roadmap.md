@@ -6,7 +6,7 @@
 
 | 阶段 | 状态 | 目标 | 不变边界 |
 |---|---|---|---|
-| P0 | 已实现 | 控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer、audit 形成最小闭环 | Postgres lease / SKIP LOCKED 是正确性边界；不接真实写 connector；不注入写权限 credential |
+| P0 | 代码基线已实现 | 控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer、audit 形成最小闭环 | Postgres lease / SKIP LOCKED 是正确性边界；不接真实写 connector；不注入写权限 credential；Bridge 完成口径以 hardening checklist 和部署复测为准 |
 | P1 | TODO | 在现有 Bridge/session/run 链路上接入真实 Hermes Runtime，只做只读 session/run，并让 Observer report 可进入受控 discussion session | 不改 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema、audit contract |
 | P2 | TODO | 启用受控外部写入 | 只启用 P1 已固定的真实 WriteConnector / CredentialProvider adapter，不把 P2 变成重构阶段 |
 
@@ -14,7 +14,7 @@ P1 会提前落地 P2 需要的 side-effect plan、credential lease、write conn
 
 ## P0 当前基线
 
-P0 已实现。路线图只保留 P1/P2 依赖的稳定基线；详细实施记录见 [P0_IMPLEMENTATION_CHECKLIST.md](P0_IMPLEMENTATION_CHECKLIST.md)。
+P0 代码基线已实现。路线图只保留 P1/P2 依赖的稳定基线；详细实施记录见 [P0_IMPLEMENTATION_CHECKLIST.md](P0_IMPLEMENTATION_CHECKLIST.md)，Bridge hardening 记录见 [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md)。
 
 ```text
 Open WebUI / Agent Identity Bridge
@@ -34,6 +34,8 @@ P1/P2 不应重写以下基线：
 4. Observer 只读 snapshot、observer_report 持久化和“只建议不控制”边界。
 5. RuntimeClient、MemoryStore、ConnectorClient、RunQueue、Telemetry facade。
 ```
+
+Bridge 只能在以下条件同时满足后宣告对应环境完成：代码测试通过、Function 安装和 valves 校验通过、dev headers 关闭、nonce/message/audit hardening 生效，并完成目标环境的登录、模型选择、基础聊天、会话保存、Bridge binding、后续 run、关闭 session 回归。
 
 ## P1 真实 Hermes Runtime，只读
 

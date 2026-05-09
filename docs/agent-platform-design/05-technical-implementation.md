@@ -66,7 +66,7 @@ GET  /v1/agent-sessions/{session_id}/children
 POST /v1/agent-sessions/{session_id}/close
 ```
 
-Orchestrator 禁止调用 admin、observer report 查询和 observer discussion API。internal API 中只允许调用 Open WebUI bridge endpoint，且必须先验证 `agent_bridge_context`。
+Orchestrator 禁止调用 admin、observer report 查询和 observer discussion API。internal API 中只允许调用 `internal:open_webui_bridge:*` namespace 下的 Open WebUI Bridge endpoint，且必须先验证 `agent_bridge_context`。
 
 ### 管理员 API
 
@@ -110,6 +110,7 @@ POST /v1/internal/sessions/{session_id}/messages
 GET  /v1/internal/sessions/{session_id}/context
 POST /v1/internal/memory/summaries
 POST /v1/internal/observer/tick
+POST /v1/internal/open-webui-bridge/nonces
 GET  /v1/internal/open-webui-bridge/bindings/{chat_id}?model=hermes-agent
 PUT  /v1/internal/open-webui-bridge/bindings
 POST /v1/internal/open-webui-bridge/bindings/{chat_id}/close
@@ -154,9 +155,10 @@ P0 使用 Postgres 作为 run queue、lease 和 resource lock 的一致性边界
 | `agent_requests` | `idempotency_key`、`requested_by_user`、`requested_by_service`、`request_type`、`structured_payload`、`status`、`approval_id`、result ids、`version`；创建幂等索引 |
 | `approval_requests` | `request_id`、`requested_by_user`、`approver_user`、`status`、`risk_level`、decision fields |
 | `agent_sessions` | `agent_id`、`owner_user`、`source_conversation_id`、parent/creator session ids、`status`、`depth`、`resource_scope`、`context_summary`、`version` |
-| `agent_session_messages` | `session_id`、`sequence`、`role`、`content_ref`、`content_summary`、`run_id`；`session_id + sequence` 唯一 |
+| `agent_session_messages` | `session_id`、`sequence`、`role`、`content_ref`、`content_summary`、`external_message_id`、`run_id`；`session_id + sequence` 唯一，`session_id + external_message_id` 在非空时唯一 |
 | `agent_runs` | `idempotency_key`、`agent_id`、`session_id`、`trigger_type`、`target_resource`、`run_status`、`risk_level`、`side_effect_mode`、lease fields、retry fields、result fields、`version`；run 幂等和 retry-ready 索引 |
 | `open_webui_bridge_bindings` | `open_webui_subject`、`open_webui_chat_id`、`open_webui_session_id`、`model`、`agent_id`、`agent_session_id`、`status`、`last_message_id`、`last_run_id`、`trace_id`、`version`；active binding 唯一键为 subject + chat + model |
+| `open_webui_bridge_nonces` | `open_webui_subject`、`open_webui_chat_id`、`model`、`nonce`、`issued_at`、`trace_id`；唯一键为 subject + chat + model + nonce |
 | `agent_run_steps` | `run_id`、`step_name`、`status`、`summary`、timestamps |
 | `resource_locks` | `resource_type`、`resource_id`、`lock_scope`、`holder_run_id`、`lease_until`；active lock 唯一 |
 | `agent_grants` | `subject_type`、`subject_id`、`action`、resource、`constraints`、`granted_by`、`expires_at` |
@@ -179,11 +181,13 @@ Open WebUI Bridge 已是当前实现基线：
 ```text
 1. Open WebUI Function / Filter 注入签名 `agent_bridge_context`。
 2. Orchestrator 校验 issuer、subject、chat_id、model、timestamp、nonce 和 HMAC。
-3. 控制请求和已绑定 session 消息必须有有效 context；普通聊天可 passthrough，但必须先删除内部 bridge 字段。
-4. Orchestrator 向 Manager 签发 service/user JWT；正式部署关闭 dev headers。
-5. Manager 在 request fulfilled 或 approval fulfilled 后根据 `bridge_source` 创建/复用 `agent_session` 并写 `open_webui_bridge_bindings`。
-6. 后续消息通过 binding append session message、create read-only run、轮询 `GET /v1/my-runs/{run_id}`。
-7. Open WebUI admin 只管理 Function 和 Valves，不默认映射为 Agent Platform admin。
+3. 控制请求和已绑定 session 消息必须先由 Manager claim nonce；重复 nonce 在同一 subject/chat/model 下拒绝。
+4. 控制请求和已绑定 session 消息必须有有效 context；普通聊天可 passthrough，但必须先删除内部 bridge 字段。
+5. Orchestrator 向 Manager 签发 service/user JWT；service token 只允许 user/session/run API 和 `internal:open_webui_bridge:*`。
+6. Manager 在 request fulfilled 或 approval fulfilled 后根据 `bridge_source` 创建/复用 `agent_session` 并写 `open_webui_bridge_bindings`。
+7. 后续消息通过 binding append session message、create read-only run、轮询 `GET /v1/my-runs/{run_id}`；`message_id` 映射为 `external_message_id` 做 append 幂等。
+8. Bridge binding upsert、close 和 run update 写 audit；closed binding 不允许继续 update run。
+9. Open WebUI admin 只管理 Function 和 Valves，不默认映射为 Agent Platform admin。
 ```
 
 ## Webhook Trigger
