@@ -40,8 +40,15 @@
 - `deploy/docker-compose.yml` 已加入真实 `tonglingyu-gateway` 服务，Open WebUI
   默认连接该 Rust Gateway，Gateway 再按配置调用 Hermes 上游生成层。
 - 2026-05-09 已在远程 `hhost:/home/simon/hermes-home-deploy` 真实部署：
-  构建 `hermes-agent-platform:formal` 镜像，启动 `tonglingyu-gateway`
-  和现有 `hermes-open-webui`，远端 gateway healthcheck 为 healthy。
+  启动 `tonglingyu-gateway` 和现有 `hermes-open-webui`，远端 gateway
+  healthcheck 为 healthy。
+- `tonglingyu-gateway` 已拆为独立镜像，使用
+  `agent-platform/crates/tonglingyu-gateway/Dockerfile` 构建，并通过
+  BuildKit cache mount 缓存 Cargo registry、git 源和 `target/`；通用
+  `hermes-agent-platform` 镜像不再包含 gateway 二进制。
+- 远端已验证第二次 `docker compose build tonglingyu-gateway` 全部命中
+  Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制，
+  `hermes-agent-platform:formal` 不含 gateway 二进制。
 - 远端 KB 由容器启动时从 source snapshot 构建，当前 `/healthz` 返回
   5 个来源、10419 个 blocks；Open WebUI 容器内 `OPENAI_API_BASE_URL`
   指向 `http://tonglingyu-gateway:8090/v1`，`DEFAULT_MODELS=tonglingyu`。

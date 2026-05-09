@@ -7,6 +7,13 @@ x-agent-platform-image: &agent-platform-image
     dockerfile: Dockerfile
   restart: unless-stopped
 
+x-tonglingyu-gateway-image: &tonglingyu-gateway-image
+  image: tonglingyu-gateway:${TONGLINGYU_GATEWAY_IMAGE_TAG:-formal}
+  build:
+    context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
+    dockerfile: crates/tonglingyu-gateway/Dockerfile
+  restart: unless-stopped
+
 services:
   hermes:
     image: nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}
@@ -79,7 +86,7 @@ services:
         ipv4_address: "${OPEN_WEBUI_ORIGIN_IP:-172.20.0.3}"
 
   tonglingyu-gateway:
-    <<: *agent-platform-image
+    <<: *tonglingyu-gateway-image
     container_name: tonglingyu-gateway
     command:
       [

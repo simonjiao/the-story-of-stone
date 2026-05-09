@@ -49,6 +49,11 @@ Required changes:
   deploy node when `agent-platform/` is copied next to `docker-compose.yml`.
   The local default is `../agent-platform` when running from this `deploy/`
   directory.
+- `TONGLINGYU_GATEWAY_BUILD_CONTEXT`: build context for the standalone
+  Tonglingyu Gateway image. Set to `./agent-platform` on the remote deploy node.
+  The local default is `../agent-platform`.
+- `TONGLINGYU_GATEWAY_IMAGE_TAG`: standalone gateway image tag. Default is
+  `formal`.
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
@@ -195,11 +200,18 @@ cargo run --manifest-path ../agent-platform/Cargo.toml -p tonglingyu-gateway -- 
 Start the stack:
 
 ```bash
-docker compose build tonglingyu-gateway agent-manager agent-orchestrator agent-worker agent-observer
+docker compose build tonglingyu-gateway
+docker compose build agent-manager agent-orchestrator agent-worker agent-observer
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
+
+`tonglingyu-gateway` is built from
+`agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
+uses BuildKit cache mounts for Cargo registry, git sources, and `target/`, so
+gateway-only code changes do not force the shared Agent Platform runtime image
+to rebuild.
 
 After re-rendering Hermes config, restart Hermes:
 
