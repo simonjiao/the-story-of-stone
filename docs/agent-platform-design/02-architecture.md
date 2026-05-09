@@ -6,11 +6,12 @@
 用户
   ↓
 Open WebUI
+  └─ Agent Identity Bridge Filter injects signed user/chat context
   ↓
 Agent Orchestrator / Gateway
   ├─ 普通聊天 → Default Hermes Agent Profile
   ├─ 创建 / 查询 / 管理意图 → Agent Manager
-  └─ 已绑定 session 消息 → Agent Runtime
+  └─ 已绑定 session 消息 → Agent Manager session/run API
 
 Agent Manager
   ├─ Policy / Approval / Lifecycle / Audit
@@ -53,9 +54,10 @@ Agent Manager admin API
 | 组件 | 定位 | 负责内容 | 不负责内容 |
 |---|---|---|---|
 | Open WebUI | 前端聊天入口 | 用户交互、展示 Gateway 返回的流式响应和安全摘要 | 不注册 Manager Tool，不直接访问 Manager / Runtime / Worker / Observer |
-| Agent Orchestrator / Gateway | 用户入口与路由层 | 身份绑定、意图路由、session binding、流式转发、限流、错误归一化 | 不执行任务，不审批，不持有目标 Agent credential，不保存长期上下文 |
+| Agent Identity Bridge Filter | Open WebUI 内部全局 Filter | 为 `hermes-agent` 请求注入签名 `agent_bridge_context`，携带 Open WebUI user/chat/model/message 摘要 | 不授予 Agent Platform admin 权限，不把 secret 写入 prompt 或日志，不影响普通默认聊天 passthrough |
+| Agent Orchestrator / Gateway | 用户入口与路由层 | 身份校验、意图路由、bridge/session routing、流式转发、限流、错误归一化 | 不执行任务，不审批，不持有目标 Agent credential，不保存长期上下文 |
 | Agent Manager | 控制面 | 授权、策略、审批、生命周期、Agent 复用、资源锁、审计、Observer 只读快照 | 不替模型执行任务，不直接暴露给 Open WebUI |
-| Agent Runtime | 执行面 | 承载 session/run，调用 Hermes profile、Minimal Runtime 和工具适配，返回结果 | 不决定授权边界，不绕过 Manager，不直接暴露给 Open WebUI |
+| Agent Runtime | 执行面 | 承载 session/run，调用 Hermes profile、Minimal Runtime 和只读工具适配，返回结果 | 不决定授权边界，不绕过 Manager，不直接暴露给 Open WebUI，不持有写权限 credential |
 | Memory / Session Store | 上下文存储 | 保存 session、message、summary、result_ref、上下文索引和 retention 状态 | 不保存明文密钥，不替代审计日志 |
 | Worker / Scheduler | 后台执行层 | claim run、heartbeat、timeout、retry、dead-letter、定时触发 | 不处理前台路由，不绕过 Manager 策略 |
 | Observer Agent | 系统观察执行体 | 读取只读摘要快照，生成健康、风险、异常和建议报告 | 不审批、不暂停、不恢复、不授权、不修改配置、不持有写权限 credential |
@@ -121,11 +123,6 @@ services:
     networks:
       - internal-agent-net
 
-  redis:
-    image: redis:7
-    networks:
-      - internal-agent-net
-
 networks:
   frontend:
   gateway-net:
@@ -138,10 +135,11 @@ networks:
 ```text
 1. Open WebUI 只访问 agent-orchestrator。
 2. agent-manager、agent-runtime、agent-worker、agent-observer 不配置 ports。
-3. agent-orchestrator 可以访问 agent-manager 和 default profile。
-4. agent-runtime、agent-worker、agent-observer、agentctl 可以访问 agent-manager；P0 worker/observer 也可以通过受控 `RunQueue` / `ObserverSnapshotStore` 直接推进已授权 run 和只读 snapshot。
-5. agent-observer 只能访问只读 snapshot / report API。
-6. 外部 connector 的写入 API 只能由已授权 side-effect run 经 Manager 策略后使用。
+3. Agent Identity Bridge Filter 只运行在 Open WebUI 内部；Bridge secret 只进入 `.env` 或 Open WebUI Function Valves。
+4. agent-orchestrator 可以访问 agent-manager 和 default profile。
+5. agent-runtime、agent-worker、agent-observer、agentctl 可以访问 agent-manager；Worker 通过受控 `RunQueue` 推进已授权 run。
+6. agent-observer 可以通过 Manager 只读 report API 或内部 `ObserverSnapshotStore` port 读取聚合 snapshot。
+7. 外部 connector 的写入 API 只能由已授权 side-effect run 经 Manager 策略后使用。
 ```
 
 ## 调用方向
@@ -150,14 +148,15 @@ networks:
 
 ```text
 Open WebUI → Orchestrator
+Open WebUI Filter → Orchestrator（仅注入签名 bridge context）
 Orchestrator → Default Hermes Agent Profile
 Orchestrator → Manager user API
-Orchestrator → Runtime session API（仅限 Manager 已授权 session）
+Orchestrator → Manager internal Open WebUI bridge API（仅限已验证 bridge context）
 agentctl → Manager admin API
 Worker → RunQueue / Manager internal run API（只处理已授权 run）
 Worker → Runtime run API（仅限 claimed run）
-Runtime → Memory / Session Store（仅限授权 session/run）
-Observer → ObserverSnapshotStore / Manager read-only snapshot API
+Runtime → Memory / Session Store（仅限授权 session/run，且只读取/写入 summary、message、result_ref）
+Observer → Manager read-only snapshot API / ObserverSnapshotStore port
 Manager → Storage / Audit
 ```
 

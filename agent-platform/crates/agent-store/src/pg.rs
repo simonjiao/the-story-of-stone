@@ -1,11 +1,12 @@
 use crate::{AgentStore, store_error};
 use agent_core::{
-    AgentBridgeBinding, AgentGrant, AgentInstance, AgentInstanceStatus, AgentRequest,
-    AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage, AgentSummary,
-    AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog, CoreResult,
-    EmptyResponse, MemoryStore, ObserverReport, ObserverReportSummary, ObserverSnapshot,
-    ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary, RuntimeOutput,
-    SessionContext, SessionSummary, validate_run_transition, validate_session_transition,
+    AgentBridgeBinding, AgentCoreError, AgentGrant, AgentInstance, AgentInstanceStatus,
+    AgentRequest, AgentRequestStatus, AgentRun, AgentRunStatus, AgentSession, AgentSessionMessage,
+    AgentSummary, AgentTemplate, AppendMessageInput, ApprovalRequest, ApprovalStatus, AuditLog,
+    CoreResult, EmptyResponse, ErrorCode, MemoryStore, ObserverReport, ObserverReportSummary,
+    ObserverSnapshot, ObserverSnapshotStore, ResourceLock, RunClaim, RunQueue, RunSummary,
+    RuntimeOutput, SessionContext, SessionSummary, new_id, validate_run_transition,
+    validate_session_transition,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -168,6 +169,7 @@ fn map_message(row: &PgRow) -> CoreResult<AgentSessionMessage> {
         role: parse(row.try_get::<String, _>("role").map_err(store_error)?)?,
         content_ref: row.try_get("content_ref").map_err(store_error)?,
         content_summary: row.try_get("content_summary").map_err(store_error)?,
+        external_message_id: row.try_get("external_message_id").map_err(store_error)?,
         run_id: row.try_get("run_id").map_err(store_error)?,
         trace_id: row.try_get("trace_id").map_err(store_error)?,
         created_at: row.try_get("created_at").map_err(store_error)?,
@@ -989,7 +991,7 @@ impl AgentStore for PgAgentStore {
                 trace_id = $4,
                 version = version + 1,
                 updated_at = $5
-            WHERE id = $1 AND open_webui_subject = $6
+            WHERE id = $1 AND open_webui_subject = $6 AND status = 'active'
             RETURNING *
             "#,
         )
@@ -1003,6 +1005,61 @@ impl AgentStore for PgAgentStore {
         .await
         .map_err(store_error)?;
         map_bridge_binding(&row)
+    }
+
+    async fn claim_open_webui_bridge_nonce(
+        &self,
+        open_webui_subject: &str,
+        open_webui_chat_id: &str,
+        model: &str,
+        nonce: &str,
+        issued_at: i64,
+        trace_id: &str,
+    ) -> CoreResult<EmptyResponse> {
+        if open_webui_subject.trim().is_empty()
+            || open_webui_chat_id.trim().is_empty()
+            || model.trim().is_empty()
+            || nonce.trim().is_empty()
+        {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "bridge nonce fields must not be empty",
+            ));
+        }
+        let issued_at = OffsetDateTime::from_unix_timestamp(issued_at).map_err(store_error)?;
+        let inserted = sqlx::query_scalar::<_, String>(
+            r#"
+            INSERT INTO open_webui_bridge_nonces (
+                id, open_webui_subject, open_webui_chat_id, model, nonce,
+                issued_at, trace_id, created_at
+            )
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (open_webui_subject, open_webui_chat_id, model, nonce)
+            DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(new_id("bridge_nonce"))
+        .bind(open_webui_subject)
+        .bind(open_webui_chat_id)
+        .bind(model)
+        .bind(nonce)
+        .bind(issued_at)
+        .bind(trace_id)
+        .bind(OffsetDateTime::now_utc())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store_error)?;
+        if inserted.is_none() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "bridge nonce replay",
+            ));
+        }
+        Ok(EmptyResponse {
+            status: "claimed".to_string(),
+            trace_id: trace_id.to_string(),
+        })
     }
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun> {
@@ -1459,9 +1516,13 @@ impl MemoryStore for PgAgentStore {
             r#"
             INSERT INTO agent_session_messages (
                 id, session_id, sequence, role, content_ref, content_summary,
-                run_id, trace_id, created_at
+                external_message_id, run_id, trace_id, created_at
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (session_id, external_message_id)
+                WHERE external_message_id IS NOT NULL
+            DO UPDATE SET
+                trace_id = agent_session_messages.trace_id
             RETURNING *
             "#,
         )
@@ -1471,6 +1532,7 @@ impl MemoryStore for PgAgentStore {
         .bind(message.role.to_string())
         .bind(&message.content_ref)
         .bind(&message.content_summary)
+        .bind(&message.external_message_id)
         .bind(&message.run_id)
         .bind(&message.trace_id)
         .bind(message.created_at)
@@ -1518,6 +1580,7 @@ impl MemoryStore for PgAgentStore {
                     role: message.role,
                     content_summary: message.content_summary.unwrap_or_default(),
                     content_ref: message.content_ref,
+                    external_message_id: message.external_message_id,
                     run_id: message.run_id,
                 })
             })

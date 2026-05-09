@@ -15,7 +15,7 @@
 
 ## 当前状态
 
-基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。Open WebUI 管理员账号级 Function API、Admin Panel Function 更新和 admin 运行时权限边界补测已完成。
+基础功能测试已执行；文件/RAG/Knowledge 按要求跳过。2026-05-08 已完成正式 Agent Platform 集成部署验证，Open WebUI 当前通过正式 `agent-orchestrator` 访问默认 `hermes-agent`。Open WebUI 管理员账号级 Function API、Admin Panel Function 更新和 admin 运行时权限边界补测已完成。2026-05-09 已完成 Agent Identity Bridge hardening 的正式环境部署复测。
 
 ## 阻断规则
 
@@ -60,6 +60,7 @@
 | [ISSUE-006](chat_huixiangdou_issues/ISSUE-006-stop-generation-control-unlabelled.md) | P3 | 长回答生成中的停止控制在可访问 DOM 中表现为无标签按钮。 | 自动化和辅助技术难以明确识别“停止生成”按钮。 | OPEN: 停止功能可用，但建议补充 `aria-label` |
 | [ISSUE-007](chat_huixiangdou_issues/ISSUE-007-approved-agent-owner-mismatch.md) | P1 | 审批后 agent 曾归属审批人而不是原始请求人。 | 原始请求人无法在 `my-agents` 中看到审批后的 agent，影响 agent 复用、多 session 和用户侧 run。 | RESOLVED: Manager fulfill 改用 `requested_by_user` 并通过正式多 session/Worker run 复测 |
 | [ISSUE-008](chat_huixiangdou_issues/ISSUE-008-open-webui-agent-identity-session-bridge.md) | P2 | Open WebUI 默认调用未透传动态 Agent Platform 用户身份和 agent session 元数据。 | 多用户审计和 UI 级 agent session 绑定不能依赖旧的默认聊天请求。 | RESOLVED: 已部署 Agent Identity Bridge，Open WebUI Filter 注入签名上下文，Manager 使用 `openwebui:<id>` 审计并支持 UI chat 到 agent session 绑定 |
+| [ISSUE-009](chat_huixiangdou_issues/ISSUE-009-agent-identity-bridge-hardening.md) | P1 | Bridge baseline 后仍缺少 replay、message append 幂等、lifecycle audit、internal 权限收窄和部署校验闭环。 | 可能导致窗口内重放、重复消息、审计不可追踪或过宽内部权限。 | RESOLVED: 已部署 hardening，正式环境复测覆盖 Function、migration、dedup、replay、subject isolation、Orchestrator 重启复用和日志 |
 
 ## 修复记录
 
@@ -101,6 +102,10 @@
 | 2026-05-08 18:47 CST | 发现审批后 agent owner 错误。 | 审批请求 `req_019e072a5bc87352b4ca99c26664157f` 后生成的 `agent_019e0732cc207a11b34713104a7f2e6d` 出现在审批人 `admin` 的 `my-agents`，不在原始请求人下。 |
 | 2026-05-08 18:55 CST | 修复并部署 Manager owner 逻辑。 | `fulfill_request` 改用 `request.requested_by_user` 做 agent owner 和复用查询 owner；正式 Agent Platform 共享镜像重建，Manager/Orchestrator/Worker/Observer 全部重启。 |
 | 2026-05-08 18:58 CST | 执行 Agent Platform 多 session 与 Worker run 复测。 | 新请求 `req_019e073c5df57450902773f4c872c1d0` 审批后 agent 归属原始请求人；同一 agent 下两个 session、两个 run 均完成。 |
+| 2026-05-09 11:00 CST | 部署 Agent Identity Bridge hardening 到远端正式环境。 | 同步 `agent-platform/`、Function verify 脚本和 README；重建 `hermes-agent-platform:formal`，重启 Manager/Orchestrator/Worker/Observer。 |
+| 2026-05-09 11:01 CST | 修复正式环境 Function 校验脚本差异。 | 远端没有 `OPEN_WEBUI_ADMIN_TOKEN`；`verify-openwebui-function.sh` 新增 compose DB fallback，输出 `source=compose-db`、Function 状态和 valve key names，不输出 secret 值。 |
+| 2026-05-09 11:03 CST | 执行 hardening 远端复测。 | 合成 Open WebUI subject/chat 覆盖审批建链、follow-up run、同 message_id 去重、nonce replay 冲突、关闭 session、不同 subject 隔离、Orchestrator 重启后 binding 复用；关键服务日志无错误关键词。 |
+| 2026-05-09 11:33 CST | 使用正式 Open WebUI 真实账号复测 Bridge。 | 用真实 admin 与普通 user 账号的 Open WebUI API auth 走 `/api/chat/completions`，确认 Function 注入真实账号上下文；两个测试 chat 已在复测后删除。 |
 
 ## 2026-05-08 正式部署验证
 
@@ -196,12 +201,44 @@
 | OPENWEBUI-ADMIN-BRIDGE-ROLE-20260508 | PASS | Open WebUI admin 登录用户通过 Bridge 发起控制请求时，默认不会映射为 Agent Platform admin。 | UI/API 请求返回 `request_id=req_019e0814ba0e71d393fe0c915fce02de` 且包含 `approval_required`；Manager DB 行为 `requested_by_user=openwebui:e85ce153-bdd3-4ef1-a82a-e107c0a12a53`、`requested_by_service=agent-orchestrator`、`status=approval_required`。 |  | Orchestrator 环境为 `AGENT_BRIDGE_USER_ROLE=viewer`、`AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled`。 |
 | OPENWEBUI-ADMIN-BRIDGE-LOGS-20260508 | PASS | 管理员实账号补测窗口内关键服务无错误日志。 | `docker compose logs --since=15m open-webui agent-orchestrator agent-manager` 未检出 `error/panic/failed/forbidden/unauthorized`。 |  |  |
 
-未做专项远程 smoke 的边界：
+## 2026-05-09 Agent Identity Bridge hardening 本地验证
 
-1. 第二个 Open WebUI 登录用户隔离未做远程账号级复测；当前代码和 store 测试覆盖 binding subject 隔离。
-2. Orchestrator 重启后 binding 复用未单独重启复测；正式代码路径已移除 Orchestrator 内存 binding，运行时每次从 Manager/Postgres 读取 active binding。
-3. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`。
-4. Open WebUI 同一 user message 重试时，run 幂等已覆盖；session message append 去重尚未做 schema 扩展。
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-HARDEN-CODE-20260509 | PASS | 本地代码已补 internal action 收窄、nonce replay 防护、message append 去重、binding lifecycle audit 和 closed binding guard。 | `cargo test --manifest-path agent-platform/Cargo.toml` 通过；覆盖 `bridge_nonce_claim_rejects_replay_through_manager`、`bridge_binding_lifecycle_is_audited`、`append_message_dedupes_external_message_id`、`dev_manager_headers_only_allow_bridge_internal_namespace`。 | P1 | 正式环境验证见下节。 |
+| BRIDGE-HARDEN-VERIFY-SCRIPT-20260509 | PASS | 新增 Open WebUI Function 校验脚本，输出 valve key names，不输出 secret 值。 | `bash -n deploy/scripts/verify-openwebui-function.sh` 通过。 | P1 | 正式环境验证见下节。 |
+
+## 2026-05-09 Agent Identity Bridge hardening 正式环境复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-HARDEN-DEPLOY-20260509 | PASS | 远端正式镜像已重建并重启，Manager/Orchestrator 健康，Worker/Observer 运行中。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator` healthy，`agent-worker`、`agent-observer` running；Open WebUI healthy。 | P1 | 本次未修改远端 `.env`。 |
+| BRIDGE-HARDEN-FUNCTION-20260509 | PASS | `agent_identity_bridge` Function 在正式 Open WebUI 中为全局启用 filter。 | `verify-openwebui-function.sh` 返回 `source=compose-db`、`type=filter`、`is_active=true`、`is_global=true`、valve keys 为 `AGENT_BRIDGE_ISSUER`、`AGENT_BRIDGE_SECRET`、`TARGET_MODEL`。 | P1 | 只记录 key names，不记录 secret 值。 |
+| BRIDGE-HARDEN-MIGRATION-20260509 | PASS | 正式 Postgres 已应用 nonce 表和 message 去重字段/索引。 | `open_webui_bridge_nonces` 表存在；`agent_session_messages.external_message_id` 存在；唯一索引 `ux_session_messages_external_message` 存在。 | P1 |  |
+| BRIDGE-HARDEN-SMOKE-20260509 | PASS | 合成 Open WebUI subject/chat 完成审批建链、follow-up run、message 去重、nonce replay 拦截和关闭。 | 临时 request 审批后 binding `active`；follow-up message count `0 -> 1`；同 message_id/new nonce 后仍为 `1`；同 nonce replay 返回 `{"error":"conflict"}`；关闭后 binding `closed`。 | P1 | 使用合成 subject，未污染已有用户 active binding。 |
+| BRIDGE-HARDEN-ISOLATION-20260509 | PASS | 相同 chat/model 下不同 Open WebUI subject 不能复用对方 binding。 | subject B 发送普通消息后，subject A session 对应 message count 仍为 `0`，subject B 无 binding。 | P1 | 覆盖 subject 级隔离；未重复执行第二个真实浏览器账号登录。 |
+| BRIDGE-HARDEN-RESTART-20260509 | PASS | Orchestrator 重启后仍从 Manager/Postgres 复用 active binding。 | 重启 `agent-orchestrator` 后健康恢复；subject A post-restart follow-up message count `0 -> 1`，Worker run 完成。 | P1 | 证明 binding 不依赖 Orchestrator 内存。 |
+| BRIDGE-HARDEN-LOGS-20260509 | PASS | 复测窗口内关键服务无错误关键词。 | `docker compose logs --since=10m agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/error/failed/deadletter/unauthorized/forbidden`。 |  |  |
+
+## 2026-05-09 Agent Identity Bridge 真实账号复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-REAL-AUTH-20260509 | PASS | 正式 Open WebUI 真实 admin 与普通 user 账号均可通过 Open WebUI auth 访问 API。 | `GET /api/v1/auths/` 对两个真实账号均返回 HTTP 200。 | P1 | 使用服务器端短期 JWT 代表真实账号，未输出 token、密码或 secret。 |
+| BRIDGE-REAL-BOOTSTRAP-20260509 | PASS | 两个真实账号分别通过 `/api/chat/completions` 触发 Function、Orchestrator 和 Manager，并进入审批状态。 | 普通 user 请求 `req_019e0acbc79071d2b9b19446ad10c419`、admin 请求 `req_019e0acbc9d57d53966e2c13d3c4b5ad`，状态均为 `approval_required`。 | P1 | admin 账号未被自动映射为 Agent Platform admin，符合 `AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled`。 |
+| BRIDGE-REAL-BINDING-20260509 | PASS | 审批后两个真实账号各自创建独立 binding/session。 | user session `sess_019e0acbc8877a70a382dd3b163585ae`，admin session `sess_019e0acbcaaa74639eadff79c6beb161`，二者不同。 | P1 |  |
+| BRIDGE-REAL-CROSS-CHAT-20260509 | PASS | admin 使用 user 的测试 chat id 发普通消息时，不会复用或污染 user 的 agent session binding。 | user session 对 admin cross message 的 count `0 -> 0`；`admin + user_chat` 没有生成 binding。 | P1 | 覆盖真实账号维度的 subject 隔离。 |
+| BRIDGE-REAL-FOLLOWUP-20260509 | PASS | 两个真实账号的后续消息只 append 到各自 session。 | user follow-up own count `0 -> 1`、other count `0 -> 0`；admin follow-up own count `0 -> 1`、other count `0 -> 0`。 | P1 |  |
+| BRIDGE-REAL-DEDUP-20260509 | PASS | 真实 Open WebUI user 重复发送同一 `user_message_id`，不重复 append session message。 | user duplicate count `1 -> 1`。 | P1 | 复盘后已修正 Filter：优先使用 `user_message_id`，缺失时才退回 assistant placeholder `message_id`。 |
+| BRIDGE-REAL-USER-MESSAGE-ID-PRIORITY-20260509 | PASS | 复盘发现此前去重测试没有证明 `user_message_id` 优先于 assistant placeholder `message_id`；修复后已用真实普通 user 账号复测同一 `user_message_id` 搭配不同 assistant id。 | request `req_019e0b67510b7013a436b3c5fa9b4253`、session `sess_019e0b6754e77892afc0b4baf2534d55`；`external_message_id=openwebui:<user_message_id>` 计数 `0 -> 1 -> 1`；测试 binding closed，测试 chat 删除 HTTP 200。 | P1 | 这条是完成前反思补测，覆盖真实 Open WebUI 元数据形态。 |
+| BRIDGE-FUNCTION-RECOVERY-20260509 | PASS | 更新正式 Function 时曾将 `function.updated_at` 写成字符串，导致 Open WebUI 启动校验失败；已修复为整数 epoch 并重新健康检查。 | Open WebUI `healthy`；`verify-openwebui-function.sh` 返回 `status=ok`；DB 校验 `FUNCTION_UPDATED_AT_IS_INT=True`、`USER_MESSAGE_ID_PRIORITY=True`。 | P1 | 记录部署操作缺口，避免只看最终 PASS。 |
+| BRIDGE-REAL-CLOSE-20260509 | PASS | 两个真实账号的测试 binding 均可关闭，测试 chat 已清理。 | user/admin close 后 binding 状态均为 `closed`；`DELETE /api/v1/chats/{id}` 对两个测试 chat 均返回 HTTP 200。 | P1 |  |
+| BRIDGE-REAL-LOGS-20260509 | PASS | 修复恢复后的真实账号复测窗口内关键服务无新错误关键词。 | `docker compose logs --since=5m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`；`docker compose ps` 显示 Open WebUI、Manager、Orchestrator healthy，Worker/Observer running。 |  | 更早窗口包含 `updated_at` 类型错误，已由 `BRIDGE-FUNCTION-RECOVERY-20260509` 单独记录。 |
+
+剩余未覆盖边界：
+
+1. 本轮未通过浏览器手动输入密码登录；已通过正式 Open WebUI auth 以真实 admin/user 账号调用真实聊天 API。
+2. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`，普通 passthrough 仍正常。
 
 ## 修复结论
 
@@ -215,3 +252,4 @@
 6. `ISSUE-006` 不阻断核心路径；建议后续补充停止生成按钮可访问标签。
 7. `ISSUE-007` 已在 Manager 中修复并部署，审批后的 agent 归属原始请求人，Worker 复用和多 session API 路径通过。
 8. `ISSUE-008` 已通过 Agent Identity Bridge 修复并部署：Open WebUI Function 注入签名上下文，Orchestrator 验签并签发 Manager JWT，Manager 持久化 Open WebUI chat 到 agent session binding，后续消息可自动创建 Worker run。
+9. `ISSUE-009` 已完成 hardening 代码、正式环境部署和复测：Function 校验、migration、message 去重、nonce replay、subject 隔离、Orchestrator 重启后复用和日志检查均通过。

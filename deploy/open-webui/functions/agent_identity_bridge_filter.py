@@ -63,10 +63,10 @@ class Filter:
             or ""
         ).strip()
         message_id = str(
-            _get(__metadata__, "message_id")
-            or _get(__metadata__, "user_message_id")
-            or _get(body.get("metadata"), "message_id")
+            _get(__metadata__, "user_message_id")
+            or _get(__metadata__, "message_id")
             or _get(body.get("metadata"), "user_message_id")
+            or _get(body.get("metadata"), "message_id")
             or ""
         ).strip()
         user_role = str(_get(__user__, "role") or "user").strip() or "user"

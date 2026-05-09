@@ -75,6 +75,7 @@ pub(crate) async fn append_message_to_session(
         role,
         content_summary,
         content_ref,
+        external_message_id,
         run_id,
     } = input;
     let mut message = AgentSessionMessage::new(
@@ -86,6 +87,7 @@ pub(crate) async fn append_message_to_session(
         auth.trace_id.clone(),
     );
     message.content_ref = content_ref;
+    message.external_message_id = external_message_id;
     let message = store.append_message(message).await?;
     append_audit(
         store,
