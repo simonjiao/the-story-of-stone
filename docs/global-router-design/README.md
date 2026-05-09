@@ -91,7 +91,8 @@ router 已完成身份签名校验。
 
 `global-router` 不处理具体业务 RAG、证据包、reviewer、Agent 控制面状态机或
 业务知识库。具体业务 gateway 负责业务工作流，Agent Platform 负责控制面和
-执行面，部署层只负责把 Open WebUI 指向 `global-router`。
+执行面。当前生产部署暂不使用 `global-router`；Open WebUI 直接连接
+`tonglingyu-gateway` 和 `agent-orchestrator`。
 
 ## 验收口径
 

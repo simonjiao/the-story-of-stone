@@ -6,7 +6,8 @@
   Gateway、Agent Platform 控制面或其它具体业务项目。
 - 当前完成的是 MVP 路由层，不是完整生产级 router。
 - 实现入口：`agent-platform/crates/global-router/`。
-- 部署入口：`deploy/docker-compose.yml` 中的 `global-router` 服务。
+- 生产部署已暂停使用 `global-router`；`deploy/docker-compose.yml` 当前让
+  Open WebUI 直接连接 `tonglingyu-gateway` 和 `agent-orchestrator`。
 
 ## 已完成
 
@@ -23,14 +24,25 @@
   否则透传入站 `Authorization`。
 - 基础 streaming 透传结构：以 bytes stream 透传上游响应。
 
-## 已验证
+## 已验证过
 
-- 远端 `hhost` 已部署 `global-router:formal`。
-- Open WebUI 当前通过 `OPENAI_API_BASE_URL=http://global-router:8099/v1`
+- 早期远端 `hhost` 曾部署 `global-router:formal`。
+- 早期 Open WebUI 曾通过 `OPENAI_API_BASE_URL=http://global-router:8099/v1`
   连接 `global-router`。
 - 容器内验证 `/v1/models` 只返回 allowlist 中的 `tonglingyu`。
 - 未 allowlist 的 `other/default` 返回 `model_not_allowed`。
 - `tonglingyu` 模型请求可转发到后端 `tonglingyu-gateway`。
+
+## 当前部署决策
+
+- `global-router` 暂不进入生产部署。
+- Open WebUI 直接配置多个 OpenAI-compatible connection：
+  `http://tonglingyu-gateway:8090/v1` 和
+  `http://agent-orchestrator:8080/v1`。
+- `tonglingyu-gateway` 暴露 `tonglingyu`；`agent-orchestrator` 暴露
+  `hermes-agent`。
+- `agent_identity_bridge` Filter 只绑定 `hermes-agent`，不注入到
+  `tonglingyu` 证据问答。
 
 ## 未完成
 
