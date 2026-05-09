@@ -111,7 +111,7 @@ not_found_or_forbidden
 
 Runtime 执行 Manager 已批准的 `agent_session` 或 `agent_run`，不自行决定权限。Worker 负责推进 run 状态，不直接调用外部写入接口，除非该 run 已获得 Manager 的 side effect 授权并持有有效 resource lock。
 
-P0 只实现 Minimal Runtime 闭环。P1 接真实 Hermes Runtime 但只读。P2 才开放受控外部执行。
+P0 已实现 Minimal Runtime 闭环和 Open WebUI Agent Identity Bridge。P1 在现有 Bridge/session/run 链路上接真实 Hermes Runtime，但只读。P2 才开放受控外部执行。
 
 P1 可以提前落地 P2 所需的副作用 plan、credential scope、no-op provider、write connector contract 和 dry-run 审计，但这些 readiness 能力不得获取真实 credential、不得调用真实写 connector、不得把 run 推进到真实外部写入。
 

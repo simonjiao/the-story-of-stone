@@ -12,6 +12,30 @@
 
 该链路不创建后台 run，不访问 Manager admin API，不暴露内部工具。
 
+## Open WebUI Agent Identity Bridge
+
+Open WebUI 通过全局 `agent_identity_bridge` Filter 为 `hermes-agent` 请求注入签名上下文。该上下文只用于让 Orchestrator 识别当前 Open WebUI user、chat、model 和 message，并不让 Open WebUI 直接访问 Manager。
+
+外部可见行为：
+
+```text
+1. 普通聊天继续透传到默认 Hermes；Orchestrator 会移除内部 bridge 字段。
+2. 明确 Agent 控制请求必须带有效 bridge context，否则 fail closed。
+3. 控制请求 fulfilled 后，同一 Open WebUI chat 会绑定到一个 Agent Platform agent_session。
+4. 同一用户同一 chat 后续消息复用该 session，并自动创建 read-only run。
+5. 不同 Open WebUI chat 即使复用同一 agent，也使用不同 session。
+6. 关闭当前 agent session 后，该 chat 恢复默认 Hermes passthrough。
+```
+
+权限边界：
+
+```text
+1. Open WebUI admin 只管理 Open WebUI Function 和 Valves，不默认映射为 Agent Platform admin。
+2. Agent Platform 权限仍由 Manager 的 JWT、role、resource allowlist 和 policy 决定。
+3. `agent_bridge_context` 不包含 secret、signature 以外的敏感字段、email 原文或完整业务 payload。
+4. Bridge secret 只进入 `.env` 或 Open WebUI Function Valves，不进入文档示例值、prompt、日志或用户响应。
+```
+
 ## 创建 Agent
 
 用户可以用自然语言请求创建 Agent。Orchestrator 只解析意图并提交 `agent_request`，不直接创建 Agent。
@@ -74,6 +98,8 @@ Open WebUI conversation_id
 ```
 
 Orchestrator 只保存轻量绑定，不保存完整上下文和 credential。
+
+正式 Open WebUI 部署中，Open WebUI chat 到 `agent_session` 的持久 binding 由 Manager 保存，不依赖 Orchestrator 内存。
 
 ## Child Session
 

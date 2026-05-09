@@ -34,8 +34,8 @@
 ## 实施阶段
 
 ```text
-P0：控制面 + Minimal Runtime 闭环 + Observer Agent。
-P1：接真实 Hermes Runtime，但只读。
+P0：控制面 + Open WebUI Agent Identity Bridge + Minimal Runtime 闭环 + Observer Agent。
+P1：在现有 Bridge/session/run 链路上接真实 Hermes Runtime，但只读。
 P2：开放受控外部执行。
 ```
 
