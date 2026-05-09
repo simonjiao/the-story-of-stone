@@ -1,0 +1,22 @@
+{
+  "source_id": "shitouji-wikisource-zhiyanzhai",
+  "source_category": "commentary_material",
+  "format": "mediawiki",
+  "title": "脂硯齋重評石頭記 维基文库",
+  "work": "红楼梦",
+  "edition": "脂硯齋重評石頭記；维基文库整理文本",
+  "language": "zh",
+  "api_url": "https://zh.wikisource.org/w/api.php",
+  "requested_pages": [
+    "脂硯齋重評石頭記"
+  ],
+  "requested_prefixes": [
+    "脂硯齋重評石頭記/"
+  ],
+  "fetched_at": "2026-05-09T17:35:10+08:00",
+  "notes": "第一批脂批资料；必须作为批语/版本证据使用，不得等同正文事实。",
+  "snapshot_contract": {
+    "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+    "raw_html_saved": false
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "registry_id": "wikisource-first-batch-acceptance",
+  "gate_id": "M1-source-snapshot",
+  "status": "m1_ready_for_m2_loader",
+  "m2_entry_policy": "M2 loader work may start only after this registry and sample validation pass.",
+  "source_root": "resources/sources/wiki",
+  "sample_manifest": "resources/sources/wiki/_registry/first_batch_samples.jsonl",
+  "acceptance_scope": [
+    "downloaded source snapshot files exist",
+    "source metadata records URL, edition boundary, language, category, download timestamp, and license note",
+    "source of record is raw MediaWiki wikitext plus revision metadata",
+    "extraction report has zero missing pages",
+    "documents and blocks JSONL counts match extraction report",
+    "each block has stable ID, source title, source URL, revision ID, and original text",
+    "cross-version smoke samples can be located by block ID and expected terms"
+  ],
+  "not_claimed": [
+    "not a scholarly collation",
+    "not a proof against Wikisource transcription errors",
+    "not a rendered HTML mirror of Wikisource pages",
+    "not proof that later evidence cards are correct",
+    "not a replacement for later image or authoritative edition checks"
+  ],
+  "required_files": [
+    "metadata/source.json",
+    "metadata/extraction_report.json",
+    "metadata/pages.json",
+    "metadata/missing_pages.json",
+    "documents/documents.jsonl",
+    "documents/blocks.jsonl"
+  ],
+  "raw_html_contract": {
+    "saved": false,
+    "expected_files": 0
+  },
+  "expected_sources": [
+    {
+      "source_id": "hongloumeng-wikisource-120",
+      "source_category": "base_material",
+      "role": "main_text_candidate",
+      "min_documents": 120,
+      "min_blocks": 3000,
+      "expected_missing": 0
+    },
+    {
+      "source_id": "hongloumeng-wikisource-chengjia",
+      "source_category": "base_material",
+      "role": "chengjia_comparison_candidate",
+      "min_documents": 120,
+      "min_blocks": 1500,
+      "expected_missing": 0
+    },
+    {
+      "source_id": "hongloumeng-wikisource-chengyi",
+      "source_category": "base_material",
+      "role": "chengyi_comparison_candidate",
+      "min_documents": 10,
+      "min_blocks": 4000,
+      "expected_missing": 0
+    },
+    {
+      "source_id": "shitouji-wikisource-zhiyanzhai",
+      "source_category": "commentary_material",
+      "role": "commentary_candidate",
+      "min_documents": 80,
+      "min_blocks": 700,
+      "expected_missing": 0
+    },
+    {
+      "source_id": "shitouji-wikisource-jiaxu",
+      "source_category": "commentary_material",
+      "role": "jiaxu_commentary_candidate",
+      "min_documents": 18,
+      "min_blocks": 600,
+      "expected_missing": 0
+    }
+  ]
+}

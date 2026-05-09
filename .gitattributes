@@ -1,0 +1,3 @@
+# Preserve upstream whitespace in source snapshots used for provenance.
+resources/sources/wiki/**/raw/** -whitespace
+resources/sources/wiki/**/combined/** -whitespace

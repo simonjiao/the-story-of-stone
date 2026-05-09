@@ -31,6 +31,8 @@
 - [运行手册](docs/RUNBOOK.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
 - [完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
+- [第一版实施细化计划](docs/tonglingyu-agent-design/18_第一版实施细化计划.md)
+- [第一批资料来源登记](docs/tonglingyu-agent-design/19_第一批资料来源登记.md)
 - [进展与决策记录](docs/PROGRESS.md)
 - [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
 
