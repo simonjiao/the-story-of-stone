@@ -4,15 +4,76 @@ set -euo pipefail
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"
+COMPOSE_SERVICE="${OPEN_WEBUI_COMPOSE_SERVICE:-open-webui}"
 
-if [[ -z "${BASE_URL}" ]]; then
+if [[ -n "${ADMIN_TOKEN}" && -z "${BASE_URL}" ]]; then
   echo "OPEN_WEBUI_BASE_URL or PUBLIC_WEBUI_URL is required" >&2
   exit 1
 fi
 
 if [[ -z "${ADMIN_TOKEN}" ]]; then
-  echo "OPEN_WEBUI_ADMIN_TOKEN is required" >&2
-  exit 1
+  if [[ ! -f "docker-compose.yml" && ! -f "compose.yml" ]]; then
+    echo "OPEN_WEBUI_ADMIN_TOKEN is required outside a compose deploy directory" >&2
+    exit 1
+  fi
+  docker compose exec -T "${COMPOSE_SERVICE}" python3 - "$FUNCTION_ID" <<'PY'
+import json
+import sqlite3
+import sys
+
+function_id = sys.argv[1]
+conn = sqlite3.connect("/app/backend/data/webui.db")
+conn.row_factory = sqlite3.Row
+row = conn.execute(
+    "select id, type, content, valves, is_active, is_global from function where id = ?",
+    (function_id,),
+).fetchone()
+if row is None:
+    raise SystemExit(f"function {function_id!r} not found")
+
+valves = row["valves"] or "{}"
+try:
+    valves = json.loads(valves)
+except json.JSONDecodeError:
+    valves = {}
+valve_keys = sorted(str(key) for key in valves.keys())
+content = row["content"] or ""
+missing = [
+    key
+    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL"]
+    if key not in valves
+]
+errors = []
+if row["type"] != "filter":
+    errors.append(f"type={row['type']!r}")
+if not bool(row["is_active"]):
+    errors.append("is_active=false")
+if not bool(row["is_global"]):
+    errors.append("is_global=false")
+if "class Filter" not in content or "agent_bridge_context" not in content:
+    errors.append("content_missing_bridge_filter")
+if missing:
+    errors.append("missing_valves=" + ",".join(missing))
+
+print(
+    json.dumps(
+        {
+            "function_id": function_id,
+            "source": "compose-db",
+            "type": row["type"],
+            "is_active": bool(row["is_active"]),
+            "is_global": bool(row["is_global"]),
+            "valve_keys": valve_keys,
+            "status": "ok" if not errors else "failed",
+            "errors": errors,
+        },
+        ensure_ascii=False,
+    )
+)
+if errors:
+    raise SystemExit(1)
+PY
+  exit 0
 fi
 
 python3 - "$BASE_URL" "$ADMIN_TOKEN" "$FUNCTION_ID" <<'PY'
@@ -85,6 +146,7 @@ print(
     json.dumps(
         {
             "function_id": function_id,
+            "source": "admin-api",
             "type": function_type,
             "is_active": is_active,
             "is_global": is_global,
