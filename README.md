@@ -1,42 +1,48 @@
-# 通灵玉 Agent
+# The Story of Stone
 
-本仓库当前主线是“通灵玉”：面向《红楼梦》的研究型 Hermes Agent。第一版只验证一条证据型 RAG 链路：
+本仓库承载几个相关但边界独立的 Hermes / Open WebUI 工作区：
 
-`source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`
+- “通灵玉”：面向《红楼梦》的研究型 Hermes Agent。
+- `global-router`：独立 OpenAI-compatible 路由层。
+- Agent Platform：Hermes 多 Agent 控制面、运行面和审计链路。
+- `deploy/`：当前 home deployment 编排。
 
-## 当前状态
+`具体进展不要写在根` README；以各项目目录下的 `PROGRESS.md` 为准。
 
-已有：
+## 项目入口
 
-- 通用 EPUB 抽取：`scripts/extract_epub.py`
-- 维基文库/MediaWiki 下载：`scripts/download_wikisource.py`
-- B 站视频转录流水线：`scripts/bilibili_hlm_pipeline.py`
-- 风格资料：`resources/styles/buhongjushi/`
-- 设计文档：`docs/tonglingyu-agent-design/`
-- Rust 实现入口：`agent-platform/crates/tonglingyu-gateway/`
-- Open WebUI 路由入口：`agent-platform/crates/global-router/`
-- 第一批 Wikisource source snapshot：`resources/sources/wiki/`
-- SQLite/FTS 建库、证据卡片、证据包和 reviewer 最小闭环
-- 远程真实部署：`hhost` 上 Open WebUI 已通过内网连接 Rust `global-router`
+| 项目 | 代码入口 | 文档入口 | 进展 |
+|---|---|---|---|
+| 通灵玉 | `agent-platform/crates/tonglingyu-gateway/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
+| Global Router | `agent-platform/crates/global-router/` | `docs/global-router-design/` | `docs/global-router-design/PROGRESS.md` |
+| Agent Platform | `agent-platform/` | `docs/agent-platform-design/` | `docs/agent-platform-design/PROGRESS.md` |
+| Deployment | `deploy/` | `deploy/README.md` | `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md` |
 
-未有：
+## 当前边界
 
-- 影印件或权威校注本复核层
-- 完整人物、关系、事件和评测题库标注
-- 多 flavor/styles 的生产化切换
-
-已废弃：旧基础库产物和旧专用抽取脚本。第一版不从已删除内容继续叠加。
+- 通灵玉第一版只验证证据型 RAG 链路：
+  `source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`。
+- `global-router` 当前是 MVP 路由层，不是完整生产级 router。
+- Agent Platform 的 P0/P1/P2 状态以 `docs/agent-platform-design/PROGRESS.md`
+  和各 implementation checklist 为准。
+- 远程部署以 `deploy/` 当前内容为准；公网入口走 Cloudflare Tunnel 到
+  Open WebUI。
 
 ## 文档入口
 
-- [设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
-- [当前差距与实施方向](docs/tonglingyu-agent-design/16_现有架构差距与实施方向.md)
+- [通灵玉设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
+- [通灵玉进展](docs/tonglingyu-agent-design/PROGRESS.md)
+- [通灵玉当前差距与实施方向](docs/tonglingyu-agent-design/16_现有架构差距与实施方向.md)
+- [通灵玉完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
+- [通灵玉第一版实施细化计划](docs/tonglingyu-agent-design/18_第一版实施细化计划.md)
+- [通灵玉第一批资料来源登记](docs/tonglingyu-agent-design/19_第一批资料来源登记.md)
+- [Global Router 设计](docs/global-router-design/README.md)
+- [Global Router 进展](docs/global-router-design/PROGRESS.md)
+- [Agent Platform 进展](docs/agent-platform-design/PROGRESS.md)
+- [Agent Platform 总览](docs/agent-platform-design/00-overview.md)
 - [运行手册](docs/RUNBOOK.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
-- [完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
-- [第一版实施细化计划](docs/tonglingyu-agent-design/18_第一版实施细化计划.md)
-- [第一批资料来源登记](docs/tonglingyu-agent-design/19_第一批资料来源登记.md)
-- [进展与决策记录](docs/PROGRESS.md)
+- [跨项目进展索引](docs/PROGRESS.md)
 - [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
 
 ## 资料边界
@@ -49,7 +55,7 @@
 
 知识库不是大向量库。正文、脂批、版本、人物关系、事件、诗词判词、现代白话摘要和研究观点必须分层；现代白话摘要只可辅助检索，不能作为回答证据。
 
-## 常用命令
+## 通灵玉常用命令
 
 ```bash
 .venv/bin/python scripts/extract_epub.py path/to/source.epub \
@@ -71,7 +77,7 @@
 ```
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py
 git diff --check
 ```
 
@@ -92,4 +98,17 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
   --db data/tonglingyu/tonglingyu.db \
   --model-id tonglingyu \
   --model-name 通灵玉
+```
+
+## Global Router 常用命令
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p global-router -- \
+  print-config
+```
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p global-router -- \
+  serve \
+  --bind 127.0.0.1:8099
 ```

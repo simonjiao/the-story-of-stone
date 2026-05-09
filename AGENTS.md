@@ -1,9 +1,11 @@
 # AGENTS.md
 
-## 当前主线
+## 项目边界
 
-- 当前主线是“通灵玉”第一版：资料 source snapshot、知识库、证据卡片、证据包、reviewer 审校和 Open WebUI 单入口。
-- 不把旧基础库产物或旧专用资料脚本作为实现依据。
+- 本仓库包含多个相关但边界独立的项目：通灵玉、Global Router、Agent Platform 和 `deploy/`。
+- 通灵玉第一版主线是资料 source snapshot、知识库、证据卡片、证据包、reviewer 审校和 Open WebUI 入口。
+- Global Router 是独立 OpenAI-compatible 路由层，不从属于通灵玉或 Agent Platform。
+- Agent Platform 的控制面、运行面和审计链路以 `docs/agent-platform-design/` 为准。
 - `resources/styles/` 是风格资料边界；除非任务明确要求，不改写风格转录和元数据。
 
 ## 编码规则
@@ -18,7 +20,9 @@
 ## 文档规则
 
 - 通灵玉产品和架构以 `docs/tonglingyu-agent-design/` 为准。
-- 当前现实状态以 `README.md` 和 `docs/PROGRESS.md` 为准。
+- Global Router 设计和进展以 `docs/global-router-design/` 为准。
+- Agent Platform 设计和进展以 `docs/agent-platform-design/` 为准。
+- 根 `docs/PROGRESS.md` 只是跨项目进展索引；当前现实状态以对应项目目录下的 `PROGRESS.md` 为准。
 - 运行命令只写当前可执行命令；计划中的命令必须明确标记为尚未实现。
 
 ## 部署规则

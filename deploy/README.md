@@ -11,8 +11,10 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `global-router`: Rust OpenAI-compatible model allowlist and routing gateway.
-  Open WebUI connects only to this service.
+- `global-router`: Rust OpenAI-compatible MVP model allowlist and routing layer.
+  Open WebUI connects only to this service. It is not yet a production-grade
+  router with inbound auth, route-level RBAC, bridge HMAC validation, persistent
+  audit, health aggregation, circuit breaking, or route hot reload.
 - `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
   SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
   packages, runs reviewer checks, and calls Hermes as the upstream generation
@@ -283,8 +285,11 @@ docker compose ps
 ```
 
 `global-router` is built from `agent-platform/crates/global-router/Dockerfile`
-as a standalone image. It only exposes configured allowlist models and rewrites
-visible model ids to backend model ids before forwarding. Example route config:
+as a standalone image. The current implementation is an MVP routing layer: it
+only exposes configured allowlist models, rewrites visible model ids to backend
+model ids before forwarding, applies per-route timeout, and either injects a
+Bearer token from `api_key_env` or forwards the inbound `Authorization` header.
+Example route config:
 
 ```json
 [
@@ -293,7 +298,8 @@ visible model ids to backend model ids before forwarding. Example route config:
     "name": "通灵玉",
     "base_url": "http://tonglingyu-gateway:8090/v1",
     "upstream_model": "tonglingyu",
-    "requires_bridge": false
+    "requires_bridge": false,
+    "timeout_seconds": 120
   },
   {
     "model": "other/default",
@@ -301,7 +307,8 @@ visible model ids to backend model ids before forwarding. Example route config:
     "base_url": "http://other-gateway:8090/v1",
     "upstream_model": "default",
     "requires_bridge": true,
-    "api_key_env": "OTHER_GATEWAY_API_KEY"
+    "api_key_env": "OTHER_GATEWAY_API_KEY",
+    "timeout_seconds": 120
   }
 ]
 ```
@@ -309,7 +316,17 @@ visible model ids to backend model ids before forwarding. Example route config:
 Use namespaced visible model ids such as `other/default` to avoid collisions.
 Set the Open WebUI `agent_identity_bridge` Function valve `TARGET_MODELS` to
 the comma-separated subset that requires identity context, for example
-`other/default`.
+`other/default`. For `requires_bridge=true`, the MVP router only checks that
+`agent_bridge_context` exists; it does not validate the bridge HMAC signature
+inside the router.
+
+MVP limitations: router-owned inbound auth, route-level user permissions/RBAC,
+persistent audit records, upstream error normalization, automatic aggregation of
+multiple upstream `/v1/models` responses, remote streaming smoke coverage, route
+hot updates, route health summaries, circuit breaking, and fallback policy are
+not implemented yet. The standalone design record lives in
+`../docs/global-router-design/`; progress lives in
+`../docs/global-router-design/PROGRESS.md`.
 
 `tonglingyu-gateway` is built from
 `agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
