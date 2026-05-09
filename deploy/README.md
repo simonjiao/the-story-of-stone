@@ -67,7 +67,8 @@ Required changes:
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
 - `TONGLINGYU_DATA_DIR`: persistent data directory for the generated SQLite/FTS
-  knowledge base. The local default is `./data/tonglingyu`.
+  knowledge base. On the remote node it should live under
+  `$HOME/huixiangdou-home-runtime/data/tonglingyu`.
 - `TONGLINGYU_MODEL_ID`: Open WebUI-visible model id. Default is `tonglingyu`.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
   `agent_identity_bridge` Filter and Agent Platform services.
@@ -141,10 +142,27 @@ Required changes:
   - `LOCAL_OPENAI_API_KEY`, usually `none` for local inference servers
   - `LOCAL_OPENAI_DOCKER_NETWORK`, for example `sub2api_sub2api-network`
 
+Runtime data is separate from deploy files. On the remote node, keep all
+runtime state under `$HOME/huixiangdou-home-runtime/data`; the deploy
+directory `$HOME/hermes-home-deploy` should contain only compose, scripts,
+source/build context, and Open WebUI Function files.
+
 Create persistent directories:
 
 ```bash
-mkdir -p data/hermes data/open-webui data/agent-platform-postgres
+mkdir -p \
+  "$HOME/huixiangdou-home-runtime/data/hermes" \
+  "$HOME/huixiangdou-home-runtime/data/open-webui" \
+  "$HOME/huixiangdou-home-runtime/data/tonglingyu" \
+  "$HOME/huixiangdou-home-runtime/data/agent-platform-postgres" \
+  "$HOME/huixiangdou-home-runtime/data/agent-action-gateway"
+```
+
+If an older remote deploy still has `$HOME/hermes-home-deploy/data`, move
+it once before restarting:
+
+```bash
+./scripts/migrate-runtime-data.sh
 ```
 
 Agent Platform uses its own Postgres container. Do not reuse
@@ -158,7 +176,7 @@ docker compose run --rm hermes setup
 ```
 
 If Hermes should use a local OpenAI-compatible container as its model provider,
-render `data/hermes/config.yaml` after editing `.env`:
+render the Hermes `config.yaml` after editing `.env`:
 
 ```bash
 ./scripts/render-hermes-config.sh
