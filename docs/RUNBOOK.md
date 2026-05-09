@@ -1,6 +1,6 @@
 # 运行手册
 
-本仓库当前已有 `.venv` 和 `requirements.txt`。后续校验知识库服务实现时，Python 项目和依赖统一迁移到 `uv` 管理。
+本仓库当前已有 `.venv` 和 `requirements.txt`。后续校验服务实现时，Python 项目和依赖统一迁移到 `uv` 管理。
 
 ## 环境准备
 
@@ -55,26 +55,78 @@ uv sync --locked
   --force-transcript
 ```
 
-## 基础版本文本抽取
+## 通用 EPUB 资料抽取
+
+`scripts/extract_epub.py` 将任意 EPUB 抽取为规范化 source snapshot。它只负责资料标准化，不直接构造知识库。
+
+示例：
 
 ```bash
-.venv/bin/python scripts/extract_epub_hongloumeng.py
+.venv/bin/python scripts/extract_epub.py path/to/source.epub \
+  --source-id tonglingyu-source-id \
+  --source-category base_material \
+  --edition "edition label" \
+  --out resources/sources/epub
 ```
 
 主要输出：
 
-- `resources/base/hongloumeng/chapters_txt/`
-- `resources/base/hongloumeng/sections_txt/`
-- `resources/base/hongloumeng/combined/`
-- `resources/base/hongloumeng/images/`
-- `resources/base/hongloumeng/metadata/`
+- `resources/sources/epub/<source_id>/metadata/source.json`
+- `resources/sources/epub/<source_id>/metadata/manifest.json`
+- `resources/sources/epub/<source_id>/metadata/spine.json`
+- `resources/sources/epub/<source_id>/documents/documents.jsonl`
+- `resources/sources/epub/<source_id>/documents/blocks.jsonl`
+- `resources/sources/epub/<source_id>/combined/all_sections.txt`
+- `resources/sources/epub/<source_id>/combined/all_sections.md`
+- `resources/sources/epub/<source_id>/assets/`
+
+## 维基文库资料下载
+
+维基文库资料通过 MediaWiki API 下载为 source snapshot。全本《红楼梦》可用根页面加子页前缀：
+
+```bash
+.venv/bin/python scripts/download_wikisource.py \
+  --source-id hongloumeng-wikisource \
+  --title "红楼梦 维基文库全本" \
+  --work "红楼梦" \
+  --edition "维基文库" \
+  --page "紅樓夢" \
+  --prefix "紅樓夢/" \
+  --out resources/sources/wiki
+```
+
+脂批本或其他版本使用对应页面名或前缀单独登记，例如：
+
+```bash
+.venv/bin/python scripts/download_wikisource.py \
+  --source-id zhipiben-wikisource \
+  --source-category commentary_material \
+  --title "脂批本 维基文库资料" \
+  --work "红楼梦" \
+  --edition "脂批本" \
+  --page "脂砚斋重评石頭記庚辰本" \
+  --prefix "脂砚斋重评石頭記庚辰本/" \
+  --out resources/sources/wiki
+```
+
+如果本机 Python 证书链不完整，可临时加 `--insecure-skip-tls-verify` 做本地调试；正式流程不要默认使用该参数。
+
+主要输出：
+
+- `resources/sources/wiki/<source_id>/metadata/source.json`
+- `resources/sources/wiki/<source_id>/metadata/pages.json`
+- `resources/sources/wiki/<source_id>/documents/documents.jsonl`
+- `resources/sources/wiki/<source_id>/documents/blocks.jsonl`
+- `resources/sources/wiki/<source_id>/combined/all_sections.txt`
+- `resources/sources/wiki/<source_id>/combined/all_sections.md`
+- `resources/sources/wiki/<source_id>/raw/`
 
 ## 常用验证命令
 
 检查 Python 脚本语法：
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub_hongloumeng.py
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
 ```
 
 检查第一条视频转录 JSON：
@@ -118,12 +170,12 @@ sys.exit(0 if txt == srt == segments else 1)
 PY
 ```
 
-## 计划中的知识库命令
+## 计划中的校验服务命令
 
-这些命令尚未实现，作为后续服务开发的目标接口：
+后续建库命令应显式传入已批准的 `resources/sources/` 快照，并继续把校订记录作为单独可写文件保存。
 
 ```bash
-uv run hlm-kb-build --base-corpus resources/base/hongloumeng --out data/hongloumeng.sqlite
+uv run hlm-kb-build --source <approved-source> --out data/hongloumeng.sqlite
 uv run hlm-kb-serve --db data/hongloumeng.sqlite --records data/verification_records.jsonl --host 0.0.0.0 --port 8000
 uv run hlm-kb-query search "官中的钱"
 ```

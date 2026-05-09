@@ -17,25 +17,8 @@ books/*.epub
 
 downloads/
 resources/cache/
-
-resources/base/hongloumeng/*
-!resources/base/hongloumeng/chapters_txt/
-!resources/base/hongloumeng/chapters_txt/**
-!resources/base/hongloumeng/chapters_md/
-!resources/base/hongloumeng/chapters_md/**
-!resources/base/hongloumeng/sections_txt/
-!resources/base/hongloumeng/sections_txt/**
-!resources/base/hongloumeng/sections_md/
-!resources/base/hongloumeng/sections_md/**
-!resources/base/hongloumeng/images/
-!resources/base/hongloumeng/images/*.jpeg
-!resources/base/hongloumeng/cover.jpg
-!resources/base/hongloumeng/metadata/
-!resources/base/hongloumeng/metadata/**
-!resources/base/hongloumeng/combined/
-resources/base/hongloumeng/combined/*
-!resources/base/hongloumeng/combined/*.txt
-!resources/base/hongloumeng/combined/*.md
+resources/base/
+data/tonglingyu/
 
 resources/styles/buhongjushi/*
 !resources/styles/buhongjushi/transcripts/

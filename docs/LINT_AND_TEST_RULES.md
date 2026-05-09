@@ -12,8 +12,8 @@ when shared contracts, generated outputs, or deployment behavior are affected.
   `git diff --stat` and keep unrelated churn out of the change.
 - Do not print secrets from `.env`, compose files, or logs. Report variable
   names, command status, paths, and sanitized evidence only.
-- Treat `resources/base/` and bulk transcript outputs as data. Lint or rewrite
-  them only when the task explicitly changes that corpus.
+- Treat `resources/sources/` and bulk transcript outputs as data. Lint or
+  rewrite them only when the task explicitly changes that corpus.
 - If a required tool, external service, model, network, or credential is missing,
   stop that check and report it as `BLOCKED` with the exact command and reason.
 
