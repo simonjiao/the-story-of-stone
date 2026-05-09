@@ -13,8 +13,8 @@ Run the smallest check set that covers the touched files. Expand only when share
 ## Python
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
-python3 -m compileall scripts src
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py
+python3 -m compileall scripts
 ```
 
 Use `ruff` and `pytest` when the repo later adds config or tests. Source snapshot changes also need a temp-dir smoke test rather than a full corpus rewrite.

@@ -4,6 +4,9 @@
 
 Gateway 是 OpenAI-compatible 的入口服务，也是内部 Agent 工作流的确定性编排层。它不是第 5 个 Agent。
 
+通用 `global-router` 的设计不从属于“通灵玉”项目，独立放在
+`docs/global-router-design/`。本文只描述“通灵玉”业务 Gateway 的职责。
+
 ## 核心定位
 
 Gateway 等于：
