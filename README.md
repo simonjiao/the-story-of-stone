@@ -1,90 +1,95 @@
-# 红楼梦文本与视频校验项目
+# 通灵玉 Agent
 
-本项目的目标是构建一个可修订、可追溯、可自定义风格的《红楼梦》交互机器人。当前阶段围绕《红楼梦》相关视频和基础版本文本，完成下载、音频提取、机器转录、文本抽取、术语校订和后续多 agent 校验知识库建设。
+本仓库当前主线是“通灵玉”：面向《红楼梦》的研究型 Hermes Agent。第一版只验证一条证据型 RAG 链路：
 
-当前重点不是做泛泛的问答库，而是建立可追溯的校订流程和可扩展的风格语料体系：每条转录中的原文引用、脂批、章回名、人物名、器物名和同音词，都要能回到基础版本文本、注释或图片字形资源确认；用户后续可以选择不同文本版本、研究视角和对话风格进行探讨。
+`source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`
 
 ## 当前状态
 
-- 已处理“红楼梦文本探究”合集全部 60 个视频。
-- 已生成每条视频的 `.txt`、`.srt`、`.transcript.json`。
-- 已抽取当前《红楼梦》基础版本文本、注释/校记、图片字形和元数据。
-- 第一条视频已做重点术语校订，并确认三份转录文件文本内容一致。
-- 视频转录被定位为一种讲解风格语料，风格名为“不红居士”。
-- 多机器多 agent 校验知识库方案已确定，尚未实现服务端。
+已有：
 
-## 目录入口
+- 通用 EPUB 抽取：`scripts/extract_epub.py`
+- 维基文库/MediaWiki 下载：`scripts/download_wikisource.py`
+- B 站视频转录流水线：`scripts/bilibili_hlm_pipeline.py`
+- 风格资料：`resources/styles/buhongjushi/`
+- 设计文档：`docs/tonglingyu-agent-design/`
+- Rust 实现入口：`agent-platform/crates/tonglingyu-gateway/`
+- Open WebUI 路由入口：`agent-platform/crates/global-router/`
+- 第一批 Wikisource source snapshot：`resources/sources/wiki/`
+- SQLite/FTS 建库、证据卡片、证据包和 reviewer 最小闭环
+- 远程真实部署：`hhost` 上 Open WebUI 已通过内网连接 Rust `global-router`
 
-- [项目概览](docs/PROJECT_OVERVIEW.md)
-- [交互机器人愿景](docs/INTERACTIVE_BOT_VISION.md)
-- [目录结构](docs/DIRECTORY_STRUCTURE.md)
+未有：
+
+- 影印件或权威校注本复核层
+- 完整人物、关系、事件和评测题库标注
+- 多 flavor/styles 的生产化切换
+
+已废弃：旧基础库产物和旧专用抽取脚本。第一版不从已删除内容继续叠加。
+
+## 文档入口
+
+- [设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
+- [当前差距与实施方向](docs/tonglingyu-agent-design/16_现有架构差距与实施方向.md)
 - [运行手册](docs/RUNBOOK.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
-- [校验知识库服务方案](docs/KB_SERVICE_PLAN.md)
+- [完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
+- [第一版实施细化计划](docs/tonglingyu-agent-design/18_第一版实施细化计划.md)
+- [第一批资料来源登记](docs/tonglingyu-agent-design/19_第一批资料来源登记.md)
 - [进展与决策记录](docs/PROGRESS.md)
+- [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
 
-## 快速命令
+## 资料边界
 
-只查看会选中哪些视频：
+新资料先进入 `resources/sources/` source snapshot，再进入知识库。第一批基础资料目标是维基文库《红楼梦》全本、脂批本或同等可追溯公开来源。
 
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
-```
+`resources/styles/` 只保存讲解风格和待校订转录，不作为正文、脂批或版本校勘的最高证据。
 
-按词表重转录视频：
+资料处理必须保留原始字形；生僻字、异体字、旧字形和来源中已有读音不得被规范化文本覆盖。
 
-```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py \
-  --limit 1 \
-  --asr-model small \
-  --asr-glossary resources/hongloumeng_asr_glossary.txt \
-  --prefer-asr \
-  --force-transcript
-```
+知识库不是大向量库。正文、脂批、版本、人物关系、事件、诗词判词、现代白话摘要和研究观点必须分层；现代白话摘要只可辅助检索，不能作为回答证据。
 
-抽取基础版本文本：
+## 常用命令
 
 ```bash
-.venv/bin/python scripts/extract_epub_hongloumeng.py
+.venv/bin/python scripts/extract_epub.py path/to/source.epub \
+  --source-id tonglingyu-source-id \
+  --source-category base_material \
+  --edition "edition label" \
+  --out resources/sources/epub
 ```
-
-检查第一条视频三份转录文本是否一致：
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-import json, re, hashlib, sys
-
-stem = '001_BV1qSjdz5ET2_司棋大闹大观园厨房，一碗炖鸡蛋，埋伏着曹雪芹精心设置的妙笔'
-base = Path('resources/styles/buhongjushi/transcripts')
-txt = [line.strip() for line in (base / f'{stem}.txt').read_text(encoding='utf-8').splitlines() if line.strip()]
-
-def srt_lines(text):
-    out = []
-    for block in re.split(r'\n\s*\n', text.strip()):
-        parts = block.splitlines()
-        if len(parts) >= 3:
-            out.append(' '.join(line.strip() for line in parts[2:] if line.strip()))
-    return [line for line in out if line]
-
-srt = srt_lines((base / f'{stem}.srt').read_text(encoding='utf-8'))
-data = json.loads((base / f'{stem}.transcript.json').read_text(encoding='utf-8'))
-segments = [str(seg.get('content', '')).strip() for seg in data.get('segments', []) if str(seg.get('content', '')).strip()]
-
-def digest(lines):
-    return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()[:16]
-
-print(len(txt), digest(txt))
-print(len(srt), digest(srt))
-print(len(segments), digest(segments))
-sys.exit(0 if txt == srt == segments else 1)
-PY
+.venv/bin/python scripts/download_wikisource.py \
+  --source-id hongloumeng-wikisource \
+  --title "红楼梦 维基文库全本" \
+  --work "红楼梦" \
+  --edition "维基文库" \
+  --page "紅樓夢" \
+  --prefix "紅樓夢/" \
+  --out resources/sources/wiki
 ```
 
-## 关键原则
+```bash
+python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py src/tonglingyu_agent/__init__.py
+git diff --check
+```
 
-- `官中` 是前八十回表示荣国府公家钱物/供应体系的常用词，不要误校为 `公中` 或 `宫中`。
-- `不红君` 是讲解者自称，应原样保留。
-- 原文引用、脂批和章回名必须跨章节交叉验证，不能只查视频标题对应章节。
-- 生僻字/异体字图片保留为字形证据，不强行 OCR 成不确定字符。
-- 音频、视频、原始大文件和临时缓存不提交。
+Rust 建库和本地 Gateway：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  build-kb \
+  --source-root resources/sources/wiki \
+  --db data/tonglingyu/tonglingyu.db \
+  --rebuild
+```
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  serve \
+  --bind 127.0.0.1:8090 \
+  --db data/tonglingyu/tonglingyu.db \
+  --model-id tonglingyu \
+  --model-name 通灵玉
+```

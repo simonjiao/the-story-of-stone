@@ -1,0 +1,22 @@
+{
+  "source_id": "shitouji-wikisource-jiaxu",
+  "source_category": "commentary_material",
+  "format": "mediawiki",
+  "title": "脂硯齋重評石頭記甲戌本 维基文库",
+  "work": "红楼梦",
+  "edition": "甲戌本；脂硯齋重評石頭記；维基文库整理文本",
+  "language": "zh",
+  "api_url": "https://zh.wikisource.org/w/api.php",
+  "requested_pages": [
+    "脂硯齋重評石頭記甲戌本"
+  ],
+  "requested_prefixes": [
+    "脂硯齋重評石頭記甲戌本/"
+  ],
+  "fetched_at": "2026-05-09T17:36:11+08:00",
+  "notes": "第一批脂批版本资料；甲戌本范围有限，必须保留来源版本和回目覆盖限制。",
+  "snapshot_contract": {
+    "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+    "raw_html_saved": false
+  }
+}

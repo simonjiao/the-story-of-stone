@@ -1,0 +1,22 @@
+{
+  "source_id": "hongloumeng-wikisource-120",
+  "source_category": "base_material",
+  "format": "mediawiki",
+  "title": "红楼梦 维基文库 120回",
+  "work": "红楼梦",
+  "edition": "维基文库汇校本；120回；不含批语；前八十回以庚辰本为底本，后四十回以程甲本为底本",
+  "language": "zh",
+  "api_url": "https://zh.wikisource.org/w/api.php",
+  "requested_pages": [
+    "紅樓夢"
+  ],
+  "requested_prefixes": [
+    "紅樓夢/"
+  ],
+  "fetched_at": "2026-05-09T17:33:31+08:00",
+  "notes": "第一批资料；版本边界按维基文库页面说明登记；用作正文主库候选，不作为影印校勘依据。",
+  "snapshot_contract": {
+    "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+    "raw_html_saved": false
+  }
+}

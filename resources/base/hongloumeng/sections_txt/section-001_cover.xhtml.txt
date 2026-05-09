@@ -1,4 +1,0 @@
-cover.xhtml
-EPUB file: cover.xhtml
-
-[[image:cover.jpg]]

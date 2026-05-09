@@ -1,0 +1,22 @@
+{
+  "source_id": "hongloumeng-wikisource-chengjia",
+  "source_category": "base_material",
+  "format": "mediawiki",
+  "title": "红楼梦 维基文库 程甲本",
+  "work": "红楼梦",
+  "edition": "程甲本；维基文库数字化文本；1791 萃文书屋刻本系统",
+  "language": "zh",
+  "api_url": "https://zh.wikisource.org/w/api.php",
+  "requested_pages": [
+    "紅樓夢（程甲本）"
+  ],
+  "requested_prefixes": [
+    "紅樓夢（程甲本）/"
+  ],
+  "fetched_at": "2026-05-09T17:55:23+08:00",
+  "notes": "第一批版本边界资料；用作程甲本版本证据候选，关键引文仍需后续影印或校勘资料复核。子页为 ProofreadPage transclusion，已通过 Page namespace 展开正文。",
+  "snapshot_contract": {
+    "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+    "raw_html_saved": false
+  }
+}

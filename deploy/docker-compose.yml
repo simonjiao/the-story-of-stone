@@ -7,6 +7,20 @@ x-agent-platform-image: &agent-platform-image
     dockerfile: Dockerfile
   restart: unless-stopped
 
+x-tonglingyu-gateway-image: &tonglingyu-gateway-image
+  image: tonglingyu-gateway:${TONGLINGYU_GATEWAY_IMAGE_TAG:-formal}
+  build:
+    context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
+    dockerfile: crates/tonglingyu-gateway/Dockerfile
+  restart: unless-stopped
+
+x-global-router-image: &global-router-image
+  image: global-router:${GLOBAL_ROUTER_IMAGE_TAG:-formal}
+  build:
+    context: "${GLOBAL_ROUTER_BUILD_CONTEXT:-../agent-platform}"
+    dockerfile: crates/global-router/Dockerfile
+  restart: unless-stopped
+
 services:
   hermes:
     image: nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}
@@ -49,7 +63,7 @@ services:
     container_name: hermes-open-webui
     restart: unless-stopped
     depends_on:
-      agent-orchestrator:
+      global-router:
         condition: service_healthy
     environment:
       WEBUI_NAME: "${OPEN_WEBUI_NAME:-Hermes Home}"
@@ -62,13 +76,13 @@ services:
       ENABLE_SIGNUP_PASSWORD_CONFIRMATION: "${OPEN_WEBUI_ENABLE_SIGNUP_PASSWORD_CONFIRMATION:-true}"
       DEFAULT_USER_ROLE: "${OPEN_WEBUI_DEFAULT_USER_ROLE:-pending}"
       DEFAULT_LOCALE: "${OPEN_WEBUI_DEFAULT_LOCALE:-zh-CN}"
-      DEFAULT_MODELS: "${OPEN_WEBUI_DEFAULT_MODELS:-hermes-agent}"
+      DEFAULT_MODELS: "${OPEN_WEBUI_DEFAULT_MODELS:-tonglingyu}"
       OFFLINE_MODE: "${OPEN_WEBUI_OFFLINE_MODE:-true}"
       HF_HUB_OFFLINE: "${OPEN_WEBUI_HF_HUB_OFFLINE:-1}"
       RAG_EMBEDDING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_EMBEDDING_MODEL_AUTO_UPDATE:-false}"
       RAG_RERANKING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_RERANKING_MODEL_AUTO_UPDATE:-false}"
       WHISPER_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_WHISPER_MODEL_AUTO_UPDATE:-false}"
-      OPENAI_API_BASE_URL: "http://agent-orchestrator:8080/v1"
+      OPENAI_API_BASE_URL: "http://global-router:8099/v1"
       OPENAI_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
       ENABLE_OLLAMA_API: "${OPEN_WEBUI_ENABLE_OLLAMA_API:-false}"
     volumes:
@@ -78,6 +92,73 @@ services:
     networks:
       hermes-internal:
         ipv4_address: "${OPEN_WEBUI_ORIGIN_IP:-172.20.0.3}"
+
+  global-router:
+    <<: *global-router-image
+    container_name: global-router
+    command:
+      [
+        "global-router",
+        "serve",
+        "--bind",
+        "0.0.0.0:8099",
+      ]
+    depends_on:
+      tonglingyu-gateway:
+        condition: service_healthy
+    environment:
+      GLOBAL_ROUTER_ROUTES_JSON: "${GLOBAL_ROUTER_ROUTES_JSON:-}"
+      RUST_LOG: "${GLOBAL_ROUTER_RUST_LOG:-info}"
+    expose:
+      - "8099"
+    networks:
+      hermes-internal:
+        ipv4_address: "${GLOBAL_ROUTER_IP:-172.20.0.15}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8099/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  tonglingyu-gateway:
+    <<: *tonglingyu-gateway-image
+    container_name: tonglingyu-gateway
+    command:
+      [
+        "tonglingyu-gateway",
+        "serve",
+        "--bind",
+        "0.0.0.0:8090",
+      ]
+    depends_on:
+      hermes:
+        condition: service_healthy
+    environment:
+      TONGLINGYU_DB_PATH: "${TONGLINGYU_DB_PATH:-/data/tonglingyu.db}"
+      TONGLINGYU_SOURCE_ROOT: "${TONGLINGYU_CONTAINER_SOURCE_ROOT:-/app/resources/sources/wiki}"
+      TONGLINGYU_AUTO_BUILD_KB: "${TONGLINGYU_AUTO_BUILD_KB:-true}"
+      TONGLINGYU_MODEL_ID: "${TONGLINGYU_MODEL_ID:-tonglingyu}"
+      TONGLINGYU_MODEL_NAME: "${TONGLINGYU_MODEL_NAME:-通灵玉}"
+      TONGLINGYU_UPSTREAM_BASE_URL: "${TONGLINGYU_UPSTREAM_BASE_URL:-http://hermes:8642/v1}"
+      TONGLINGYU_UPSTREAM_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
+      TONGLINGYU_UPSTREAM_MODEL: "${TONGLINGYU_UPSTREAM_MODEL:-hermes-agent}"
+      TONGLINGYU_MAX_EVIDENCE: "${TONGLINGYU_MAX_EVIDENCE:-8}"
+      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+    volumes:
+      - "${TONGLINGYU_SOURCE_ROOT:-../resources/sources/wiki}:/app/resources/sources/wiki:ro"
+      - "${TONGLINGYU_DATA_DIR:-./data/tonglingyu}:/data"
+    expose:
+      - "8090"
+    networks:
+      hermes-internal:
+        ipv4_address: "${TONGLINGYU_GATEWAY_IP:-172.20.0.14}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/healthz >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   cloudflared:
     image: cloudflare/cloudflared:${CLOUDFLARED_IMAGE_TAG:-latest}
