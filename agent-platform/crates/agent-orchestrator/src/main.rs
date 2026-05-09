@@ -533,7 +533,11 @@ fn verify_bridge_context(
             .unwrap_or_else(|| "user".to_string()),
         chat_id: context.chat_id.clone(),
         session_id: context.session_id.clone(),
-        message_id: context.message_id.clone(),
+        message_id: context
+            .message_id
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         model: context.model.clone(),
         nonce: context.nonce.clone(),
         issued_at: context.issued_at,
@@ -1130,6 +1134,17 @@ ASSISTANT: 该请求需要资源负责人审批。
             bridge_signature("bridge-secret", &context).unwrap(),
             "6185debba03afb3b99ac20a9ff87d93757940034dc9b3ccef7c83247004fbb10"
         );
+    }
+
+    #[test]
+    fn empty_bridge_message_id_falls_back_to_nonce() {
+        let state = test_state(Some("bridge-secret"));
+        let mut context = signed_context("bridge-secret");
+        context.message_id = Some(" ".to_string());
+        context.signature = bridge_signature("bridge-secret", &context).unwrap();
+        let verified = verify_bridge_context(&state, &context, "trace-test").unwrap();
+        assert_eq!(verified.message_id, None);
+        assert!(bridge_idempotency_key(&verified, "run").ends_with(":nonce-1"));
     }
 
     #[test]
