@@ -11,10 +11,6 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `global-router`: Rust OpenAI-compatible MVP model allowlist and routing layer.
-  Open WebUI connects only to this service. It is not yet a production-grade
-  router with inbound auth, route-level RBAC, bridge HMAC validation, persistent
-  audit, health aggregation, circuit breaking, or route hot reload.
 - `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
   SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
   packages, runs reviewer checks, and calls Hermes as the upstream generation
@@ -24,8 +20,9 @@ Services:
   workflows; ordinary 通灵玉 chat enters through `tonglingyu-gateway`.
 - `agent-worker`: Agent run worker.
 - `agent-observer`: read-only Observer Agent report loop.
-- `open-webui`: email/password login and chat UI. It connects only to
-  `global-router`; visible models come from the router allowlist.
+- `open-webui`: email/password login and chat UI. It connects directly to
+  `tonglingyu-gateway` and `agent-orchestrator` as separate OpenAI-compatible
+  connections.
 - `cloudflared`: Cloudflare Tunnel connector.
 - `agent-platform-postgres`: dedicated Agent Platform database, internal
   Docker network only.
@@ -60,20 +57,18 @@ Required changes:
   The local default is `../agent-platform`.
 - `TONGLINGYU_GATEWAY_IMAGE_TAG`: standalone gateway image tag. Default is
   `formal`.
-- `GLOBAL_ROUTER_BUILD_CONTEXT`: build context for the standalone Global Router
-  image. Set to `./agent-platform` on the remote deploy node. The local default
-  is `../agent-platform`.
-- `GLOBAL_ROUTER_IMAGE_TAG`: standalone Global Router image tag. Default is
-  `formal`.
-- `GLOBAL_ROUTER_ROUTES_JSON`: optional JSON array that declares the Open WebUI
-  visible model allowlist and route targets. If empty, only `tonglingyu` is
-  exposed and routed to `http://tonglingyu-gateway:8090/v1`.
-- `GLOBAL_ROUTER_IP`: optional stable internal IP for `global-router`.
+- `OPEN_WEBUI_OPENAI_API_BASE_URLS`: optional semicolon-separated
+  OpenAI-compatible endpoints for Open WebUI. The compose default is
+  `http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1`.
+- `OPEN_WEBUI_OPENAI_API_KEYS`: optional semicolon-separated provider keys for
+  those Open WebUI connections. Leave empty for the default internal
+  `tonglingyu-gateway` and `agent-orchestrator` connections.
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
 - `TONGLINGYU_DATA_DIR`: persistent data directory for the generated SQLite/FTS
-  knowledge base. The local default is `./data/tonglingyu`.
+  knowledge base. On the remote node it should live under
+  `$HOME/huixiangdou-home-runtime/data/tonglingyu`.
 - `TONGLINGYU_MODEL_ID`: Open WebUI-visible model id. Default is `tonglingyu`.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
   `agent_identity_bridge` Filter and Agent Platform services.
@@ -147,10 +142,27 @@ Required changes:
   - `LOCAL_OPENAI_API_KEY`, usually `none` for local inference servers
   - `LOCAL_OPENAI_DOCKER_NETWORK`, for example `sub2api_sub2api-network`
 
+Runtime data is separate from deploy files. On the remote node, keep all
+runtime state under `$HOME/huixiangdou-home-runtime/data`; the deploy
+directory `$HOME/hermes-home-deploy` should contain only compose, scripts,
+source/build context, and Open WebUI Function files.
+
 Create persistent directories:
 
 ```bash
-mkdir -p data/hermes data/open-webui data/agent-platform-postgres
+mkdir -p \
+  "$HOME/huixiangdou-home-runtime/data/hermes" \
+  "$HOME/huixiangdou-home-runtime/data/open-webui" \
+  "$HOME/huixiangdou-home-runtime/data/tonglingyu" \
+  "$HOME/huixiangdou-home-runtime/data/agent-platform-postgres" \
+  "$HOME/huixiangdou-home-runtime/data/agent-action-gateway"
+```
+
+If an older remote deploy still has `$HOME/hermes-home-deploy/data`, move
+it once before restarting:
+
+```bash
+./scripts/migrate-runtime-data.sh
 ```
 
 Agent Platform uses its own Postgres container. Do not reuse
@@ -164,7 +176,7 @@ docker compose run --rm hermes setup
 ```
 
 If Hermes should use a local OpenAI-compatible container as its model provider,
-render `data/hermes/config.yaml` after editing `.env`:
+render the Hermes `config.yaml` after editing `.env`:
 
 ```bash
 ./scripts/render-hermes-config.sh
@@ -201,6 +213,47 @@ model:
 api_key: none
 ```
 
+## Open WebUI Model Connections
+
+Global Router is intentionally not part of this production deploy path. It is
+still tracked as a standalone design, but the current implementation is not
+production-grade enough to sit between Open WebUI and the model endpoints.
+
+Open WebUI is configured with two direct OpenAI-compatible connections:
+
+```text
+http://tonglingyu-gateway:8090/v1
+http://agent-orchestrator:8080/v1
+```
+
+The expected visible models are:
+
+- `tonglingyu`: 通灵玉 evidence and reviewer gateway.
+- `hermes-agent`: Agent Platform Orchestrator. Ordinary chat is passed through
+  to Hermes; Agent control/session requests require the signed Bridge context.
+
+This direct setup is acceptable for now because Open WebUI can merge models from
+multiple OpenAI-compatible connections and dispatch chat requests by the selected
+model's source connection. It also removes the current Global Router MVP risks:
+no router-owned inbound auth, no router RBAC, no partial Bridge validation, no
+router audit gap, and no untested fallback or circuit-breaker behavior.
+
+Operational constraints:
+
+- Keep model ids unique across directly configured endpoints. If two endpoints
+  expose the same id, Open WebUI keeps the first merged entry and routing becomes
+  ambiguous.
+- If a future endpoint requires inbound API auth from Open WebUI, set
+  `OPEN_WEBUI_OPENAI_API_KEYS` with the same semicolon-separated entry count as
+  `OPEN_WEBUI_OPENAI_API_BASE_URLS`.
+- Keep `DEFAULT_MODELS=tonglingyu` unless the desired first-open experience is
+  Agent Platform chat through `hermes-agent`.
+- Keep the `agent_identity_bridge` Function target on `hermes-agent`; do not
+  inject Agent Platform identity context into `tonglingyu` evidence chat.
+- For a live Open WebUI with an existing `webui.db`, admin Settings →
+  Connections may already persist provider settings. Verify the UI or admin API
+  after changing env values.
+
 ## Open WebUI Agent Identity Bridge
 
 The formal Open WebUI deployment uses `agent_identity_bridge` as a Filter
@@ -229,6 +282,9 @@ OPEN_WEBUI_ADMIN_TOKEN
 AGENT_BRIDGE_SECRET
 AGENT_BRIDGE_ISSUER
 ```
+
+`AGENT_BRIDGE_TARGET_MODEL` defaults to `hermes-agent`. Keep that default unless
+the Orchestrator model id changes.
 
 If the available Open WebUI account is not an admin and the Function API returns
 401, use the formal container/DB installer instead of creating a temporary Open
@@ -276,57 +332,12 @@ cargo run --manifest-path ../agent-platform/Cargo.toml -p tonglingyu-gateway -- 
 Start the stack:
 
 ```bash
-docker compose build global-router
 docker compose build tonglingyu-gateway
 docker compose build agent-manager agent-orchestrator agent-worker agent-observer
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
-
-`global-router` is built from `agent-platform/crates/global-router/Dockerfile`
-as a standalone image. The current implementation is an MVP routing layer: it
-only exposes configured allowlist models, rewrites visible model ids to backend
-model ids before forwarding, applies per-route timeout, and either injects a
-Bearer token from `api_key_env` or forwards the inbound `Authorization` header.
-Example route config:
-
-```json
-[
-  {
-    "model": "tonglingyu",
-    "name": "通灵玉",
-    "base_url": "http://tonglingyu-gateway:8090/v1",
-    "upstream_model": "tonglingyu",
-    "requires_bridge": false,
-    "timeout_seconds": 120
-  },
-  {
-    "model": "other/default",
-    "name": "Other Gateway",
-    "base_url": "http://other-gateway:8090/v1",
-    "upstream_model": "default",
-    "requires_bridge": true,
-    "api_key_env": "OTHER_GATEWAY_API_KEY",
-    "timeout_seconds": 120
-  }
-]
-```
-
-Use namespaced visible model ids such as `other/default` to avoid collisions.
-Set the Open WebUI `agent_identity_bridge` Function valve `TARGET_MODELS` to
-the comma-separated subset that requires identity context, for example
-`other/default`. For `requires_bridge=true`, the MVP router only checks that
-`agent_bridge_context` exists; it does not validate the bridge HMAC signature
-inside the router.
-
-MVP limitations: router-owned inbound auth, route-level user permissions/RBAC,
-persistent audit records, upstream error normalization, automatic aggregation of
-multiple upstream `/v1/models` responses, remote streaming smoke coverage, route
-hot updates, route health summaries, circuit breaking, and fallback policy are
-not implemented yet. The standalone design record lives in
-`../docs/global-router-design/`; progress lives in
-`../docs/global-router-design/PROGRESS.md`.
 
 `tonglingyu-gateway` is built from
 `agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
@@ -354,13 +365,13 @@ docker compose logs -f cloudflared
 docker compose logs -f agent-platform-postgres
 ```
 
-Check the Tonglingyu Gateway from the internal Docker network:
+Check the direct Open WebUI model endpoints from the internal Docker network:
 
 ```bash
-docker compose exec global-router curl -fsS http://127.0.0.1:8099/healthz
-docker compose exec global-router curl -fsS http://127.0.0.1:8099/v1/models
 docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/healthz
 docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/v1/models
+docker compose exec agent-orchestrator curl -fsS http://127.0.0.1:8080/healthz
+docker compose exec agent-orchestrator curl -fsS http://127.0.0.1:8080/v1/models
 ```
 
 Cloudflare Tunnel public hostname should point to:

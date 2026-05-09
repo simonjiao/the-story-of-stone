@@ -32,6 +32,8 @@ read_env_value_or_default() {
 }
 
 HERMES_DATA_DIR="$(read_env_value HERMES_DATA_DIR)"
+HERMES_DATA_DIR="${HERMES_DATA_DIR/#\$\{HOME\}/${HOME}}"
+HERMES_DATA_DIR="${HERMES_DATA_DIR/#\$HOME/${HOME}}"
 LOCAL_OPENAI_BASE_URL="$(read_env_value LOCAL_OPENAI_BASE_URL)"
 LOCAL_OPENAI_MODEL="$(read_env_value LOCAL_OPENAI_MODEL)"
 LOCAL_OPENAI_API_KEY="$(read_env_value LOCAL_OPENAI_API_KEY)"
