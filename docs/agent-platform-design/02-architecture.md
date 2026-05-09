@@ -11,7 +11,7 @@ Open WebUI
 Agent Orchestrator / Gateway
   ├─ 普通聊天 → Default Hermes Agent Profile
   ├─ 创建 / 查询 / 管理意图 → Agent Manager
-  └─ 已绑定 session 消息 → Agent Runtime
+  └─ 已绑定 session 消息 → Agent Manager session/run API
 
 Agent Manager
   ├─ Policy / Approval / Lifecycle / Audit
@@ -55,7 +55,7 @@ Agent Manager admin API
 |---|---|---|---|
 | Open WebUI | 前端聊天入口 | 用户交互、展示 Gateway 返回的流式响应和安全摘要 | 不注册 Manager Tool，不直接访问 Manager / Runtime / Worker / Observer |
 | Agent Identity Bridge Filter | Open WebUI 内部全局 Filter | 为 `hermes-agent` 请求注入签名 `agent_bridge_context`，携带 Open WebUI user/chat/model/message 摘要 | 不授予 Agent Platform admin 权限，不把 secret 写入 prompt 或日志，不影响普通默认聊天 passthrough |
-| Agent Orchestrator / Gateway | 用户入口与路由层 | 身份绑定、意图路由、session binding、流式转发、限流、错误归一化 | 不执行任务，不审批，不持有目标 Agent credential，不保存长期上下文 |
+| Agent Orchestrator / Gateway | 用户入口与路由层 | 身份校验、意图路由、bridge/session routing、流式转发、限流、错误归一化 | 不执行任务，不审批，不持有目标 Agent credential，不保存长期上下文 |
 | Agent Manager | 控制面 | 授权、策略、审批、生命周期、Agent 复用、资源锁、审计、Observer 只读快照 | 不替模型执行任务，不直接暴露给 Open WebUI |
 | Agent Runtime | 执行面 | 承载 session/run，调用 Hermes profile、Minimal Runtime 和只读工具适配，返回结果 | 不决定授权边界，不绕过 Manager，不直接暴露给 Open WebUI，不持有写权限 credential |
 | Memory / Session Store | 上下文存储 | 保存 session、message、summary、result_ref、上下文索引和 retention 状态 | 不保存明文密钥，不替代审计日志 |
@@ -152,7 +152,6 @@ Open WebUI Filter → Orchestrator（仅注入签名 bridge context）
 Orchestrator → Default Hermes Agent Profile
 Orchestrator → Manager user API
 Orchestrator → Manager internal Open WebUI bridge API（仅限已验证 bridge context）
-Orchestrator → Runtime session API（仅限 Manager 已授权 session）
 agentctl → Manager admin API
 Worker → RunQueue / Manager internal run API（只处理已授权 run）
 Worker → Runtime run API（仅限 claimed run）

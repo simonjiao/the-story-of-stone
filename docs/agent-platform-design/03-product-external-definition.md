@@ -88,18 +88,17 @@ run summary:
 
 ## 长时间交互
 
-当用户希望和已启动 Agent 持续交互时，Orchestrator 创建或恢复 `agent_session`，后续消息进入 Agent Runtime。
+当用户希望和已启动 Agent 持续交互时，Orchestrator 通过 Manager 创建或恢复 `agent_session`，后续消息追加到 session，并创建只读 run。
 
 ```text
 Open WebUI conversation_id
-  → agent_session_id binding
-  → Agent Runtime
+  → Manager bridge/session binding
+  → agent_session message + read-only run
+  → Worker / Agent Runtime
   → Memory / Session Store
 ```
 
-Orchestrator 只保存轻量绑定，不保存完整上下文和 credential。
-
-正式 Open WebUI 部署中，Open WebUI chat 到 `agent_session` 的持久 binding 由 Manager 保存，不依赖 Orchestrator 内存。
+正式 Open WebUI 部署中，Open WebUI chat 到 `agent_session` 的持久 binding 由 Manager 保存。Orchestrator 只路由和转发安全摘要，不保存完整上下文或 credential。
 
 ## Child Session
 
@@ -157,7 +156,6 @@ agentctl agents pause agent_001
 agentctl agents resume agent_001
 agentctl observer reports
 agentctl observer show obsr_001
-# P1 planned:
 agentctl observer discuss obsr_001 --agent-id agent_001
 agentctl audit tail
 ```

@@ -12,45 +12,27 @@
 
 P1 会提前落地 P2 需要的 side-effect plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。P1 只 dry-run / validate / reject，不获取真实 credential，不调用真实写 connector，不把 run 推进到真实外部写入。
 
-## P0 控制面闭环
+## P0 当前基线
 
-P0 已具备：
+P0 已实现。路线图只保留 P1/P2 依赖的稳定基线；详细实施记录见 [P0_IMPLEMENTATION_CHECKLIST.md](P0_IMPLEMENTATION_CHECKLIST.md)。
 
 ```text
-Open WebUI / Orchestrator
-  → Agent Identity Bridge
-  → Manager
-  → Session / Run
+Open WebUI / Agent Identity Bridge
+  → Orchestrator
+  → Manager bridge/session/run API
   → Worker
   → Minimal Runtime
-  → Memory
-  → Audit
-  → Observer Report
+  → Memory / Audit / Observer Report
 ```
 
-实现范围：
+P1/P2 不应重写以下基线：
 
 ```text
-1. Rust workspace：agent-core、agent-store、agent-manager、agent-orchestrator、agent-runtime、agent-worker、agentctl。
-2. Postgres migration、核心表、idempotency、resource lock、run lease、retry、dead_letter。
-3. Agent Identity Bridge Filter、签名 `agent_bridge_context`、Manager JWT、`open_webui_bridge_bindings`。
-4. Manager user/admin/internal API，包含 request、agent、run、audit、observer report 和 bridge binding 管理。
-5. Orchestrator 安全路由、持久 session binding、streaming 和安全错误摘要。
-6. Minimal Runtime、Memory / Session Store、Worker claim/heartbeat/finish。
-7. observer_agent 只读 snapshot、observer_report 持久化和 audit 关联。
-8. RuntimeClient、MemoryStore、ConnectorClient、RunQueue、Telemetry facade。
-```
-
-P0 验收：
-
-```text
-1. 可以创建受控 agent request，并返回 fulfilled / approval_required / denied。
-2. 可以创建 agent_session 并追加消息。
-3. 可以创建 agent_run，由 worker claim 后调用 Minimal Runtime。
-4. Open WebUI chat 可以通过 bridge binding 绑定到 agent_session，后续消息自动创建 read-only run。
-5. run、session、audit、observer_report 可以用 trace_id 串起来追踪。
-6. Observer 只能报告系统健康、失败、延迟、锁占用和建议，不能改变系统状态。
-7. P1/P2 只需新增 adapter、feature 或非破坏字段，不需要重写核心 contract。
+1. Manager 授权、审批、生命周期、audit 和 `open_webui_bridge_bindings`。
+2. agent_session / agent_run 状态机、Worker claim / heartbeat / finish / dead-letter。
+3. Postgres lease / SKIP LOCKED、resource_locks、idempotency 和 trace_id 关联。
+4. Observer 只读 snapshot、observer_report 持久化和“只建议不控制”边界。
+5. RuntimeClient、MemoryStore、ConnectorClient、RunQueue、Telemetry facade。
 ```
 
 ## P1 真实 Hermes Runtime，只读

@@ -10,7 +10,7 @@ agent-platform/
     agent-core/           # domain model、状态枚举、错误、ID、policy context、trait 边界
     agent-store/          # Postgres、migration、transaction、repository
     agent-manager/        # 唯一控制面：auth、policy、approval、audit、observer report
-    agent-orchestrator/   # Gateway、intent routing、session binding、streaming、安全错误摘要
+    agent-orchestrator/   # Gateway、intent routing、bridge/session routing、streaming、安全错误摘要
     agent-runtime/        # Runtime trait、Minimal Runtime、P1 HermesRuntimeClient、context assembly
     agent-worker/         # run claim、heartbeat、timeout、retry、resource lock、observer tick
     agentctl/             # 管理员 CLI
@@ -66,7 +66,7 @@ GET  /v1/agent-sessions/{session_id}/children
 POST /v1/agent-sessions/{session_id}/close
 ```
 
-Orchestrator 禁止调用 admin、internal、observer report 查询和 observer discussion API。
+Orchestrator 禁止调用 admin、observer report 查询和 observer discussion API。internal API 中只允许调用 Open WebUI bridge endpoint，且必须先验证 `agent_bridge_context`。
 
 ### 管理员 API
 
@@ -89,7 +89,7 @@ GET    /v1/admin/observer/reports/{report_id}
 POST   /v1/admin/observer/runs
 ```
 
-P1 planned admin API：
+P1 计划新增 admin API：
 
 ```http
 POST /v1/admin/observer/reports/{report_id}/discussions
@@ -163,14 +163,14 @@ P0 使用 Postgres 作为 run queue、lease 和 resource lock 的一致性边界
 | `observer_reports` | `observer_run_id`、`health_status`、`risk_level`、`summary`、`findings`、`recommendations`、`evidence_refs` |
 | `audit_logs` | actor、`action`、resource、`decision`、`reason`、request/session/run/approval/report ids、`trace_id` |
 
-P1 planned data model：
+P1 计划新增 data model：
 
 | 表 | 关键字段 / 约束 |
 |---|---|
 | `side_effect_plans` | `run_id`、connector/action/resource、risk/mode、`approval_id`、`credential_scope`、input/result refs、`status`、`error_code`、`version`、`trace_id` |
 | `credential_leases` | `side_effect_plan_id`、`credential_scope`、opaque `provider_ref`、`status`、`expires_at`、`trace_id`、`revoked_at` |
 
-P1 planned schema 只能用于 dry-run 和 contract test；P2 才能接真实 provider / connector。
+P1 计划新增 schema 只能用于 dry-run 和 contract test；P2 才能接真实 provider / connector。
 
 ## Open WebUI Bridge Contract
 

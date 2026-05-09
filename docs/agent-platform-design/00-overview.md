@@ -14,7 +14,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 |---|---|
 | Open WebUI | 用户聊天界面，只连接 Orchestrator |
 | Agent Identity Bridge Filter | Open WebUI 全局 Filter，向 Orchestrator 注入签名用户/chat 上下文 |
-| Agent Orchestrator / Gateway | 用户入口、路由、session binding、流式转发和安全错误摘要 |
+| Agent Orchestrator / Gateway | 用户入口、路由、bridge/session routing、流式转发和安全错误摘要 |
 | Agent Manager | 控制面，负责授权、策略、审批、生命周期、审计和资源锁决策 |
 | Agent Runtime | 执行面，承载 session/run，调用 Hermes profile 和工具适配 |
 | Memory / Session Store | 保存 session、message、summary、result_ref 和上下文索引 |
@@ -75,7 +75,7 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | [05-technical-implementation.md](05-technical-implementation.md) | Rust 模块、依赖、API、数据表、并发和 Worker 机制 |
 | [06-negative-list.md](06-negative-list.md) | 明确禁止、不建议、延期实现和延期原因 |
 | [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、决策清单和验收标准 |
-| [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 实施 TODO 和阶段验收 |
+| [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 阶段边界、交付顺序和验收 |
 
 一致性规则：
 

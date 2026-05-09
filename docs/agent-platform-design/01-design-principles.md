@@ -58,7 +58,7 @@ Orchestrator 是确定性 Gateway，不是执行 Agent。它只允许做：
 ```text
 普通聊天路由
 Agent intent 解析和 submit_agent_request
-Open WebUI conversation 与 agent_session 的轻量绑定
+Open WebUI bridge binding 的验证、查询和关闭请求
 agent_session message 转发
 agent/run/session 摘要查询
 安全错误摘要返回
