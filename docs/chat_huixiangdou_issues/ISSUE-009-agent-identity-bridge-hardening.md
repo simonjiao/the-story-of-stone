@@ -18,6 +18,7 @@ P1
 | `BRIDGE-HARDEN-SMOKE-20260509` | PASS | 合成 Open WebUI subject/chat 覆盖审批建链、后续消息 run、同 message_id 去重、nonce replay 冲突和关闭 session。 |
 | `BRIDGE-HARDEN-ISOLATION-20260509` | PASS | 相同 chat/model 下不同签名 subject 不复用 binding，未向原 subject session append message。 |
 | `BRIDGE-HARDEN-RESTART-20260509` | PASS | Orchestrator 重启后仍从 Manager/Postgres 复用 active binding，并能继续创建 Worker run。 |
+| `BRIDGE-REAL-ACCOUNT-20260509` | PASS | 使用正式 Open WebUI 真实 admin/user 账号，经 `/api/chat/completions` 触发 Function 和 Bridge，验证独立 binding、cross-chat 隔离、follow-up、dedupe 和 close。 |
 
 ## 背景
 
@@ -55,10 +56,11 @@ python3 -m unittest deploy/open-webui/functions/test_agent_identity_bridge_filte
 8. 重启：Orchestrator 重启后从 Manager/Postgres 复用 active binding。
 9. 清理：合成 binding 关闭后状态为 `closed`。
 10. 日志：复测窗口内 Manager/Orchestrator/Worker/Observer 无错误关键词。
+11. 真实账号：Open WebUI admin/user 真实账号均通过 Open WebUI auth；admin 不自动获得 Agent Platform admin；两个真实账号拥有独立 binding/session；admin 使用 user 的测试 chat id 不复用 user binding；重复 message id 不重复 append；测试 chat 已删除。
 ```
 
 ## 完成口径
 
 已满足：不是仅凭代码合并关闭，正式环境部署复测证据已写回 `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md`。
 
-残余边界：第二个真实 Open WebUI 浏览器账号未重复登录复测；本轮用不同 signed subject 完成服务端隔离验证。
+残余边界：本轮没有通过浏览器手动输入密码登录；已使用正式 Open WebUI auth 代表真实 admin/user 账号调用真实聊天 API。

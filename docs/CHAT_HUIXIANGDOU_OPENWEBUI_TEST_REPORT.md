@@ -105,6 +105,7 @@
 | 2026-05-09 11:00 CST | 部署 Agent Identity Bridge hardening 到远端正式环境。 | 同步 `agent-platform/`、Function verify 脚本和 README；重建 `hermes-agent-platform:formal`，重启 Manager/Orchestrator/Worker/Observer。 |
 | 2026-05-09 11:01 CST | 修复正式环境 Function 校验脚本差异。 | 远端没有 `OPEN_WEBUI_ADMIN_TOKEN`；`verify-openwebui-function.sh` 新增 compose DB fallback，输出 `source=compose-db`、Function 状态和 valve key names，不输出 secret 值。 |
 | 2026-05-09 11:03 CST | 执行 hardening 远端复测。 | 合成 Open WebUI subject/chat 覆盖审批建链、follow-up run、同 message_id 去重、nonce replay 冲突、关闭 session、不同 subject 隔离、Orchestrator 重启后 binding 复用；关键服务日志无错误关键词。 |
+| 2026-05-09 11:33 CST | 使用正式 Open WebUI 真实账号复测 Bridge。 | 用真实 admin 与普通 user 账号的 Open WebUI API auth 走 `/api/chat/completions`，确认 Function 注入真实账号上下文；两个测试 chat 已在复测后删除。 |
 
 ## 2026-05-08 正式部署验证
 
@@ -219,9 +220,22 @@
 | BRIDGE-HARDEN-RESTART-20260509 | PASS | Orchestrator 重启后仍从 Manager/Postgres 复用 active binding。 | 重启 `agent-orchestrator` 后健康恢复；subject A post-restart follow-up message count `0 -> 1`，Worker run 完成。 | P1 | 证明 binding 不依赖 Orchestrator 内存。 |
 | BRIDGE-HARDEN-LOGS-20260509 | PASS | 复测窗口内关键服务无错误关键词。 | `docker compose logs --since=10m agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/error/failed/deadletter/unauthorized/forbidden`。 |  |  |
 
+## 2026-05-09 Agent Identity Bridge 真实账号复测
+
+| 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| BRIDGE-REAL-AUTH-20260509 | PASS | 正式 Open WebUI 真实 admin 与普通 user 账号均可通过 Open WebUI auth 访问 API。 | `GET /api/v1/auths/` 对两个真实账号均返回 HTTP 200。 | P1 | 使用服务器端短期 JWT 代表真实账号，未输出 token、密码或 secret。 |
+| BRIDGE-REAL-BOOTSTRAP-20260509 | PASS | 两个真实账号分别通过 `/api/chat/completions` 触发 Function、Orchestrator 和 Manager，并进入审批状态。 | 普通 user 请求 `req_019e0acbc79071d2b9b19446ad10c419`、admin 请求 `req_019e0acbc9d57d53966e2c13d3c4b5ad`，状态均为 `approval_required`。 | P1 | admin 账号未被自动映射为 Agent Platform admin，符合 `AGENT_BRIDGE_ADMIN_ROLE_MAPPING=disabled`。 |
+| BRIDGE-REAL-BINDING-20260509 | PASS | 审批后两个真实账号各自创建独立 binding/session。 | user session `sess_019e0acbc8877a70a382dd3b163585ae`，admin session `sess_019e0acbcaaa74639eadff79c6beb161`，二者不同。 | P1 |  |
+| BRIDGE-REAL-CROSS-CHAT-20260509 | PASS | admin 使用 user 的测试 chat id 发普通消息时，不会复用或污染 user 的 agent session binding。 | user session 对 admin cross message 的 count `0 -> 0`；`admin + user_chat` 没有生成 binding。 | P1 | 覆盖真实账号维度的 subject 隔离。 |
+| BRIDGE-REAL-FOLLOWUP-20260509 | PASS | 两个真实账号的后续消息只 append 到各自 session。 | user follow-up own count `0 -> 1`、other count `0 -> 0`；admin follow-up own count `0 -> 1`、other count `0 -> 0`。 | P1 |  |
+| BRIDGE-REAL-DEDUP-20260509 | PASS | 真实 Open WebUI user 重复发送同一 message id，不重复 append session message。 | user duplicate count `1 -> 1`。 | P1 | 真实 Open WebUI 后台任务传入 Bridge 的稳定 message id 为 assistant placeholder id。 |
+| BRIDGE-REAL-CLOSE-20260509 | PASS | 两个真实账号的测试 binding 均可关闭，测试 chat 已清理。 | user/admin close 后 binding 状态均为 `closed`；`DELETE /api/v1/chats/{id}` 对两个测试 chat 均返回 HTTP 200。 | P1 |  |
+| BRIDGE-REAL-LOGS-20260509 | PASS | 真实账号复测窗口内关键服务无错误关键词。 | `docker compose logs --since=12m open-webui agent-manager agent-orchestrator agent-worker agent-observer` 未检出 `panic/traceback/exception/error/failed/deadletter/unauthorized/forbidden`。 |  |  |
+
 剩余未覆盖边界：
 
-1. 第二个真实 Open WebUI 浏览器登录用户未重复执行；正式环境已用不同签名 subject 验证 binding 隔离。
+1. 本轮未通过浏览器手动输入密码登录；已通过正式 Open WebUI auth 以真实 admin/user 账号调用真实聊天 API。
 2. Hermes 上游 payload 未做抓包级验证；代码单测覆盖 passthrough 前删除 `agent_bridge_context`，普通 passthrough 仍正常。
 
 ## 修复结论

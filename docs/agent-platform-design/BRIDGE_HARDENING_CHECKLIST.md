@@ -21,7 +21,7 @@
 | B2 Bridge nonce replay 防护 | DONE | HMAC + clock skew 不足以防窗口内重放；mutating Bridge 请求现在必须先在 Manager/Store claim nonce。残余风险：claim 成功后如果下游网络失败，同一请求重试会被当成 replay，需要用户重新发起。 | 已新增 `open_webui_bridge_nonces` migration、Manager nonce endpoint、Memory/Pg store 实现和 replay 测试。 |
 | B3 Open WebUI message append 去重 | DONE | run idempotency 不等于 message append 幂等；现在 `message_id` 映射为 `external_message_id`，同一 session 内重复 append 返回既有 message。残余风险：Open WebUI 不提供稳定 `message_id` 时只能退回 nonce 级保护。 | 已新增 `agent_session_messages.external_message_id`、唯一索引、append 去重和测试。 |
 | B4 Bridge lifecycle 审计 | DONE | run/message audit 不能替代 binding 生命周期审计；现在 binding upsert、run update、close 都写 audit，且 closed binding 不能继续 update run。 | 已补 Manager audit 记录、active binding guard 和 lifecycle audit 测试。 |
-| B5 部署和完成口径 | DONE | 不只停留在 code-ready；已在正式远端环境重建镜像、重启服务并执行 hardening 复测。残余风险：第二个真实 Open WebUI 浏览器账号未重复登录，本轮用不同 signed subject 完成服务端隔离验证。 | `verify-openwebui-function.sh` 支持 Admin API 和 compose DB fallback；正式环境复测通过 Function、migration、dedup、replay、subject isolation、Orchestrator restart reuse 和日志检查。 |
+| B5 部署和完成口径 | DONE | 不只停留在 code-ready；已在正式远端环境重建镜像、重启服务并执行 hardening 复测。追加真实账号复测后，admin/user 两个 Open WebUI 真实账号均通过真实聊天 API 覆盖 Bridge 隔离。残余风险：未通过浏览器手动输入密码登录，本轮使用正式 Open WebUI auth 代表真实账号。 | `verify-openwebui-function.sh` 支持 Admin API 和 compose DB fallback；正式环境复测通过 Function、migration、dedup、replay、subject isolation、Orchestrator restart reuse、真实账号 Bridge 回归和日志检查。 |
 
 ## 验证记录
 
@@ -42,5 +42,6 @@ python3 -m unittest deploy/open-webui/functions/test_agent_identity_bridge_filte
 4. 合成 Open WebUI subject/chat 覆盖审批建链、follow-up run、同 message_id 去重、nonce replay 冲突和关闭 session。
 5. 相同 chat/model 下不同 signed subject 不复用对方 binding。
 6. Orchestrator 重启后，从 Manager/Postgres 找回 active binding 并继续创建 Worker run。
-7. 复测窗口内 Manager/Orchestrator/Worker/Observer 无错误关键词。
+7. 正式 Open WebUI 真实 admin/user 账号经 `/api/chat/completions` 触发 Function 和 Bridge，验证独立 binding/session、cross-chat 隔离、follow-up、dedupe 和 close。
+8. 复测窗口内 Open WebUI/Manager/Orchestrator/Worker/Observer 无错误关键词。
 ```
