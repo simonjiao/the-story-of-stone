@@ -22,7 +22,9 @@
 
 - 通灵玉第一版只验证证据型 RAG 链路：
   `source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`。
-- `global-router` 当前是 MVP 路由层，不是完整生产级 router。
+- `global-router` 已进入生产化第一阶段基线，不等同于完整生产级 router；
+  剩余状态以
+  `docs/global-router-design/PROGRESS.md` 为准。
 - Agent Platform 的 P0/P1/P2 状态以 `docs/agent-platform-design/PROGRESS.md`
   和各 implementation checklist 为准。
 - 远程部署以 `deploy/` 当前内容为准；公网入口走 Cloudflare Tunnel 到

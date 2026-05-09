@@ -43,7 +43,10 @@ class Filter:
         __model__: Optional[Any] = None,
     ) -> dict:
         model = str(body.get("model") or _get(__model__, "id") or "")
-        if model not in _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL):
+        if not _matches_target_model(
+            model,
+            _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL),
+        ):
             return body
 
         secret = self.valves.AGENT_BRIDGE_SECRET
@@ -110,6 +113,12 @@ def _target_models(target_models: str, target_model: str) -> set[str]:
             if item:
                 models.add(item)
     return models
+
+
+def _matches_target_model(model: str, target_models: set[str]) -> bool:
+    if model in target_models:
+        return True
+    return any(model.startswith(f"{target}/") for target in target_models)
 
 
 def _signature(secret: str, context: dict) -> str:

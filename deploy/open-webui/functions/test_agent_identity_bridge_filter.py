@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-from agent_identity_bridge_filter import Filter, _signature
+from agent_identity_bridge_filter import Filter, _matches_target_model, _signature
 
 
 class AgentIdentityBridgeFilterTest(unittest.TestCase):
@@ -30,6 +30,8 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_injects_signed_context_for_target_model(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "hermes-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent"
         body = {"model": "hermes-agent", "messages": []}
         result = asyncio.run(
             filt.inlet(
@@ -51,6 +53,8 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "hermes-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent"
         body = {"model": "hermes-agent", "messages": []}
         result = asyncio.run(
             filt.inlet(
@@ -71,6 +75,8 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_accepts_body_level_metadata_fallbacks(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "hermes-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent"
         body = {
             "model": "hermes-agent",
             "messages": [],
@@ -90,6 +96,11 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         self.assertEqual(context["session_id"], "session-from-body")
         self.assertEqual(context["message_id"], "message-from-body")
         self.assertEqual(context["user_role"], "admin")
+
+    def test_target_model_namespace_matches_dynamic_router_model(self) -> None:
+        self.assertTrue(_matches_target_model("other/default", {"other"}))
+        self.assertTrue(_matches_target_model("other/default", {"other/default"}))
+        self.assertFalse(_matches_target_model("other-default", {"other"}))
 
 
 if __name__ == "__main__":

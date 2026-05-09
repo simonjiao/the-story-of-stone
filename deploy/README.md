@@ -11,10 +11,12 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `global-router`: Rust OpenAI-compatible MVP model allowlist and routing layer.
-  Open WebUI connects only to this service. It is not yet a production-grade
-  router with inbound auth, route-level RBAC, bridge HMAC validation, persistent
-  audit, health aggregation, circuit breaking, or route hot reload.
+- `global-router`: Rust OpenAI-compatible model allowlist and routing layer.
+  The current implementation is a first productionization baseline for controlled
+  trial deployments, not a complete production-grade router. Open WebUI connects
+  only to this service; it owns inbound auth, route-level permissions, Bridge
+  HMAC validation, audit JSONL, health summaries, circuit breaking, fallback,
+  route reload, and optional upstream model discovery.
 - `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
   SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
   packages, runs reviewer checks, and calls Hermes as the upstream generation
@@ -68,6 +70,16 @@ Required changes:
 - `GLOBAL_ROUTER_ROUTES_JSON`: optional JSON array that declares the Open WebUI
   visible model allowlist and route targets. If empty, only `tonglingyu` is
   exposed and routed to `http://tonglingyu-gateway:8090/v1`.
+- `GLOBAL_ROUTER_ROUTES_FILE`: optional JSON route config file path. When set,
+  `POST /v1/router/reload` reloads routes from this file.
+- `GLOBAL_ROUTER_INBOUND_API_KEYS`: optional comma-separated Bearer tokens
+  accepted from Open WebUI. Leave empty only for trusted internal networks or
+  local development.
+- `GLOBAL_ROUTER_ADMIN_API_KEY`: Bearer token required for
+  `/v1/router/health`, `/v1/router/routes`, and `/v1/router/reload`.
+- `GLOBAL_ROUTER_DATA_DIR`: persistent directory for router audit records.
+- `GLOBAL_ROUTER_AUDIT_LOG_PATH`: JSONL audit path inside the container. Default
+  is `/data/audit.jsonl`.
 - `GLOBAL_ROUTER_IP`: optional stable internal IP for `global-router`.
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
@@ -285,11 +297,13 @@ docker compose ps
 ```
 
 `global-router` is built from `agent-platform/crates/global-router/Dockerfile`
-as a standalone image. The current implementation is an MVP routing layer: it
-only exposes configured allowlist models, rewrites visible model ids to backend
-model ids before forwarding, applies per-route timeout, and either injects a
-Bearer token from `api_key_env` or forwards the inbound `Authorization` header.
-Example route config:
+as a standalone image. It exposes configured allowlist models, rewrites visible
+model ids to backend model ids before forwarding, applies per-route timeout,
+validates inbound router auth when configured, validates signed
+`agent_bridge_context` for bridge routes, writes audit JSONL when configured,
+normalizes router/upstream errors, tracks per-route health, opens a circuit after
+repeated 5xx/transport failures, and can use a configured fallback route. Example
+route config:
 
 ```json
 [
@@ -299,7 +313,9 @@ Example route config:
     "base_url": "http://tonglingyu-gateway:8090/v1",
     "upstream_model": "tonglingyu",
     "requires_bridge": false,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "failure_threshold": 3,
+    "circuit_breaker_seconds": 30
   },
   {
     "model": "other/default",
@@ -308,7 +324,20 @@ Example route config:
     "upstream_model": "default",
     "requires_bridge": true,
     "api_key_env": "OTHER_GATEWAY_API_KEY",
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "allowed_user_roles": ["admin"],
+    "failure_threshold": 3,
+    "circuit_breaker_seconds": 30,
+    "fallback_model": "tonglingyu"
+  },
+  {
+    "model": "other",
+    "name": "Other Gateway",
+    "base_url": "http://other-gateway:8090/v1",
+    "requires_bridge": true,
+    "api_key_env": "OTHER_GATEWAY_API_KEY",
+    "discover_models": true,
+    "allowed_user_roles": ["admin"]
   }
 ]
 ```
@@ -316,17 +345,34 @@ Example route config:
 Use namespaced visible model ids such as `other/default` to avoid collisions.
 Set the Open WebUI `agent_identity_bridge` Function valve `TARGET_MODELS` to
 the comma-separated subset that requires identity context, for example
-`other/default`. For `requires_bridge=true`, the MVP router only checks that
-`agent_bridge_context` exists; it does not validate the bridge HMAC signature
-inside the router.
+`other/default` or a discovery namespace such as `other`. For
+`requires_bridge=true`, the router verifies the Bridge HMAC using
+`AGENT_BRIDGE_SECRET`, issuer, model, nonce, timestamp, subject, chat, session,
+and message fields, rejects in-process nonce replay, then strips the bridge
+context before forwarding.
 
-MVP limitations: router-owned inbound auth, route-level user permissions/RBAC,
-persistent audit records, upstream error normalization, automatic aggregation of
-multiple upstream `/v1/models` responses, remote streaming smoke coverage, route
-hot updates, route health summaries, circuit breaking, and fallback policy are
-not implemented yet. The standalone design record lives in
-`../docs/global-router-design/`; progress lives in
-`../docs/global-router-design/PROGRESS.md`.
+If `discover_models=true`, `/v1/models` calls the upstream `/models` endpoint and
+exposes returned ids under the configured namespace, for example
+`other/default`. Requests to `other/default` then forward as upstream
+`model=default`.
+
+Fallback routes are only used when the fallback route itself is not circuit-open
+and the trusted identity, when present, is also allowed by the fallback route.
+
+Admin checks:
+
+```bash
+docker compose exec global-router curl -fsS \
+  -H "Authorization: Bearer ${GLOBAL_ROUTER_ADMIN_API_KEY}" \
+  http://127.0.0.1:8099/v1/router/health
+
+docker compose exec global-router curl -fsS -X POST \
+  -H "Authorization: Bearer ${GLOBAL_ROUTER_ADMIN_API_KEY}" \
+  http://127.0.0.1:8099/v1/router/reload
+```
+
+The standalone design record lives in `../docs/global-router-design/`; progress
+lives in `../docs/global-router-design/PROGRESS.md`.
 
 `tonglingyu-gateway` is built from
 `agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
