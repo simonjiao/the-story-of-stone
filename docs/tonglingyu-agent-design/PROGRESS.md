@@ -145,6 +145,10 @@
   标记和 dry run 的 `runtime_stream_events`。去重缓存命中的 streaming replay
   已复用缓存中的 Runtime stream events；旧缓存如果缺少 events，会 fallback
   到 cached completion stream。
+- Gateway final response 和去重缓存非 streaming replay 会剥离内部
+  `_runtime_stream_events` / `_stream_source`，smoke 已断言公开 completion 不暴露
+  runtime step plan、agent runtime plan gate、planned profiles 或内部 stream
+  event 列表。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   SQLite 连接并把连接传给本地 Runtime API；profile workflow 还是
   `tonglingyu-runtime` 确定性执行，`agent-runtime` 只承担 plan gate，尚未承担

@@ -243,6 +243,29 @@ assert chat["trace_id"] == package["trace_id"], (chat, package)
 assert chat["session_id"] == duplicate["session_id"], (chat, duplicate)
 assert chat["evidence_package_id"] == duplicate["evidence_package_id"], (chat, duplicate)
 assert chat["review"]["status"] == "passed", chat
+public_completion_keys = {
+    "id",
+    "object",
+    "model",
+    "choices",
+    "trace_id",
+    "evidence_package_id",
+    "review",
+    "session_id",
+}
+assert set(chat) <= public_completion_keys, chat
+assert set(duplicate) <= public_completion_keys, duplicate
+for payload in [chat, duplicate]:
+    encoded = json.dumps(payload, ensure_ascii=False)
+    for forbidden_public_field in [
+        "_runtime_stream_events",
+        "_stream_source",
+        "runtime_step_plan",
+        "agent_runtime_plan_gate",
+        "runtime_stream_events",
+        "planned_profiles",
+    ]:
+        assert forbidden_public_field not in encoded, (forbidden_public_field, payload)
 assert forbidden["error"]["code"] == "forbidden_control_fields", forbidden
 assert model_reject["error"]["code"] == "model_not_allowed", model_reject
 assert package_forbidden["error"] == "not_found", package_forbidden

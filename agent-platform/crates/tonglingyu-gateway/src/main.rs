@@ -3241,6 +3241,36 @@ mod tests {
     }
 
     #[test]
+    fn public_completion_strips_cached_runtime_stream_events() {
+        let value = completion_value(
+            "tonglingyu",
+            "测试回答".to_string(),
+            None,
+            Some("session-test"),
+        );
+        let cached = cache_completion_value(
+            &value,
+            &[RuntimeWorkflowStreamEvent {
+                sequence: 0,
+                event_type: "content_delta".to_string(),
+                profile: "honglou-main".to_string(),
+                trace_id: "trace-test".to_string(),
+                content_delta: Some("测试回答".to_string()),
+                output_ref: None,
+                package_id: None,
+                metadata: json!({}),
+            }],
+        );
+
+        assert!(cached.get("_runtime_stream_events").is_some());
+        assert!(cached_runtime_stream_events(&cached).is_some());
+        let public = public_completion_value(&cached);
+        assert!(public.get("_runtime_stream_events").is_none());
+        assert!(public.get("_stream_source").is_none());
+        assert_eq!(public["session_id"], "session-test");
+    }
+
+    #[test]
     fn gateway_does_not_reown_runtime_domain_or_kb_functions() {
         let main_source = include_str!("main.rs");
         for function_name in [

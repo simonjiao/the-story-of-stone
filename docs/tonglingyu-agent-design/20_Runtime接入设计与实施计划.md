@@ -241,7 +241,7 @@ workflow 执行。R5A/R5D 必须等 profile content/tool 执行面接入
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`
   event，不自行生成领域内容。
 - [x] 去重缓存命中的 streaming replay 改为 Runtime event replay。
-- [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
+- [x] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
