@@ -113,6 +113,7 @@ SEARCH_JSON="${SMOKE_DIR}/search.json"
 CHAT_JSON="${SMOKE_DIR}/chat.json"
 DUP_CHAT_JSON="${SMOKE_DIR}/chat-duplicate.json"
 STREAM_TXT="${SMOKE_DIR}/chat-stream.txt"
+DUP_STREAM_TXT="${SMOKE_DIR}/chat-stream-duplicate.txt"
 FORBIDDEN_JSON="${SMOKE_DIR}/forbidden.json"
 MODEL_REJECT_JSON="${SMOKE_DIR}/model-reject.json"
 PACKAGE_FORBIDDEN_JSON="${SMOKE_DIR}/package-forbidden.json"
@@ -157,6 +158,14 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
 grep -q 'evidence_package_id' "${STREAM_TXT}"
 grep -q 'runtime_workflow' "${STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${STREAM_TXT}"
+curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
+  -H "x-tonglingyu-message-id: smoke-message-stream" \
+  -X POST \
+  -d '{"model":"tonglingyu","stream":true,"messages":[{"role":"user","content":"黛玉命运是什么？"}]}' \
+  "${BASE_URL}/v1/chat/completions" >"${DUP_STREAM_TXT}"
+grep -q 'evidence_package_id' "${DUP_STREAM_TXT}"
+grep -q 'runtime_workflow' "${DUP_STREAM_TXT}"
+grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
 
 PACKAGE_ID="$(cat "${CHAT_JSON}" | json_get "evidence_package_id")"
 TRACE_ID="$(cat "${CHAT_JSON}" | json_get "trace_id")"

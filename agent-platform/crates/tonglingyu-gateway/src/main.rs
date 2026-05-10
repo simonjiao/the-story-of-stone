@@ -2302,9 +2302,9 @@ async fn chat_completions(
                     &json!({"deduped_external_message_id": &context.external_message_id}),
                 );
                 return if request.stream.unwrap_or(false) {
-                    streaming_response_from_completion_value(&value)
+                    streaming_response_from_cached_completion_value(&value)
                 } else {
-                    Json(value).into_response()
+                    Json(public_completion_value(&value)).into_response()
                 };
             }
             Ok(None) => {}
@@ -2548,6 +2548,7 @@ async fn chat_completions(
         Some(&package),
         Some(&session_id),
     );
+    let cached_value = cache_completion_value(&value, &workflow.stream_events);
     if let Ok(request_hash) = hash_value(&payload) {
         let _ = store_gateway_message(
             &conn,
@@ -2558,7 +2559,7 @@ async fn chat_completions(
                 package_id: Some(&package.package_id),
                 request_hash: &request_hash,
                 question: &question,
-                response: &value,
+                response: &cached_value,
             },
         );
     }
@@ -2617,6 +2618,36 @@ fn completion_value(
         value["session_id"] = json!(session_id);
     }
     value
+}
+
+fn cache_completion_value(value: &Value, events: &[RuntimeWorkflowStreamEvent]) -> Value {
+    let mut cached = value.clone();
+    if let Value::Object(map) = &mut cached {
+        map.insert("_runtime_stream_events".to_string(), json!(events));
+        map.insert("_stream_source".to_string(), json!("runtime_workflow"));
+    }
+    cached
+}
+
+fn public_completion_value(value: &Value) -> Value {
+    let mut public = value.clone();
+    if let Value::Object(map) = &mut public {
+        map.remove("_runtime_stream_events");
+        map.remove("_stream_source");
+    }
+    public
+}
+
+fn cached_runtime_stream_events(value: &Value) -> Option<Vec<RuntimeWorkflowStreamEvent>> {
+    serde_json::from_value::<Vec<RuntimeWorkflowStreamEvent>>(
+        value.get("_runtime_stream_events")?.clone(),
+    )
+    .ok()
+    .filter(|events| {
+        events
+            .iter()
+            .any(|event| event.event_type == "content_delta")
+    })
 }
 
 fn streaming_response_from_completion_value(value: &Value) -> Response {
@@ -2690,6 +2721,19 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
         body,
     )
         .into_response()
+}
+
+fn streaming_response_from_cached_completion_value(value: &Value) -> Response {
+    let public = public_completion_value(value);
+    let model = public
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_MODEL_ID);
+    if let Some(events) = cached_runtime_stream_events(value) {
+        streaming_response_from_runtime_events(model, &public, &events)
+    } else {
+        streaming_response_from_completion_value(&public)
+    }
 }
 
 fn streaming_response_from_runtime_events(

@@ -204,15 +204,15 @@ dependency、requested tool scope、output_ref 和 Runtime step metadata。
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
 OpenAI-compatible SSE chunk，不再由 Gateway 自行切分领域回答。去重缓存命中
-的 streaming replay 仍沿用 cached completion stream，需要后续改为 Runtime
-event replay。
+的 streaming replay 会复用缓存中的 Runtime stream events；旧缓存如果缺少
+events，会 fallback 到 cached completion stream。
 
 这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite 连接并传给本地
 Runtime API；`agent-runtime` 当前只作为 contract/step plan gate，四 profile
 的领域内容、工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性
 workflow 执行。R5A/R5D 必须等 profile content/tool 执行面接入
-`agent-runtime`/Hermes、缓存 replay 的 Runtime event streaming、
-连接/事务边界收敛和目标环境 Open WebUI 复测完成后再勾选。
+`agent-runtime`/Hermes、连接/事务边界收敛和目标环境 Open WebUI 复测完成后
+再勾选。
 
 ### R5C 四 Profile 编排
 
@@ -240,7 +240,7 @@ workflow 执行。R5A/R5D 必须等 profile content/tool 执行面接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`
   event，不自行生成领域内容。
-- [ ] 去重缓存命中的 streaming replay 改为 Runtime event replay。
+- [x] 去重缓存命中的 streaming replay 改为 Runtime event replay。
 - [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。

@@ -143,12 +143,12 @@
   `final_output` stream events；新请求的 Gateway streaming response 已改为
   转发 Runtime `content_delta` event，并由 smoke 校验 `runtime_workflow`
   标记和 dry run 的 `runtime_stream_events`。去重缓存命中的 streaming replay
-  仍沿用 cached completion stream，尚未完成 Runtime event replay。
+  已复用缓存中的 Runtime stream events；旧缓存如果缺少 events，会 fallback
+  到 cached completion stream。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   SQLite 连接并把连接传给本地 Runtime API；profile workflow 还是
   `tonglingyu-runtime` 确定性执行，`agent-runtime` 只承担 plan gate，尚未承担
-  profile content/tool execution；streaming 只覆盖新请求，缓存 replay 和目标
-  Open WebUI 页面复测仍未完成。
+  profile content/tool execution；目标 Open WebUI 页面复测仍未完成。
 
 ## 下一步
 
