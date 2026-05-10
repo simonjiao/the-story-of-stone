@@ -18,7 +18,9 @@
   `safety_policy` 字段也不会回显字段名或值。
   当前 streaming 完成口径是有序 event 序列；无工具路径解析 Hermes 上游
   SSE，tool loop 路径执行完整受控 tool loop 后合成 Runtime events，不声明
-  调用方可边读边转发的 async stream/backpressure API。
+  调用方可边读边转发的 async stream/backpressure API；explicit contract
+  或 registry contract 解析到版本时，成功和错误 stream event 都保留
+  schema version。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
   可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy

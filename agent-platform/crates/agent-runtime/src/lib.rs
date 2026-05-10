@@ -332,6 +332,84 @@ impl RuntimeClient for MinimalRuntimeClient {
             input.runtime_step.as_ref(),
         )
     }
+
+    async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = runtime_profile_for_run(&input, &self.profile);
+        let trace_id = input.trace_id.clone();
+        let run_id = input.run.id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.execute_run(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
+
+    async fn stream_session_message(
+        &self,
+        input: RuntimeSessionInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = runtime_profile_for_session(&input, &self.profile);
+        let trace_id = input.trace_id.clone();
+        let session_id = input.session_id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.send_session_message(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
+
+    async fn stream_profile_step(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = input.profile_id.clone();
+        let trace_id = input.trace_id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.execute_profile_step(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1017,10 +1095,11 @@ impl RuntimeClient for HermesRuntimeClient {
         let runtime_profile = runtime_profile_for_run(&input, "agent-platform-hermes");
         let trace_id = input.trace_id.clone();
         let run_id = input.run.id.clone();
-        let error_schema_version = input
-            .profile_contract
-            .as_ref()
-            .map(|contract| contract.version.version.clone());
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &runtime_profile,
+        );
         let error_profile = runtime_profile.clone();
         let error_trace_id = trace_id.clone();
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
@@ -1093,10 +1172,11 @@ impl RuntimeClient for HermesRuntimeClient {
         let runtime_profile = runtime_profile_for_session(&input, &input.agent_id);
         let trace_id = input.trace_id.clone();
         let session_id = input.session_id.clone();
-        let error_schema_version = input
-            .profile_contract
-            .as_ref()
-            .map(|contract| contract.version.version.clone());
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &runtime_profile,
+        );
         let error_profile = runtime_profile.clone();
         let error_trace_id = trace_id.clone();
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
@@ -1175,10 +1255,11 @@ impl RuntimeClient for HermesRuntimeClient {
     ) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let error_profile = input.profile_id.clone();
         let error_trace_id = input.trace_id.clone();
-        let error_schema_version = input
-            .profile_contract
-            .as_ref()
-            .map(|contract| contract.version.version.clone());
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &input.profile_id,
+        );
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
             let contract = input
                 .profile_contract
@@ -2255,6 +2336,20 @@ fn runtime_profile_for_session(input: &RuntimeSessionInput, fallback: &str) -> S
                 .map(|agent| agent.hermes_profile.clone())
         })
         .unwrap_or_else(|| fallback.to_string())
+}
+
+fn schema_version_for_contract_or_registry(
+    contract: Option<&ProfileContract>,
+    registry: &RuntimeProfileRegistry,
+    profile_id: &str,
+) -> Option<String> {
+    contract
+        .map(|contract| contract.version.version.clone())
+        .or_else(|| {
+            registry
+                .get(profile_id)
+                .map(|contract| contract.version.version)
+        })
 }
 
 fn validate_contract_input(
@@ -3384,6 +3479,33 @@ mod tests {
         assert_eq!(events[0].event_type.as_str(), "final");
         assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
         assert!(events[0].output.is_some());
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_stream_registry_contract_error_preserves_schema_version() {
+        let mut contract = ProfileContract::new("registry-profile", "registry-v1");
+        contract.max_context_messages = Some(0);
+        let runtime = MinimalRuntimeClient::default()
+            .with_profile_registry(RuntimeProfileRegistry::new([contract]));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "registry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "SECRET_REGISTRY_INPUT")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].schema_version.as_deref(), Some("registry-v1"));
+        let encoded = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded.contains("SECRET_REGISTRY_INPUT"));
     }
 
     #[tokio::test]
@@ -5326,6 +5448,75 @@ mod tests {
         assert_eq!(session_events[0].schema_version.as_deref(), Some("v1"));
         let encoded_session = serde_json::to_string(&session_events[0]).unwrap();
         assert!(!encoded_session.contains("SECRET_SESSION_BUDGET"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_registry_contract_errors_preserve_schema_version() {
+        let mut run_contract = ProfileContract::new("agent-platform-hermes", "registry-v2");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut session_contract = ProfileContract::new("agent-1", "registry-v2");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut profile_contract = ProfileContract::new("registry-profile", "registry-v2");
+        profile_contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_profile_registry(RuntimeProfileRegistry::new([
+            run_contract,
+            session_contract,
+            profile_contract,
+        ]));
+
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.run.target_resource = "resource:team/SECRET_REGISTRY_RUN".to_string();
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].schema_version.as_deref(), Some("registry-v2"));
+        let encoded_run = serde_json::to_string(&run_events[0]).unwrap();
+        assert!(!encoded_run.contains("SECRET_REGISTRY_RUN"));
+
+        let session_events = runtime
+            .stream_session_message(hermes_session_input(
+                new_trace_id(),
+                "SECRET_REGISTRY_SESSION",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            session_events[0].schema_version.as_deref(),
+            Some("registry-v2")
+        );
+        let encoded_session = serde_json::to_string(&session_events[0]).unwrap();
+        assert!(!encoded_session.contains("SECRET_REGISTRY_SESSION"));
+
+        let profile_events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "registry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "SECRET_REGISTRY_PROFILE",
+                )],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(profile_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            profile_events[0].schema_version.as_deref(),
+            Some("registry-v2")
+        );
+        let encoded_profile = serde_json::to_string(&profile_events[0]).unwrap();
+        assert!(!encoded_profile.contains("SECRET_REGISTRY_PROFILE"));
     }
 
     #[tokio::test]

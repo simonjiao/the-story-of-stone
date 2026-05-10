@@ -288,7 +288,8 @@ RuntimeStreamEvent
 2. streaming final 和非 streaming 输出语义一致。
 3. error event 不泄露 prompt、credential、connector payload 或内部栈。
 4. Runtime stream event 能携带 trace、run/session、profile 和 schema version；
-   是否写入审计由调用方决定。
+   explicit contract 或 registry contract 解析到版本时，成功和错误事件都必须
+   标注 schema version；是否写入审计由调用方决定。
 5. run、session message 和 profile step 的 tool loop streaming path 会发出
    `tool_progress`；schema 校验通过后会发出 `schema_partial`。
 6. safe error event 有回归测试，确认不包含 prompt 或 upstream error body。

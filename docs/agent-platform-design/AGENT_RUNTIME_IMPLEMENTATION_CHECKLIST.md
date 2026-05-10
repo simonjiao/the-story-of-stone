@@ -117,6 +117,8 @@ backpressure API 是后续项。
 - [x] streaming final 和非 streaming 输出语义一致。
 - [x] error event 不泄露 prompt、credential、connector payload 或内部栈。
 - [x] stream event 能携带 trace、run/session、profile 和 schema version。
+- [x] explicit contract 或 registry contract 解析到版本时，成功和错误 stream
+  event 都保留 schema version。
 - [x] run、session message 和 profile step 的 tool progress /
   schema partial 有端到端验证。
 - [x] safe error event 有回归验证。
@@ -125,6 +127,8 @@ backpressure API 是后续项。
 ### R2 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `minimal_runtime_stream_registry_contract_error_preserves_schema_version`
+- [x] `hermes_runtime_stream_registry_contract_errors_preserve_schema_version`
 
 ### R2 提交
 
