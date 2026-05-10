@@ -104,8 +104,11 @@
   Runtime step plan schema/policy 版本和受控 step 快照；Gateway 审计中的
   Planned 状态会记录该 runtime step plan，但当前仍是本地 runtime API 调用，
   不是完整 `agent-runtime` step 执行。
+- Evidence package、review record、claim link 和 audit event 的运行时表
+  初始化已迁入 `tonglingyu-runtime::init_runtime_schema`；Gateway 只初始化
+  gateway session/message/workflow 表并调用 runtime schema 初始化。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  source snapshot loader、SQLite 连接和 schema 初始化，且 Runtime
+  source snapshot loader、SQLite 连接和 KB/schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。
 
 ## 下一步

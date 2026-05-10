@@ -841,11 +841,12 @@ fn open_db(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    init_runtime_schema(&conn)?;
+    init_gateway_schema(&conn)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
     Ok(conn)
 }
 
-fn init_runtime_schema(conn: &Connection) -> Result<()> {
+fn init_gateway_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -887,33 +888,16 @@ fn init_runtime_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS evidence_claim_links (
-            package_id TEXT NOT NULL,
-            claim_index INTEGER NOT NULL,
-            evidence_id TEXT NOT NULL,
-            support_relation TEXT NOT NULL,
-            PRIMARY KEY(package_id, claim_index, evidence_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_events (
-            event_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_session ON gateway_messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_trace ON gateway_messages(trace_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_package ON gateway_messages(package_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_trace ON workflow_states(trace_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_package ON workflow_states(package_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
         "#,
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
-        params!["runtime-schema-v2", now_rfc3339()],
+        params!["tonglingyu-gateway-schema-v1", now_rfc3339()],
     )?;
     Ok(())
 }
@@ -1083,50 +1067,6 @@ fn init_schema(conn: &Connection) -> Result<()> {
             topic TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS evidence_cards (
-            evidence_id TEXT PRIMARY KEY,
-            package_id TEXT,
-            evidence_type TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            block_id TEXT NOT NULL,
-            support_scope TEXT NOT NULL,
-            unsupported_scope TEXT NOT NULL,
-            evidence_level TEXT NOT NULL,
-            confidence TEXT NOT NULL,
-            verification_status TEXT NOT NULL,
-            evidence_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS evidence_packages (
-            package_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            question TEXT NOT NULL,
-            claim_statements_json TEXT NOT NULL,
-            evidence_ids_json TEXT NOT NULL,
-            review_status TEXT NOT NULL,
-            review_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS review_records (
-            review_id TEXT PRIMARY KEY,
-            package_id TEXT NOT NULL REFERENCES evidence_packages(package_id),
-            status TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            issues_json TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_events (
-            event_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS kb_version (
             version_id TEXT PRIMARY KEY,
             source_root TEXT NOT NULL,
@@ -1140,7 +1080,6 @@ fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
         CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
-        CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
         "#,
     )?;
     Ok(())

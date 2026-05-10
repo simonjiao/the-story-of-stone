@@ -52,6 +52,77 @@ pub struct EvidencePackage {
     pub review: ReviewRecord,
 }
 
+pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            migration_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS evidence_claim_links (
+            package_id TEXT NOT NULL,
+            claim_index INTEGER NOT NULL,
+            evidence_id TEXT NOT NULL,
+            support_relation TEXT NOT NULL,
+            PRIMARY KEY(package_id, claim_index, evidence_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS evidence_cards (
+            evidence_id TEXT PRIMARY KEY,
+            package_id TEXT,
+            evidence_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            block_id TEXT NOT NULL,
+            support_scope TEXT NOT NULL,
+            unsupported_scope TEXT NOT NULL,
+            evidence_level TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            verification_status TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS evidence_packages (
+            package_id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            claim_statements_json TEXT NOT NULL,
+            evidence_ids_json TEXT NOT NULL,
+            review_status TEXT NOT NULL,
+            review_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS review_records (
+            review_id TEXT PRIMARY KEY,
+            package_id TEXT NOT NULL REFERENCES evidence_packages(package_id),
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            issues_json TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            event_id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
+        "#,
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params!["tonglingyu-runtime-schema-v1", now_rfc3339()],
+    )?;
+    Ok(())
+}
+
 pub fn create_evidence_package(
     conn: &Connection,
     trace_id: &str,

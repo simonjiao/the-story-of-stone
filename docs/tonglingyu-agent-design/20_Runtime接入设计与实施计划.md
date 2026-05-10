@@ -180,7 +180,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 claim-to-evidence 映射、reviewer 规则、本地受控回答、SQLite/FTS 检索和
 evidence card 构建从 Gateway 函数体中迁出。Gateway 现在通过
 `tonglingyu-gateway::plan` 生成 search policy 和 Runtime step plan 快照，
-并调用 runtime API 执行本地领域流程。
+并调用 runtime API 执行本地领域流程。Evidence package、review record、
+claim link 和 audit event 的运行时表初始化已由
+`tonglingyu-runtime::init_runtime_schema` 承接。
 
 这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite、初始化 schema、
 构建 source snapshot KB，并且尚未通过 `agent-runtime` 执行四 profile 或
