@@ -6478,6 +6478,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_stream_profile_rejects_unrequested_tool_call() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["stream"], true);
+                assert!(body.get("tools").is_none());
+                let event = json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_STREAM_PROFILE_CALL_ID",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_STREAM_PROFILE_TOOL",
+                                            "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                });
+                (
+                    StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream; charset=utf-8",
+                    )],
+                    format!("data: {event}\n\ndata: [DONE]\n\n"),
+                )
+            }),
+        );
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "stream-no-contract-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "hallucinate a stream tool",
+                )],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(events[0].profile_id, "stream-no-contract-profile");
+        assert!(events[0].output.is_none());
+        let encoded_events = serde_json::to_string(&events).unwrap();
+        assert!(!encoded_events.contains("SECRET_STREAM_PROFILE_CALL_ID"));
+        assert!(!encoded_events.contains("SECRET_STREAM_PROFILE_TOOL"));
+        assert!(!encoded_events.contains("SECRET_ARGUMENT"));
+        assert!(!encoded_events.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 2);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 2);
+        assert!(!log.contains("SECRET_STREAM_PROFILE_CALL_ID"));
+        assert!(!log.contains("SECRET_STREAM_PROFILE_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_maps_5xx_to_safe_internal_error() {
         let app = Router::new().route(
             "/chat/completions",

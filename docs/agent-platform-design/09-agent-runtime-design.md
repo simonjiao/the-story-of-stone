@@ -472,8 +472,9 @@ runtime: add multi-profile step plan
 验收：
 
 1. 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
-2. 未授权、denied、无 profile contract 或 no-tool run/session
-   non-streaming/streaming path 中的 hallucinated tool call 在执行前被拒绝。
+2. 未授权、denied、无 profile contract、no-tool run/session non-streaming
+   path，或 no-tool run/session/profile streaming path 中的 hallucinated
+   tool call 在执行前被拒绝。
 3. malformed tool arguments 时不会执行 tool executor，streaming path 返回
    安全 `error` event，并写安全 `runtime_tool_error` audit event。
 4. tool input schema invalid 时不会执行 tool executor 或形成 successful tool

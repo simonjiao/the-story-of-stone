@@ -261,8 +261,9 @@ backpressure API 是后续项。
 ### R4.5 验收
 
 - [x] 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
-- [x] 未授权、denied、无 profile contract 或 no-tool run/session
-  non-streaming/streaming path 中的 hallucinated tool call 在执行前被拒绝。
+- [x] 未授权、denied、无 profile contract、no-tool run/session
+  non-streaming path，或 no-tool run/session/profile streaming path 中的
+  hallucinated tool call 在执行前被拒绝。
 - [x] 不在本次 requested tool scope 内的 tool call 在执行前被拒绝。
 - [x] non-read-only tool scope 在执行前被拒绝。
 - [x] malformed tool arguments 时不会执行 tool executor；streaming path
@@ -306,6 +307,9 @@ backpressure API 是后续项。
   覆盖 no-tool run/session path 中 hallucinated tool call 的拒绝和 audit 脱敏。
 - [x] `hermes_runtime_stream_rejects_unrequested_run_and_session_tool_calls`
   覆盖 no-tool streaming run/session path 中 hallucinated tool call 的安全
+  error event 和 audit 脱敏。
+- [x] `hermes_runtime_stream_profile_rejects_unrequested_tool_call`
+  覆盖 no-tool streaming profile step path 中 hallucinated tool call 的安全
   error event 和 audit 脱敏。
 - [x] `hermes_runtime_execute_run_exposes_requested_profile_tools`
 - [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
