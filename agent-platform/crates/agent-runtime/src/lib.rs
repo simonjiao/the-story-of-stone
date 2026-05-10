@@ -546,10 +546,20 @@ impl HermesRuntimeClient {
         messages: Vec<HermesChatMessage>,
         trace_id: &str,
         runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
     ) -> CoreResult<(String, Value)> {
         let (message, metadata) = self
             .chat_completion_message(messages, trace_id, runtime_profile, Vec::new())
             .await?;
+        self.reject_unexpected_tool_calls(
+            &message.tool_calls,
+            runtime_profile,
+            trace_id,
+            contract,
+            requested_tools,
+        )
+        .await?;
         let content = message_content(message)?;
         Ok((content, metadata))
     }
@@ -560,14 +570,59 @@ impl HermesRuntimeClient {
         trace_id: &str,
         runtime_profile: &str,
         contract: Option<&ProfileContract>,
+        requested_tools: &[String],
     ) -> CoreResult<(String, Value)> {
         let started = Instant::now();
         ensure_profile_budget(started, contract)?;
         let result = self
-            .chat_completion(messages, trace_id, runtime_profile)
+            .chat_completion(
+                messages,
+                trace_id,
+                runtime_profile,
+                contract,
+                requested_tools,
+            )
             .await?;
         ensure_profile_budget(started, contract)?;
         Ok(result)
+    }
+
+    async fn reject_unexpected_tool_calls(
+        &self,
+        tool_calls: &[HermesToolCall],
+        runtime_profile: &str,
+        trace_id: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<()> {
+        if tool_calls.is_empty() {
+            return Ok(());
+        }
+        let error = AgentCoreError::coded(
+            ErrorCode::Forbidden,
+            "runtime profile requested a tool outside authorized scope",
+        );
+        for tool_call in tool_calls {
+            let audit_tool_name =
+                runtime_tool_audit_name(contract, requested_tools, &tool_call.function.name);
+            let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+            let call_event = runtime_tool_call_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+            );
+            self.audit_sink.append_runtime_event(call_event).await?;
+            let failure_event = runtime_tool_error_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+                &error,
+            );
+            self.audit_sink.append_runtime_event(failure_event).await?;
+        }
+        Err(error)
     }
 
     async fn chat_completion_message(
@@ -988,6 +1043,7 @@ impl RuntimeClient for HermesRuntimeClient {
                     &input.trace_id,
                     &runtime_profile,
                     contract.as_ref(),
+                    &input.requested_tools,
                 )
                 .await?
             };
@@ -1033,6 +1089,7 @@ impl RuntimeClient for HermesRuntimeClient {
                     &input.trace_id,
                     &runtime_profile,
                     contract.as_ref(),
+                    &input.requested_tools,
                 )
                 .await?
             };
@@ -6112,6 +6169,78 @@ mod tests {
         assert!(log.contains("\"tool_name_status\":\"redacted\""));
         assert!(!log.contains("SECRET_NO_CONTRACT_CALL_ID"));
         assert!(!log.contains("SECRET_NO_CONTRACT_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_unrequested_run_and_session_tool_calls_with_safe_audit() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        assert!(body.get("tools").is_none());
+                        let call_id = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            format!("SECRET_NO_TOOL_SCOPE_CALL_{}", *calls)
+                        };
+                        Json(json!({
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "SECRET_NO_TOOL_SCOPE_TOOL",
+                                                    "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let run_result = runtime.execute_run(hermes_run_input(new_trace_id())).await;
+        assert_eq!(run_result.unwrap_err().code(), ErrorCode::Forbidden);
+
+        let session_result = runtime
+            .send_session_message(hermes_session_input(new_trace_id(), "hallucinate a tool"))
+            .await;
+        assert_eq!(session_result.unwrap_err().code(), ErrorCode::Forbidden);
+        assert_eq!(*calls.lock().unwrap(), 2);
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_error").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 4);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 4);
+        assert!(!log.contains("SECRET_NO_TOOL_SCOPE_CALL"));
+        assert!(!log.contains("SECRET_NO_TOOL_SCOPE_TOOL"));
         assert!(!log.contains("SECRET_ARGUMENT"));
         assert!(!log.contains("SECRET_VALUE"));
         assert!(!log.contains("\"arguments\""));

@@ -41,6 +41,7 @@
   summary 只暴露类型和长度/数量，不透传 tool executor metadata payload、
   raw string output 或 object key 名，且不会让 executor 覆盖已授权 tool call
   身份；未授权/未知 tool name 和 call id 会在失败 audit 中脱敏；
+  no-tool run/session path 中 hallucinated tool call 会被安全拒绝并审计；
   malformed arguments 和 tool input/output schema invalid 有直接回归验证，
   失败时不会执行越界 executor、回灌 raw arguments/output 或形成
   successful tool result；tool executor 自身失败会包装为安全 Runtime
