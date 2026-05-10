@@ -669,13 +669,33 @@ impl HermesRuntimeClient {
                 .await?;
             ensure_profile_budget(started, contract)?;
             if !message.tool_calls.is_empty() {
+                let tool_calls = message.tool_calls.clone();
                 if round >= self.max_tool_rounds {
-                    return Err(AgentCoreError::coded(
+                    let error = AgentCoreError::coded(
                         ErrorCode::Conflict,
                         "runtime profile exceeded maximum tool rounds",
-                    ));
+                    );
+                    for tool_call in &tool_calls {
+                        let audit_tool_name = runtime_tool_audit_name(
+                            contract,
+                            requested_tools,
+                            &tool_call.function.name,
+                        );
+                        let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+                        let failure_event = runtime_tool_error_audit_event(
+                            runtime_profile,
+                            trace_id,
+                            audit_call_id.as_deref(),
+                            audit_tool_name.as_deref(),
+                            &error,
+                        );
+                        self.audit_sink
+                            .append_runtime_event(failure_event.clone())
+                            .await?;
+                        tool_audit_events.push(failure_event);
+                    }
+                    return Err(error);
                 }
-                let tool_calls = message.tool_calls.clone();
                 messages.push(HermesChatMessage::assistant_tool_calls(tool_calls.clone()));
                 for tool_call in tool_calls {
                     ensure_profile_budget(started, contract)?;
@@ -5256,6 +5276,7 @@ mod tests {
         );
         let mut contract = ProfileContract::new("loop-profile", "v1");
         contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
         let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
             base_url: spawn_server(app).await,
             api_key: None,
@@ -5268,6 +5289,7 @@ mod tests {
             "tool.read".to_string(),
             json!({"ok": true}),
         )])))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)))
         .with_max_tool_rounds(1);
 
         let result = runtime
@@ -5289,6 +5311,11 @@ mod tests {
                 ..
             }
         ));
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("\"error_code\":\"conflict\""));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
     }
 
     #[tokio::test]

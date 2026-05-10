@@ -478,7 +478,8 @@ runtime: add multi-profile step plan
 7. required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
    audit event。
 8. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
-9. 超出 tool round 或 runtime budget 时返回安全错误。
+9. 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
+   超出 runtime budget 时返回安全错误。
 10. streaming run、session message 或 profile step 超出 runtime budget 时返回
     安全 `error` event。
 11. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
