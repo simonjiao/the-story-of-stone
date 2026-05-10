@@ -110,6 +110,12 @@
 - Gateway 单元测试已加入源码级回归断言，防止 `extract_terms`、
   `query_blocks_like`、`evidence_card_from_block`、`review` 等 runtime
   领域函数重新回流到 Gateway。
+- Runtime 已定义 `tonglingyu.text.search`、`tonglingyu.commentary.search`、
+  `tonglingyu.evidence.package.create/read/replay` 的 tool catalog 和结构化
+  `TonglingyuToolCall` / `TonglingyuToolOutput`；Gateway 主路径已改为通过
+  `execute_tool` 调用这些 runtime tools，不再直接调用 package/search 函数。
+- 本轮验证已补跑 `agent-runtime` 单包测试、`tonglingyu-runtime` /
+  `tonglingyu-gateway` 单包测试、clippy、文档 lint 和 gateway smoke。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   source snapshot loader、SQLite 连接和 KB/schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。

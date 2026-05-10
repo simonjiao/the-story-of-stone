@@ -52,6 +52,182 @@ pub struct EvidencePackage {
     pub review: ReviewRecord,
 }
 
+pub const TOOL_CATALOG_VERSION: &str = "tonglingyu-readonly-tools-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub version: String,
+    pub allowed_profiles: Vec<String>,
+    pub effect_scope: String,
+    pub input_contract: Value,
+    pub output_contract: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+pub enum TonglingyuToolCall {
+    #[serde(rename = "tonglingyu.text.search")]
+    TextSearch {
+        question: String,
+        limit: usize,
+        required_evidence_types: Vec<String>,
+    },
+    #[serde(rename = "tonglingyu.commentary.search")]
+    CommentarySearch { question: String, limit: usize },
+    #[serde(rename = "tonglingyu.evidence.package.create")]
+    EvidencePackageCreate {
+        trace_id: String,
+        question: String,
+        cards: Vec<EvidenceCard>,
+    },
+    #[serde(rename = "tonglingyu.evidence.package.read")]
+    EvidencePackageRead { package_id: String },
+    #[serde(rename = "tonglingyu.evidence.package.replay")]
+    EvidencePackageReplay { package_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "object", rename_all = "snake_case")]
+pub enum TonglingyuToolOutput {
+    EvidenceCards {
+        cards: Vec<EvidenceCard>,
+        tool_version: String,
+    },
+    EvidencePackage {
+        package: Box<EvidencePackage>,
+        tool_version: String,
+    },
+    EvidencePackageRead {
+        package: Option<Box<EvidencePackage>>,
+        tool_version: String,
+    },
+    EvidencePackageReplay {
+        replay: Option<Value>,
+        tool_version: String,
+    },
+}
+
+pub fn tool_catalog() -> Vec<ToolDescriptor> {
+    vec![
+        ToolDescriptor {
+            name: "tonglingyu.text.search".to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec!["honglou-text".to_string()],
+            effect_scope: "read_only_kb".to_string(),
+            input_contract: json!({
+                "required": ["question", "limit", "required_evidence_types"],
+                "properties": {
+                    "question": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1},
+                    "required_evidence_types": {
+                        "type": "array",
+                        "items": {"enum": ["base_text", "commentary", "version_note"]}
+                    }
+                }
+            }),
+            output_contract: json!({
+                "object": "evidence_cards",
+                "preserves": ["original_text", "source_id", "source_url", "revision_id", "block_id"]
+            }),
+        },
+        ToolDescriptor {
+            name: "tonglingyu.commentary.search".to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec!["honglou-commentary".to_string()],
+            effect_scope: "read_only_kb".to_string(),
+            input_contract: json!({
+                "required": ["question", "limit"],
+                "properties": {
+                    "question": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1}
+                }
+            }),
+            output_contract: json!({
+                "object": "evidence_cards",
+                "required_evidence_type": "commentary"
+            }),
+        },
+        ToolDescriptor {
+            name: "tonglingyu.evidence.package.create".to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec!["honglou-main".to_string()],
+            effect_scope: "runtime_evidence_store_only".to_string(),
+            input_contract: json!({
+                "required": ["trace_id", "question", "cards"],
+                "properties": {
+                    "trace_id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "cards": {"type": "array"}
+                }
+            }),
+            output_contract: json!({"object": "evidence_package"}),
+        },
+        ToolDescriptor {
+            name: "tonglingyu.evidence.package.read".to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec![
+                "honglou-main".to_string(),
+                "honglou-reviewer".to_string(),
+                "gateway-admin-proxy".to_string(),
+            ],
+            effect_scope: "read_only_runtime_evidence_store".to_string(),
+            input_contract: json!({"required": ["package_id"]}),
+            output_contract: json!({"object": "evidence_package"}),
+        },
+        ToolDescriptor {
+            name: "tonglingyu.evidence.package.replay".to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec!["gateway-admin-proxy".to_string()],
+            effect_scope: "read_only_runtime_evidence_store".to_string(),
+            input_contract: json!({"required": ["package_id"]}),
+            output_contract: json!({"object": "tonglingyu.evidence_package_replay"}),
+        },
+    ]
+}
+
+pub fn execute_tool(conn: &Connection, call: TonglingyuToolCall) -> Result<TonglingyuToolOutput> {
+    match call {
+        TonglingyuToolCall::TextSearch {
+            question,
+            limit,
+            required_evidence_types,
+        } => Ok(TonglingyuToolOutput::EvidenceCards {
+            cards: search_evidence(conn, &question, limit, &required_evidence_types)?,
+            tool_version: TOOL_CATALOG_VERSION.to_string(),
+        }),
+        TonglingyuToolCall::CommentarySearch { question, limit } => {
+            Ok(TonglingyuToolOutput::EvidenceCards {
+                cards: search_evidence(conn, &question, limit, &["commentary".to_string()])?,
+                tool_version: TOOL_CATALOG_VERSION.to_string(),
+            })
+        }
+        TonglingyuToolCall::EvidencePackageCreate {
+            trace_id,
+            question,
+            cards,
+        } => Ok(TonglingyuToolOutput::EvidencePackage {
+            package: Box::new(create_evidence_package(conn, &trace_id, &question, cards)?),
+            tool_version: TOOL_CATALOG_VERSION.to_string(),
+        }),
+        TonglingyuToolCall::EvidencePackageRead { package_id } => {
+            let package = load_evidence_package_from_conn(conn, &package_id)?.map(Box::new);
+            Ok(TonglingyuToolOutput::EvidencePackageRead {
+                package,
+                tool_version: TOOL_CATALOG_VERSION.to_string(),
+            })
+        }
+        TonglingyuToolCall::EvidencePackageReplay { package_id } => {
+            let replay = load_evidence_package_from_conn(conn, &package_id)?
+                .map(|package| replay_package_json(&package));
+            Ok(TonglingyuToolOutput::EvidencePackageReplay {
+                replay,
+                tool_version: TOOL_CATALOG_VERSION.to_string(),
+            })
+        }
+    }
+}
+
 pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -224,6 +400,13 @@ pub fn create_evidence_package(
 
 pub fn load_evidence_package(db: &Path, package_id: &str) -> Result<Option<EvidencePackage>> {
     let conn = Connection::open(db)?;
+    load_evidence_package_from_conn(&conn, package_id)
+}
+
+pub fn load_evidence_package_from_conn(
+    conn: &Connection,
+    package_id: &str,
+) -> Result<Option<EvidencePackage>> {
     let package: Option<(String, String, String, String, String, String)> = conn
         .query_row(
             "SELECT package_id, trace_id, question, claim_statements_json, evidence_ids_json, review_json FROM evidence_packages WHERE package_id = ?1",
@@ -1207,5 +1390,34 @@ mod tests {
         let answer = replay_answer(&package);
         assert!(answer.contains("pkg-test"));
         assert!(answer.contains("证据不足"));
+    }
+
+    #[test]
+    fn tool_catalog_defines_expected_readonly_contracts() {
+        let catalog = tool_catalog();
+        let names = catalog
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "tonglingyu.text.search",
+            "tonglingyu.commentary.search",
+            "tonglingyu.evidence.package.create",
+            "tonglingyu.evidence.package.read",
+            "tonglingyu.evidence.package.replay",
+        ] {
+            assert!(names.contains(expected), "missing tool contract {expected}");
+        }
+        assert!(
+            catalog
+                .iter()
+                .all(|tool| tool.version == TOOL_CATALOG_VERSION)
+        );
+        assert!(
+            catalog
+                .iter()
+                .filter(|tool| tool.name.ends_with(".search"))
+                .all(|tool| tool.effect_scope == "read_only_kb")
+        );
     }
 }

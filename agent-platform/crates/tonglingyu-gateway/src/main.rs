@@ -23,9 +23,8 @@ use std::{
 };
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
-    EvidenceCard, EvidencePackage, create_evidence_package, enforce_review, load_evidence_package,
-    local_answer, package_json, replay_answer, replay_package_json,
-    search_evidence as runtime_search_evidence,
+    EvidenceCard, EvidencePackage, TonglingyuToolCall, TonglingyuToolOutput, enforce_review,
+    execute_tool, local_answer, package_json, replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -587,17 +586,15 @@ async fn main() -> Result<()> {
             let conn = open_db(&args.db)?;
             let (cards, _policy) = search_evidence_with_policy(&conn, &args.question, args.limit)?;
             let trace_id = new_trace_id();
-            let package = create_evidence_package(&conn, &trace_id, &args.question, cards)?;
+            let package = runtime_create_package(&conn, &trace_id, &args.question, cards)?;
             println!("{}", serde_json::to_string_pretty(&package)?);
             Ok(())
         }
         Command::ReplayPackage(args) => {
-            let package = load_evidence_package(&args.db, &args.package_id)?
+            let conn = open_db(&args.db)?;
+            let replay = runtime_replay_package(&conn, &args.package_id)?
                 .ok_or_else(|| anyhow!("evidence package not found: {}", args.package_id))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&replay_package_json(&package))?
-            );
+            println!("{}", serde_json::to_string_pretty(&replay)?);
             Ok(())
         }
         Command::Eval(args) => {
@@ -1463,8 +1460,74 @@ fn search_evidence_with_policy(
     limit: usize,
 ) -> Result<(Vec<EvidenceCard>, SearchPolicy)> {
     let policy = search_policy(question);
-    let cards = runtime_search_evidence(conn, question, limit, &policy.required_evidence_types)?;
+    let cards = runtime_search_cards(conn, question, limit, &policy.required_evidence_types)?;
     Ok((cards, policy))
+}
+
+fn runtime_search_cards(
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    required_evidence_types: &[String],
+) -> Result<Vec<EvidenceCard>> {
+    match execute_tool(
+        conn,
+        TonglingyuToolCall::TextSearch {
+            question: question.to_string(),
+            limit,
+            required_evidence_types: required_evidence_types.to_vec(),
+        },
+    )? {
+        TonglingyuToolOutput::EvidenceCards { cards, .. } => Ok(cards),
+        other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+    }
+}
+
+fn runtime_create_package(
+    conn: &Connection,
+    trace_id: &str,
+    question: &str,
+    cards: Vec<EvidenceCard>,
+) -> Result<EvidencePackage> {
+    match execute_tool(
+        conn,
+        TonglingyuToolCall::EvidencePackageCreate {
+            trace_id: trace_id.to_string(),
+            question: question.to_string(),
+            cards,
+        },
+    )? {
+        TonglingyuToolOutput::EvidencePackage { package, .. } => Ok(*package),
+        other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+    }
+}
+
+fn runtime_read_package(conn: &Connection, package_id: &str) -> Result<Option<EvidencePackage>> {
+    match execute_tool(
+        conn,
+        TonglingyuToolCall::EvidencePackageRead {
+            package_id: package_id.to_string(),
+        },
+    ) {
+        Ok(TonglingyuToolOutput::EvidencePackageRead { package, .. }) => {
+            Ok(package.map(|package| *package))
+        }
+        Ok(other) => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        Err(error) => Err(error),
+    }
+}
+
+fn runtime_replay_package(conn: &Connection, package_id: &str) -> Result<Option<Value>> {
+    match execute_tool(
+        conn,
+        TonglingyuToolCall::EvidencePackageReplay {
+            package_id: package_id.to_string(),
+        },
+    ) {
+        Ok(TonglingyuToolOutput::EvidencePackageReplay { replay, .. }) => Ok(replay),
+        Ok(other) => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        Err(error) => Err(error),
+    }
 }
 
 fn insert_audit_event(
@@ -1634,7 +1697,7 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         let trace_id = format!("eval-{}", new_trace_id());
         let (cards, _policy) =
             search_evidence_with_policy(&conn, case.question, case.limit.unwrap_or(args.limit))?;
-        let package = create_evidence_package(&conn, &trace_id, case.question, cards)?;
+        let package = runtime_create_package(&conn, &trace_id, case.question, cards)?;
         let replay = replay_answer(&package);
         let mut failures = Vec::new();
         if package.review.status != case.expected_review_status {
@@ -2481,8 +2544,8 @@ async fn replay_package_endpoint(
         Err(response) => return *response,
     };
     let access = package_access_context(&headers, subject);
-    match load_evidence_package_for_subject(&state.db, &package_id, &access) {
-        Ok(Some(package)) => Json(replay_package_json(&package)).into_response(),
+    match load_package_replay_for_subject(&state.db, &package_id, &access) {
+        Ok(Some(replay)) => Json(replay).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
         Err(error) => {
             tracing::warn!(package_id = %package_id, error = %error, "package replay failed");
@@ -2905,7 +2968,7 @@ async fn chat_completions(
         }),
     );
 
-    let package = match create_evidence_package(&conn, &trace_id, &question, cards) {
+    let package = match runtime_create_package(&conn, &trace_id, &question, cards) {
         Ok(package) => package,
         Err(error) => {
             let _ = record_workflow_state(
@@ -3301,14 +3364,29 @@ fn load_evidence_package_for_subject(
     access: &PackageAccessContext,
 ) -> Result<Option<EvidencePackage>> {
     let conn = open_db(db)?;
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM evidence_packages WHERE package_id = ?1",
-        params![package_id],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
+    if !package_owned_by_subject(&conn, package_id, access)? {
         return Ok(None);
     }
+    runtime_read_package(&conn, package_id)
+}
+
+fn load_package_replay_for_subject(
+    db: &Path,
+    package_id: &str,
+    access: &PackageAccessContext,
+) -> Result<Option<Value>> {
+    let conn = open_db(db)?;
+    if !package_owned_by_subject(&conn, package_id, access)? {
+        return Ok(None);
+    }
+    runtime_replay_package(&conn, package_id)
+}
+
+fn package_owned_by_subject(
+    conn: &Connection,
+    package_id: &str,
+    access: &PackageAccessContext,
+) -> Result<bool> {
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
@@ -3320,10 +3398,7 @@ fn load_evidence_package_for_subject(
         params![package_id, &access.user_ref, &access.subject],
         |row| row.get(0),
     )?;
-    if owned == 0 {
-        return Ok(None);
-    }
-    load_evidence_package(db, package_id)
+    Ok(owned > 0)
 }
 
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
@@ -3358,7 +3433,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     }
     let mut packages = Vec::new();
     for package_id in package_ids {
-        if let Some(package) = load_evidence_package(db, &package_id)? {
+        if let Some(package) = runtime_read_package(&conn, &package_id)? {
             packages.push(package_json(&package));
         }
     }
@@ -3373,7 +3448,8 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
 }
 
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
-    let Some(package) = load_evidence_package(db, package_id)? else {
+    let conn = open_db(db)?;
+    let Some(package) = runtime_read_package(&conn, package_id)? else {
         return Ok(None);
     };
     let trace = load_trace(db, &package.trace_id)?;

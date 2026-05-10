@@ -154,25 +154,25 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
   trace/session 透传、SSE 转发、模型隐藏和响应封装。
 - [ ] Gateway 不直接执行 source snapshot、SQLite 或 FTS 查询。
-- [ ] Gateway 不构建证据卡片或证据包。
-- [ ] Gateway 不执行 reviewer 或本地审校规则。
-- [ ] Gateway 不维护证据包 replay 的领域逻辑。
-- [ ] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
+- [x] Gateway 不构建证据卡片或证据包。
+- [x] Gateway 不执行 reviewer 或本地审校规则。
+- [x] Gateway 不维护证据包 replay 的领域逻辑。
+- [x] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
   内部 profile。
 
 ### R5B Evidence Read-only Tools
 
 - [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
-- [ ] 定义 `tonglingyu.text.search` read-only tool。
-- [ ] 定义 `tonglingyu.commentary.search` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.create` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.read` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.replay` read-only tool。
-- [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
-- [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
+- [x] 定义 `tonglingyu.text.search` read-only tool。
+- [x] 定义 `tonglingyu.commentary.search` read-only tool。
+- [x] 定义 `tonglingyu.evidence.package.create` runtime-scoped tool。
+- [x] 定义 `tonglingyu.evidence.package.read` read-only tool。
+- [x] 定义 `tonglingyu.evidence.package.replay` read-only tool。
+- [x] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
+- [x] 工具不暴露 secret、写权限 credential 或内部 prompt。
 
 ### R5B 当前实现校准
 
@@ -183,7 +183,9 @@ evidence card 构建从 Gateway 函数体中迁出。Gateway 现在通过
 并调用 runtime API 执行本地领域流程。Evidence package、review record、
 claim link 和 audit event 的运行时表初始化已由
 `tonglingyu-runtime::init_runtime_schema` 承接。Gateway 单元测试已加入
-源码级回归断言，防止 runtime 领域函数重新回流到 Gateway。
+源码级回归断言，防止 runtime 领域函数重新回流到 Gateway。Runtime 已定义
+`TonglingyuToolCall` / `TonglingyuToolOutput` / `tool_catalog`，Gateway 主路径
+通过 `execute_tool` 调用 text search、package create/read/replay。
 
 这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite、初始化 schema、
 构建 source snapshot KB，并且尚未通过 `agent-runtime` 执行四 profile 或
@@ -215,9 +217,9 @@ read-only tool contract。R5A/R5C/R5D 必须等 Runtime profile、tool contract
   安全元数据，不暴露内部日志或 prompt。
 - [ ] 增加 fake runtime/tools 的本地 dry run。
 - [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-- [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 - [ ] 目标环境 Open WebUI 单入口复测。
 
 ## 验收口径
