@@ -211,6 +211,22 @@ impl TonglingyuRuntimeStore {
         let conn = self.open_connection()?;
         runtime_audit_events_for_trace(&conn, trace_id)
     }
+
+    pub fn rebuild_knowledge_base_from_snapshots(
+        &self,
+        source_root: &Path,
+    ) -> Result<KnowledgeBaseBuildReport> {
+        let mut conn = self.open_connection()?;
+        let tx = conn.transaction()?;
+        let report = rebuild_knowledge_base_from_snapshots(&tx, source_root)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    pub fn prune_data(&self, retention_days: u32, dry_run: bool) -> Result<Value> {
+        let conn = self.open_connection()?;
+        prune_runtime_data(&conn, retention_days, dry_run)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

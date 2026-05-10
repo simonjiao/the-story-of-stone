@@ -134,9 +134,10 @@
   `MinimalRuntimeClient` plan gate，校验 step dependency、requested tool scope、
   output_ref 和 Runtime step metadata。
 - `tonglingyu-runtime` 已新增 `TonglingyuRuntimeStore`；Gateway 请求路径、
-  `runtime-dry-run`、health、search、metrics 和 admin package/trace 读取已改为
-  通过 runtime store handle 按 DB path 访问 runtime，不再把这些路径的 Gateway
-  `Connection` 直接传入 Runtime workflow/tool API。
+  `runtime-dry-run`、health、search、metrics、admin package/trace 读取以及
+  build/prune 管理路径已改为通过 runtime store handle 按 DB path 访问 runtime，
+  不再把 Gateway `Connection` 直接传入 Runtime workflow/tool/schema/prune/rebuild
+  API。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
@@ -153,8 +154,7 @@
   `_runtime_stream_events` / `_stream_source`，smoke 已断言公开 completion 不暴露
   runtime step plan、agent runtime plan gate、planned profiles 或内部 stream
   event 列表。
-- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  build/prune 等管理路径的 SQLite 连接/事务边界；profile workflow 还是
+- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 还是
   `tonglingyu-runtime` 确定性执行，`agent-runtime` 只承担 plan gate，尚未承担
   profile content/tool execution；目标 Open WebUI 页面复测仍未完成。
 
@@ -162,9 +162,8 @@
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway 的本地连接/事务边界、
-   Runtime workflow 的 profile content/tool execution 接入 `agent-runtime` /
-   Hermes 执行面。
+2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Runtime workflow 的 profile
+   content/tool execution 接入 `agent-runtime` / Hermes 执行面。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前

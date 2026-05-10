@@ -606,8 +606,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         build_kb(&build)?;
     }
     if args.retention_days > 0 {
-        let conn = open_db(&args.db)?;
-        let report = prune_gateway_and_runtime_data(&conn, args.retention_days, false)?;
+        let report = prune_gateway_and_runtime_data(&args.db, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
     let state = Arc::new(AppState {
@@ -674,11 +673,10 @@ fn build_kb(args: &BuildKbArgs) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
-    let mut conn = open_db(&args.db)?;
-    let tx = conn.transaction()?;
-    clear_gateway_generated_rows(&tx)?;
-    let report = tonglingyu_runtime::rebuild_knowledge_base_from_snapshots(&tx, &args.source_root)?;
-    tx.commit()?;
+    let conn = open_db(&args.db)?;
+    clear_gateway_generated_rows(&conn)?;
+    let report = TonglingyuRuntimeStore::new(args.db.clone())
+        .rebuild_knowledge_base_from_snapshots(&args.source_root)?;
     println!(
         "OK build_kb db={} source_root={} sources={} blocks={} schema={}",
         args.db.display(),
@@ -716,27 +714,24 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
 }
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
-    let conn = open_db(&args.db)?;
-    prune_gateway_and_runtime_data(&conn, args.retention_days, args.dry_run)
+    prune_gateway_and_runtime_data(&args.db, args.retention_days, args.dry_run)
 }
 
-fn prune_gateway_and_runtime_data(
-    conn: &Connection,
-    retention_days: u32,
-    dry_run: bool,
-) -> Result<Value> {
+fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool) -> Result<Value> {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
     if retention_days == 0 {
-        return tonglingyu_runtime::prune_runtime_data(conn, retention_days, dry_run);
+        return runtime_store.prune_data(retention_days, dry_run);
     }
-    let mut report = tonglingyu_runtime::prune_runtime_data(conn, retention_days, dry_run)?;
+    let mut report = runtime_store.prune_data(retention_days, dry_run)?;
+    let conn = open_db(db)?;
     let cutoff = report
         .get("cutoff")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("runtime prune report missing cutoff"))?
         .to_string();
     let gateway_counts = json!({
-        "gateway_messages": count_where(conn, "gateway_messages", "created_at < ?1", &cutoff)?,
-        "workflow_states": count_where(conn, "workflow_states", "created_at < ?1", &cutoff)?,
+        "gateway_messages": count_where(&conn, "gateway_messages", "created_at < ?1", &cutoff)?,
+        "workflow_states": count_where(&conn, "workflow_states", "created_at < ?1", &cutoff)?,
     });
     if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
         counts.insert(
@@ -780,7 +775,6 @@ fn open_db(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_gateway_schema(&conn)?;
-    tonglingyu_runtime::init_runtime_schema(&conn)?;
     Ok(conn)
 }
 
