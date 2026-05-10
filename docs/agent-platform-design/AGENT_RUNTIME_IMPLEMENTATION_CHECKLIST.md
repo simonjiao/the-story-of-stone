@@ -239,6 +239,7 @@ backpressure API 是后续项。
   step output。
 - [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
+- [x] streaming profile step 超出 runtime budget 时返回安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
   runtime tool call / result 事件。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证。
@@ -250,6 +251,7 @@ backpressure API 是后续项。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
+- [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 
 ### R4.5 提交
 

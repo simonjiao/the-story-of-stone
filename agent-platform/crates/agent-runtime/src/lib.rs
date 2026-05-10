@@ -586,6 +586,7 @@ impl HermesRuntimeClient {
             let (message, mut metadata) = self
                 .chat_completion_message(messages.clone(), trace_id, runtime_profile, tools.clone())
                 .await?;
+            ensure_profile_budget(started, contract)?;
             if !message.tool_calls.is_empty() {
                 if round >= self.max_tool_rounds {
                     return Err(AgentCoreError::coded(
@@ -631,6 +632,7 @@ impl HermesRuntimeClient {
                             return Err(error);
                         }
                     };
+                    ensure_profile_budget(started, contract)?;
                     let result_summary = runtime_tool_result_summary(&result);
                     let result_event = runtime_tool_result_audit_event(&result);
                     self.audit_sink
@@ -1118,9 +1120,12 @@ impl RuntimeClient for HermesRuntimeClient {
                 .iter()
                 .map(runtime_profile_message_to_hermes)
                 .collect();
+            let started = Instant::now();
+            ensure_profile_budget(started, contract.as_ref())?;
             let (content, metadata, mut events) = self
                 .chat_completion_stream(messages, &input.trace_id, &input.profile_id)
                 .await?;
+            ensure_profile_budget(started, contract.as_ref())?;
             let output = finalize_runtime_output(
                 RuntimeOutput {
                     result_summary: content,
@@ -4297,6 +4302,40 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_safe_error_for_expired_profile_budget() {
+        let mut contract = ProfileContract::new("budget-profile", "v1");
+        contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "budget-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "SECRET_BUDGET")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("conflict"));
+        assert!(events[0].output.is_none());
+        let encoded = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded.contains("SECRET_BUDGET"));
     }
 
     #[tokio::test]

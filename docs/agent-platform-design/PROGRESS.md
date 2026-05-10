@@ -24,8 +24,9 @@
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool
   scope、per-profile tool permission、read-only capability、tool schema、
-  tool round、runtime budget 和 output ref/summary 约束；RuntimeOutput
-  metadata 会返回安全 tool event 摘要；tool call 失败会写安全
+  tool round、runtime budget 和 output ref/summary 约束；普通和 streaming
+  profile step 超出 runtime budget 都会返回安全错误；RuntimeOutput metadata
+  会返回安全 tool event 摘要；tool call 失败会写安全
   `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
   可配置的 append-only JSONL audit sink。
 - Runtime 完整完成口径已关闭在 repo/local 范围内；完整 JSON Schema 和
