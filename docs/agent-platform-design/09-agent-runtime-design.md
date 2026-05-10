@@ -232,7 +232,7 @@ ProfileContract
 6. 超过 `max_context_messages` 时返回安全错误，不进入 successful runtime output。
 7. `safety_policy.deny_message_roles` 和 `safety_policy.max_message_bytes`
    会在进入模型前执行，未知 safety policy 字段 fail closed，失败时返回
-   安全错误。
+   安全错误，且不回显未知字段名或字段值。
 
 测试：
 

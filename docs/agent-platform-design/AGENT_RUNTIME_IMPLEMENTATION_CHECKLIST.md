@@ -69,7 +69,8 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
 - [x] 超过 `max_context_messages` 时返回安全错误，不进入 successful output。
 - [x] `safety_policy` 拒绝指定 message role 或超大消息时返回安全错误。
-- [x] 未支持的 `safety_policy` 字段 fail closed，不被静默忽略。
+- [x] 未支持的 `safety_policy` 字段 fail closed，不被静默忽略，也不回显
+  未知字段名或字段值。
 
 ### R1 测试
 
@@ -78,6 +79,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] `minimal_runtime_rejects_profile_safety_denied_role`
 - [x] `minimal_runtime_rejects_profile_safety_oversized_message`
 - [x] `minimal_runtime_rejects_profile_safety_unknown_field`
+  覆盖未知字段名和字段值脱敏。
 - [x] `schema_validation_error_omits_unexpected_property_name`
 
 ### R1 提交

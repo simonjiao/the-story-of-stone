@@ -2245,17 +2245,13 @@ fn validate_contract_safety_policy(contract: &ProfileContract, input: &Value) ->
     };
     for field in policy.keys() {
         if !matches!(field.as_str(), "deny_message_roles" | "max_message_bytes") {
-            return Err(invalid_safety_policy(field));
+            return Err(invalid_safety_policy());
         }
     }
     if let Some(denied_roles) = policy.get("deny_message_roles") {
-        let denied_roles = denied_roles
-            .as_array()
-            .ok_or_else(|| invalid_safety_policy("deny_message_roles"))?;
+        let denied_roles = denied_roles.as_array().ok_or_else(invalid_safety_policy)?;
         for denied_role in denied_roles {
-            let denied_role = denied_role
-                .as_str()
-                .ok_or_else(|| invalid_safety_policy("deny_message_roles"))?;
+            let denied_role = denied_role.as_str().ok_or_else(invalid_safety_policy)?;
             if runtime_message_values(input).into_iter().any(|message| {
                 message
                     .get("role")
@@ -2272,8 +2268,7 @@ fn validate_contract_safety_policy(contract: &ProfileContract, input: &Value) ->
     if let Some(max_message_bytes) = policy.get("max_message_bytes") {
         let max_message_bytes = max_message_bytes
             .as_u64()
-            .ok_or_else(|| invalid_safety_policy("max_message_bytes"))?
-            as usize;
+            .ok_or_else(invalid_safety_policy)? as usize;
         if runtime_message_values(input)
             .into_iter()
             .filter_map(runtime_message_content)
@@ -2288,10 +2283,10 @@ fn validate_contract_safety_policy(contract: &ProfileContract, input: &Value) ->
     Ok(())
 }
 
-fn invalid_safety_policy(field: &str) -> AgentCoreError {
+fn invalid_safety_policy() -> AgentCoreError {
     AgentCoreError::coded(
         ErrorCode::Conflict,
-        format!("runtime profile safety policy field {field} was invalid"),
+        "runtime profile safety policy was invalid",
     )
 }
 
@@ -3393,7 +3388,7 @@ mod tests {
     async fn minimal_runtime_rejects_profile_safety_unknown_field() {
         let mut contract = ProfileContract::new("test-profile", "v1");
         contract.safety_policy = json!({
-            "future_policy": true
+            "SECRET_FUTURE_POLICY": "SECRET_POLICY_VALUE"
         });
         let runtime = MinimalRuntimeClient::default();
         let result = runtime
@@ -3408,13 +3403,17 @@ mod tests {
             })
             .await;
 
+        let error = result.unwrap_err();
         assert!(matches!(
-            result.unwrap_err(),
+            error,
             AgentCoreError::Coded {
                 code: ErrorCode::Conflict,
                 ..
             }
         ));
+        let encoded = error.to_string();
+        assert!(!encoded.contains("SECRET_FUTURE_POLICY"));
+        assert!(!encoded.contains("SECRET_POLICY_VALUE"));
     }
 
     #[tokio::test]
