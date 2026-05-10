@@ -606,7 +606,7 @@ impl HermesRuntimeClient {
                     tool_audit_events.push(call_event);
                     let tool_call_id = tool_call.id.clone();
                     let tool_name = tool_call.function.name.clone();
-                    let result = match self
+                    let (result, output_schema) = match self
                         .execute_runtime_tool_call(
                             contract,
                             requested_tools,
@@ -633,8 +633,8 @@ impl HermesRuntimeClient {
                         }
                     };
                     ensure_profile_budget(started, contract)?;
-                    let result_summary = runtime_tool_result_summary(&result);
-                    let result_event = runtime_tool_result_audit_event(&result);
+                    let result_summary = runtime_tool_result_summary(&result, &output_schema);
+                    let result_event = runtime_tool_result_audit_event(&result, &output_schema);
                     self.audit_sink
                         .append_runtime_event(result_event.clone())
                         .await?;
@@ -667,7 +667,7 @@ impl HermesRuntimeClient {
         runtime_profile: &str,
         trace_id: &str,
         tool_call: HermesToolCall,
-    ) -> CoreResult<RuntimeToolResult> {
+    ) -> CoreResult<(RuntimeToolResult, Value)> {
         let Some(contract) = contract else {
             return Err(AgentCoreError::coded(
                 ErrorCode::Forbidden,
@@ -710,7 +710,7 @@ impl HermesRuntimeClient {
             ));
         }
         validate_json_schema_value(&spec.output_schema, &result.output)?;
-        Ok(result)
+        Ok((result, spec.output_schema))
     }
 
     async fn chat_completion_stream(
@@ -2553,8 +2553,8 @@ fn runtime_tool_call_audit_event(
     })
 }
 
-fn runtime_tool_result_audit_event(result: &RuntimeToolResult) -> Value {
-    let mut value = runtime_tool_result_summary(result);
+fn runtime_tool_result_audit_event(result: &RuntimeToolResult, output_schema: &Value) -> Value {
+    let mut value = runtime_tool_result_summary(result, output_schema);
     value["event"] = json!("runtime_tool_result");
     value
 }
@@ -2576,11 +2576,12 @@ fn runtime_tool_error_audit_event(
     })
 }
 
-fn runtime_tool_result_summary(result: &RuntimeToolResult) -> Value {
+fn runtime_tool_result_summary(result: &RuntimeToolResult, output_schema: &Value) -> Value {
     json!({
         "call_id": &result.call_id,
         "profile_id": &result.profile_id,
         "tool_name": &result.tool_name,
+        "output_schema": output_schema,
         "output_ref": &result.output_ref,
         "output_summary": summarize_json(&result.output),
         "trace_id": result.metadata.get("trace_id").and_then(Value::as_str),
@@ -3855,6 +3856,11 @@ mod tests {
         let mut contract = ProfileContract::new("honglou-text", "v1");
         contract.tool_policy =
             RuntimeToolPolicy::read_only(vec!["tonglingyu.text.search".to_string()]);
+        let output_schema = json!({
+            "type": "object",
+            "required": ["cards"],
+            "properties": {"cards": {"type": "array"}}
+        });
         contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
             name: "tonglingyu.text.search".to_string(),
             description: "Search Tonglingyu source text".to_string(),
@@ -3863,11 +3869,7 @@ mod tests {
                 "required": ["query"],
                 "properties": {"query": {"type": "string"}}
             }),
-            output_schema: json!({
-                "type": "object",
-                "required": ["cards"],
-                "properties": {"cards": {"type": "array"}}
-            }),
+            output_schema: output_schema.clone(),
             output_ref_required: true,
             capability: RuntimeToolCapability::ReadOnly,
         }];
@@ -3903,6 +3905,10 @@ mod tests {
         assert_eq!(
             output.metadata["tool_results"][0]["tool_name"],
             "tonglingyu.text.search"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_schema"],
+            output_schema
         );
         assert!(output.metadata["tool_results"][0].get("output").is_none());
         assert_eq!(
@@ -4079,6 +4085,7 @@ mod tests {
         let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
         assert_eq!(log.matches("runtime_tool_call").count(), 1);
         assert_eq!(log.matches("runtime_tool_result").count(), 1);
+        assert!(log.contains("\"output_schema\""));
         assert!(!log.contains("\"output\":"));
         let _ = tokio::fs::remove_file(audit_path).await;
     }
@@ -4331,6 +4338,10 @@ mod tests {
         assert_eq!(
             output.metadata["tool_results"][0]["output_summary"],
             "object_keys_len:1"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_schema"],
+            json!({"type": "object"})
         );
         assert_eq!(
             output.metadata["tool_results"][0]["call_id"],

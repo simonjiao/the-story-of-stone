@@ -428,7 +428,8 @@ runtime: add multi-profile step plan
 3. 每个 tool call 在执行前校验 tool name、input schema 和 profile tool policy。
 4. 每个 tool result 在回灌给 profile 前校验 output schema。
 5. 大 tool output 不进入 final `RuntimeOutput.metadata`；metadata 只保留
-   output_ref、类型/长度/数量摘要、schema、tool name、call id 和 trace 信息。
+   output_ref、类型/长度/数量摘要、已校验的 output_schema contract、
+   tool name、call id 和 trace 信息。
    摘要不得包含 raw string、object key 名或 executor metadata payload。
 6. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
 7. RuntimeOutput metadata 中必须返回安全 tool event 摘要；Runtime adapter

@@ -237,7 +237,8 @@ backpressure API 是后续项。
 - [x] non-read-only tool scope 在执行前被拒绝。
 - [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
   step output。
-- [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
+- [x] final metadata 只保留 tool result ref、已校验的 output_schema
+  contract、summary 和 trace 信息。
 - [x] tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
 - [x] tool output summary 不包含 raw string、object key 名或 executor metadata
   payload。
@@ -258,6 +259,7 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 executor metadata、raw string output summary 和 adapter audit 不泄漏。
+- [x] tool result metadata / adapter audit 覆盖已校验 output_schema contract。
 
 ### R4.5 提交
 
