@@ -37,7 +37,7 @@
   profile step 超出 runtime budget 都会返回安全错误；profile 回灌、
   RuntimeOutput metadata 和 adapter audit 只保留安全 tool event 摘要、
   已校验的 output_schema contract 与 output_ref，required output_ref 缺失会
-  失败并写安全错误事件，tool round violation 也会写安全错误事件；tool output
+  失败并写安全错误事件，tool round violation 也会写安全 call/error 事件；tool output
   summary 只暴露类型和长度/数量，不透传 tool executor metadata payload、
   raw string output 或 object key 名，且不会让 executor 覆盖已授权 tool call
   身份；未授权/未知 tool name 和 call id 会在失败 audit 中脱敏；

@@ -737,6 +737,16 @@ impl HermesRuntimeClient {
                             &tool_call.function.name,
                         );
                         let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+                        let call_event = runtime_tool_call_audit_event(
+                            runtime_profile,
+                            trace_id,
+                            audit_call_id.as_deref(),
+                            audit_tool_name.as_deref(),
+                        );
+                        self.audit_sink
+                            .append_runtime_event(call_event.clone())
+                            .await?;
+                        tool_audit_events.push(call_event);
                         let failure_event = runtime_tool_error_audit_event(
                             runtime_profile,
                             trace_id,
@@ -5933,7 +5943,11 @@ mod tests {
             }
         ));
         let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 1);
         assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("call-loop"));
+        assert!(log.contains("tool.read"));
         assert!(log.contains("\"error_code\":\"conflict\""));
         assert!(!log.contains("\"arguments\""));
         let _ = tokio::fs::remove_file(audit_path).await;

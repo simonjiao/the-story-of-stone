@@ -284,8 +284,8 @@ backpressure API 是后续项。
 - [x] required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
   audit event。
 - [x] tool executor 返回的 call/profile/tool 身份不会覆盖 Runtime 已授权 tool call。
-- [x] 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
-  超出 runtime budget 时返回安全错误。
+- [x] 超出 tool round 时返回安全错误并写安全 tool call / error audit
+  event；超出 runtime budget 时返回安全错误。
 - [x] streaming run、session message 和 profile step 超出 runtime budget 时返回
   安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
@@ -320,7 +320,7 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_run_and_session_reject_expired_contract_budget`
 - [x] `hermes_runtime_stream_run_and_session_safe_error_for_expired_contract_budget`
 - [x] `hermes_runtime_rejects_excessive_tool_rounds` 覆盖 tool round
-  violation 的 `runtime_tool_error` audit event。
+  violation 的安全 tool call / error audit event。
 - [x] `hermes_runtime_rejects_invalid_tool_input_schema_with_safe_audit`
   覆盖 tool input schema invalid 的安全错误和 audit 不泄漏 arguments。
 - [x] `hermes_runtime_streams_safe_error_for_malformed_tool_arguments`
