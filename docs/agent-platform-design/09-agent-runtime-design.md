@@ -57,23 +57,23 @@ Manager 创建和授权 session/run
 ## 缺口和当前处置
 
 以下能力不能用 P2 external-action 完成状态替代。当前 repo/local 已补齐
-Runtime primitives 和部分 hardening，但仍保留若干执行语义与验证缺口：
+Runtime 执行面要求，完整 JSON Schema 和领域 Gateway 接入仍不纳入本体
+完成口径：
 
 1. Runtime streaming 输出：R2 已补齐 `started` / `delta` / `final` /
-   `error` 基础事件和 final output 语义；`tool_progress` 和
-   `schema_partial` 事件仍未实现。
+   `error` 基础事件、`tool_progress`、`schema_partial` 和 final output
+   语义。
 2. 结构化 schema 输出校验：R1 已补齐 profile input/output contract 和轻量
    JSON Schema 子集校验；完整 JSON Schema 不是当前完成口径。
-3. per-profile tool permission：R3 已补齐 profile 工具策略、传入授权工具
-   scope 的交集计算、read-only capability 校验和执行前约束。
-4. 多 profile 编排：R4 已补齐 `RuntimeStepPlan` / `RuntimeStep` 数据模型和
-   单 step metadata；多 step executor、依赖、fallback 和跨 step output_ref
-   流转仍未实现。
+3. per-profile tool permission：R3 已补齐 profile 工具策略、Manager/Worker
+   授权工具 scope、交集计算、read-only capability 校验和执行前约束。
+4. 多 profile 编排：R4 已补齐 `RuntimeStepPlan` / `RuntimeStep` 数据模型、
+   多 step executor、依赖校验、fallback policy 和跨 step output_ref 流转。
 5. 领域 profile 强类型契约：Runtime 已提供 profile contract 机制；
    具体领域 contract 在领域设计文档中定义和复核。
 6. Runtime tool execution loop：R4.5 已补齐 read-only tool call、
-   tool input/output schema、预算、metadata 摘要和 Worker 路径审计约束；
-   领域 Gateway 直连 Runtime 时的 append-only audit sink 仍需接入方提供。
+   tool input/output schema、预算、metadata 摘要、Worker 路径审计和 Runtime
+   adapter 直连 JSONL audit sink；具体领域 Gateway 仍需显式配置并复测。
 
 ## 完善目标
 
@@ -242,7 +242,7 @@ RuntimeStreamEvent
   - profile_id
   - schema_version
   - sequence
-  - event_type: started | delta | final | error
+  - event_type: started | delta | tool_progress | schema_partial | final | error
   - content_delta
   - metadata
 ```
@@ -261,7 +261,8 @@ RuntimeStreamEvent
 2. streaming final 和非 streaming 输出语义一致。
 3. error event 不泄露 prompt、credential、connector payload 或内部栈。
 4. trace/audit 能看到流式调用的 final 状态。
-5. `tool_progress` 和 `schema_partial` 是后续扩展，不作为当前 R2 已完成项。
+5. tool loop streaming path 会发出 `tool_progress`；schema 校验通过后会发出
+   `schema_partial`。
 
 测试：
 
@@ -293,10 +294,12 @@ effective_tool_set =
 代码范围：
 
 1. `agent-core`：定义 tool capability、allowed/denied/effective tool set。
-2. `agent-worker`、Manager 或领域 Gateway：把本次 run/session/profile step
-   的授权工具 scope 作为 `requested_tools` 传入 Runtime。
-3. `agent-runtime`：执行前计算 effective tool set，拒绝越权 tool request。
-4. `agent-manager` external-action：保持写入工具必须走 apply/compensate。
+2. `agent-manager`：创建 agent 时从 profile contract 生成默认授权
+   `requested_tools`；显式配置优先。
+3. `agent-worker`：运行已有 agent 时从配置或 profile contract 派生本次
+   run/session/profile step 授权工具 scope。
+4. `agent-runtime`：执行前计算 effective tool set，拒绝越权 tool request。
+5. `agent-manager` external-action：保持写入工具必须走 apply/compensate。
 
 `allowed_tools` 为空时表示 profile 没有工具权限，不表示通配所有工具。
 
@@ -344,8 +347,8 @@ RuntimeStepPlan
       - fallback_policy
 ```
 
-当前已实现 `RuntimeStepPlan` / `RuntimeStep` 数据模型和单 step metadata。
-完整多 step 执行器仍需实现以下边界规则：
+已实现 `RuntimeStepPlan` / `RuntimeStep` 数据模型、plan owner、step
+dependency、fallback policy 和通用多 step 执行器。执行器遵循以下边界规则：
 
 1. step plan 必须由 Manager、Orchestrator 或领域 Gateway 明确创建。
 2. Runtime 只执行已授权 step，不自行追加新 profile step。
@@ -354,20 +357,22 @@ RuntimeStepPlan
 
 代码范围：
 
-1. `agent-core`：新增 `RuntimeStepPlan`、`RuntimeStep` 和
-   `RuntimeStepStatus`。
-2. `agent-runtime`：执行单个已授权 profile step，并把 step metadata 写入
+1. `agent-core`：新增 `RuntimeStepPlan`、`RuntimeStep`、
+   `RuntimeStepStatus`、owner、dependency 和 fallback policy。
+2. `agent-core` / `RuntimeClient`：提供通用 `execute_profile_step_plan()`
+   默认执行器。
+3. `agent-runtime`：执行单个已授权 profile step，并把 step metadata 写入
    `RuntimeOutput.metadata`。
-3. `agent-manager` 或 domain gateway helper：创建完整 step plan。待实现。
-4. `agent-runtime`：执行多 step plan、依赖和 fallback。待实现。
-5. `agent-store`：如需持久化 step，只新增 append-only step audit 表。待实现。
+4. `agent-manager` 或 domain gateway helper：负责创建完整 step plan。
+5. `agent-store`：如需跨进程查询 step，只新增 append-only step audit 表。
 
 验收：
 
-1. 单个 profile step 独立可追踪。
-2. step output 未通过 schema 时不能作为 successful output 返回。
-3. Runtime 单 step 不自行创建新 step。
-4. 多 step 依赖、fallback、跨 step output_ref 流转和 step audit 仍需补齐。
+1. 每个 profile step 独立可追踪。
+2. step output 未通过 schema 时不能作为 successful output 进入下一 step。
+3. Runtime 执行既有 step plan，不自行追加新 step。
+4. 多 step 依赖、fallback 和跨 step output_ref 流转有回归验证。
+5. 持久 step audit 表不是当前 Runtime 本体完成条件。
 
 测试：
 
@@ -398,7 +403,7 @@ runtime: add multi-profile step plan
    output_ref、summary、schema、tool name、call id 和 trace 信息。
 6. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
 7. Worker 路径中 tool call / tool result 必须进入现有 append-only audit
-   logs；领域 Gateway 直连 Runtime 时必须提供等价 append-only audit sink。
+   logs；Runtime adapter 直连场景必须配置等价 append-only audit sink。
 
 代码范围：
 
@@ -408,18 +413,19 @@ runtime: add multi-profile step plan
 3. `agent-runtime`：执行前校验 tool policy、tool input schema 和预算。
 4. `agent-runtime`：执行后校验 tool output schema，并生成安全 metadata 摘要。
 5. `agent-worker`：把 Runtime 返回的 tool audit events 追加到 `audit_logs`。
-6. 领域 Gateway 直连 Runtime：接入方负责把 tool audit events 写入等价
-   append-only audit。待实现。
+6. `agent-runtime`：提供 `RuntimeAuditSink` 和 JSONL append-only sink，供
+   Gateway 直连 Runtime 时显式配置。
 
 验收：
 
 1. 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
 2. 未授权或 denied tool call 在执行前被拒绝。
-3. tool output schema invalid 时不会进入后续 profile step。
+3. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
+   step output。
 4. final metadata 不包含大 payload，只包含 ref 和摘要。
 5. 超出 tool round 或 runtime budget 时返回安全错误。
 6. Worker run trace 可以看到 runtime tool call / result audit log。
-7. Gateway 直连 Runtime 的 tool audit sink 有单独验证。待实现。
+7. Runtime adapter 直连 JSONL audit sink 有单独验证。
 
 测试：
 
@@ -442,14 +448,14 @@ runtime: audit profile tool execution
 ```text
 Agent Platform 已具备 P1 真实 Hermes Runtime 只读闭环和 P2 external-action
 执行链路；Runtime 已具备 profile contract、轻量 schema validation、
-基础 streaming、per-profile tool permission、单 profile step metadata 和
-read-only tool execution loop 的 repo/local primitives。
+streaming events、per-profile tool permission、multi-profile step plan 和
+read-only tool execution loop 的 repo/local 实现。
 ```
 
 不能说：
 
 ```text
 P2 已完成 Runtime 全量完善。
-Agent Runtime 本体已经完整完成。
+Agent Runtime 本体完成等于完整 JSON Schema 或领域 Gateway 接入完成。
 Runtime 本体完成即可代表任何领域 Gateway 已完成接入。
 ```

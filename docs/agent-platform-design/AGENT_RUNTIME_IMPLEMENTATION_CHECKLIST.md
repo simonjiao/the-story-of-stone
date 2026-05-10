@@ -11,13 +11,13 @@
 - [x] R0 文档整合完成。
 - [x] R1 Profile Contract 和轻量 Schema Validation。
 - [x] R2 Runtime Streaming 基础事件。
-- [ ] R2 tool progress / schema partial streaming 扩展。
+- [x] R2 tool progress / schema partial streaming 扩展。
 - [x] R3 Per-profile Tool Permission Enforcement。
 - [x] R4 Step Plan 数据模型和单 step metadata。
-- [ ] R4 Multi-profile Step Plan 执行器、依赖、fallback 和 output_ref 流转。
+- [x] R4 Multi-profile Step Plan 执行器、依赖、fallback 和 output_ref 流转。
 - [x] R4.5 Runtime Tool Execution Loop。
-- [ ] Agent Runtime 本体完成口径复核；领域 Gateway 接入不作为本 checklist
-  范围。
+- [x] Agent Runtime 本体 repo/local 完成口径复核；领域 Gateway 接入不作为
+  本 checklist 范围。
 
 ## 实施前确认
 
@@ -84,8 +84,8 @@
   完成态语义保持不变。
 - [x] `agent-orchestrator` 现有 OpenAI-compatible SSE wrapper 不回退。
 - [x] 保留非 streaming path 的原有行为。
-- [ ] 增加 tool progress streaming event。
-- [ ] 增加 schema partial streaming event。
+- [x] 增加 tool progress streaming event。
+- [x] 增加 schema partial streaming event。
 
 ### R2 验收
 
@@ -93,7 +93,7 @@
 - [x] streaming final 和非 streaming 输出语义一致。
 - [x] error event 不泄露 prompt、credential、connector payload 或内部栈。
 - [x] trace/audit 能看到流式调用的 final 状态。
-- [ ] tool progress / schema partial 有端到端验证。
+- [x] tool progress / schema partial 有端到端验证。
 
 ### R2 测试
 
@@ -122,8 +122,8 @@
 - [x] 空 `allowed_tools` 解释为无工具权限，不解释为通配符。
 - [x] 保持写入类工具必须走 Manager external-action apply/compensate。
 - [x] metadata 记录 effective tool set。
-- [ ] Manager 按策略为 run/session 生成授权 `requested_tools`，而不是只依赖
-  agent config。
+- [x] Manager 创建 agent 时从 profile contract 生成默认授权 `requested_tools`；
+  Worker 对已有 agent 按 contract 做防御性派生。
 
 ### R3 验收
 
@@ -139,7 +139,7 @@
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-manager`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-manager`
 
 ### R3 提交
 
@@ -160,16 +160,16 @@
 - [x] 单 step 输出通过 schema 校验后写入 `RuntimeOutput`。
 - [x] 当前复用 Runtime metadata、Gateway workflow state 和 audit；后续如需
   跨 gateway 查询，再新增 append-only step audit 表。
-- [ ] 在 `agent-manager` 或 domain gateway helper 中创建完整 `RuntimeStepPlan`。
-- [ ] step 输出只通过 schema 校验后的 `output_ref` 进入下一 step。
-- [ ] 增加多 step 失败降级或终止策略。
+- [x] 在 `agent-core` / `RuntimeClient` 中提供完整 `RuntimeStepPlan` 执行器。
+- [x] step 输出只通过 schema 校验后的 `output_ref` 进入下一 step。
+- [x] 增加多 step 失败降级或终止策略。
 
 ### R4 验收
 
 - [x] 每个 profile step 独立可追踪。
 - [x] 单 step output 未通过 schema 时不能作为 successful output 返回。
 - [x] Runtime 不能自行创建新 step。
-- [ ] 多 step 失败不会导致权限扩大或未审计输出。
+- [x] 多 step 失败不会导致权限扩大或未审计输出。
 
 ### R4 测试
 
@@ -197,12 +197,12 @@
 - [x] tool output 通过 `output_ref` 和安全摘要传递；大 payload 不进入
   final `RuntimeOutput.metadata`。
 - [x] profile step 受最大 tool round 和 `max_runtime_seconds` 预算约束。
-- [x] tool call / tool result 事件接入现有 append-only `audit_logs`。
+- [x] Worker 路径 tool call / tool result 事件接入现有 append-only
+  `audit_logs`。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
 - [x] Runtime 只向 Hermes 暴露 read-only effective tool specs。
-- [ ] 领域 Gateway 直连 Runtime 时，把 tool audit events 写入等价
-  append-only audit sink。
+- [x] Runtime adapter 提供直连场景可配置的 append-only JSONL audit sink。
 
 ### R4.5 验收
 
@@ -210,11 +210,12 @@
 - [x] 未授权或 denied tool call 在执行前被拒绝。
 - [x] 不在本次 requested tool scope 内的 tool call 在执行前被拒绝。
 - [x] non-read-only tool scope 在执行前被拒绝。
-- [x] tool output schema invalid 时不会进入后续 profile step。
+- [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
+  step output。
 - [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
 - [x] Worker audit logs 能按 run trace 看到 runtime tool call / result 事件。
-- [ ] Gateway 直连 Runtime audit sink 有回归验证。
+- [x] Runtime adapter 直连 JSONL audit sink 有回归验证。
 
 ### R4.5 测试
 
@@ -233,13 +234,13 @@ Runtime 专项完成后可以声明：
 
 - [x] Agent Platform 已具备 P1 真实 Hermes Runtime 只读闭环。
 - [x] Agent Platform 已具备 P2 external-action 执行链路。
-- [x] Agent Runtime 已具备基础 streaming、轻量 schema、tool policy、单 step
-  metadata 和 read-only tool execution loop primitives。
+- [x] Agent Runtime 已具备 streaming events、轻量 schema、tool policy、
+  multi-profile step plan 和 read-only tool execution loop repo/local 实现。
 
 Runtime 专项完成条件：
 
-- [ ] R1 到 R4.5 repo/local checkbox 全部关闭。
-- [x] 本次 Runtime/Core/Worker 对应测试命令通过。
+- [x] R1 到 R4.5 repo/local checkbox 全部关闭。
+- [x] 本次 Runtime/Core/Worker/Manager 对应测试命令通过。
 - [x] `PROGRESS.md` 已更新当前状态和残余风险。
 
 领域 Gateway 接入的完成口径、测试和 Open WebUI 复测由对应领域设计文档

@@ -243,6 +243,8 @@ string_enum! {
     pub enum RuntimeStreamEventType {
         Started => "started",
         Delta => "delta",
+        ToolProgress => "tool_progress",
+        SchemaPartial => "schema_partial",
         Final => "final",
         Error => "error",
     }
@@ -259,10 +261,33 @@ string_enum! {
 }
 
 string_enum! {
+    pub enum RuntimeStepPlanOwner {
+        Manager => "manager",
+        Orchestrator => "orchestrator",
+        DomainGateway => "domain_gateway",
+    }
+}
+
+string_enum! {
+    pub enum RuntimeStepFailurePolicy {
+        Stop => "stop",
+        Continue => "continue",
+    }
+}
+
+string_enum! {
     pub enum RuntimeToolCapability {
         ReadOnly => "read_only",
         Write => "write",
     }
+}
+
+fn default_runtime_step_plan_owner() -> RuntimeStepPlanOwner {
+    RuntimeStepPlanOwner::Manager
+}
+
+fn default_runtime_step_failure_policy() -> RuntimeStepFailurePolicy {
+    RuntimeStepFailurePolicy::Stop
 }
 
 fn default_runtime_tool_capability() -> RuntimeToolCapability {
@@ -504,6 +529,10 @@ pub struct RuntimeStep {
     pub contract_version: String,
     pub status: RuntimeStepStatus,
     #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default = "default_runtime_step_failure_policy")]
+    pub fallback_policy: RuntimeStepFailurePolicy,
+    #[serde(default)]
     pub input_ref: Option<String>,
     #[serde(default)]
     pub output_ref: Option<String>,
@@ -522,6 +551,8 @@ impl RuntimeStep {
             profile_id: profile_id.into(),
             contract_version: contract_version.into(),
             status: RuntimeStepStatus::Planned,
+            depends_on: Vec::new(),
+            fallback_policy: RuntimeStepFailurePolicy::Stop,
             input_ref: None,
             output_ref: None,
             metadata,
@@ -533,6 +564,8 @@ impl RuntimeStep {
 pub struct RuntimeStepPlan {
     pub plan_id: String,
     pub trace_id: String,
+    #[serde(default = "default_runtime_step_plan_owner")]
+    pub owner: RuntimeStepPlanOwner,
     pub status: RuntimeStepStatus,
     pub steps: Vec<RuntimeStep>,
     #[serde(default)]
@@ -544,6 +577,7 @@ impl RuntimeStepPlan {
         Self {
             plan_id: new_id("rtplan"),
             trace_id: trace_id.into(),
+            owner: RuntimeStepPlanOwner::Manager,
             status: RuntimeStepStatus::Planned,
             steps,
             metadata: json!({}),

@@ -1,13 +1,17 @@
 use crate::{
     AgentCoreError, AgentInstance, AgentRun, AgentSessionMessage, CoreResult, CredentialLease,
     ErrorCode, ExternalActionMode, ExternalActionPlan, ObserverSnapshot, ProfileContract,
-    RiskLevel, RunSummary, RuntimeStep, RuntimeStreamEventType, RuntimeToolCall, RuntimeToolResult,
-    RuntimeToolSpec, SessionContext,
+    RiskLevel, RunSummary, RuntimeStep, RuntimeStepFailurePolicy, RuntimeStepPlan,
+    RuntimeStepStatus, RuntimeStreamEventType, RuntimeToolCall, RuntimeToolResult, RuntimeToolSpec,
+    SessionContext,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::time::Duration;
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeRunInput {
@@ -75,6 +79,19 @@ pub struct RuntimeProfileInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStepPlanInput {
+    pub plan: RuntimeStepPlan,
+    pub messages: Vec<RuntimeProfileMessage>,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub profile_contracts: Vec<ProfileContract>,
+    #[serde(default)]
+    pub requested_tools_by_profile: BTreeMap<String, Vec<String>>,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeOutput {
     pub result_summary: String,
     pub result_ref: Option<String>,
@@ -114,6 +131,42 @@ impl RuntimeStreamEvent {
             metadata: serde_json::json!({}),
         }
     }
+
+    pub fn tool_progress(
+        sequence: u64,
+        profile_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        metadata: Value,
+    ) -> Self {
+        Self {
+            sequence,
+            event_type: RuntimeStreamEventType::ToolProgress,
+            profile_id: profile_id.into(),
+            trace_id: trace_id.into(),
+            content_delta: None,
+            output: None,
+            error_code: None,
+            metadata,
+        }
+    }
+
+    pub fn schema_partial(
+        sequence: u64,
+        profile_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        metadata: Value,
+    ) -> Self {
+        Self {
+            sequence,
+            event_type: RuntimeStreamEventType::SchemaPartial,
+            profile_id: profile_id.into(),
+            trace_id: trace_id.into(),
+            content_delta: None,
+            output: None,
+            error_code: None,
+            metadata,
+        }
+    }
 }
 
 #[async_trait]
@@ -127,6 +180,13 @@ pub trait RuntimeClient: Send + Sync {
             ErrorCode::Conflict,
             "runtime client does not support direct profile steps",
         ))
+    }
+
+    async fn execute_profile_step_plan(
+        &self,
+        input: RuntimeStepPlanInput,
+    ) -> CoreResult<RuntimeOutput> {
+        execute_runtime_step_plan(self, input).await
     }
 
     async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
@@ -181,6 +241,193 @@ pub trait RuntimeClient: Send + Sync {
             profile_id, trace_id, output,
         )])
     }
+}
+
+async fn execute_runtime_step_plan<C>(
+    client: &C,
+    mut input: RuntimeStepPlanInput,
+) -> CoreResult<RuntimeOutput>
+where
+    C: RuntimeClient + ?Sized,
+{
+    if input.plan.steps.is_empty() {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime step plan has no steps",
+        ));
+    }
+    if input.plan.trace_id != input.trace_id {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime step plan trace_id mismatch",
+        ));
+    }
+
+    let mut seen_step_ids = BTreeSet::new();
+    for step in &input.plan.steps {
+        if step.step_id.trim().is_empty() || step.profile_id.trim().is_empty() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime step plan contains an invalid step",
+            ));
+        }
+        if !seen_step_ids.insert(step.step_id.clone()) {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime step plan contains duplicate step ids",
+            ));
+        }
+    }
+
+    let contracts = input
+        .profile_contracts
+        .into_iter()
+        .map(|contract| (contract.profile_id.clone(), contract))
+        .collect::<BTreeMap<_, _>>();
+    let mut output_refs = BTreeMap::<String, String>::new();
+    let mut completed_steps = Vec::new();
+    let mut step_summaries = Vec::new();
+    let mut last_output = None;
+    let mut had_failed_continued_step = false;
+
+    for mut step in input.plan.steps.clone() {
+        let dependency_refs = step
+            .depends_on
+            .iter()
+            .map(|dependency| {
+                output_refs
+                    .get(dependency)
+                    .map(|output_ref| {
+                        json!({
+                            "step_id": dependency,
+                            "output_ref": output_ref,
+                        })
+                    })
+                    .ok_or_else(|| {
+                        AgentCoreError::coded(
+                            ErrorCode::Conflict,
+                            "runtime step dependency was not completed",
+                        )
+                    })
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        let contract = contracts.get(&step.profile_id).cloned().ok_or_else(|| {
+            AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime step profile contract was not provided",
+            )
+        })?;
+        if step.contract_version != contract.version.version {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime step contract version mismatch",
+            ));
+        }
+
+        step.status = RuntimeStepStatus::Executing;
+        step.input_ref = dependency_refs
+            .first()
+            .and_then(|value| value.get("output_ref"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let mut step_messages = input.messages.clone();
+        for dependency_ref in &dependency_refs {
+            let encoded = serde_json::to_string(dependency_ref).map_err(|_| {
+                AgentCoreError::coded(
+                    ErrorCode::InternalError,
+                    "runtime step dependency ref was not serializable",
+                )
+            })?;
+            step_messages.push(RuntimeProfileMessage::new(
+                "system",
+                format!("runtime_step_input_ref {encoded}"),
+            ));
+        }
+        let requested_tools = input
+            .requested_tools_by_profile
+            .get(&step.profile_id)
+            .cloned()
+            .unwrap_or_else(|| contract.tool_policy.effective_tools());
+        let step_metadata = json!({
+            "plan_id": &input.plan.plan_id,
+            "plan_owner": input.plan.owner,
+            "step_metadata": &step.metadata,
+            "dependency_output_refs": dependency_refs,
+            "plan_metadata": &input.metadata,
+        });
+        let result = client
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: step.profile_id.clone(),
+                messages: step_messages,
+                metadata: step_metadata,
+                profile_contract: Some(contract),
+                runtime_step: Some(step.clone()),
+                requested_tools,
+                trace_id: input.trace_id.clone(),
+            })
+            .await;
+
+        match result {
+            Ok(output) => {
+                let output_ref = output.result_ref.clone().ok_or_else(|| {
+                    AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "runtime step did not produce output_ref",
+                    )
+                })?;
+                step.status = RuntimeStepStatus::Completed;
+                step.output_ref = Some(output_ref.clone());
+                output_refs.insert(step.step_id.clone(), output_ref.clone());
+                step_summaries.push(json!({
+                    "step_id": &step.step_id,
+                    "profile_id": &step.profile_id,
+                    "status": step.status,
+                    "output_ref": &output_ref,
+                }));
+                completed_steps.push(step);
+                last_output = Some(output);
+            }
+            Err(error) => {
+                step.status = RuntimeStepStatus::Failed;
+                step_summaries.push(json!({
+                    "step_id": &step.step_id,
+                    "profile_id": &step.profile_id,
+                    "status": step.status,
+                    "error_code": "step_failed",
+                }));
+                completed_steps.push(step.clone());
+                if step.fallback_policy == RuntimeStepFailurePolicy::Continue {
+                    had_failed_continued_step = true;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    let Some(mut output) = last_output else {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime step plan produced no successful output",
+        ));
+    };
+    input.plan.status = if had_failed_continued_step {
+        RuntimeStepStatus::Failed
+    } else {
+        RuntimeStepStatus::Completed
+    };
+    input.plan.steps = completed_steps;
+    if !output.metadata.is_object() {
+        output.metadata = json!({});
+    }
+    output.metadata["runtime_step_plan"] = serde_json::to_value(&input.plan).map_err(|_| {
+        AgentCoreError::coded(
+            ErrorCode::InternalError,
+            "runtime step plan metadata was not serializable",
+        )
+    })?;
+    output.metadata["runtime_step_outputs"] = json!(step_summaries);
+    Ok(output)
 }
 
 #[async_trait]

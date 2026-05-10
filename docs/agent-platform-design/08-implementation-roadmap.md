@@ -9,14 +9,15 @@
 | P0 | 代码基线已实现 | 控制面、Open WebUI Agent Identity Bridge、Minimal Runtime、Worker、Observer、audit 形成最小闭环 | Postgres lease / SKIP LOCKED 是正确性边界；不接真实写 connector；不注入写权限 credential；Bridge 完成口径以 hardening checklist 和部署复测为准 |
 | P1 | 已完成实现和部署 smoke | 在现有 Bridge/session/run 链路上接入真实 Hermes Runtime，只做只读 session/run，让 Observer report 可进入受控 discussion session，并提供 System Observer status session | 不改 Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、Memory schema、audit contract；System Observer status session 只作为窄口例外，不扩展为通用 admin proxy |
 | P2 | 仓库侧实现完成 | 启用受控外部写入 | 已完成 apply / compensate API、HTTP provider/connector、`action-journal` provider/connector/target adapter、锁、审计、补偿状态、本地回归和端到端 smoke；默认部署仍关闭写入，真实第三方目标以目标环境 contract smoke 证明 |
-| Runtime | R1-R4.5 primitives 已落地，hardening 待完成 | Runtime 执行面完善 | 不改控制面、领域 Gateway 或核心业务 |
+| Runtime | R1-R4.5 repo/local 已完成 | Runtime 执行面完善 | 不改控制面、领域 Gateway 或核心业务 |
 
 P1 会提前落地 P2 需要的 external-action plan、credential lease、write connector contract、dry-run policy、no-op provider 和审计事件。P1 只 dry-run / validate / reject，不获取真实 credential，不调用真实写 connector，不把 run 推进到真实外部写入。
 
 Runtime streaming、结构化 schema 输出校验、per-profile tool permission、
 multi-profile step plan、read-only tool execution loop 和领域 profile
 contract 机制不属于 P2 external-action 完成范围。R1 到 R4.5 的 repo/local
-primitives 已在 Runtime 专项内落地，但完整完成口径仍需关闭 hardening 项。
+实现已在 Runtime 专项内落地。完整 JSON Schema 和领域 Gateway 接入复测
+不属于 Agent Runtime 本体完成条件。
 领域 Gateway 接入不属于 Agent Runtime 路线图。
 
 ## P0 当前基线
@@ -117,8 +118,9 @@ P2 验收：
 ## Runtime 专项完善
 
 Runtime 专项完善在 P0/P1/P2 之后独立推进，不能倒推修改已固定的控制面、
-session/run、Worker 或 audit contract。R1 到 R4.5 的 repo/local primitives
-已落地，完整完成口径以 checklist 中剩余 hardening 项关闭为准。详细设计见
+session/run、Worker 或 audit contract。R1 到 R4.5 的 repo/local 实现
+已落地；完整 JSON Schema 和领域 Gateway 接入复测不纳入 Runtime 本体
+完成口径。详细设计见
 [09-agent-runtime-design.md](09-agent-runtime-design.md)，执行跟踪见
 [AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md](AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md)。
 
@@ -126,16 +128,16 @@ session/run、Worker 或 audit contract。R1 到 R4.5 的 repo/local primitives
 
 1. R0 现状锁定：明确 P1/P2 已完成内容和 Runtime 未完成内容。
 2. R1 Schema 和 Profile Contract：让 profile 输入输出可校验。
-3. R2 Runtime Streaming：基础流式输出并保留最终 `RuntimeOutput`；
-   tool progress / schema partial 待补。
+3. R2 Runtime Streaming：流式输出、tool progress、schema partial 并保留
+   最终 `RuntimeOutput`。
 4. R3 Tool Permission Enforcement：让 profile 工具能力有真实执行约束。
-5. R4 Multi-profile Step Plan：已具备数据模型和单 step metadata；多 step
-   executor、依赖、fallback 和 output_ref 流转待补。
+5. R4 Multi-profile Step Plan：具备数据模型、单 step metadata、多 step
+   executor、依赖、fallback 和 output_ref 流转。
 6. R4.5 Runtime Tool Execution Loop：支持受控 read-only tool call、
    tool result、预算和审计。
 
 当前状态口径是：Agent Platform 已具备 P1 真实 Hermes Runtime 只读闭环和
-P2 external-action 执行链路，Runtime R1 到 R4.5 已具备基础 streaming、
-轻量 schema、per-profile tool permission、单 step metadata 和 read-only
-tool execution loop primitives。不能用 Runtime primitives 完成状态替代完整
-Runtime 完成状态或任何领域 Gateway 接入完成状态。
+P2 external-action 执行链路，Runtime R1 到 R4.5 已具备 streaming events、
+轻量 schema、per-profile tool permission、multi-profile step plan 和
+read-only tool execution loop 的 repo/local 实现。不能用 Runtime 本体完成
+状态替代完整 JSON Schema、部署复测或任何领域 Gateway 接入完成状态。

@@ -193,7 +193,7 @@ impl Worker {
             .await?
             .summary;
         let profile_contract = profile_contract_from_agent(&agent)?;
-        let requested_tools = requested_tools_from_agent(&agent);
+        let requested_tools = requested_tools_from_agent(&agent, profile_contract.as_ref());
         let runtime_step = Some(RuntimeStep::new(
             profile_contract
                 .as_ref()
@@ -469,8 +469,11 @@ fn profile_contract_from_agent(agent: &AgentInstance) -> CoreResult<Option<Profi
         .map_err(|_| agent_store::store_error("agent profile contract is malformed"))
 }
 
-fn requested_tools_from_agent(agent: &AgentInstance) -> Vec<String> {
-    agent
+fn requested_tools_from_agent(
+    agent: &AgentInstance,
+    profile_contract: Option<&ProfileContract>,
+) -> Vec<String> {
+    let configured = agent
         .config
         .pointer("/runtime/requested_tools")
         .or_else(|| agent.config.get("requested_tools"))
@@ -481,7 +484,14 @@ fn requested_tools_from_agent(agent: &AgentInstance) -> Vec<String> {
         .map(str::trim)
         .filter(|tool| !tool.is_empty())
         .map(ToString::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    if configured.is_empty() {
+        profile_contract
+            .map(|contract| contract.tool_policy.effective_tools())
+            .unwrap_or_default()
+    } else {
+        configured
+    }
 }
 
 pub async fn idle_heartbeat(
@@ -499,7 +509,7 @@ mod tests {
     use super::*;
     use agent_core::{
         AgentInstance, AgentRun, AgentSession, AgentSessionMessage, ConnectorSnapshot, MemoryStore,
-        MessageRole, RuntimeSessionInput, TriggerType, new_trace_id,
+        MessageRole, RuntimeSessionInput, RuntimeToolPolicy, TriggerType, new_trace_id,
     };
     use async_trait::async_trait;
     use serde_json::json;
@@ -602,6 +612,26 @@ mod tests {
         worker.tick().await.unwrap();
         let completed = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(completed.run_status, AgentRunStatus::Completed);
+    }
+
+    #[test]
+    fn requested_tools_fall_back_to_profile_contract_policy() {
+        let agent = AgentInstance::new(
+            "user-1",
+            "background_worker",
+            "resource:team/project-alpha",
+            "hash",
+            json!({}),
+            new_trace_id(),
+        );
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+
+        assert_eq!(
+            requested_tools_from_agent(&agent, Some(&contract)),
+            vec!["tool.alpha".to_string(), "tool.beta".to_string()]
+        );
     }
 
     #[tokio::test]
