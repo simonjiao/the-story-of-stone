@@ -16,10 +16,8 @@
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 per-profile
   tool permission、tool schema、tool round、runtime budget 和 output ref/summary
   约束；Worker 会把 tool call / tool result 写入现有 append-only audit logs。
-- R5 通灵玉接入已按“薄 Gateway + Runtime Agent”目标重新打开；旧的
-  Gateway 内检索、证据包、reviewer 和确定性 text/commentary step 不再作为
-  完成口径。
-- 通灵玉目标环境 Open WebUI 单入口复测仍需在 R5 完成后执行。
+- 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime
+  接入设计和复测口径迁入 `docs/tonglingyu-agent-design/`。
 
 ## 详细记录
 
@@ -41,10 +39,6 @@
 - Runtime 专项只新增 adapter、contract 或 feature；未改写 P0/P1/P2 已固定的
   Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、
   Memory schema 或 audit contract。
-- 通灵玉目标架构是薄 Gateway + Runtime Agent：Gateway 只做协议、鉴权、
-  路由、trace/session、SSE、模型隐藏和响应封装；正文/脂批检索、证据包、
-  reviewer 和 replay 归 Runtime profile 与 read-only tools 负责。
-- `honglou-text` 和 `honglou-commentary` 走 LLM profile，不再按确定性
-  Gateway 检索 step 作为目标方案。
-- 完成口径仍保留 R5 和部署侧限制：未完成薄 Gateway 改造和目标环境
-  Open WebUI 单入口复测前，不能宣称通灵玉 Runtime 接入完成。
+- Agent Runtime 完成状态不能替代任何领域 Gateway 接入完成状态；通灵玉
+  目标架构、四 profile contract、read-only tools 和 Open WebUI 复测以
+  通灵玉设计文档为准。

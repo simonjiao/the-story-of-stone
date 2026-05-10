@@ -14,8 +14,7 @@
 - [x] R3 Per-profile Tool Permission Enforcement。
 - [x] R4 Multi-profile Step Plan。
 - [x] R4.5 Runtime Tool Execution Loop。
-- [ ] R5 通灵玉按薄 Gateway + Runtime Agent 目标重新接入。
-- [ ] 目标环境 Open WebUI 单入口复测。
+- [x] Agent Runtime 本体完成；领域 Gateway 接入不作为本 checklist 范围。
 
 ## 实施前确认
 
@@ -30,22 +29,8 @@
   streaming event contract。
 - [x] R3 写入类工具仍强制走 Manager external-action apply/compensate。
 - [x] R4 多 profile 编排只创建显式 step plan，不塞进 `HermesRuntimeClient`。
-- [x] R5 通灵玉 Gateway 仍是唯一公开入口，Open WebUI 只看到 `tonglingyu`。
-
-R5 决策：
-
-- [x] 通灵玉 Gateway 只做协议适配、鉴权、限流、trace/session 透传和
-  OpenAI-compatible 响应封装。
-- [x] 通灵玉 Gateway 不做 SQLite/FTS 查询、不构建证据包、不执行 reviewer。
-- [x] `honglou-text` 和 `honglou-commentary` 走 LLM profile。
-- [x] `honglou-text` 和 `honglou-commentary` 通过 Runtime read-only tools
-  查询正文、版本、脂批和评语证据。
-- [x] 证据包、replay 和 admin trace 的领域数据归 Runtime Agent/tool 侧维护；
-  Gateway 只透传或代理结果。
-- [x] 通灵玉四 profile contract 先出工程版，R5 前做一次轻量领域复核后
-  再冻结首版字段。
-- [x] 通灵玉 Runtime 接入先做本地 dry run，再做远端或目标环境
-  Open WebUI 单入口复测。
+- [x] 领域 Gateway 接入计划迁出 Runtime checklist；通灵玉以
+  `docs/tonglingyu-agent-design/` 为准。
 
 ## R1 Profile Contract 和 Schema Validation
 
@@ -217,83 +202,20 @@ R5 决策：
 - [x] `runtime: implement profile tool execution`
 - [x] `runtime: audit profile tool execution`
 
-## R5 通灵玉薄 Gateway + Runtime Agent 接入
-
-目标：把通灵玉内部角色升级为真实 Runtime profile 执行边界，同时把 Gateway
-收敛为协议入口，不在 Gateway 请求路径中执行领域检索、证据包或 reviewer。
-
-### R5A 薄 Gateway 边界
-
-- [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
-  trace/session 透传、SSE 转发、模型隐藏和响应封装。
-- [ ] Gateway 不直接执行 source snapshot、SQLite 或 FTS 查询。
-- [ ] Gateway 不构建证据卡片或证据包。
-- [ ] Gateway 不执行 reviewer 或本地审校规则。
-- [ ] Gateway 不维护证据包 replay 的领域逻辑。
-- [ ] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
-  内部 profile。
-
-### R5B 通灵玉 Evidence Read-only Tools
-
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
-- [ ] 定义 `tonglingyu.text.search` read-only tool。
-- [ ] 定义 `tonglingyu.commentary.search` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.create` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.read` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.replay` read-only tool。
-- [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
-- [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
-
-### R5C 四 Profile 编排
-
-- [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
-- [ ] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
-- [ ] `honglou-text` 通过 `tonglingyu.text.search` 生成正文 evidence analysis。
-- [ ] `honglou-commentary` 通过 `tonglingyu.commentary.search` 生成脂批 evidence
-  analysis。
-- [ ] 证据包由 Runtime Agent/tool 侧创建，`honglou-main` 只消费 package ref
-  和前序 profile 输出。
-- [ ] `honglou-reviewer` 强制消费草稿、claim statements 和 package ref。
-- [ ] reviewer 不可关闭；未通过 reviewer 的结果不能作为最终回答返回。
-- [ ] 四 profile step 的 schema、duration、tool set、output_ref 和 trace_id
-  可追踪。
-
-### R5D Gateway 集成和验证
-
-- [ ] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
-  step plan 调用。
-- [ ] Gateway streaming response 只转发 Runtime event，不自行生成领域内容。
-- [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
-  安全元数据，不暴露内部日志或 prompt。
-- [ ] 增加 fake runtime/tools 的本地 dry run。
-- [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-- [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
-- [ ] 目标环境 Open WebUI 单入口复测。
-
-### R5 提交
-
-- [ ] `tonglingyu: move domain flow behind runtime agent`
-
 ## 完成口径
 
-Runtime 专项完成前，只能声明：
+Runtime 专项完成后可以声明：
 
 - [x] Agent Platform 已具备 P1 真实 Hermes Runtime 只读闭环。
 - [x] Agent Platform 已具备 P2 external-action 执行链路。
-- [x] Agent Runtime 已具备 streaming、schema、tool policy 和 step plan。
-- [ ] 通灵玉已满足薄 Gateway + Runtime Agent 架构。
+- [x] Agent Runtime 已具备 streaming、schema、tool policy、step plan 和
+  read-only tool execution loop。
 
-Runtime 专项全部完成后，必须满足：
+Runtime 专项完成条件：
 
-- [x] R1 到 R4 repo/local checkbox 关闭。
-- [ ] R5A 到 R5D checkbox 关闭。
-- [ ] 对应测试命令全部通过。
-- [ ] `PROGRESS.md` 更新完成状态和残余风险。
-- [ ] 通灵玉远端或目标部署完成 Open WebUI 单入口复测。
+- [x] R1 到 R4.5 repo/local checkbox 关闭。
+- [x] 对应测试命令全部通过。
+- [x] `PROGRESS.md` 更新完成状态和残余风险。
+
+领域 Gateway 接入的完成口径、测试和 Open WebUI 复测由对应领域设计文档
+维护；通灵玉接入不再记录在本 Runtime checklist 中。
