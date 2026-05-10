@@ -3873,4 +3873,27 @@ mod tests {
         assert!(answer.contains("pkg-test"));
         assert!(answer.contains("证据不足"));
     }
+
+    #[test]
+    fn gateway_does_not_reown_runtime_domain_functions() {
+        let main_source = include_str!("main.rs");
+        for function_name in [
+            "extract_terms",
+            "query_blocks_like",
+            "query_blocks_exact_text",
+            "evidence_card_from_block",
+            "create_evidence_package",
+            "load_evidence_package",
+            "claims_from_cards",
+            "review",
+            "local_answer",
+            "enforce_review",
+        ] {
+            let forbidden = format!("fn {function_name}(");
+            assert!(
+                !main_source.contains(&forbidden),
+                "Gateway must not re-own runtime domain function {function_name}"
+            );
+        }
+    }
 }

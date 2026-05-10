@@ -107,6 +107,9 @@
 - Evidence package、review record、claim link 和 audit event 的运行时表
   初始化已迁入 `tonglingyu-runtime::init_runtime_schema`；Gateway 只初始化
   gateway session/message/workflow 表并调用 runtime schema 初始化。
+- Gateway 单元测试已加入源码级回归断言，防止 `extract_terms`、
+  `query_blocks_like`、`evidence_card_from_block`、`review` 等 runtime
+  领域函数重新回流到 Gateway。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   source snapshot loader、SQLite 连接和 KB/schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。
