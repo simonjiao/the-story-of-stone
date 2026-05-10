@@ -4981,6 +4981,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_streams_safe_error_for_malformed_tool_arguments() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-args",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.malformed_args",
+                                            "arguments": "{\"SECRET_ARGUMENT_FIELD\":"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-args-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.malformed_args".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "tool-args-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "use malformed args tool",
+                )],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.malformed_args".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
+        assert!(events[0].output.is_none());
+        let encoded_event = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded_event.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!encoded_event.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-args"));
+        assert!(log.contains("tool.malformed_args"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("SECRET_ARGUMENT_FIELD"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit() {
         let app = Router::new().route(
             "/chat/completions",

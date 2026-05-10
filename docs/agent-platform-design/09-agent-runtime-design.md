@@ -435,7 +435,8 @@ runtime: add multi-profile step plan
 
 1. Runtime 只执行本次授权 scope 与 profile contract 交集内的 read-only tools。
 2. 写入类工具仍只能走 Manager external-action apply/compensate。
-3. 每个 tool call 在执行前校验 tool name、input schema 和 profile tool policy。
+3. 每个 tool call 在执行前校验 tool name、arguments JSON、input schema 和
+   profile tool policy。
 4. 每个 tool result 在回灌给 profile 前校验 output schema。
 5. tool output 不以 raw output 形式回灌给 profile，也不进入 final
    `RuntimeOutput.metadata`；profile 回灌和 metadata 只保留 output_ref、
@@ -469,26 +470,28 @@ runtime: add multi-profile step plan
 
 1. 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
 2. 未授权或 denied tool call 在执行前被拒绝。
-3. tool input schema invalid 时不会执行 tool executor 或形成 successful tool
+3. malformed tool arguments 时不会执行 tool executor，streaming path 返回
+   安全 `error` event，并写安全 `runtime_tool_error` audit event。
+4. tool input schema invalid 时不会执行 tool executor 或形成 successful tool
    result，并写安全 `runtime_tool_error` audit event。
-4. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
+5. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
    step output，并写安全 `runtime_tool_error` audit event。
-5. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
-6. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
-7. tool output summary 不泄漏 raw string、object key 名或 executor metadata
+6. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
+7. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
+8. tool output summary 不泄漏 raw string、object key 名或 executor metadata
    payload。
-8. required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
+9. required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
    audit event。
-9. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
-10. 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
+10. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
+11. 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
    超出 runtime budget 时返回安全错误。
-11. streaming run、session message 或 profile step 超出 runtime budget 时返回
+12. streaming run、session message 或 profile step 超出 runtime budget 时返回
     安全 `error` event。
-12. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
+13. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
-13. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
+14. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
     记录不会被覆盖。
-14. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
+15. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
     raw tool name / raw call id。
 
 测试：

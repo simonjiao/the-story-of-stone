@@ -260,6 +260,8 @@ backpressure API 是后续项。
 - [x] 未授权或 denied tool call 在执行前被拒绝。
 - [x] 不在本次 requested tool scope 内的 tool call 在执行前被拒绝。
 - [x] non-read-only tool scope 在执行前被拒绝。
+- [x] malformed tool arguments 时不会执行 tool executor；streaming path
+  返回安全 `error` event，并写安全 `runtime_tool_error` audit event。
 - [x] tool input schema invalid 时不会执行 tool executor 或形成 successful
   tool result，并写安全 `runtime_tool_error` audit event。
 - [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
@@ -300,6 +302,9 @@ backpressure API 是后续项。
   violation 的 `runtime_tool_error` audit event。
 - [x] `hermes_runtime_rejects_invalid_tool_input_schema_with_safe_audit`
   覆盖 tool input schema invalid 的安全错误和 audit 不泄漏 arguments。
+- [x] `hermes_runtime_streams_safe_error_for_malformed_tool_arguments`
+  覆盖 malformed arguments 不执行 executor、streaming safe error event 和
+  audit 不泄漏 arguments。
 - [x] `hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit`
   覆盖 tool output schema invalid 不回灌、不形成 result event、audit 不泄漏
   raw output。
