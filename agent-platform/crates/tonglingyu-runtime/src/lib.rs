@@ -148,6 +148,19 @@ pub struct RuntimeWorkflowStepReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowStreamEvent {
+    pub sequence: u64,
+    pub event_type: String,
+    pub profile: String,
+    pub trace_id: String,
+    pub content_delta: Option<String>,
+    pub output_ref: Option<String>,
+    pub package_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeWorkflowOutput {
     pub trace_id: String,
     pub question: String,
@@ -156,6 +169,7 @@ pub struct RuntimeWorkflowOutput {
     pub final_answer: String,
     pub answer_source: String,
     pub steps: Vec<RuntimeWorkflowStepReport>,
+    pub stream_events: Vec<RuntimeWorkflowStreamEvent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -634,6 +648,13 @@ pub fn execute_runtime_workflow(
             }),
         },
     )?);
+    let stream_events = workflow_stream_events(
+        &input.trace_id,
+        &input.profiles.main,
+        &package.package_id,
+        &final_answer,
+        &steps,
+    );
     Ok(RuntimeWorkflowOutput {
         trace_id: input.trace_id,
         question: input.question,
@@ -642,6 +663,7 @@ pub fn execute_runtime_workflow(
         final_answer,
         answer_source: "runtime_local_profile".to_string(),
         steps,
+        stream_events,
     })
 }
 
@@ -732,6 +754,77 @@ fn evidence_types(cards: &[EvidenceCard]) -> Vec<String> {
 
 fn elapsed_ms(started: Instant) -> u128 {
     started.elapsed().as_millis()
+}
+
+fn workflow_stream_events(
+    trace_id: &str,
+    final_profile: &str,
+    package_id: &str,
+    final_answer: &str,
+    steps: &[RuntimeWorkflowStepReport],
+) -> Vec<RuntimeWorkflowStreamEvent> {
+    let mut events = Vec::new();
+    events.push(RuntimeWorkflowStreamEvent {
+        sequence: 0,
+        event_type: "started".to_string(),
+        profile: final_profile.to_string(),
+        trace_id: trace_id.to_string(),
+        content_delta: None,
+        output_ref: None,
+        package_id: Some(package_id.to_string()),
+        metadata: json!({"runtime": "tonglingyu", "stream_source": "runtime_workflow"}),
+    });
+    for step in steps {
+        events.push(RuntimeWorkflowStreamEvent {
+            sequence: events.len() as u64,
+            event_type: "step_completed".to_string(),
+            profile: step.profile.clone(),
+            trace_id: trace_id.to_string(),
+            content_delta: None,
+            output_ref: Some(step.output_ref.clone()),
+            package_id: Some(package_id.to_string()),
+            metadata: json!({
+                "step_id": &step.step_id,
+                "operation": &step.operation,
+                "duration_ms": step.duration_ms,
+                "allowed_tools": &step.allowed_tools,
+            }),
+        });
+    }
+    for chunk in text_stream_chunks(final_answer, 96) {
+        events.push(RuntimeWorkflowStreamEvent {
+            sequence: events.len() as u64,
+            event_type: "content_delta".to_string(),
+            profile: final_profile.to_string(),
+            trace_id: trace_id.to_string(),
+            content_delta: Some(chunk),
+            output_ref: None,
+            package_id: Some(package_id.to_string()),
+            metadata: json!({"runtime": "tonglingyu"}),
+        });
+    }
+    events.push(RuntimeWorkflowStreamEvent {
+        sequence: events.len() as u64,
+        event_type: "final_output".to_string(),
+        profile: final_profile.to_string(),
+        trace_id: trace_id.to_string(),
+        content_delta: None,
+        output_ref: steps.last().map(|step| step.output_ref.clone()),
+        package_id: Some(package_id.to_string()),
+        metadata: json!({"runtime": "tonglingyu"}),
+    });
+    events
+}
+
+fn text_stream_chunks(content: &str, max_chars: usize) -> Vec<String> {
+    let chars = content.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(max_chars)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
 }
 
 pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
@@ -2809,6 +2902,13 @@ mod tests {
                 .any(|step| step.operation == "review_answer"
                     && step.output["draft_consumed"] == true)
         );
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "content_delta"
+                && event
+                    .content_delta
+                    .as_deref()
+                    .is_some_and(|chunk| !chunk.is_empty())
+        }));
         let profile_step_events: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM audit_events WHERE event_type = 'runtime_profile_step_completed'",

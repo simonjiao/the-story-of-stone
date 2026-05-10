@@ -196,11 +196,17 @@ profile step output_ref、duration、tool set、trace_id、draft 和 final answe
 `tonglingyu-runtime` 也定义了四个 profile descriptor，Gateway Runtime step
 plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱节。
 
+Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
+Gateway streaming response 只把 Runtime `content_delta` event 包装为
+OpenAI-compatible SSE chunk，不再由 Gateway 自行切分领域回答。去重缓存命中
+的 streaming replay 仍沿用 cached completion stream，需要后续改为 Runtime
+event replay。
+
 这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite 连接并传给本地
 Runtime API，四 profile 当前是 `tonglingyu-runtime` 内的确定性 workflow，
-尚未通过 `agent-runtime` 执行，streaming 也还不是 Runtime event 转发。
-R5A/R5D 必须等 `agent-runtime` 执行面接入、Runtime event streaming、
-连接/事务边界收敛和目标环境 Open WebUI 复测完成后再勾选。
+尚未通过 `agent-runtime` 执行。R5A/R5D 必须等 `agent-runtime` 执行面接入、
+缓存 replay 的 Runtime event streaming、连接/事务边界收敛和目标环境
+Open WebUI 复测完成后再勾选。
 
 ### R5C 四 Profile 编排
 
@@ -222,7 +228,9 @@ R5A/R5D 必须等 `agent-runtime` 执行面接入、Runtime event streaming、
 
 - [x] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
   workflow 调用。
-- [ ] Gateway streaming response 只转发 Runtime event，不自行生成领域内容。
+- [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`
+  event，不自行生成领域内容。
+- [ ] 去重缓存命中的 streaming replay 改为 Runtime event replay。
 - [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。

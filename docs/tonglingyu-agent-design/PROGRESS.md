@@ -134,10 +134,15 @@
 - Gateway health、metrics、admin trace 的 KB/runtime 统计和 runtime audit 读取
   已改为调用 `tonglingyu-runtime` stats/audit API；runtime prune 和 audit
   append 也已迁入 Runtime，Gateway 只保留 gateway session/workflow 清理。
+- Runtime workflow 已生成 `started`、`step_completed`、`content_delta` 和
+  `final_output` stream events；新请求的 Gateway streaming response 已改为
+  转发 Runtime `content_delta` event，并由 smoke 校验 `runtime_workflow`
+  标记和 dry run 的 `runtime_stream_events`。去重缓存命中的 streaming replay
+  仍沿用 cached completion stream，尚未完成 Runtime event replay。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   SQLite 连接并把连接传给本地 Runtime API；profile workflow 还是
-  `tonglingyu-runtime` 确定性执行，尚未接入 `agent-runtime` 执行面，
-  streaming 也还不是 Runtime event 转发。
+  `tonglingyu-runtime` 确定性执行，尚未接入 `agent-runtime` 执行面；
+  streaming 只覆盖新请求，缓存 replay 和目标 Open WebUI 页面复测仍未完成。
 
 ## 下一步
 

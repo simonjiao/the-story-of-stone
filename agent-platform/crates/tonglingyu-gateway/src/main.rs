@@ -23,8 +23,8 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     EvidenceCard, EvidencePackage, RuntimeWorkflowInput, RuntimeWorkflowProfiles,
-    TonglingyuToolCall, TonglingyuToolOutput, execute_runtime_workflow, execute_tool, package_json,
-    replay_answer,
+    RuntimeWorkflowStreamEvent, TonglingyuToolCall, TonglingyuToolOutput, execute_runtime_workflow,
+    execute_tool, package_json, replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -1081,6 +1081,7 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "policy": policy,
         "runtime_step_plan": runtime_step_plan,
         "runtime_step_outputs": workflow.steps,
+        "runtime_stream_events": workflow.stream_events,
         "package_id": &package.package_id,
         "review": &package.review,
         "final_answer": workflow.final_answer,
@@ -1091,6 +1092,7 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             "claim_count": package.claims.len(),
             "reviewer_enforced": true,
             "profile_step_count": workflow.steps.len(),
+            "runtime_stream_event_count": workflow.stream_events.len(),
             "runtime_tools_used": [
                 "tonglingyu.text.search",
                 "tonglingyu.evidence.package.create",
@@ -2532,7 +2534,7 @@ async fn chat_completions(
         }),
     );
     if request.stream.unwrap_or(false) {
-        streaming_response_from_completion_value(&value)
+        streaming_response_from_runtime_events(&state.model_id, &value, &workflow.stream_events)
     } else {
         Json(value).into_response()
     }
@@ -2622,6 +2624,94 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
             "evidence_package_id": value.get("evidence_package_id"),
             "session_id": value.get("session_id"),
             "review": value.get("review"),
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        })
+    ));
+    chunks.push("data: [DONE]\n\n".to_string());
+    let body = chunks.join("");
+    (
+        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn streaming_response_from_runtime_events(
+    model: &str,
+    value: &Value,
+    events: &[RuntimeWorkflowStreamEvent],
+) -> Response {
+    let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
+    let mut chunks = Vec::new();
+    chunks.push(format!(
+        "data: {}\n\n",
+        json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "trace_id": value.get("trace_id"),
+            "evidence_package_id": value.get("evidence_package_id"),
+            "session_id": value.get("session_id"),
+            "review": value.get("review"),
+            "stream_source": "runtime_workflow",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        })
+    ));
+    let mut forwarded_delta = false;
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "content_delta")
+    {
+        let Some(piece) = event.content_delta.as_deref() else {
+            continue;
+        };
+        forwarded_delta = true;
+        chunks.push(format!(
+            "data: {}\n\n",
+            json!({
+                "id": &completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "trace_id": value.get("trace_id"),
+                "evidence_package_id": value.get("evidence_package_id"),
+                "session_id": value.get("session_id"),
+                "review": value.get("review"),
+                "runtime_event": {
+                    "sequence": event.sequence,
+                    "event_type": &event.event_type,
+                    "profile": &event.profile,
+                    "output_ref": &event.output_ref,
+                },
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": piece},
+                    "finish_reason": null
+                }]
+            })
+        ));
+    }
+    if !forwarded_delta {
+        return streaming_response_from_completion_value(value);
+    }
+    chunks.push(format!(
+        "data: {}\n\n",
+        json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "trace_id": value.get("trace_id"),
+            "evidence_package_id": value.get("evidence_package_id"),
+            "session_id": value.get("session_id"),
+            "review": value.get("review"),
+            "stream_source": "runtime_workflow",
             "choices": [{
                 "index": 0,
                 "delta": {},

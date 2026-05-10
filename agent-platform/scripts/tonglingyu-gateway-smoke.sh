@@ -155,6 +155,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -d '{"model":"tonglingyu","stream":true,"messages":[{"role":"user","content":"黛玉命运是什么？"}]}' \
   "${BASE_URL}/v1/chat/completions" >"${STREAM_TXT}"
 grep -q 'evidence_package_id' "${STREAM_TXT}"
+grep -q 'runtime_workflow' "${STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${STREAM_TXT}"
 
 PACKAGE_ID="$(cat "${CHAT_JSON}" | json_get "evidence_package_id")"
@@ -297,7 +298,9 @@ assert dry_run["status"] == "passed", dry_run
 assert dry_run["package_id"] in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
 assert dry_run["runtime_step_outputs"], dry_run
+assert dry_run["runtime_stream_events"], dry_run
 assert all("output_ref" in step for step in dry_run["runtime_step_outputs"]), dry_run
+assert any(event["event_type"] == "content_delta" for event in dry_run["runtime_stream_events"]), dry_run
 assert any(
     "tonglingyu.text.search" in step["allowed_tools"]
     for step in dry_run["runtime_step_plan"]["steps"]
