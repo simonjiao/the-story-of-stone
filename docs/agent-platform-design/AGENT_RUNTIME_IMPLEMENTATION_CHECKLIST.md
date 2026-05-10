@@ -87,7 +87,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 
 ### R1 提交
 
-- [x] `runtime: add profile contract validation`
+- [x] `Complete agent runtime execution requirements`
 - [x] `runtime: complete agent runtime contract enforcement`
 - [x] `runtime: enforce profile safety policy subset`
 - [x] `runtime: redact schema unexpected property errors`
@@ -145,7 +145,7 @@ backpressure API 是后续项。
 
 ### R2 提交
 
-- [x] `runtime: add streaming event contract`
+- [x] `Complete agent runtime execution requirements`
 - [x] `runtime: align stream event contract fields`
 - [x] `docs: clarify runtime streaming completion scope`
 - [x] `runtime: enforce profile budget on streaming path`
@@ -194,7 +194,6 @@ backpressure API 是后续项。
 
 ### R3 提交
 
-- [x] `runtime: enforce profile tool policy`
 - [x] `Tighten agent runtime tool scope`
 - [x] `runtime: verify non-read-only tool calls`
 
@@ -252,7 +251,7 @@ backpressure API 是后续项。
 
 ### R4 提交
 
-- [x] `runtime: add multi-profile step plan`
+- [x] `Complete agent runtime execution requirements`
 - [x] `runtime: enforce step plan contract fallbacks`
 - [x] `runtime: require explicit step tool scope`
 - [x] `runtime: cover step fallback edge cases`
