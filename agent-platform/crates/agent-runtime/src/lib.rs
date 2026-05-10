@@ -476,6 +476,22 @@ impl HermesRuntimeClient {
         Ok((content, metadata))
     }
 
+    async fn chat_completion_with_budget(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+    ) -> CoreResult<(String, Value)> {
+        let started = Instant::now();
+        ensure_profile_budget(started, contract)?;
+        let result = self
+            .chat_completion(messages, trace_id, runtime_profile)
+            .await?;
+        ensure_profile_budget(started, contract)?;
+        Ok(result)
+    }
+
     async fn chat_completion_message(
         &self,
         messages: Vec<HermesChatMessage>,
@@ -820,6 +836,22 @@ impl HermesRuntimeClient {
             events,
         ))
     }
+
+    async fn chat_completion_stream_with_budget(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+    ) -> CoreResult<(String, Value, Vec<RuntimeStreamEvent>)> {
+        let started = Instant::now();
+        ensure_profile_budget(started, contract)?;
+        let result = self
+            .chat_completion_stream(messages, trace_id, runtime_profile)
+            .await?;
+        ensure_profile_budget(started, contract)?;
+        Ok(result)
+    }
 }
 
 #[async_trait]
@@ -849,8 +881,13 @@ impl RuntimeClient for HermesRuntimeClient {
                 )
                 .await?
             } else {
-                self.chat_completion(messages, &input.trace_id, &runtime_profile)
-                    .await?
+                self.chat_completion_with_budget(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                )
+                .await?
             };
         finalize_runtime_output(
             RuntimeOutput {
@@ -889,8 +926,13 @@ impl RuntimeClient for HermesRuntimeClient {
                 )
                 .await?
             } else {
-                self.chat_completion(messages, &input.trace_id, &runtime_profile)
-                    .await?
+                self.chat_completion_with_budget(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                )
+                .await?
             };
         let assistant_message = AgentSessionMessage::new(
             input.session_id.clone(),
@@ -1009,7 +1051,12 @@ impl RuntimeClient for HermesRuntimeClient {
             }
             let messages = run_messages(&input, &runtime_profile);
             let (content, metadata, mut events) = self
-                .chat_completion_stream(messages, &trace_id, &runtime_profile)
+                .chat_completion_stream_with_budget(
+                    messages,
+                    &trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                )
                 .await?;
             let output = finalize_runtime_output(
                 RuntimeOutput {
@@ -1079,7 +1126,12 @@ impl RuntimeClient for HermesRuntimeClient {
             }
             let messages = session_messages(&input, &runtime_profile);
             let (content, metadata, mut events) = self
-                .chat_completion_stream(messages, &trace_id, &runtime_profile)
+                .chat_completion_stream_with_budget(
+                    messages,
+                    &trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                )
                 .await?;
             let assistant_message = AgentSessionMessage::new(
                 input.session_id.clone(),
@@ -3217,6 +3269,36 @@ mod tests {
         }
     }
 
+    fn hermes_session_input(trace_id: String, content: impl Into<String>) -> RuntimeSessionInput {
+        let session_id = "session-1".to_string();
+        RuntimeSessionInput {
+            session_id: session_id.clone(),
+            agent_id: "agent-1".to_string(),
+            agent: None,
+            message: AgentSessionMessage::new(
+                session_id.clone(),
+                1,
+                MessageRole::User,
+                Some(content.into()),
+                None,
+                trace_id.clone(),
+            ),
+            context: SessionContext {
+                session_id,
+                agent_id: "agent-1".to_string(),
+                context_summary: None,
+                recent_messages: Vec::new(),
+                resource_scope: json!({"resource": "resource:team/project-alpha"}),
+                trace_id: trace_id.clone(),
+            },
+            snapshot: None,
+            profile_contract: None,
+            runtime_step: None,
+            requested_tools: Vec::new(),
+            trace_id,
+        }
+    }
+
     async fn spawn_server(app: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5122,6 +5204,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_run_and_session_reject_expired_contract_budget() {
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let mut run_contract = ProfileContract::new("budget-run-profile", "v1");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.profile_contract = Some(run_contract);
+
+        let run_error = runtime.execute_run(run_input).await.unwrap_err();
+
+        assert!(matches!(
+            run_error,
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+
+        let mut session_contract = ProfileContract::new("budget-session-profile", "v1");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut session_input = hermes_session_input(new_trace_id(), "session budget");
+        session_input.profile_contract = Some(session_contract);
+
+        let session_error = runtime
+            .send_session_message(session_input)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            session_error,
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_streams_safe_error_for_expired_profile_budget() {
         let mut contract = ProfileContract::new("budget-profile", "v1");
         contract.max_runtime_seconds = Some(0);
@@ -5153,6 +5279,53 @@ mod tests {
         assert!(events[0].output.is_none());
         let encoded = serde_json::to_string(&events[0]).unwrap();
         assert!(!encoded.contains("SECRET_BUDGET"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_and_session_safe_error_for_expired_contract_budget() {
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let mut run_contract = ProfileContract::new("budget-run-stream-profile", "v1");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.run.target_resource = "resource:team/SECRET_RUN_BUDGET".to_string();
+        let run_id = run_input.run.id.clone();
+        run_input.profile_contract = Some(run_contract);
+
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+
+        assert_eq!(run_events.len(), 1);
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(run_events[0].run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(run_events[0].schema_version.as_deref(), Some("v1"));
+        let encoded_run = serde_json::to_string(&run_events[0]).unwrap();
+        assert!(!encoded_run.contains("SECRET_RUN_BUDGET"));
+
+        let mut session_contract = ProfileContract::new("budget-session-stream-profile", "v1");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut session_input = hermes_session_input(new_trace_id(), "SECRET_SESSION_BUDGET");
+        let session_id = session_input.session_id.clone();
+        session_input.profile_contract = Some(session_contract);
+
+        let session_events = runtime.stream_session_message(session_input).await.unwrap();
+
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(session_events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(
+            session_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(session_events[0].schema_version.as_deref(), Some("v1"));
+        let encoded_session = serde_json::to_string(&session_events[0]).unwrap();
+        assert!(!encoded_session.contains("SECRET_SESSION_BUDGET"));
     }
 
     #[tokio::test]

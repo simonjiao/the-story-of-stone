@@ -443,7 +443,8 @@ runtime: add multi-profile step plan
    metadata payload。
 6. `RuntimeToolSpec.output_ref_required=true` 时，tool executor 缺失
    `output_ref` 必须失败，不能由 Runtime 自动补全后当作成功结果。
-7. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
+7. run、session message 和 profile step 都必须受 `max_runtime_seconds`
+   预算约束；tool loop 还必须受最大 tool round 约束。
 8. RuntimeOutput metadata 中必须返回安全 tool event 摘要；Runtime adapter
    直连场景必须配置等价 append-only audit sink。
 9. tool call 失败时必须写安全 `runtime_tool_error` audit event，且不记录
@@ -477,7 +478,8 @@ runtime: add multi-profile step plan
    audit event。
 8. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
 9. 超出 tool round 或 runtime budget 时返回安全错误。
-10. streaming profile step 超出 runtime budget 时返回安全 `error` event。
+10. streaming run、session message 或 profile step 超出 runtime budget 时返回
+    安全 `error` event。
 11. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
 12. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL

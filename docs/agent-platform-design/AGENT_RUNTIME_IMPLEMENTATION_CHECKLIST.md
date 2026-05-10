@@ -240,7 +240,8 @@ backpressure API 是后续项。
   profile，也不进入 final `RuntimeOutput.metadata`，摘要只暴露类型和长度/数量。
 - [x] `RuntimeToolSpec.output_ref_required=true` 时，缺失 `output_ref` 会失败，
   不会被 Runtime 自动补全成 successful tool result。
-- [x] profile step 受最大 tool round 和 `max_runtime_seconds` 预算约束。
+- [x] run、session message 和 profile step 都受 `max_runtime_seconds`
+  预算约束；tool loop 还受最大 tool round 约束。
 - [x] RuntimeOutput metadata 返回安全 tool call / tool result event 摘要。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
@@ -266,7 +267,8 @@ backpressure API 是后续项。
   audit event。
 - [x] tool executor 返回的 call/profile/tool 身份不会覆盖 Runtime 已授权 tool call。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
-- [x] streaming profile step 超出 runtime budget 时返回安全 `error` event。
+- [x] streaming run、session message 和 profile step 超出 runtime budget 时返回
+  安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
   runtime tool call / result 事件。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证，且确认已有 JSONL
@@ -285,6 +287,8 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
 - [x] `hermes_runtime_stream_run_with_tools_emits_tool_progress_events`
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
+- [x] `hermes_runtime_run_and_session_reject_expired_contract_budget`
+- [x] `hermes_runtime_stream_run_and_session_safe_error_for_expired_contract_budget`
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 profile 回灌、executor metadata、raw string output summary 和 adapter
   audit 不泄漏。
