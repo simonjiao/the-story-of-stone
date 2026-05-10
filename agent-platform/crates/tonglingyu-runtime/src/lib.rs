@@ -5,7 +5,7 @@ use agent_core::{
     RuntimeStepPlanOwner, RuntimeToolCall, RuntimeToolExecutor, RuntimeToolPolicy,
     RuntimeToolResult, RuntimeToolSpec,
 };
-use agent_runtime::MinimalRuntimeClient;
+use agent_runtime::{HermesRuntimeClient, MinimalRuntimeClient, RuntimeProfileRegistry};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,6 +17,7 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 use time::OffsetDateTime;
@@ -148,11 +149,24 @@ impl TonglingyuRuntimeStore {
         &self,
         input: RuntimeWorkflowInput,
     ) -> Result<RuntimeWorkflowOutput> {
+        self.execute_workflow_with_agent_runtime_mode(
+            input,
+            TonglingyuAgentRuntimeMode::from_env()?,
+        )
+        .await
+    }
+
+    pub async fn execute_workflow_with_agent_runtime_mode(
+        &self,
+        input: RuntimeWorkflowInput,
+        mode: TonglingyuAgentRuntimeMode,
+    ) -> Result<RuntimeWorkflowOutput> {
         let mut workflow = {
             let conn = self.open_connection()?;
             execute_runtime_workflow(&conn, input.clone())?
         };
-        attach_agent_runtime_step_execution(&mut workflow, &input.profiles).await?;
+        attach_agent_runtime_step_execution(&mut workflow, &input.profiles, self.clone(), mode)
+            .await?;
         workflow.stream_events = workflow_stream_events(
             &workflow.trace_id,
             &input.profiles.main,
@@ -312,6 +326,33 @@ impl RuntimeToolExecutor for TonglingyuRuntimeToolExecutor {
                 "trace_id": call.trace_id,
             }),
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TonglingyuAgentRuntimeMode {
+    #[default]
+    Minimal,
+    Hermes,
+}
+
+impl TonglingyuAgentRuntimeMode {
+    pub fn from_env() -> Result<Self> {
+        let value = std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE")
+            .unwrap_or_else(|_| "minimal".to_string());
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "minimal" => Ok(Self::Minimal),
+            "hermes" => Ok(Self::Hermes),
+            other => Err(anyhow!("unsupported TONGLINGYU_AGENT_RUNTIME_MODE={other}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Hermes => "hermes",
+        }
     }
 }
 
@@ -1368,12 +1409,16 @@ pub fn execute_runtime_workflow(
 async fn attach_agent_runtime_step_execution(
     workflow: &mut RuntimeWorkflowOutput,
     profiles: &RuntimeWorkflowProfiles,
+    store: TonglingyuRuntimeStore,
+    mode: TonglingyuAgentRuntimeMode,
 ) -> Result<()> {
-    let contracts = agent_runtime_profile_contracts(profiles)
+    let profile_contracts = agent_runtime_profile_contracts(profiles);
+    let registry = RuntimeProfileRegistry::new(profile_contracts.clone());
+    let contracts = profile_contracts
         .into_iter()
         .map(|contract| (contract.profile_id.clone(), contract))
         .collect::<BTreeMap<_, _>>();
-    let runtime = MinimalRuntimeClient::default();
+    let runtime = tonglingyu_agent_runtime_client(mode, store, registry)?;
     for step in &mut workflow.steps {
         let contract = contracts
             .get(&step.profile)
@@ -1402,9 +1447,10 @@ async fn attach_agent_runtime_step_execution(
             })
             .await?;
         step.agent_runtime = Some(json!({
-            "client": "minimal",
+            "client": mode.as_str(),
             "status": "executed",
             "content_source": "tonglingyu-deterministic-workflow",
+            "executor_output_source": format!("agent-runtime-{}", mode.as_str()),
             "content_used_for_final_answer": false,
             "result_ref": output.result_ref,
             "result_summary": output.result_summary,
@@ -1426,6 +1472,23 @@ async fn attach_agent_runtime_step_execution(
         }));
     }
     Ok(())
+}
+
+fn tonglingyu_agent_runtime_client(
+    mode: TonglingyuAgentRuntimeMode,
+    store: TonglingyuRuntimeStore,
+    registry: RuntimeProfileRegistry,
+) -> Result<Arc<dyn RuntimeClient>> {
+    match mode {
+        TonglingyuAgentRuntimeMode::Minimal => Ok(Arc::new(
+            MinimalRuntimeClient::default().with_profile_registry(registry),
+        )),
+        TonglingyuAgentRuntimeMode::Hermes => Ok(Arc::new(
+            HermesRuntimeClient::from_env()?
+                .with_profile_registry(registry)
+                .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
+        )),
+    }
 }
 
 fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> AgentRuntimeStep {
@@ -3829,13 +3892,16 @@ mod tests {
             init_knowledge_base_schema(&conn).expect("kb schema");
         }
         let workflow = store
-            .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
-                trace_id: "trace-agent-runtime-step-test".to_string(),
-                question: "量子红学理论如何解释通灵玉？".to_string(),
-                limit: 3,
-                required_evidence_types: vec!["base_text".to_string()],
-                profiles: RuntimeWorkflowProfiles::default(),
-            })
+            .execute_workflow_with_agent_runtime_mode(
+                RuntimeWorkflowInput {
+                    trace_id: "trace-agent-runtime-step-test".to_string(),
+                    question: "量子红学理论如何解释通灵玉？".to_string(),
+                    limit: 3,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Minimal,
+            )
             .await
             .expect("workflow executes");
 
@@ -3847,7 +3913,8 @@ mod tests {
         );
         assert!(workflow.steps.iter().any(|step| {
             step.agent_runtime.as_ref().is_some_and(|value| {
-                value["content_source"] == "tonglingyu-deterministic-workflow"
+                value["client"] == "minimal"
+                    && value["content_source"] == "tonglingyu-deterministic-workflow"
                     && value["content_used_for_final_answer"] == json!(false)
             })
         }));

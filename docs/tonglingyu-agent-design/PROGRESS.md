@@ -151,6 +151,9 @@
   实现 `agent_core::RuntimeToolExecutor`，可把 agent-runtime/Hermes tool call
   转成 `TonglingyuToolCall` 并调用本地 SQLite evidence/package 工具；单测覆盖
   text search、package create/read。
+- profile step execution envelope 已支持 `TONGLINGYU_AGENT_RUNTIME_MODE=minimal|hermes`；
+  默认 `minimal`，`hermes` 模式使用 `HermesRuntimeClient::from_env()` 并挂载本地
+  Tonglingyu tool executor，但最终回答仍未切到 Hermes content/tool execution。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
