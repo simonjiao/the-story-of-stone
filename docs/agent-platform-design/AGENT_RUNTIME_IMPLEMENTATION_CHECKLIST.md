@@ -331,6 +331,9 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_stream_run_safe_error_for_tool_executor_failure`
   覆盖 streaming tool loop 的 executor failure 不泄漏 error payload，并保留
   run/schema/audit 边界。
+- [x] `hermes_runtime_stream_session_and_profile_safe_error_for_tool_executor_failure`
+  覆盖 streaming tool loop 的 executor failure 在 session/profile wrapper
+  中保留安全 error event、schema version、session/profile 标识和 audit 边界。
 - [x] `hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit`
   覆盖 tool output schema invalid 不回灌、不形成 result event、audit 不泄漏
   raw output。

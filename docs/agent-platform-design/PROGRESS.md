@@ -47,7 +47,8 @@
   失败时不会执行越界 executor、回灌 raw arguments/output 或形成
   successful tool result；tool executor 自身失败会包装为安全 Runtime
   错误，streaming path 返回安全 `error` event，不透传 executor error
-  payload；tool call 失败会写安全 `runtime_tool_error` adapter audit event；
+  payload，且 run/session/profile wrapper 均有回归验证；tool call 失败会写安全
+  `runtime_tool_error` adapter audit event；
   Runtime adapter 也提供直连场景可配置的 append-only JSONL audit sink，并有
   保留已有记录和 `AGENT_RUNTIME_AUDIT_LOG` 配置入口的回归验证。
 - Runtime repo/local checklist 当前已关闭；完成口径限定为 Agent Runtime 本体，
