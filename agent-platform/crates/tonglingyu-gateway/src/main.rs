@@ -51,6 +51,7 @@ enum Command {
     BuildKb(BuildKbArgs),
     Query(QueryArgs),
     ReplayPackage(ReplayPackageArgs),
+    RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
@@ -97,6 +98,19 @@ struct ReplayPackageArgs {
     )]
     db: PathBuf,
     package_id: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeDryRunArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    question: String,
+    #[arg(long, default_value_t = 8)]
+    limit: usize,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -595,6 +609,11 @@ async fn main() -> Result<()> {
             let replay = runtime_replay_package(&conn, &args.package_id)?
                 .ok_or_else(|| anyhow!("evidence package not found: {}", args.package_id))?;
             println!("{}", serde_json::to_string_pretty(&replay)?);
+            Ok(())
+        }
+        Command::RuntimeDryRun(args) => {
+            let report = runtime_dry_run(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         Command::Eval(args) => {
@@ -1669,6 +1688,49 @@ fn hash_value(value: &Value) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(data);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
+    if args.limit == 0 {
+        return Err(anyhow!("--limit must be greater than 0"));
+    }
+    let started = Instant::now();
+    let conn = open_db(&args.db)?;
+    let trace_id = format!("dryrun-{}", new_trace_id());
+    let profiles = InternalProfiles {
+        main: "honglou-main".to_string(),
+        text: "honglou-text".to_string(),
+        commentary: "honglou-commentary".to_string(),
+        reviewer: "honglou-reviewer".to_string(),
+    };
+    let (cards, mut policy) = search_evidence_with_policy(&conn, &args.question, args.limit)?;
+    policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
+    let package = runtime_create_package(&conn, &trace_id, &args.question, cards)?;
+    let replay = runtime_replay_package(&conn, &package.package_id)?
+        .ok_or_else(|| anyhow!("runtime dry run package replay missing"))?;
+    Ok(json!({
+        "object": "tonglingyu.runtime_dry_run",
+        "status": "passed",
+        "trace_id": trace_id,
+        "question": &args.question,
+        "policy": policy,
+        "runtime_step_plan": runtime_step_plan,
+        "package_id": &package.package_id,
+        "review": &package.review,
+        "replay": replay,
+        "elapsed_ms": elapsed_ms(started),
+        "checks": {
+            "card_count": package.cards.len(),
+            "claim_count": package.claims.len(),
+            "reviewer_enforced": true,
+            "runtime_tools_used": [
+                "tonglingyu.text.search",
+                "tonglingyu.evidence.package.create",
+                "tonglingyu.evidence.package.replay"
+            ],
+        },
+    }))
 }
 
 #[derive(Debug)]

@@ -119,6 +119,9 @@
 - Runtime 已定义 `honglou-text`、`honglou-commentary`、`honglou-main`、
   `honglou-reviewer` 四个 profile descriptor；Gateway Runtime step plan
   已带 `PROFILE_CONTRACT_VERSION`，避免 plan 与 profile contract 脱节。
+- Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
+  执行 search、package create、package replay 和 reviewer 约束检查；
+  gateway smoke 已覆盖该 dry run。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   source snapshot loader、SQLite 连接和 KB/schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。

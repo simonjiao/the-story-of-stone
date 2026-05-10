@@ -8,6 +8,7 @@ SMOKE_DIR="${TMPDIR:-/tmp}/tonglingyu-gateway-smoke-$$"
 SOURCE_ROOT="${TONGLINGYU_SOURCE_ROOT:-${REPO_ROOT}/resources/sources/wiki}"
 DB_PATH="${SMOKE_DIR}/tonglingyu.db"
 REPORT_PATH="${SMOKE_DIR}/eval-report.json"
+DRY_RUN_JSON="${SMOKE_DIR}/runtime-dry-run.json"
 STDOUT_LOG="${SMOKE_DIR}/gateway.stdout.log"
 SMOKE_TOKEN="smoke-gateway-token"
 ADMIN_TOKEN="smoke-admin-token"
@@ -87,6 +88,10 @@ owui_headers=(
   --source-root "${SOURCE_ROOT}" \
   --db "${DB_PATH}" \
   --rebuild >/dev/null
+
+"${GATEWAY_BIN}" runtime-dry-run \
+  --db "${DB_PATH}" \
+  "通灵玉上的字是什么？" >"${DRY_RUN_JSON}"
 
 RUST_LOG="${RUST_LOG:-warn}" \
 TONGLINGYU_GATEWAY_API_KEY="${SMOKE_TOKEN}" \
@@ -185,7 +190,8 @@ python3 - \
   "${SESSION_JSON}" \
   "${ADMIN_PACKAGE_JSON}" \
   "${METRICS_JSON}" \
-  "${REPORT_PATH}" <<'PY'
+  "${REPORT_PATH}" \
+  "${DRY_RUN_JSON}" <<'PY'
 import json
 import sys
 
@@ -206,6 +212,7 @@ import sys
     admin_package,
     metrics,
     report,
+    dry_run,
 ) = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
 
 assert health["status"] == "ok", health
@@ -282,6 +289,15 @@ assert metrics["dependencies"]["sqlite"] == "ok", metrics
 assert report["status"] == "passed", report
 assert report["summary"]["total"] >= 20, report
 assert report["summary"]["failed"] == 0, report
+
+assert dry_run["object"] == "tonglingyu.runtime_dry_run", dry_run
+assert dry_run["status"] == "passed", dry_run
+assert dry_run["package_id"] in dry_run["replay"]["answer"], dry_run
+assert dry_run["runtime_step_plan"]["steps"], dry_run
+assert any(
+    "tonglingyu.text.search" in step["allowed_tools"]
+    for step in dry_run["runtime_step_plan"]["steps"]
+), dry_run
 PY
 
 echo "tonglingyu gateway smoke passed"

@@ -217,7 +217,7 @@ contract dry run 和目标环境 Open WebUI 复测完成后再勾选。
 - [ ] Gateway streaming response 只转发 Runtime event，不自行生成领域内容。
 - [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
-- [ ] 增加 fake runtime/tools 的本地 dry run。
+- [x] 增加 fake runtime/tools 的本地 dry run。
 - [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
