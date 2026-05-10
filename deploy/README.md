@@ -70,6 +70,19 @@ Required changes:
   knowledge base. On the remote node it should live under
   `$HOME/huixiangdou-home-runtime/data/tonglingyu`.
 - `TONGLINGYU_MODEL_ID`: Open WebUI-visible model id. Default is `tonglingyu`.
+- `TONGLINGYU_GATEWAY_API_KEY`: service credential used by Open WebUI to call
+  `tonglingyu-gateway`. Keep it in `.env`; do not write it into compose or logs.
+- `TONGLINGYU_GATEWAY_API_KEYS`: optional comma-separated old/new gateway keys
+  during rotation.
+- `TONGLINGYU_ADMIN_API_KEY`: separate administrator credential for
+  `/v1/admin/*`; it must not be the same value as `TONGLINGYU_GATEWAY_API_KEY`.
+- `TONGLINGYU_ADMIN_API_KEYS`: optional comma-separated old/new admin keys during
+  rotation.
+- `TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY`: defaults to `false`; keep it false
+  outside local development so admin endpoints cannot be opened with the normal
+  Open WebUI provider key.
+- `TONGLINGYU_RETENTION_DAYS`: runtime audit/session/package retention window.
+  Default is `90`; set `0` only when automatic pruning must be disabled.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
   `agent_identity_bridge` Filter and Agent Platform services.
 - `AGENT_JWT_SECRET`: Manager JWT signing secret shared by `agent-manager` and
@@ -313,7 +326,9 @@ Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`, or
 Test the endpoint from the same Docker network:
 
 ```bash
-docker run --rm --network "${LOCAL_OPENAI_DOCKER_NETWORK}" curlimages/curl:latest \
+docker run --rm \
+  --network "${LOCAL_OPENAI_DOCKER_NETWORK}" \
+  curlimages/curl:latest \
   -sS -m 8 \
   -H "Authorization: Bearer ${LOCAL_OPENAI_API_KEY}" \
   "${LOCAL_OPENAI_BASE_URL}/models"
@@ -322,7 +337,9 @@ docker run --rm --network "${LOCAL_OPENAI_DOCKER_NETWORK}" curlimages/curl:lates
 Build the Tonglingyu knowledge base locally before deployment smoke tests:
 
 ```bash
-cargo run --manifest-path ../agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+cargo run \
+  --manifest-path ../agent-platform/Cargo.toml \
+  -p tonglingyu-gateway -- \
   build-kb \
   --source-root ../resources/sources/wiki \
   --db data/tonglingyu/tonglingyu.db \
@@ -369,7 +386,15 @@ Check the direct Open WebUI model endpoints from the internal Docker network:
 
 ```bash
 docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/healthz
-docker compose exec tonglingyu-gateway curl -fsS http://127.0.0.1:8090/v1/models
+docker compose exec open-webui curl -fsS \
+  -H "Authorization: Bearer ${TONGLINGYU_GATEWAY_API_KEY}" \
+  http://tonglingyu-gateway:8090/v1/models
+docker compose exec open-webui curl -fsS \
+  -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" \
+  http://tonglingyu-gateway:8090/v1/admin/metrics
+docker compose exec open-webui curl -fsS \
+  -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" \
+  http://tonglingyu-gateway:8090/v1/admin/metrics/prometheus
 docker compose exec agent-orchestrator curl -fsS http://127.0.0.1:8080/healthz
 docker compose exec agent-orchestrator curl -fsS http://127.0.0.1:8080/v1/models
 ```

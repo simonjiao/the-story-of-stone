@@ -157,6 +157,7 @@ pub(crate) async fn apply_external_action_plan(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_external_action_plan_with_adapters(
     store: &StoreRef,
     auth: &AuthContext,

@@ -7,7 +7,6 @@
 - `scripts/extract_epub.py` 和 `scripts/download_wikisource.py` 已输出
   source snapshot，并保留 `rare_char_annotations`。
 - `resources/styles/buhongjushi/` 风格转录保留，不作为主证据库。
-- 当前实现入口是 Rust `agent-platform/crates/tonglingyu-gateway/`。
 - Rust 主线入口为 `agent-platform/crates/tonglingyu-gateway/`。
 
 ## 已确认
@@ -55,15 +54,48 @@
 - 远端 KB 由 `tonglingyu-gateway` 容器启动时从 source snapshot 构建，
   当前 `/healthz` 返回 5 个来源、10419 个 blocks；Open WebUI 容器内
   `DEFAULT_MODELS=tonglingyu`。
-- 远端容器内已验证 `/v1/models`、`/v1/evidence/search` 和
-  `/v1/chat/completions`；“通灵玉上的字是什么？”返回带证据包和 reviewer
-  约束的回答。
+- 远端容器内已验证 `/v1/models`、`/v1/evidence/search`、
+  `/v1/chat/completions`、证据包 owner-only 读取、admin
+  trace/session/package/metrics 和 Prometheus 指标；“通灵玉上的字是什么？”
+  返回带证据包和 reviewer 约束的回答。
+- 2026-05-10 已更新远端 `tonglingyu-gateway:formal`
+  (`sha256:faff12b147dab57dfb3e041f551c4a9320c20158acb763cc7fe12b82e25c2127`)
+  并重启 `tonglingyu-gateway` 与 `hermes-open-webui`；compose 内两个服务
+  均为 healthy，公网 `https://chat.huixiangdou.top/api/config` 返回 200。
+- 最终远端 smoke 记录：`package_id=pkg-019e0ffe32617c7291e58267bca26655`，
+  `trace_id=tly-019e0ffe30bc7c918613681c2b5cd27a`，
+  `session_id=session-019e0ffe30c57742904e728a3cd14aea`。
+- 管理员账号 API 侧验收已通过：Open WebUI 登录角色为 `admin`，
+  `/api/models` 可见 `tonglingyu`，`/api/config` 的 `default_models` 为
+  `tonglingyu`，并通过 `/api/chat/completions` 成功转发到 Gateway。
+  对应 Gateway 审计可查：
+  `package_id=pkg-019e1006535a76139f0eb7e568b8d70d`，
+  `trace_id=tly-019e10064fa079118d3dbf84d344f8ba`，
+  `session_id=session-019e1005c3ff7dd1b5bc3d02c6270b82`；admin metrics
+  显示 `admin_key_isolated=true`。
+- `tonglingyu-gateway` 已补证据包确定性回放：CLI
+  `replay-package` 和 HTTP
+  `/v1/evidence/packages/{package_id}/replay` 都可在不调用上游模型的情况下
+  重建受 reviewer 约束的本地回答。
+- evidence package 创建和 reviewer 完成事件已写入 SQLite `audit_events`，
+  便于后续按 trace ID 回放与审计。
+- 已补内置评测入口 `eval`，当前覆盖正文、脂批、版本边界、人物别名、
+  诗词判词、字形读音、证据不足、prompt injection、预期证据 ID 和禁止
+  结论等 102 个发布回归 case；评测报告可落盘到
+  `data/tonglingyu/reports/`。
+- 已新增 `agent-platform/scripts/tonglingyu-gateway-smoke.sh`，可临时建库并
+  验证 Gateway 鉴权、单可见模型、会话映射、消息去重、内部字段拒绝、
+  模型越权拒绝、SSE streaming 元数据、证据包读取、证据包回放、
+  admin trace/session/package/metrics、Prometheus 指标和内置评测。
+- 完整通灵玉产品 Gateway 的本地代码级差距已收敛：接口层鉴权、会话映射、
+  状态机、证据源强制策略、claim-to-evidence 映射、审校拦截、审计查询、
+  脱敏错误、streaming 追踪、备份和保留清理均已有测试覆盖。
 
 ## 下一步
 
-1. 用 Open WebUI 页面侧做人工点击验证，确认登录态和 UI 中的模型选择
-   与容器内配置一致。
-2. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-3. 增加证据包回放、reviewer 失败样例和公开入口的 smoke 测试脚本。
+1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
+   可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
+2. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
+3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 4. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。

@@ -893,6 +893,7 @@ pub struct ObserverReport {
 }
 
 impl ObserverReport {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         observer_run_id: impl Into<String>,
         health_status: HealthStatus,
