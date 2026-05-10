@@ -3365,6 +3365,20 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct UnexpectedRuntimeToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for UnexpectedRuntimeToolExecutor {
+        async fn execute_tool(
+            &self,
+            _call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            panic!("tool executor should not run after input schema failure")
+        }
+    }
+
     fn hermes_run_input(trace_id: String) -> RuntimeRunInput {
         RuntimeRunInput {
             trace_id: trace_id.clone(),
@@ -4880,6 +4894,179 @@ mod tests {
         assert_eq!(log.matches("runtime_tool_result").count(), 1);
         assert!(log.contains("\"output_schema\""));
         assert!(!log.contains("\"output\":"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_invalid_tool_input_schema_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-input",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.input_schema",
+                                            "arguments": "{\"SECRET_ARGUMENT_FIELD\":\"SECRET_ARGUMENT_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-input-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.input_schema".to_string()]);
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
+            name: "tool.input_schema".to_string(),
+            description: "Validate runtime tool input".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {"query": {"type": "string"}},
+                "additionalProperties": false
+            }),
+            output_schema: json!({"type": "object"}),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }];
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-input-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use input tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.input_schema".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        let encoded_error = error.to_string();
+        assert!(!encoded_error.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!encoded_error.contains("SECRET_ARGUMENT_VALUE"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-input"));
+        assert!(log.contains("tool.input_schema"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!log.contains("SECRET_ARGUMENT_VALUE"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-output",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.output_schema",
+                                            "arguments": "{\"query\":\"ok\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-output-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.output_schema".to_string()]);
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
+            name: "tool.output_schema".to_string(),
+            description: "Validate runtime tool output".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {"query": {"type": "string"}}
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}}
+            }),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }];
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.output_schema".to_string(),
+            json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"}),
+        )])))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-output-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use output tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.output_schema".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        let encoded_error = error.to_string();
+        assert!(!encoded_error.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!encoded_error.contains("SECRET_TOOL_VALUE"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-output"));
+        assert!(log.contains("tool.output_schema"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("\"output\""));
+        assert!(!log.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!log.contains("SECRET_TOOL_VALUE"));
         let _ = tokio::fs::remove_file(audit_path).await;
     }
 
