@@ -13,7 +13,8 @@
   per-profile tool permission、multi-profile step plan 和 read-only tool loop
   已落地；`max_context_messages` 会作为 Runtime 输入预算约束执行，
   确定性 `safety_policy` 子集会在进入模型前执行，streaming 失败会返回
-  安全 `error` event。
+  安全 `error` event。当前 streaming 完成口径是有序 event 序列和 Hermes
+  上游 SSE 解析，不声明调用方可边读边转发的 async stream/backpressure API。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
   可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy

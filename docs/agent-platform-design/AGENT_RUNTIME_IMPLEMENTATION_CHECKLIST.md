@@ -58,7 +58,6 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] Runtime input contract 支持调用方传入 profile contract metadata。
 - [x] 当前不需要持久化 contract version；后续如需运营动态配置，再在
   `agent-store` 新增非破坏字段或新表。
-- [ ] 如需要完整 JSON Schema，替换当前轻量校验器或接入标准 schema crate。
 
 ### R1 验收
 
@@ -83,15 +82,18 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 
 - [x] `runtime: add profile contract validation`
 
-## R2 Runtime Streaming
+## R2 Runtime Streaming Events
 
-目标：Runtime 支持原生流式输出，同时保留最终 `RuntimeOutput` 作为落盘结果。
+目标：Runtime 支持 Hermes 上游 SSE 解析和有序 `RuntimeStreamEvent` 输出，
+同时保留最终 `RuntimeOutput` 作为落盘结果。当前完成口径是
+`RuntimeClient::stream_*()` 返回完整 event 序列；下游 async stream /
+backpressure API 是后续项。
 
 ### R2 代码任务
 
 - [x] 在 `agent-core` 新增 `RuntimeStreamEvent`。
-- [x] 在 `agent-core` 新增 streaming trait 或 feature-gated adapter 边界。
-- [x] 在 `agent-runtime` 为 Hermes adapter 增加 streaming path。
+- [x] 在 `agent-core` 新增 event-returning streaming trait 边界。
+- [x] 在 `agent-runtime` 为 Hermes adapter 增加上游 SSE streaming path。
 - [x] streaming final event 携带最终 `RuntimeOutput`；Worker 非 streaming
   完成态语义保持不变。
 - [x] 保留非 streaming path 的原有行为。
@@ -108,6 +110,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] stream event 能携带 trace、run/session、profile 和 schema version。
 - [x] tool progress / schema partial 有端到端验证。
 - [x] safe error event 有回归验证。
+- [x] 当前完成口径不声明下游 async stream/backpressure API。
 
 ### R2 测试
 
@@ -252,6 +255,15 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 
 - [x] `runtime: implement profile tool execution`
 - [x] `runtime: audit profile tool execution`
+
+## 后续项
+
+以下条目不计入当前 Agent Runtime repo/local 完成口径，只有在后续设计把它们
+升为本体要求时才进入必做 checklist：
+
+- [ ] 如需要完整 JSON Schema，替换当前轻量校验器或接入标准 schema crate。
+- [ ] 如调用方需要边读边转发 Runtime event，新增 object-safe async stream
+  或 callback API，并补充 backpressure / cancellation 验证。
 
 ## 完成口径
 

@@ -244,9 +244,13 @@ cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime
 runtime: add profile contract validation
 ```
 
-### R2：Runtime Streaming
+### R2：Runtime Streaming Events
 
-目标：Runtime 支持原生流式输出，同时保留最终 `RuntimeOutput` 作为落盘结果。
+目标：Runtime 支持 Hermes 上游 SSE 解析和有序 `RuntimeStreamEvent` 输出，
+同时保留最终 `RuntimeOutput` 作为落盘结果。当前完成口径是
+`RuntimeClient::stream_*()` 返回完整 event 序列；调用方可边读边转发的
+object-safe async stream / callback API 是后续扩展，不在本轮 repo/local
+完成口径内。
 
 设计对象：
 
@@ -266,8 +270,9 @@ RuntimeStreamEvent
 
 代码范围：
 
-1. `agent-core`：新增 `RuntimeStreamEvent` 和 streaming trait 边界。
-2. `agent-runtime`：为 Hermes adapter 增加 streaming path。
+1. `agent-core`：新增 `RuntimeStreamEvent` 和 event-returning streaming trait
+   边界。
+2. `agent-runtime`：为 Hermes adapter 增加上游 SSE streaming path。
 3. `agent-core` / `agent-runtime`：streaming path 失败时返回安全 `error`
    event；非 streaming path 仍按原 `CoreResult` 错误语义返回。
 
@@ -281,6 +286,7 @@ RuntimeStreamEvent
 5. tool loop streaming path 会发出 `tool_progress`；schema 校验通过后会发出
    `schema_partial`。
 6. safe error event 有回归测试，确认不包含 prompt 或 upstream error body。
+7. 本轮不声明 Runtime 已提供下游 async stream/backpressure API。
 
 测试：
 
@@ -474,8 +480,8 @@ runtime: audit profile tool execution
 ```text
 Agent Platform 已具备 P1 真实 Hermes Runtime 只读闭环和 P2 external-action
 执行链路；Runtime 已具备 profile contract、轻量 schema validation、
-streaming events、per-profile tool permission、multi-profile step plan 和
-read-only tool execution loop 的 repo/local 实现。
+streaming event contract、per-profile tool permission、multi-profile step plan
+和 read-only tool execution loop 的 repo/local 实现。
 ```
 
 不能说：
@@ -484,4 +490,5 @@ read-only tool execution loop 的 repo/local 实现。
 P2 已完成 Runtime 全量完善。
 Agent Runtime 本体完成等于完整 JSON Schema 或领域 Gateway 接入完成。
 Runtime 本体完成即可代表任何领域 Gateway 已完成接入。
+Runtime 已提供调用方可边读边转发的 async stream/backpressure API。
 ```
