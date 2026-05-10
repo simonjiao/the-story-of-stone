@@ -16,7 +16,8 @@
   安全 `error` event；schema validation 错误不回显输入侧未知字段名/值、
   schema required 字段名、schema property path 或 raw value，未知
   `safety_policy` 字段也不会回显字段名或值。
-  当前 streaming 完成口径是有序 event 序列和 Hermes 上游 SSE 解析，不声明
+  当前 streaming 完成口径是有序 event 序列；无工具路径解析 Hermes 上游
+  SSE，tool loop 路径执行完整受控 tool loop 后合成 Runtime events，不声明
   调用方可边读边转发的 async stream/backpressure API。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`

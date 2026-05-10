@@ -89,8 +89,10 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 
 ## R2 Runtime Streaming Events
 
-目标：Runtime 支持 Hermes 上游 SSE 解析和有序 `RuntimeStreamEvent` 输出，
-同时保留最终 `RuntimeOutput` 作为落盘结果。当前完成口径是
+目标：Runtime 支持无工具 Hermes 上游 SSE 解析和有序 `RuntimeStreamEvent`
+输出，同时保留最终 `RuntimeOutput` 作为落盘结果。tool loop streaming
+路径的完成口径是执行完整 tool loop 后返回 `tool_progress` /
+`schema_partial` / `final` 事件序列，不声明 token 级 SSE 透传。当前完成口径是
 `RuntimeClient::stream_*()` 返回完整 event 序列；下游 async stream /
 backpressure API 是后续项。
 
@@ -98,7 +100,9 @@ backpressure API 是后续项。
 
 - [x] 在 `agent-core` 新增 `RuntimeStreamEvent`。
 - [x] 在 `agent-core` 新增 event-returning streaming trait 边界。
-- [x] 在 `agent-runtime` 为 Hermes adapter 增加上游 SSE streaming path。
+- [x] 在 `agent-runtime` 为 Hermes adapter 增加无工具上游 SSE streaming
+  path；tool loop streaming path 复用受控 tool loop 并合成有序 Runtime
+  events。
 - [x] streaming final event 携带最终 `RuntimeOutput`；Worker 非 streaming
   完成态语义保持不变。
 - [x] 保留非 streaming path 的原有行为。
@@ -279,6 +283,7 @@ backpressure API 是后续项。
   覆盖未授权 raw tool name / raw call id 在 call/error audit 中脱敏。
 - [x] `hermes_runtime_execute_run_exposes_requested_profile_tools`
 - [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
+- [x] `hermes_runtime_stream_run_with_tools_emits_tool_progress_events`
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 profile 回灌、executor metadata、raw string output summary 和 adapter

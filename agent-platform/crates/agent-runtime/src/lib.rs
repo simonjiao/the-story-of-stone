@@ -4476,6 +4476,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_stream_run_with_tools_emits_tool_progress_events() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            assert_eq!(body["tools"][0]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-run-stream",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(body["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|message| message["role"] == "tool"
+                                    && message["tool_call_id"] == "call-run-stream"));
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "run stream tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("run-stream-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let mut input = hermes_run_input(new_trace_id());
+        let run_id = input.run.id.clone();
+        input.profile_contract = Some(contract);
+        input.requested_tools = vec!["tool.read".to_string()];
+
+        let events = runtime.stream_run(input).await.unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[1].metadata["tool_event"]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(events[2].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[2].metadata["tool_event"]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(events.iter().all(|event| {
+            event.run_id.as_deref() == Some(run_id.as_str())
+                && event.session_id.is_none()
+                && event.schema_version.as_deref() == Some("v1")
+        }));
+        assert_eq!(
+            events[4].output.as_ref().unwrap().result_summary,
+            "run stream tool answer"
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_writes_tool_events_to_jsonl_audit_sink() {
         let calls = Arc::new(Mutex::new(0usize));
         let app = Router::new()
