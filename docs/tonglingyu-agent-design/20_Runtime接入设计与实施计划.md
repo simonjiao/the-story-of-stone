@@ -203,6 +203,9 @@ plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱
 Gateway 新请求和 `runtime-dry-run` 中先执行 `agent-runtime`
 `MinimalRuntimeClient` plan gate；该 gate 会校验 profile contract、step
 dependency、requested tool scope、output_ref 和 Runtime step metadata。
+Runtime plan factory 已收敛到 `tonglingyu-runtime::runtime_workflow_plan`；
+Gateway 只把 search policy 转成 runtime plan input，agent-runtime plan gate
+和实际 Runtime workflow 也从同一 plan 派生 step_id、operation 和 allowed tools。
 Gateway 请求路径、`runtime-dry-run`、health、search、metrics、admin
 package/trace 读取以及 build/prune 管理路径已通过 `TonglingyuRuntimeStore`
 按 DB path 访问 runtime store，不再把 Gateway `Connection` 直接传入 Runtime
@@ -248,6 +251,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   workflow 调用。
 - [x] 新请求先执行 `agent-runtime` plan gate，校验 profile contract、
   step dependency 和 read-only tool scope。
+- [x] Runtime plan factory 收敛到 `tonglingyu-runtime`，Gateway plan、
+  agent-runtime plan gate 和实际 workflow 共用 step source。
 - [x] 每个确定性 profile step 先接入 `agent-runtime`
   `execute_profile_step` envelope，并记录 `agent_runtime_profile_step_executed`
   audit event。

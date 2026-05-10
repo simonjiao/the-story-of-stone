@@ -133,6 +133,9 @@
   Gateway 新请求和 `runtime-dry-run` 会先执行 `agent-runtime`
   `MinimalRuntimeClient` plan gate，校验 step dependency、requested tool scope、
   output_ref 和 Runtime step metadata。
+- Runtime plan factory 已收敛到 `tonglingyu-runtime::runtime_workflow_plan`；
+  Gateway plan、agent-runtime plan gate 和实际 workflow 共用 step_id、operation
+  和 allowed tools，测试会比较实际 workflow step 与 runtime plan 是否一致。
 - `tonglingyu-runtime` 已新增 `TonglingyuRuntimeStore`；Gateway 请求路径、
   `runtime-dry-run`、health、search、metrics、admin package/trace 读取以及
   build/prune 管理路径已改为通过 runtime store handle 按 DB path 访问 runtime，

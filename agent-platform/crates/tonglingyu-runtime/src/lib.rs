@@ -66,6 +66,8 @@ pub struct EvidencePackage {
 pub const TOOL_CATALOG_VERSION: &str = "tonglingyu-readonly-tools-v1";
 pub const PROFILE_CONTRACT_VERSION: &str = "tonglingyu-runtime-profiles-v1";
 pub const KNOWLEDGE_BASE_SCHEMA_VERSION: &str = "tonglingyu-v1-sqlite-fts";
+pub const RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
+pub const RUNTIME_WORKFLOW_PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -280,6 +282,93 @@ impl Default for RuntimeWorkflowProfiles {
             commentary: "honglou-commentary".to_string(),
             reviewer: "honglou-reviewer".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowPlanInput {
+    pub question_type: String,
+    #[serde(default)]
+    pub required_evidence_types: Vec<String>,
+    #[serde(default)]
+    pub blocked_controls: Vec<String>,
+    pub profiles: RuntimeWorkflowProfiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowPlan {
+    pub schema_version: String,
+    pub policy_version: String,
+    pub question_type: String,
+    pub required_evidence_types: Vec<String>,
+    pub blocked_controls: Vec<String>,
+    pub steps: Vec<RuntimeWorkflowPlanStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowPlanStep {
+    pub step_id: String,
+    pub profile: String,
+    pub profile_contract_version: String,
+    pub operation: String,
+    pub required: bool,
+    pub allowed_tools: Vec<String>,
+}
+
+pub fn runtime_workflow_plan(input: RuntimeWorkflowPlanInput) -> RuntimeWorkflowPlan {
+    let mut steps = vec![RuntimeWorkflowPlanStep {
+        step_id: "step-01-text-search".to_string(),
+        profile: input.profiles.text.clone(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "text_evidence_search".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.text.search".to_string()],
+    }];
+    if input
+        .required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+    {
+        steps.push(RuntimeWorkflowPlanStep {
+            step_id: "step-02-commentary-search".to_string(),
+            profile: input.profiles.commentary.clone(),
+            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+            operation: "commentary_evidence_search".to_string(),
+            required: true,
+            allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
+        });
+    }
+    steps.push(RuntimeWorkflowPlanStep {
+        step_id: step_id(steps.len() + 1, "package-create"),
+        profile: input.profiles.main.clone(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "evidence_package_create".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.create".to_string()],
+    });
+    steps.push(RuntimeWorkflowPlanStep {
+        step_id: step_id(steps.len() + 1, "draft-answer"),
+        profile: input.profiles.main.clone(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "draft_answer".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+    });
+    steps.push(RuntimeWorkflowPlanStep {
+        step_id: step_id(steps.len() + 1, "review-answer"),
+        profile: input.profiles.reviewer.clone(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "review_answer".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+    });
+    RuntimeWorkflowPlan {
+        schema_version: RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION.to_string(),
+        policy_version: RUNTIME_WORKFLOW_PLAN_POLICY_VERSION.to_string(),
+        question_type: input.question_type,
+        required_evidence_types: input.required_evidence_types,
+        blocked_controls: input.blocked_controls,
+        steps,
     }
 }
 
@@ -647,67 +736,46 @@ pub fn agent_runtime_step_plan(input: &AgentRuntimePlanGateInput) -> AgentRuntim
         .into_iter()
         .map(|descriptor| (descriptor.profile.clone(), descriptor))
         .collect::<BTreeMap<_, _>>();
+    let workflow_plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
+        question_type: "agent_runtime_plan_gate".to_string(),
+        required_evidence_types: input.required_evidence_types.clone(),
+        blocked_controls: Vec::new(),
+        profiles: input.profiles.clone(),
+    });
     let mut steps = Vec::new();
     let mut evidence_dependencies = Vec::new();
-
-    let text_step = agent_runtime_step(
-        steps.len() + 1,
-        "evidence-text-search",
-        &input.profiles.text,
-        vec!["tonglingyu.text.search".to_string()],
-        Vec::new(),
-        descriptors.get(&input.profiles.text),
-    );
-    evidence_dependencies.push(text_step.step_id.clone());
-    steps.push(text_step);
-
-    if input
-        .required_evidence_types
-        .iter()
-        .any(|kind| kind == "commentary")
-    {
-        let commentary_step = agent_runtime_step(
-            steps.len() + 1,
-            "evidence-commentary-search",
-            &input.profiles.commentary,
-            vec!["tonglingyu.commentary.search".to_string()],
-            Vec::new(),
-            descriptors.get(&input.profiles.commentary),
+    let mut package_step_id = None;
+    let mut draft_step_id = None;
+    for plan_step in &workflow_plan.steps {
+        let depends_on = match plan_step.operation.as_str() {
+            "text_evidence_search" | "commentary_evidence_search" => Vec::new(),
+            "evidence_package_create" => evidence_dependencies.clone(),
+            "draft_answer" => package_step_id.iter().cloned().collect(),
+            "review_answer" => [package_step_id.clone(), draft_step_id.clone()]
+                .into_iter()
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let runtime_step = agent_runtime_step_from_plan_step(
+            plan_step,
+            depends_on,
+            descriptors.get(&plan_step.profile),
         );
-        evidence_dependencies.push(commentary_step.step_id.clone());
-        steps.push(commentary_step);
+        match plan_step.operation.as_str() {
+            "text_evidence_search" | "commentary_evidence_search" => {
+                evidence_dependencies.push(runtime_step.step_id.clone());
+            }
+            "evidence_package_create" => {
+                package_step_id = Some(runtime_step.step_id.clone());
+            }
+            "draft_answer" => {
+                draft_step_id = Some(runtime_step.step_id.clone());
+            }
+            _ => {}
+        }
+        steps.push(runtime_step);
     }
-
-    let package_step = agent_runtime_step(
-        steps.len() + 1,
-        "evidence-package-create",
-        &input.profiles.main,
-        vec!["tonglingyu.evidence.package.create".to_string()],
-        evidence_dependencies,
-        descriptors.get(&input.profiles.main),
-    );
-    let package_step_id = package_step.step_id.clone();
-    steps.push(package_step);
-
-    let draft_step = agent_runtime_step(
-        steps.len() + 1,
-        "draft-answer",
-        &input.profiles.main,
-        vec!["tonglingyu.evidence.package.read".to_string()],
-        vec![package_step_id.clone()],
-        descriptors.get(&input.profiles.main),
-    );
-    let draft_step_id = draft_step.step_id.clone();
-    steps.push(draft_step);
-
-    steps.push(agent_runtime_step(
-        steps.len() + 1,
-        "review-answer",
-        &input.profiles.reviewer,
-        vec!["tonglingyu.evidence.package.read".to_string()],
-        vec![package_step_id, draft_step_id],
-        descriptors.get(&input.profiles.reviewer),
-    ));
 
     let mut plan = AgentRuntimeStepPlan::new(input.trace_id.clone(), steps);
     plan.owner = RuntimeStepPlanOwner::DomainGateway;
@@ -800,28 +868,25 @@ fn runtime_profile_descriptors(profiles: &RuntimeWorkflowProfiles) -> Vec<Profil
         .collect()
 }
 
-fn agent_runtime_step(
-    index: usize,
-    operation: &str,
-    profile: &str,
-    allowed_tools: Vec<String>,
+fn agent_runtime_step_from_plan_step(
+    plan_step: &RuntimeWorkflowPlanStep,
     depends_on: Vec<String>,
     descriptor: Option<&ProfileDescriptor>,
 ) -> AgentRuntimeStep {
     let mut step = AgentRuntimeStep::new(
-        profile.to_string(),
+        plan_step.profile.clone(),
         PROFILE_CONTRACT_VERSION,
         json!({
             "runtime": "tonglingyu",
-            "operation": operation,
+            "operation": &plan_step.operation,
             "domain_input_contract": descriptor.map(|item| item.input_contract.clone()),
             "domain_output_contract": descriptor.map(|item| item.output_contract.clone()),
             "domain_safety_contract": descriptor.map(|item| item.safety_contract.clone()),
         }),
     );
-    step.step_id = format!("tonglingyu-{index:02}-{operation}");
+    step.step_id = plan_step.step_id.clone();
     step.depends_on = depends_on;
-    step.tool_policy = agent_runtime_tool_policy(allowed_tools);
+    step.tool_policy = agent_runtime_tool_policy(plan_step.allowed_tools.clone());
     step.output_contract = agent_runtime_output_schema();
     step
 }
@@ -933,6 +998,12 @@ pub fn execute_runtime_workflow(
     if input.limit == 0 {
         return Err(anyhow!("runtime workflow limit must be greater than 0"));
     }
+    let workflow_plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
+        question_type: "runtime_workflow".to_string(),
+        required_evidence_types: input.required_evidence_types.clone(),
+        blocked_controls: Vec::new(),
+        profiles: input.profiles.clone(),
+    });
     let mut steps = Vec::new();
     let mut cards = Vec::new();
     let mut text_required_types = input
@@ -957,16 +1028,17 @@ pub fn execute_runtime_workflow(
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
     cards = merge_cards(cards, text_cards.clone());
+    let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
     steps.push(workflow_step_report(
         conn,
         WorkflowStepReportInput {
             trace_id: &input.trace_id,
-            step_id: "step-01-text-search",
-            profile: &input.profiles.text,
-            operation: "text_evidence_search",
-            required: true,
-            allowed_tools: vec!["tonglingyu.text.search".to_string()],
-            tool_calls: vec!["tonglingyu.text.search".to_string()],
+            step_id: &text_plan_step.step_id,
+            profile: &text_plan_step.profile,
+            operation: &text_plan_step.operation,
+            required: text_plan_step.required,
+            allowed_tools: text_plan_step.allowed_tools.clone(),
+            tool_calls: text_plan_step.allowed_tools.clone(),
             input_ref: None,
             duration_ms: elapsed_ms(text_started),
             output: json!({
@@ -995,16 +1067,18 @@ pub fn execute_runtime_workflow(
             other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
         };
         cards = merge_cards(cards, commentary_cards.clone());
+        let commentary_plan_step =
+            workflow_plan_step(&workflow_plan, "commentary_evidence_search")?;
         steps.push(workflow_step_report(
             conn,
             WorkflowStepReportInput {
                 trace_id: &input.trace_id,
-                step_id: "step-02-commentary-search",
-                profile: &input.profiles.commentary,
-                operation: "commentary_evidence_search",
-                required: true,
-                allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
-                tool_calls: vec!["tonglingyu.commentary.search".to_string()],
+                step_id: &commentary_plan_step.step_id,
+                profile: &commentary_plan_step.profile,
+                operation: &commentary_plan_step.operation,
+                required: commentary_plan_step.required,
+                allowed_tools: commentary_plan_step.allowed_tools.clone(),
+                tool_calls: commentary_plan_step.allowed_tools.clone(),
                 input_ref: None,
                 duration_ms: elapsed_ms(commentary_started),
                 output: json!({
@@ -1030,18 +1104,19 @@ pub fn execute_runtime_workflow(
         TonglingyuToolOutput::EvidencePackage { package, .. } => *package,
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
-    let package_step_id = step_id(steps.len() + 1, "package-create");
+    let package_plan_step = workflow_plan_step(&workflow_plan, "evidence_package_create")?;
+    let package_step_id = package_plan_step.step_id.clone();
     let package_output_ref = workflow_output_ref(&input.trace_id, &package_step_id);
     steps.push(workflow_step_report(
         conn,
         WorkflowStepReportInput {
             trace_id: &input.trace_id,
             step_id: &package_step_id,
-            profile: &input.profiles.main,
-            operation: "evidence_package_create",
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.create".to_string()],
-            tool_calls: vec!["tonglingyu.evidence.package.create".to_string()],
+            profile: &package_plan_step.profile,
+            operation: &package_plan_step.operation,
+            required: package_plan_step.required,
+            allowed_tools: package_plan_step.allowed_tools.clone(),
+            tool_calls: package_plan_step.allowed_tools.clone(),
             input_ref: None,
             duration_ms: elapsed_ms(package_started),
             output: json!({
@@ -1055,17 +1130,18 @@ pub fn execute_runtime_workflow(
     )?);
     let draft_started = Instant::now();
     let draft_answer = local_answer(&input.question, &package);
-    let draft_step_id = step_id(steps.len() + 1, "draft-answer");
+    let draft_plan_step = workflow_plan_step(&workflow_plan, "draft_answer")?;
+    let draft_step_id = draft_plan_step.step_id.clone();
     steps.push(workflow_step_report(
         conn,
         WorkflowStepReportInput {
             trace_id: &input.trace_id,
             step_id: &draft_step_id,
-            profile: &input.profiles.main,
-            operation: "draft_answer",
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
-            tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+            profile: &draft_plan_step.profile,
+            operation: &draft_plan_step.operation,
+            required: draft_plan_step.required,
+            allowed_tools: draft_plan_step.allowed_tools.clone(),
+            tool_calls: draft_plan_step.allowed_tools.clone(),
             input_ref: Some(package_output_ref.clone()),
             duration_ms: elapsed_ms(draft_started),
             output: json!({
@@ -1078,17 +1154,18 @@ pub fn execute_runtime_workflow(
     )?);
     let review_started = Instant::now();
     let final_answer = enforce_review(draft_answer.clone(), &package);
-    let review_step_id = step_id(steps.len() + 1, "review-answer");
+    let review_plan_step = workflow_plan_step(&workflow_plan, "review_answer")?;
+    let review_step_id = review_plan_step.step_id.clone();
     steps.push(workflow_step_report(
         conn,
         WorkflowStepReportInput {
             trace_id: &input.trace_id,
             step_id: &review_step_id,
-            profile: &input.profiles.reviewer,
-            operation: "review_answer",
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
-            tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+            profile: &review_plan_step.profile,
+            operation: &review_plan_step.operation,
+            required: review_plan_step.required,
+            allowed_tools: review_plan_step.allowed_tools.clone(),
+            tool_calls: review_plan_step.allowed_tools.clone(),
             input_ref: Some(package_output_ref),
             duration_ms: elapsed_ms(review_started),
             output: json!({
@@ -1202,6 +1279,16 @@ fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> Ag
     runtime_step.tool_policy = agent_runtime_tool_policy(step.allowed_tools.clone());
     runtime_step.output_contract = agent_runtime_output_schema();
     runtime_step
+}
+
+fn workflow_plan_step<'a>(
+    plan: &'a RuntimeWorkflowPlan,
+    operation: &str,
+) -> Result<&'a RuntimeWorkflowPlanStep> {
+    plan.steps
+        .iter()
+        .find(|step| step.operation == operation)
+        .ok_or_else(|| anyhow!("runtime workflow plan missing operation {operation}"))
 }
 
 struct WorkflowStepReportInput<'a> {
@@ -3442,6 +3529,35 @@ mod tests {
         assert_eq!(workflow.steps.len(), 4);
         assert_eq!(workflow.package.review.status, "needs_revision");
         assert!(workflow.final_answer.contains(&workflow.package.package_id));
+        let plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
+            question_type: "runtime_workflow".to_string(),
+            required_evidence_types: vec!["base_text".to_string()],
+            blocked_controls: Vec::new(),
+            profiles: RuntimeWorkflowProfiles::default(),
+        });
+        let planned_steps = plan
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.step_id.clone(),
+                    step.operation.clone(),
+                    step.allowed_tools.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let actual_steps = workflow
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.step_id.clone(),
+                    step.operation.clone(),
+                    step.allowed_tools.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_steps, planned_steps);
         assert!(
             workflow
                 .steps

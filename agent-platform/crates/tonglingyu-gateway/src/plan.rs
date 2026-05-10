@@ -2,10 +2,15 @@ use crate::InternalProfiles;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use tonglingyu_runtime::PROFILE_CONTRACT_VERSION;
+use tonglingyu_runtime::{
+    RuntimeWorkflowPlan, RuntimeWorkflowPlanInput, RuntimeWorkflowProfiles, runtime_workflow_plan,
+};
 
-pub(crate) const PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
-pub(crate) const PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
+#[cfg(test)]
+use tonglingyu_runtime::{
+    RUNTIME_WORKFLOW_PLAN_POLICY_VERSION as PLAN_POLICY_VERSION,
+    RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION as PLAN_SCHEMA_VERSION,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SearchPolicy {
@@ -15,82 +20,24 @@ pub(crate) struct SearchPolicy {
     pub(crate) blocked_controls: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct RuntimeStepPlan {
-    pub(crate) schema_version: String,
-    pub(crate) policy_version: String,
-    pub(crate) question_type: String,
-    pub(crate) required_evidence_types: Vec<String>,
-    pub(crate) blocked_controls: Vec<String>,
-    pub(crate) steps: Vec<RuntimePlanStep>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct RuntimePlanStep {
-    pub(crate) step_id: String,
-    pub(crate) profile: String,
-    pub(crate) profile_contract_version: String,
-    pub(crate) operation: String,
-    pub(crate) required: bool,
-    pub(crate) allowed_tools: Vec<String>,
-}
+pub(crate) struct RuntimeStepPlan;
 
 impl RuntimeStepPlan {
-    pub(crate) fn from_policy(profiles: &InternalProfiles, policy: &SearchPolicy) -> Self {
-        let mut steps = vec![RuntimePlanStep {
-            step_id: "step-01-text-search".to_string(),
-            profile: profiles.text.clone(),
-            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-            operation: "text_evidence_search".to_string(),
-            required: true,
-            allowed_tools: vec!["tonglingyu.text.search".to_string()],
-        }];
-        if policy
-            .required_evidence_types
-            .iter()
-            .any(|item| item == "commentary")
-        {
-            steps.push(RuntimePlanStep {
-                step_id: "step-02-commentary-search".to_string(),
-                profile: profiles.commentary.clone(),
-                profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-                operation: "commentary_evidence_search".to_string(),
-                required: true,
-                allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
-            });
-        }
-        steps.push(RuntimePlanStep {
-            step_id: step_id(steps.len() + 1, "package-create"),
-            profile: profiles.main.clone(),
-            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-            operation: "evidence_package_create".to_string(),
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.create".to_string()],
-        });
-        steps.push(RuntimePlanStep {
-            step_id: step_id(steps.len() + 1, "draft-answer"),
-            profile: profiles.main.clone(),
-            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-            operation: "draft_answer".to_string(),
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
-        });
-        steps.push(RuntimePlanStep {
-            step_id: step_id(steps.len() + 1, "review-answer"),
-            profile: profiles.reviewer.clone(),
-            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-            operation: "review_answer".to_string(),
-            required: true,
-            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
-        });
-        Self {
-            schema_version: PLAN_SCHEMA_VERSION.to_string(),
-            policy_version: PLAN_POLICY_VERSION.to_string(),
+    pub(crate) fn from_policy(
+        profiles: &InternalProfiles,
+        policy: &SearchPolicy,
+    ) -> RuntimeWorkflowPlan {
+        runtime_workflow_plan(RuntimeWorkflowPlanInput {
             question_type: policy.question_type.clone(),
             required_evidence_types: policy.required_evidence_types.clone(),
             blocked_controls: policy.blocked_controls.clone(),
-            steps,
-        }
+            profiles: RuntimeWorkflowProfiles {
+                main: profiles.main.clone(),
+                text: profiles.text.clone(),
+                commentary: profiles.commentary.clone(),
+                reviewer: profiles.reviewer.clone(),
+            },
+        })
     }
 }
 
@@ -224,10 +171,6 @@ fn normalize_text(input: &str) -> String {
     output
 }
 
-fn step_id(index: usize, name: &str) -> String {
-    format!("step-{index:02}-{name}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +197,7 @@ mod tests {
         let policy = search_policy("脂批如何评价通灵玉？");
         let plan = RuntimeStepPlan::from_policy(&profiles(), &policy);
         assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
+        assert_eq!(plan.policy_version, PLAN_POLICY_VERSION);
         assert!(
             plan.steps.iter().all(|step| step.profile_contract_version
                 == tonglingyu_runtime::PROFILE_CONTRACT_VERSION)
