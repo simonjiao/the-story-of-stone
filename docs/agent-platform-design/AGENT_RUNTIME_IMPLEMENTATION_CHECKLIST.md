@@ -13,6 +13,7 @@
 - [x] R2 Runtime Streaming。
 - [x] R3 Per-profile Tool Permission Enforcement。
 - [x] R4 Multi-profile Step Plan。
+- [x] R5B Runtime Tool Execution Loop core。
 - [ ] R5 通灵玉按薄 Gateway + Runtime Agent 目标重新接入。
 - [ ] 目标环境 Open WebUI 单入口复测。
 
@@ -195,15 +196,16 @@ R5 决策：
 
 ### R5B Runtime Tool Execution Loop
 
-- [ ] 在 `agent-core` / `agent-runtime` 补齐 `RuntimeToolCall`、
+- [x] 在 `agent-core` / `agent-runtime` 补齐 `RuntimeToolCall`、
   `RuntimeToolResult` 和 `RuntimeToolExecutor` 等价 contract。
-- [ ] Runtime adapter 能处理 LLM profile 发起的 read-only tool call，或执行
+- [x] Runtime adapter 能处理 LLM profile 发起的 read-only tool call，或执行
   受控 step tool call。
-- [ ] per-profile allowed tools 在真实 tool execution 前强制校验。
-- [ ] tool output 做 schema 校验，并通过 `output_ref` 或 evidence/package ref
+- [x] per-profile allowed tools 在真实 tool execution 前强制校验。
+- [x] tool output 做 schema 校验，并通过 `output_ref` 或 evidence/package ref
   传递给后续 step。
-- [ ] 越权 tool、写入类 tool 或未知 tool 返回安全错误并记录 audit。
-- [ ] 写入类工具仍只能走 Manager external-action apply/compensate。
+- [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
+- [ ] tool call / tool result 事件接入 append-only audit 或等价 runtime trace。
+- [x] 写入类工具仍只能走 Manager external-action apply/compensate。
 
 ### R5C 通灵玉 Evidence Read-only Tools
 

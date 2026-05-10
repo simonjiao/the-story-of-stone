@@ -1,7 +1,8 @@
 use crate::{
     AgentCoreError, AgentInstance, AgentRun, AgentSessionMessage, CoreResult, CredentialLease,
-    ExternalActionMode, ExternalActionPlan, ObserverSnapshot, RiskLevel, RunSummary,
-    SessionContext,
+    ErrorCode, ExternalActionMode, ExternalActionPlan, ObserverSnapshot, ProfileContract,
+    RiskLevel, RunSummary, RuntimeStep, RuntimeStreamEventType, RuntimeToolCall, RuntimeToolResult,
+    RuntimeToolSpec, SessionContext,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,12 @@ pub struct RuntimeRunInput {
     pub agent: Option<AgentInstance>,
     pub context: Option<SessionContext>,
     pub snapshot: Option<Value>,
+    #[serde(default)]
+    pub profile_contract: Option<ProfileContract>,
+    #[serde(default)]
+    pub runtime_step: Option<RuntimeStep>,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
     pub trace_id: String,
 }
 
@@ -28,6 +35,42 @@ pub struct RuntimeSessionInput {
     pub context: SessionContext,
     #[serde(default)]
     pub snapshot: Option<Value>,
+    #[serde(default)]
+    pub profile_contract: Option<ProfileContract>,
+    #[serde(default)]
+    pub runtime_step: Option<RuntimeStep>,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeProfileMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl RuntimeProfileMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeProfileInput {
+    pub profile_id: String,
+    pub messages: Vec<RuntimeProfileMessage>,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub profile_contract: Option<ProfileContract>,
+    #[serde(default)]
+    pub runtime_step: Option<RuntimeStep>,
+    #[serde(default)]
+    pub requested_tools: Vec<String>,
     pub trace_id: String,
 }
 
@@ -41,11 +84,216 @@ pub struct RuntimeOutput {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStreamEvent {
+    pub sequence: u64,
+    pub event_type: RuntimeStreamEventType,
+    pub profile_id: String,
+    pub trace_id: String,
+    pub content_delta: Option<String>,
+    pub output: Option<RuntimeOutput>,
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+impl RuntimeStreamEvent {
+    pub fn final_output(
+        profile_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        output: RuntimeOutput,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            event_type: RuntimeStreamEventType::Final,
+            profile_id: profile_id.into(),
+            trace_id: trace_id.into(),
+            content_delta: None,
+            output: Some(output),
+            error_code: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+}
+
 #[async_trait]
 pub trait RuntimeClient: Send + Sync {
     async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput>;
 
     async fn send_session_message(&self, input: RuntimeSessionInput) -> CoreResult<RuntimeOutput>;
+
+    async fn execute_profile_step(&self, _input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime client does not support direct profile steps",
+        ))
+    }
+
+    async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.profile_id.clone())
+            .or_else(|| {
+                input
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.hermes_profile.clone())
+            })
+            .unwrap_or_else(|| "agent-platform-runtime".to_string());
+        let trace_id = input.trace_id.clone();
+        let output = self.execute_run(input).await?;
+        Ok(vec![RuntimeStreamEvent::final_output(
+            profile_id, trace_id, output,
+        )])
+    }
+
+    async fn stream_session_message(
+        &self,
+        input: RuntimeSessionInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.profile_id.clone())
+            .or_else(|| {
+                input
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.hermes_profile.clone())
+            })
+            .unwrap_or_else(|| input.agent_id.clone());
+        let trace_id = input.trace_id.clone();
+        let output = self.send_session_message(input).await?;
+        Ok(vec![RuntimeStreamEvent::final_output(
+            profile_id, trace_id, output,
+        )])
+    }
+
+    async fn stream_profile_step(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = input.profile_id.clone();
+        let trace_id = input.trace_id.clone();
+        let output = self.execute_profile_step(input).await?;
+        Ok(vec![RuntimeStreamEvent::final_output(
+            profile_id, trace_id, output,
+        )])
+    }
+}
+
+#[async_trait]
+pub trait RuntimeToolExecutor: Send + Sync {
+    async fn execute_tool(
+        &self,
+        call: RuntimeToolCall,
+        spec: RuntimeToolSpec,
+    ) -> CoreResult<RuntimeToolResult>;
+}
+
+pub fn validate_json_schema_value(schema: &Value, value: &Value) -> CoreResult<()> {
+    validate_json_schema_at(schema, value, "$")
+}
+
+fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreResult<()> {
+    let Some(schema_object) = schema.as_object() else {
+        return Ok(());
+    };
+    if schema_object.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(expected) = schema_object.get("type").and_then(Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "null" => value.is_null(),
+            _ => true,
+        };
+        if !matches {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                format!("schema validation failed at {path}: expected {expected}"),
+            ));
+        }
+    }
+
+    if let Some(values) = schema_object.get("enum").and_then(Value::as_array)
+        && !values.iter().any(|item| item == value)
+    {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            format!("schema validation failed at {path}: enum mismatch"),
+        ));
+    }
+
+    if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
+        let object = value.as_object().ok_or_else(|| {
+            AgentCoreError::coded(
+                ErrorCode::Conflict,
+                format!("schema validation failed at {path}: expected object"),
+            )
+        })?;
+        for field in required.iter().filter_map(Value::as_str) {
+            if !object.contains_key(field) {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    format!("schema validation failed at {path}: missing {field}"),
+                ));
+            }
+        }
+    }
+
+    if let (Some(properties), Some(object)) = (
+        schema_object.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) {
+        for (field, property_schema) in properties {
+            if let Some(field_value) = object.get(field) {
+                validate_json_schema_at(property_schema, field_value, &format!("{path}.{field}"))?;
+            }
+        }
+        if schema_object
+            .get("additionalProperties")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            for field in object.keys() {
+                if !properties.contains_key(field) {
+                    return Err(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        format!("schema validation failed at {path}: unexpected {field}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let (Some(item_schema), Some(items)) = (schema_object.get("items"), value.as_array()) {
+        for (index, item) in items.iter().enumerate() {
+            validate_json_schema_at(item_schema, item, &format!("{path}[{index}]"))?;
+        }
+    }
+
+    if let Some(min_items) = schema_object.get("minItems").and_then(Value::as_u64)
+        && value
+            .as_array()
+            .map(|items| items.len())
+            .unwrap_or_default()
+            < min_items as usize
+    {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            format!("schema validation failed at {path}: minItems"),
+        ));
+    }
+
+    Ok(())
 }
 
 #[async_trait]

@@ -1,8 +1,8 @@
 use agent_core::{
-    AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient, CoreResult,
-    EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ResourceLock, RuntimeClient,
-    RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, TriggerType, assess_observer_snapshot,
-    metric_names, new_id,
+    AgentInstance, AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient,
+    CoreResult, EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ProfileContract,
+    ResourceLock, RuntimeClient, RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, RuntimeStep,
+    TriggerType, assess_observer_snapshot, metric_names, new_id,
 };
 use agent_runtime::{
     HermesRuntimeClient, HttpReadOnlyConnector, HttpReadOnlyConnectorConfig,
@@ -192,6 +192,23 @@ impl Worker {
             .read_only_snapshot(connector_name(&agent), &run.target_resource, &run.trace_id)
             .await?
             .summary;
+        let profile_contract = profile_contract_from_agent(&agent)?;
+        let requested_tools = requested_tools_from_agent(&agent);
+        let runtime_step = Some(RuntimeStep::new(
+            profile_contract
+                .as_ref()
+                .map(|contract| contract.profile_id.as_str())
+                .unwrap_or(agent.hermes_profile.as_str()),
+            profile_contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str())
+                .unwrap_or("unversioned"),
+            serde_json::json!({
+                "run_id": &run.id,
+                "worker_id": &self.worker_id,
+                "trigger_type": run.trigger_type,
+            }),
+        ));
         let output = if matches!(run.trigger_type, TriggerType::SessionMessage) {
             let context =
                 context.ok_or_else(|| agent_store::store_error("session context missing"))?;
@@ -204,6 +221,9 @@ impl Worker {
                     message,
                     context,
                     snapshot: Some(snapshot),
+                    profile_contract,
+                    runtime_step,
+                    requested_tools,
                     trace_id: run.trace_id.clone(),
                 })
                 .await?
@@ -214,6 +234,9 @@ impl Worker {
                     agent: Some(agent.clone()),
                     context,
                     snapshot: Some(snapshot),
+                    profile_contract,
+                    runtime_step,
+                    requested_tools,
                     trace_id: run.trace_id.clone(),
                 })
                 .await?
@@ -382,6 +405,34 @@ fn connector_name(agent: &agent_core::AgentInstance) -> &str {
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or("local")
+}
+
+fn profile_contract_from_agent(agent: &AgentInstance) -> CoreResult<Option<ProfileContract>> {
+    let Some(value) = agent
+        .config
+        .pointer("/runtime/profile_contract")
+        .or_else(|| agent.config.get("profile_contract"))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| agent_store::store_error("agent profile contract is malformed"))
+}
+
+fn requested_tools_from_agent(agent: &AgentInstance) -> Vec<String> {
+    agent
+        .config
+        .pointer("/runtime/requested_tools")
+        .or_else(|| agent.config.get("requested_tools"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 pub async fn idle_heartbeat(
