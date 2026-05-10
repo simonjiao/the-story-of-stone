@@ -224,6 +224,12 @@ profile step execution envelope 的 runtime client 已可通过
 `TONGLINGYU_AGENT_RUNTIME_MODE=minimal|hermes` 选择；默认 `minimal` 保持本地
 smoke 稳定，`hermes` 模式会使用 `HermesRuntimeClient::from_env()` 并挂载本地
 `TonglingyuRuntimeToolExecutor`。
+在 `hermes` 模式下，`draft_answer` profile 的 runtime output 可以成为
+workflow 草稿，并由本地 reviewer enforcement 重新生成最终回答；Runtime 会记录
+`agent_runtime_profile_draft_consumed` audit event，并区分
+`content_used_for_final_answer`。如果本地 reviewer 降级，Hermes 草稿不会被标记为
+最终回答内容。该路径仍只消费 draft profile 内容，不代表
+text/commentary/package/reviewer 四 profile 全量内容和工具执行已经完成。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -268,6 +274,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   content/tool execution 调用本地证据工具准备执行边界。
 - [x] profile step execution envelope 支持 `minimal|hermes` runtime client
   选择；Hermes 模式挂载本地 Tonglingyu tool executor。
+- [x] Hermes 模式可消费 `draft_answer` profile output 作为草稿，并强制经过
+  本地 reviewer enforcement 后才生成最终回答。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`

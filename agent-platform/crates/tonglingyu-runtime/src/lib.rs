@@ -167,6 +167,8 @@ impl TonglingyuRuntimeStore {
         };
         attach_agent_runtime_step_execution(&mut workflow, &input.profiles, self.clone(), mode)
             .await?;
+        let agent_runtime_content_application =
+            apply_agent_runtime_content_outputs(&mut workflow, mode);
         workflow.stream_events = workflow_stream_events(
             &workflow.trace_id,
             &input.profiles.main,
@@ -189,6 +191,22 @@ impl TonglingyuRuntimeStore {
                     }),
                 )?;
             }
+        }
+        if let Some(application) = agent_runtime_content_application {
+            append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_draft_consumed",
+                &json!({
+                    "answer_source": &workflow.answer_source,
+                    "package_id": &workflow.package.package_id,
+                    "review_status": &workflow.package.review.status,
+                    "draft_profile": &input.profiles.main,
+                    "runtime_mode": mode.as_str(),
+                    "local_reviewer_enforced": true,
+                    "content_used_for_final_answer": application.content_used_for_final_answer,
+                }),
+            )?;
         }
         Ok(workflow)
     }
@@ -1489,6 +1507,81 @@ fn tonglingyu_agent_runtime_client(
                 .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
         )),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AgentRuntimeContentApplication {
+    content_used_for_final_answer: bool,
+}
+
+fn apply_agent_runtime_content_outputs(
+    workflow: &mut RuntimeWorkflowOutput,
+    mode: TonglingyuAgentRuntimeMode,
+) -> Option<AgentRuntimeContentApplication> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes {
+        return None;
+    }
+    let (draft_step_index, draft) =
+        workflow
+            .steps
+            .iter()
+            .enumerate()
+            .find_map(|(index, step)| {
+                if step.operation != "draft_answer" {
+                    return None;
+                }
+                let draft = step
+                    .agent_runtime
+                    .as_ref()
+                    .and_then(|value| value.get("result_summary"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                Some((index, draft.to_string()))
+            })?;
+
+    workflow.draft_answer = draft.clone();
+    workflow.final_answer = enforce_review(draft, &workflow.package);
+    let content_used_for_final_answer = workflow.package.review.status == "passed";
+    workflow.answer_source = if content_used_for_final_answer {
+        "agent_runtime_hermes_profile_with_local_review".to_string()
+    } else {
+        "agent_runtime_hermes_profile_rejected_by_local_review".to_string()
+    };
+    if let Some(step) = workflow.steps.get_mut(draft_step_index) {
+        step.output["answer_source"] = json!("agent_runtime_hermes_profile");
+        step.output["agent_runtime_draft_consumed"] = json!(true);
+        step.output["agent_runtime_content_used_for_final_answer"] =
+            json!(content_used_for_final_answer);
+        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "content_used_for_final_answer".to_string(),
+                json!(content_used_for_final_answer),
+            );
+            agent_runtime.insert(
+                "content_application".to_string(),
+                json!({
+                    "answer_source": &workflow.answer_source,
+                    "local_reviewer_enforced": true,
+                    "review_status": &workflow.package.review.status,
+                    "draft_consumed": true,
+                    "content_used_for_final_answer": content_used_for_final_answer,
+                }),
+            );
+        }
+    }
+    if let Some(step) = workflow
+        .steps
+        .iter_mut()
+        .find(|step| step.operation == "review_answer")
+    {
+        step.output["draft_source"] = json!("agent_runtime_hermes_profile");
+        step.output["final_answer_source"] = json!(&workflow.answer_source);
+        step.output["local_reviewer_enforced"] = json!(true);
+    }
+    Some(AgentRuntimeContentApplication {
+        content_used_for_final_answer,
+    })
 }
 
 fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> AgentRuntimeStep {
@@ -3817,6 +3910,103 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(profile_step_events, workflow.steps.len() as i64);
+    }
+
+    #[test]
+    fn hermes_mode_applies_runtime_draft_with_local_review() {
+        let package = EvidencePackage {
+            package_id: "pkg-runtime-draft-test".to_string(),
+            trace_id: "trace-runtime-draft-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards: vec![sample_card("base_text")],
+            claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
+            claim_evidence_map: vec![],
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        };
+        let mut workflow = RuntimeWorkflowOutput {
+            trace_id: package.trace_id.clone(),
+            question: package.question.clone(),
+            package,
+            draft_answer: "本地草稿".to_string(),
+            final_answer: "本地最终回答".to_string(),
+            answer_source: "runtime_local_profile".to_string(),
+            steps: vec![
+                RuntimeWorkflowStepReport {
+                    step_id: "step-01-draft-answer".to_string(),
+                    profile: "honglou-main".to_string(),
+                    profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+                    operation: "draft_answer".to_string(),
+                    status: "completed".to_string(),
+                    required: true,
+                    allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+                    tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+                    input_ref: None,
+                    output_ref:
+                        "runtime://tonglingyu/trace-runtime-draft-test/step-01-draft-answer"
+                            .to_string(),
+                    duration_ms: 1,
+                    trace_id: "trace-runtime-draft-test".to_string(),
+                    output: json!({"object": "tonglingyu.draft_answer"}),
+                    agent_runtime: Some(json!({
+                        "client": "hermes",
+                        "status": "executed",
+                        "content_used_for_final_answer": false,
+                        "result_summary": "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+                    })),
+                },
+                RuntimeWorkflowStepReport {
+                    step_id: "step-02-review-answer".to_string(),
+                    profile: "honglou-reviewer".to_string(),
+                    profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+                    operation: "review_answer".to_string(),
+                    status: "completed".to_string(),
+                    required: true,
+                    allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+                    tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+                    input_ref: Some(
+                        "runtime://tonglingyu/trace-runtime-draft-test/step-01-draft-answer"
+                            .to_string(),
+                    ),
+                    output_ref:
+                        "runtime://tonglingyu/trace-runtime-draft-test/step-02-review-answer"
+                            .to_string(),
+                    duration_ms: 1,
+                    trace_id: "trace-runtime-draft-test".to_string(),
+                    output: json!({"object": "tonglingyu.review_result"}),
+                    agent_runtime: Some(json!({
+                        "client": "hermes",
+                        "status": "executed",
+                        "content_used_for_final_answer": false,
+                        "result_summary": "Hermes reviewer envelope",
+                    })),
+                },
+            ],
+            stream_events: Vec::new(),
+        };
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("runtime draft consumed");
+        assert!(application.content_used_for_final_answer);
+        assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
+        assert_eq!(workflow.final_answer, workflow.draft_answer);
+        assert_eq!(
+            workflow.answer_source,
+            "agent_runtime_hermes_profile_with_local_review"
+        );
+        assert_eq!(
+            workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.steps[1].output["draft_source"],
+            "agent_runtime_hermes_profile"
+        );
     }
 
     #[test]
