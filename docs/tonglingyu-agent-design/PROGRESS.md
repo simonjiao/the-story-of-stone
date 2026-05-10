@@ -126,17 +126,19 @@
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
+- Gateway health、metrics、admin trace 的 KB/runtime 统计和 runtime audit 读取
+  已改为调用 `tonglingyu-runtime` stats/audit API；runtime prune 和 audit
+  append 也已迁入 Runtime，Gateway 只保留 gateway session/workflow 清理。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  SQLite 连接，health、metrics、admin 查询仍读取 KB/runtime 计数，且 Runtime
-  profile/read-only tools 尚未接入 `agent-runtime` 执行面。
+  SQLite 连接并把连接传给本地 Runtime API，Runtime profile/read-only tools
+  尚未接入 `agent-runtime` 执行面，streaming 也还不是 Runtime event 转发。
 
 ## 下一步
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway health、metrics、
-   admin 计数读取、运行时 profile 调用和 read-only tools 迁入 Runtime/tool
-   边界。
+2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway 的本地连接/事务边界、
+   运行时 profile 调用和 read-only tools 迁入 Runtime/tool 边界。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前

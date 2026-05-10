@@ -88,6 +88,18 @@ pub struct KnowledgeBaseBuildReport {
     pub schema_version: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStoreStats {
+    pub sources: i64,
+    pub blocks: i64,
+    pub evidence_packages: i64,
+    pub evidence_cards: i64,
+    pub audit_events: i64,
+    pub review_status: BTreeMap<String, i64>,
+    pub evidence_types: BTreeMap<String, i64>,
+    pub audit_event_types: BTreeMap<String, i64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct SourceMetadata {
     source_id: String,
@@ -480,6 +492,104 @@ pub fn has_knowledge_base(path: &Path) -> Result<bool> {
         .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
         .unwrap_or_default();
     Ok(sources > 0)
+}
+
+pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
+    Ok(RuntimeStoreStats {
+        sources: table_count(conn, "sources")?,
+        blocks: table_count(conn, "blocks")?,
+        evidence_packages: table_count(conn, "evidence_packages")?,
+        evidence_cards: table_count(conn, "evidence_cards")?,
+        audit_events: table_count(conn, "audit_events")?,
+        review_status: grouped_count_map(
+            conn,
+            "SELECT review_status, COUNT(*) FROM evidence_packages GROUP BY review_status",
+        )?,
+        evidence_types: grouped_count_map(
+            conn,
+            "SELECT evidence_type, COUNT(*) FROM evidence_cards GROUP BY evidence_type",
+        )?,
+        audit_event_types: grouped_count_map(
+            conn,
+            "SELECT event_type, COUNT(*) FROM audit_events GROUP BY event_type",
+        )?,
+    })
+}
+
+pub fn runtime_package_ids_for_trace(conn: &Connection, trace_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT package_id FROM evidence_packages WHERE trace_id = ?1")?;
+    stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+pub fn runtime_audit_events_for_trace(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
+    load_rows_json(
+        conn,
+        "SELECT event_id, event_type, payload_json, created_at FROM audit_events WHERE trace_id = ?1 ORDER BY created_at, event_id",
+        trace_id,
+    )
+}
+
+pub fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> Result<Value> {
+    if retention_days == 0 {
+        return Ok(json!({
+            "object": "tonglingyu.runtime_prune_report",
+            "status": "disabled",
+            "retention_days": retention_days,
+            "dry_run": dry_run,
+        }));
+    }
+    let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let old_packages = collect_string_column(
+        conn,
+        "SELECT package_id FROM evidence_packages WHERE created_at < ?1",
+        &cutoff,
+    )?;
+    let counts = json!({
+        "packages": old_packages.len(),
+        "audit_events": count_where(conn, "audit_events", "created_at < ?1", &cutoff)?,
+    });
+    if dry_run {
+        return Ok(json!({
+            "object": "tonglingyu.runtime_prune_report",
+            "status": "dry_run",
+            "retention_days": retention_days,
+            "cutoff": cutoff,
+            "counts": counts,
+        }));
+    }
+    for package_id in &old_packages {
+        conn.execute(
+            "DELETE FROM evidence_claim_links WHERE package_id = ?1",
+            params![package_id],
+        )?;
+        conn.execute(
+            "DELETE FROM review_records WHERE package_id = ?1",
+            params![package_id],
+        )?;
+        conn.execute(
+            "DELETE FROM evidence_cards WHERE package_id = ?1",
+            params![package_id],
+        )?;
+        conn.execute(
+            "DELETE FROM evidence_packages WHERE package_id = ?1",
+            params![package_id],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM audit_events WHERE created_at < ?1",
+        params![&cutoff],
+    )?;
+    Ok(json!({
+        "object": "tonglingyu.runtime_prune_report",
+        "status": "pruned",
+        "retention_days": retention_days,
+        "cutoff": cutoff,
+        "counts": counts,
+    }))
 }
 
 pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
@@ -921,6 +1031,74 @@ fn hash_files<'a>(paths: impl IntoIterator<Item = &'a std::path::PathBuf>) -> Re
         hasher.update(fs::read(path).with_context(|| format!("hash {}", path.display()))?);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn table_count(conn: &Connection, table: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
+    conn.query_row(&sql, params![value], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+fn collect_string_column(conn: &Connection, sql: &str, value: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(sql)?;
+    stmt.query_map(params![value], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn grouped_count_map(conn: &Connection, sql: &str) -> Result<BTreeMap<String, i64>> {
+    let mut map = BTreeMap::new();
+    for (key, count) in grouped_count_pairs(conn, sql)? {
+        map.insert(key, count);
+    }
+    Ok(map)
+}
+
+fn grouped_count_pairs(conn: &Connection, sql: &str) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(sql)?;
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
+
+fn load_rows_json(conn: &Connection, sql: &str, trace_id: &str) -> Result<Vec<Value>> {
+    let mut stmt = conn.prepare(sql)?;
+    let column_names = stmt
+        .column_names()
+        .into_iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let rows = stmt.query_map(params![trace_id], |row| {
+        let mut object = serde_json::Map::new();
+        for (index, name) in column_names.iter().enumerate() {
+            let value: Option<String> = row.get(index)?;
+            if name.ends_with("_json") {
+                object.insert(
+                    name.trim_end_matches("_json").to_string(),
+                    value
+                        .as_deref()
+                        .and_then(|item| serde_json::from_str::<Value>(item).ok())
+                        .unwrap_or(Value::Null),
+                );
+            } else {
+                object.insert(
+                    name.clone(),
+                    value.map(Value::String).unwrap_or(Value::Null),
+                );
+            }
+        }
+        Ok(Value::Object(object))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn seed_aliases(conn: &Connection) -> Result<()> {
@@ -2170,7 +2348,7 @@ fn blocked_prompt_controls(question: &str) -> Vec<String> {
         .collect()
 }
 
-fn append_runtime_audit_event(
+pub fn append_runtime_audit_event(
     conn: &Connection,
     trace_id: &str,
     event_type: &str,

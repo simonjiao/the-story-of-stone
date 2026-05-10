@@ -154,8 +154,8 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
   trace/session 透传、SSE 转发、模型隐藏和响应封装。
 - [x] Gateway 不直接执行 source snapshot loader、KB SQLite/FTS 检索或 FTS 写入。
-- [ ] Gateway 不直接读取 KB/domain SQLite 表；当前 health、metrics 和 admin
-  仍读取 KB/runtime 计数。
+- [x] Gateway 不直接读取 KB/domain SQLite 表；health、metrics、admin trace 和
+  prune 通过 Runtime stats/audit/prune API 访问 runtime store。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。
@@ -194,11 +194,10 @@ claim link 和 audit event 的运行时表初始化已由
 `tonglingyu-runtime` 也定义了四个 profile descriptor，Gateway Runtime step
 plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱节。
 
-这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite，并且
-health、metrics、admin 查询仍直接读取 KB/runtime 计数；四 profile 尚未通过
-`agent-runtime` 执行，streaming 也还不是 Runtime event 转发。R5A/R5D
-必须等 Runtime profile 执行面、Gateway 观测口改为 Runtime/admin adapter、
-Runtime event streaming 和目标环境 Open WebUI 复测完成后再勾选。
+这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite 连接并传给本地
+Runtime API，四 profile 尚未通过 `agent-runtime` 执行，streaming 也还不是
+Runtime event 转发。R5A/R5D 必须等 Runtime profile 执行面、Runtime event
+streaming、连接/事务边界收敛和目标环境 Open WebUI 复测完成后再勾选。
 
 ### R5C 四 Profile 编排
 

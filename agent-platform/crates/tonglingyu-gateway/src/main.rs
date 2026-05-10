@@ -595,7 +595,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
     if args.retention_days > 0 {
         let conn = open_db(&args.db)?;
-        let report = prune_runtime_data(&conn, args.retention_days, false)?;
+        let report = prune_gateway_and_runtime_data(&conn, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
     let state = Arc::new(AppState {
@@ -706,58 +706,39 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
     let conn = open_db(&args.db)?;
-    prune_runtime_data(&conn, args.retention_days, args.dry_run)
+    prune_gateway_and_runtime_data(&conn, args.retention_days, args.dry_run)
 }
 
-fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> Result<Value> {
+fn prune_gateway_and_runtime_data(
+    conn: &Connection,
+    retention_days: u32,
+    dry_run: bool,
+) -> Result<Value> {
     if retention_days == 0 {
-        return Ok(json!({
-            "object": "tonglingyu.runtime_prune_report",
-            "status": "disabled",
-            "retention_days": retention_days,
-            "dry_run": dry_run,
-        }));
+        return tonglingyu_runtime::prune_runtime_data(conn, retention_days, dry_run);
     }
-    let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64))
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-    let old_packages = collect_string_column(
-        conn,
-        "SELECT package_id FROM evidence_packages WHERE created_at < ?1",
-        &cutoff,
-    )?;
-    let counts = json!({
-        "packages": old_packages.len(),
+    let mut report = tonglingyu_runtime::prune_runtime_data(conn, retention_days, dry_run)?;
+    let cutoff = report
+        .get("cutoff")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("runtime prune report missing cutoff"))?
+        .to_string();
+    let gateway_counts = json!({
         "gateway_messages": count_where(conn, "gateway_messages", "created_at < ?1", &cutoff)?,
         "workflow_states": count_where(conn, "workflow_states", "created_at < ?1", &cutoff)?,
-        "audit_events": count_where(conn, "audit_events", "created_at < ?1", &cutoff)?,
     });
-    if dry_run {
-        return Ok(json!({
-            "object": "tonglingyu.runtime_prune_report",
-            "status": "dry_run",
-            "retention_days": retention_days,
-            "cutoff": cutoff,
-            "counts": counts,
-        }));
+    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
+        counts.insert(
+            "gateway_messages".to_string(),
+            gateway_counts["gateway_messages"].clone(),
+        );
+        counts.insert(
+            "workflow_states".to_string(),
+            gateway_counts["workflow_states"].clone(),
+        );
     }
-    for package_id in &old_packages {
-        conn.execute(
-            "DELETE FROM evidence_claim_links WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM review_records WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_cards WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_packages WHERE package_id = ?1",
-            params![package_id],
-        )?;
+    if dry_run {
+        return Ok(report);
     }
     conn.execute(
         "DELETE FROM gateway_messages WHERE created_at < ?1",
@@ -768,27 +749,10 @@ fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> 
         params![&cutoff],
     )?;
     conn.execute(
-        "DELETE FROM audit_events WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
         "DELETE FROM gateway_sessions WHERE updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM gateway_messages WHERE gateway_messages.session_id = gateway_sessions.session_id)",
         params![&cutoff],
     )?;
-    Ok(json!({
-        "object": "tonglingyu.runtime_prune_report",
-        "status": "pruned",
-        "retention_days": retention_days,
-        "cutoff": cutoff,
-        "counts": counts,
-    }))
-}
-
-fn collect_string_column(conn: &Connection, sql: &str, value: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(sql)?;
-    stmt.query_map(params![value], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    Ok(report)
 }
 
 fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
@@ -947,17 +911,7 @@ fn insert_audit_event(
     event_type: &str,
     payload: &Value,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO audit_events (event_id, trace_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            format!("audit-{}", uuid::Uuid::now_v7().simple()),
-            trace_id,
-            event_type,
-            serde_json::to_string(payload)?,
-            now_rfc3339(),
-        ],
-    )?;
-    Ok(())
+    tonglingyu_runtime::append_runtime_audit_event(conn, trace_id, event_type, payload)
 }
 
 fn record_workflow_state(
@@ -1891,18 +1845,12 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
-    match open_db(&state.db).and_then(|conn| {
-        let source_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
-        let block_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
-        Ok((source_count, block_count))
-    }) {
-        Ok((source_count, block_count)) => Json(json!({
+    match open_db(&state.db).and_then(|conn| tonglingyu_runtime::runtime_store_stats(&conn)) {
+        Ok(stats) => Json(json!({
             "status": "ok",
             "model": state.model_id,
-            "sources": source_count,
-            "blocks": block_count
+            "sources": stats.sources,
+            "blocks": stats.blocks
         }))
         .into_response(),
         Err(error) => (
@@ -2857,22 +2805,13 @@ fn package_owned_by_subject(
 
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
-    let package_ids = {
-        let mut stmt =
-            conn.prepare("SELECT package_id FROM evidence_packages WHERE trace_id = ?1")?;
-        stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
+    let package_ids = tonglingyu_runtime::runtime_package_ids_for_trace(&conn, trace_id)?;
     let workflow_states = load_rows_json(
         &conn,
         "SELECT state_id, session_id, package_id, state, status, detail_json, created_at FROM workflow_states WHERE trace_id = ?1 ORDER BY created_at, state_id",
         trace_id,
     )?;
-    let audit_events = load_rows_json(
-        &conn,
-        "SELECT event_id, event_type, payload_json, created_at FROM audit_events WHERE trace_id = ?1 ORDER BY created_at, event_id",
-        trace_id,
-    )?;
+    let audit_events = tonglingyu_runtime::runtime_audit_events_for_trace(&conn, trace_id)?;
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -2968,14 +2907,7 @@ struct AnswerDraft {
 
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
-    let review_counts = grouped_counts(
-        &conn,
-        "SELECT review_status, COUNT(*) FROM evidence_packages GROUP BY review_status",
-    )?;
-    let evidence_type_counts = grouped_counts(
-        &conn,
-        "SELECT evidence_type, COUNT(*) FROM evidence_cards GROUP BY evidence_type",
-    )?;
+    let runtime_stats = tonglingyu_runtime::runtime_store_stats(&conn)?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -2999,23 +2931,24 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "auto_prune_enabled": state.retention_days > 0,
         },
         "counts": {
-            "sources": table_count(&conn, "sources")?,
-            "blocks": table_count(&conn, "blocks")?,
+            "sources": runtime_stats.sources,
+            "blocks": runtime_stats.blocks,
             "sessions": table_count(&conn, "gateway_sessions")?,
             "messages": table_count(&conn, "gateway_messages")?,
-            "evidence_packages": table_count(&conn, "evidence_packages")?,
-            "evidence_cards": table_count(&conn, "evidence_cards")?,
+            "evidence_packages": runtime_stats.evidence_packages,
+            "evidence_cards": runtime_stats.evidence_cards,
             "workflow_states": table_count(&conn, "workflow_states")?,
-            "audit_events": table_count(&conn, "audit_events")?,
+            "audit_events": runtime_stats.audit_events,
         },
-        "review_status": review_counts,
-        "evidence_types": evidence_type_counts,
+        "review_status": runtime_stats.review_status,
+        "evidence_types": runtime_stats.evidence_types,
         "workflow_status": workflow_status_counts,
     }))
 }
 
 fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
+    let runtime_stats = tonglingyu_runtime::runtime_store_stats(&conn)?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -3025,31 +2958,34 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         escape_metric_label(&state.profiles.main),
         escape_metric_label(&state.profiles.reviewer)
     ));
-    for (metric, table) in [
-        ("tonglingyu_sources_total", "sources"),
-        ("tonglingyu_blocks_total", "blocks"),
-        ("tonglingyu_sessions_total", "gateway_sessions"),
-        ("tonglingyu_messages_total", "gateway_messages"),
-        ("tonglingyu_evidence_packages_total", "evidence_packages"),
-        ("tonglingyu_audit_events_total", "audit_events"),
+    for (metric, count) in [
+        ("tonglingyu_sources_total", runtime_stats.sources),
+        ("tonglingyu_blocks_total", runtime_stats.blocks),
+        (
+            "tonglingyu_sessions_total",
+            table_count(&conn, "gateway_sessions")?,
+        ),
+        (
+            "tonglingyu_messages_total",
+            table_count(&conn, "gateway_messages")?,
+        ),
+        (
+            "tonglingyu_evidence_packages_total",
+            runtime_stats.evidence_packages,
+        ),
+        ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
         lines.push(format!("# TYPE {metric} gauge"));
-        lines.push(format!("{metric} {}", table_count(&conn, table)?));
+        lines.push(format!("{metric} {count}"));
     }
-    for (status, count) in grouped_count_pairs(
-        &conn,
-        "SELECT review_status, COUNT(*) FROM evidence_packages GROUP BY review_status",
-    )? {
+    for (status, count) in runtime_stats.review_status {
         lines.push(format!(
             "tonglingyu_review_status_total{{status=\"{}\"}} {}",
             escape_metric_label(&status),
             count
         ));
     }
-    for (event_type, count) in grouped_count_pairs(
-        &conn,
-        "SELECT event_type, COUNT(*) FROM audit_events GROUP BY event_type",
-    )? {
+    for (event_type, count) in runtime_stats.audit_event_types {
         lines.push(format!(
             "tonglingyu_audit_events_by_type_total{{event_type=\"{}\"}} {}",
             escape_metric_label(&event_type),
@@ -3236,6 +3172,10 @@ mod tests {
             format!("struct Block{}", "Record"),
             format!("CREATE VIRTUAL TABLE IF NOT EXISTS {}", "blocks_fts"),
             format!("INSERT INTO {}", "blocks_fts"),
+            format!("SELECT package_id FROM {}", "evidence_packages"),
+            format!("DELETE FROM {}", "evidence_packages"),
+            format!("INSERT INTO {}", "audit_events"),
+            format!("SELECT COUNT(*) FROM {}", "sources"),
         ] {
             assert!(
                 !main_source.contains(&forbidden),
