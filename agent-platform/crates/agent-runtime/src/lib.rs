@@ -503,8 +503,9 @@ impl HermesRuntimeClient {
         trace_id: &str,
         runtime_profile: &str,
         contract: Option<&ProfileContract>,
+        requested_tools: &[String],
     ) -> CoreResult<(String, Value)> {
-        let tools = tool_definitions(contract);
+        let tools = tool_definitions(contract, requested_tools);
         let started = Instant::now();
         let mut tool_results = Vec::new();
         let mut tool_audit_events = Vec::new();
@@ -530,7 +531,13 @@ impl HermesRuntimeClient {
                         &tool_call,
                     ));
                     let result = self
-                        .execute_runtime_tool_call(contract, runtime_profile, trace_id, tool_call)
+                        .execute_runtime_tool_call(
+                            contract,
+                            requested_tools,
+                            runtime_profile,
+                            trace_id,
+                            tool_call,
+                        )
                         .await?;
                     let result_summary = runtime_tool_result_summary(&result);
                     tool_audit_events.push(runtime_tool_result_audit_event(&result));
@@ -558,6 +565,7 @@ impl HermesRuntimeClient {
     async fn execute_runtime_tool_call(
         &self,
         contract: Option<&ProfileContract>,
+        requested_tools: &[String],
         runtime_profile: &str,
         trace_id: &str,
         tool_call: HermesToolCall,
@@ -570,7 +578,7 @@ impl HermesRuntimeClient {
         };
         let spec = contract
             .tool_policy
-            .validate_tool_call(&tool_call.function.name)?;
+            .validate_tool_call(&tool_call.function.name, requested_tools)?;
         let arguments = parse_tool_arguments(&tool_call.function.arguments)?;
         validate_json_schema_value(&spec.input_schema, &arguments)?;
         let call = RuntimeToolCall {
@@ -800,6 +808,7 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.trace_id,
                 &input.profile_id,
                 contract.as_ref(),
+                &input.requested_tools,
             )
             .await?;
         finalize_runtime_output(
@@ -914,10 +923,12 @@ impl RuntimeClient for HermesRuntimeClient {
             &input.requested_tools,
             &input.profile_id,
         )?;
-        if contract
-            .as_ref()
-            .is_some_and(|contract| !contract.tool_policy.effective_tools().is_empty())
-        {
+        if contract.as_ref().is_some_and(|contract| {
+            !contract
+                .tool_policy
+                .effective_tools_for_request(&input.requested_tools)
+                .is_empty()
+        }) {
             let profile_id = input.profile_id.clone();
             let trace_id = input.trace_id.clone();
             let output = self.execute_profile_step(input).await?;
@@ -2008,7 +2019,11 @@ fn finalize_runtime_output(
         }
         output.metadata["profile_id"] = json!(&contract.profile_id);
         output.metadata["schema_version"] = json!(&contract.version.version);
-        output.metadata["effective_tool_set"] = json!(contract.tool_policy.effective_tools());
+        output.metadata["effective_tool_set"] = json!(
+            contract
+                .tool_policy
+                .effective_tools_for_request(requested_tools)
+        );
         output.metadata["requested_tools"] = json!(requested_tools);
         if let Some(step) = runtime_step {
             let mut step_value = serde_json::to_value(step)
@@ -2098,12 +2113,15 @@ fn ensure_profile_budget(started: Instant, contract: Option<&ProfileContract>) -
     Ok(())
 }
 
-fn tool_definitions(contract: Option<&ProfileContract>) -> Vec<HermesToolDefinition> {
+fn tool_definitions(
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+) -> Vec<HermesToolDefinition> {
     contract
         .map(|contract| {
             contract
                 .tool_policy
-                .effective_tool_specs()
+                .effective_tool_specs_for_request(requested_tools)
                 .into_iter()
                 .map(|spec| HermesToolDefinition {
                     kind: "function".to_string(),
@@ -2535,8 +2553,8 @@ mod tests {
     use super::*;
     use agent_core::{
         AgentInstance, AgentRun, CredentialLeaseStatus, ExternalActionPlan, ProfileContract,
-        RiskLevel, RuntimeProfileInput, RuntimeProfileMessage, RuntimeToolPolicy, RuntimeToolSpec,
-        TriggerType, new_trace_id,
+        RiskLevel, RuntimeProfileInput, RuntimeProfileMessage, RuntimeToolCapability,
+        RuntimeToolPolicy, RuntimeToolSpec, TriggerType, new_trace_id,
     };
     use axum::{
         Json, Router,
@@ -2670,6 +2688,31 @@ mod tests {
                 profile_contract: Some(contract),
                 runtime_step: None,
                 requested_tools: vec!["direct_external_write".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_unallowed_profile_tool() {
+        let contract = ProfileContract::new("test-profile", "v1");
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
                 trace_id: new_trace_id(),
             })
             .await;
@@ -2924,6 +2967,7 @@ mod tests {
                 "properties": {"cards": {"type": "array"}}
             }),
             output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
         }];
         let executor = StaticRuntimeToolExecutor::new([(
             "tonglingyu.text.search".to_string(),
@@ -2946,7 +2990,7 @@ mod tests {
                 metadata: json!({}),
                 profile_contract: Some(contract),
                 runtime_step: None,
-                requested_tools: Vec::new(),
+                requested_tools: vec!["tonglingyu.text.search".to_string()],
                 trace_id: new_trace_id(),
             })
             .await
@@ -2968,6 +3012,92 @@ mod tests {
             "runtime_tool_result"
         );
         assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_exposes_only_requested_profile_tools() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let tools = body["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0]["function"]["name"], "tool.alpha");
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "scoped tools"}}
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("scoped-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "scoped-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "scoped")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.alpha".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "scoped tools");
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.alpha");
+        assert_eq!(
+            output.metadata["effective_tool_set"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_write_capability_tool_scope() {
+        let mut contract = ProfileContract::new("write-profile", "v1");
+        contract.tool_policy.allowed_tools = vec!["tool.write".to_string()];
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec::write("tool.write")];
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "write-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "write")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.write".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -3038,7 +3168,7 @@ mod tests {
                 metadata: json!({}),
                 profile_contract: Some(contract),
                 runtime_step: None,
-                requested_tools: Vec::new(),
+                requested_tools: vec!["tool.large".to_string()],
                 trace_id: new_trace_id(),
             })
             .await
@@ -3103,7 +3233,7 @@ mod tests {
                 metadata: json!({}),
                 profile_contract: Some(contract),
                 runtime_step: None,
-                requested_tools: Vec::new(),
+                requested_tools: vec!["tool.read".to_string()],
                 trace_id: new_trace_id(),
             })
             .await;

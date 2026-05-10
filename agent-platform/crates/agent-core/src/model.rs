@@ -258,6 +258,17 @@ string_enum! {
     }
 }
 
+string_enum! {
+    pub enum RuntimeToolCapability {
+        ReadOnly => "read_only",
+        Write => "write",
+    }
+}
+
+fn default_runtime_tool_capability() -> RuntimeToolCapability {
+    RuntimeToolCapability::ReadOnly
+}
+
 pub const AGENT_TYPE_BACKGROUND_WORKER: &str = "background_worker";
 pub const AGENT_TYPE_OBSERVER: &str = "observer_agent";
 
@@ -284,6 +295,8 @@ pub struct RuntimeToolSpec {
     pub output_schema: Value,
     #[serde(default)]
     pub output_ref_required: bool,
+    #[serde(default = "default_runtime_tool_capability")]
+    pub capability: RuntimeToolCapability,
 }
 
 impl RuntimeToolSpec {
@@ -295,7 +308,24 @@ impl RuntimeToolSpec {
             input_schema: json!({"type": "object"}),
             output_schema: json!({"type": "object"}),
             output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
         }
+    }
+
+    pub fn write(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            description: format!("Write runtime tool {name}"),
+            name,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::Write,
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.capability == RuntimeToolCapability::ReadOnly
     }
 }
 
@@ -329,8 +359,20 @@ impl RuntimeToolPolicy {
     pub fn effective_tools(&self) -> Vec<String> {
         self.allowed_tools
             .iter()
-            .filter(|tool| !self.denied_tools.iter().any(|denied| denied == *tool))
+            .filter(|tool| {
+                !self.denied_tools.iter().any(|denied| denied == *tool)
+                    && self
+                        .spec_for_contract_tool(tool)
+                        .is_some_and(|spec| spec.is_read_only())
+            })
             .cloned()
+            .collect()
+    }
+
+    pub fn effective_tools_for_request(&self, requested_tools: &[String]) -> Vec<String> {
+        self.effective_tools()
+            .into_iter()
+            .filter(|tool| requested_tools.iter().any(|requested| requested == tool))
             .collect()
     }
 
@@ -348,11 +390,28 @@ impl RuntimeToolPolicy {
             .collect()
     }
 
-    pub fn spec_for(&self, tool: &str) -> Option<RuntimeToolSpec> {
+    pub fn effective_tool_specs_for_request(
+        &self,
+        requested_tools: &[String],
+    ) -> Vec<RuntimeToolSpec> {
+        let effective_tools = self.effective_tools_for_request(requested_tools);
+        effective_tools
+            .iter()
+            .map(|tool| {
+                self.tool_specs
+                    .iter()
+                    .find(|spec| spec.name == *tool)
+                    .cloned()
+                    .unwrap_or_else(|| RuntimeToolSpec::read_only(tool.clone()))
+            })
+            .collect()
+    }
+
+    fn spec_for_contract_tool(&self, tool: &str) -> Option<RuntimeToolSpec> {
         if self.denied_tools.iter().any(|denied| denied == tool) {
             return None;
         }
-        if !self.allowed_tools.is_empty() && !self.allowed_tools.iter().any(|name| name == tool) {
+        if !self.allowed_tools.iter().any(|name| name == tool) {
             return None;
         }
         self.tool_specs
@@ -364,43 +423,46 @@ impl RuntimeToolPolicy {
 
     pub fn validate_requested_tools(&self, requested_tools: &[String]) -> CoreResult<()> {
         for tool in requested_tools {
-            if self.denied_tools.iter().any(|denied| denied == tool) {
-                return Err(AgentCoreError::coded(
-                    crate::ErrorCode::Forbidden,
-                    "runtime profile requested a denied tool",
-                ));
-            }
-            if !self.allowed_tools.is_empty()
-                && !self.allowed_tools.iter().any(|allowed| allowed == tool)
-            {
+            let Some(spec) = self.spec_for_contract_tool(tool) else {
                 return Err(AgentCoreError::coded(
                     crate::ErrorCode::Forbidden,
                     "runtime profile requested an unauthorized tool",
+                ));
+            };
+            if !spec.is_read_only() {
+                return Err(AgentCoreError::coded(
+                    crate::ErrorCode::Forbidden,
+                    "runtime profile requested a non-read-only tool",
                 ));
             }
         }
         Ok(())
     }
 
-    pub fn validate_tool_call(&self, tool: &str) -> CoreResult<RuntimeToolSpec> {
-        if self.denied_tools.iter().any(|denied| denied == tool) {
+    pub fn validate_tool_call(
+        &self,
+        tool: &str,
+        requested_tools: &[String],
+    ) -> CoreResult<RuntimeToolSpec> {
+        if !requested_tools.iter().any(|requested| requested == tool) {
             return Err(AgentCoreError::coded(
                 crate::ErrorCode::Forbidden,
-                "runtime profile requested a denied tool",
+                "runtime profile requested a tool outside authorized scope",
             ));
         }
-        if !self.allowed_tools.is_empty() && !self.allowed_tools.iter().any(|name| name == tool) {
+        let Some(spec) = self.spec_for_contract_tool(tool) else {
             return Err(AgentCoreError::coded(
                 crate::ErrorCode::Forbidden,
                 "runtime profile requested an unauthorized tool",
             ));
+        };
+        if !spec.is_read_only() {
+            return Err(AgentCoreError::coded(
+                crate::ErrorCode::Forbidden,
+                "runtime profile requested a non-read-only tool",
+            ));
         }
-        Ok(self
-            .tool_specs
-            .iter()
-            .find(|spec| spec.name == tool)
-            .cloned()
-            .unwrap_or_else(|| RuntimeToolSpec::read_only(tool.to_string())))
+        Ok(spec)
     }
 }
 
