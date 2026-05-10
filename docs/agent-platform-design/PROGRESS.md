@@ -49,7 +49,7 @@
   错误，streaming path 返回安全 `error` event，不透传 executor error
   payload；tool call 失败会写安全 `runtime_tool_error` adapter audit event；
   Runtime adapter 也提供直连场景可配置的 append-only JSONL audit sink，并有
-  保留已有记录的回归验证。
+  保留已有记录和 `AGENT_RUNTIME_AUDIT_LOG` 配置入口的回归验证。
 - Runtime repo/local checklist 当前已关闭；完成口径限定为 Agent Runtime 本体，
   完整 JSON Schema 和领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
 - 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime

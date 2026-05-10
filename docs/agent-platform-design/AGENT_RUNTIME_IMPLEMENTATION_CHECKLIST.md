@@ -341,6 +341,9 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_rejects_required_tool_output_ref_missing`
 - [x] `hermes_runtime_writes_tool_events_to_jsonl_audit_sink` 覆盖 append-only
   保留已有记录。
+- [x] `hermes_runtime_from_env_uses_audit_log_env` 覆盖
+  `AGENT_RUNTIME_AUDIT_LOG` 会通过 `HermesRuntimeClient::from_env()` 启用
+  JSONL audit sink。
 
 ### R4.5 提交
 

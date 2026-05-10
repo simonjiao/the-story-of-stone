@@ -5125,6 +5125,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_from_env_uses_audit_log_env() {
+        let child_flag = "AGENT_RUNTIME_FROM_ENV_AUDIT_CHILD";
+        if std::env::var_os(child_flag).is_some() {
+            let runtime = HermesRuntimeClient::from_env().unwrap();
+            let result = runtime
+                .execute_profile_step(RuntimeProfileInput {
+                    profile_id: "from-env-audit-profile".to_string(),
+                    messages: vec![RuntimeProfileMessage::new("user", "audit from env")],
+                    metadata: json!({}),
+                    profile_contract: None,
+                    runtime_step: None,
+                    requested_tools: Vec::new(),
+                    trace_id: new_trace_id(),
+                })
+                .await;
+            assert_eq!(result.unwrap_err().code(), ErrorCode::Forbidden);
+            return;
+        }
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert!(body.get("tools").is_none());
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_FROM_ENV_AUDIT_CALL",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_FROM_ENV_AUDIT_TOOL",
+                                            "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .arg("tests::hermes_runtime_from_env_uses_audit_log_env")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(child_flag, "1")
+            .env("AGENT_RUNTIME_HERMES_BASE_URL", spawn_server(app).await)
+            .env("AGENT_RUNTIME_HERMES_MODEL", "hermes-agent")
+            .env("AGENT_RUNTIME_AUDIT_LOG", &audit_path)
+            .output()
+            .await
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child stdout:\n{}\nchild stderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("\"call_id\":null"));
+        assert!(log.contains("\"tool_name\":null"));
+        assert!(!log.contains("SECRET_FROM_ENV_AUDIT_CALL"));
+        assert!(!log.contains("SECRET_FROM_ENV_AUDIT_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_rejects_invalid_tool_input_schema_with_safe_audit() {
         let app = Router::new().route(
             "/chat/completions",
