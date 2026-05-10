@@ -20,9 +20,9 @@
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool
   scope、per-profile tool permission、read-only capability、tool schema、
-  tool round、runtime budget 和 output ref/summary 约束；Worker 会把
-  tool call / tool result 写入现有 append-only audit logs；tool call 失败会写
-  安全 `runtime_tool_error` audit event；Runtime adapter 也提供直连场景
+  tool round、runtime budget 和 output ref/summary 约束；RuntimeOutput
+  metadata 会返回安全 tool event 摘要；tool call 失败会写安全
+  `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
   可配置的 append-only JSONL audit sink。
 - Runtime 完整完成口径已关闭在 repo/local 范围内；完整 JSON Schema 和
   领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
@@ -49,6 +49,9 @@
 - Runtime 专项只新增 adapter、contract 或 feature；未改写 P0/P1/P2 已固定的
   Manager 授权、Open WebUI Bridge、run/session 状态机、Worker claim、
   Memory schema 或 audit contract。
+- Runtime 本体完成口径限定在 `agent-core` / `agent-runtime`；Manager、
+  Worker、Orchestrator 和领域 Gateway 的消费、落审计、SSE 包装和部署复测
+  属于各自集成边界。
 - Agent Runtime repo/local 完成状态不能替代任何领域 Gateway 接入完成状态；通灵玉
   目标架构、四 profile contract、read-only tools 和 Open WebUI 复测以
   通灵玉设计文档为准。

@@ -4,7 +4,9 @@
 
 本 checklist 跟踪 Agent Runtime 完善专项的实施状态。设计边界以
 [09-agent-runtime-design.md](09-agent-runtime-design.md) 为准；本文件只记录
-可执行任务、验收、测试和待确认项。
+`agent-core` / `agent-runtime` 范围内的可执行任务、验收、测试和待确认项。
+Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边界引用，
+不计入本 checklist 的完成条件。
 
 ## 当前状态
 
@@ -50,7 +52,7 @@
 - [x] 在 `agent-runtime` 新增 profile contract registry。
 - [x] 在 `agent-runtime` 增加 runtime input schema validation。
 - [x] 在 `agent-runtime` 增加 runtime output schema validation。
-- [x] 在 `agent-worker` 调用 Runtime 时带上 profile contract metadata。
+- [x] Runtime input contract 支持调用方传入 profile contract metadata。
 - [x] 当前不需要持久化 contract version；后续如需运营动态配置，再在
   `agent-store` 新增非破坏字段或新表。
 - [ ] 如需要完整 JSON Schema，替换当前轻量校验器或接入标准 schema crate。
@@ -66,7 +68,6 @@
 ### R1 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
 
 ### R1 提交
 
@@ -83,7 +84,6 @@
 - [x] 在 `agent-runtime` 为 Hermes adapter 增加 streaming path。
 - [x] streaming final event 携带最终 `RuntimeOutput`；Worker 非 streaming
   完成态语义保持不变。
-- [x] `agent-orchestrator` 现有 OpenAI-compatible SSE wrapper 不回退。
 - [x] 保留非 streaming path 的原有行为。
 - [x] 增加 tool progress streaming event。
 - [x] 增加 schema partial streaming event。
@@ -95,14 +95,13 @@
 - [x] 非 streaming path 不回退。
 - [x] streaming final 和非 streaming 输出语义一致。
 - [x] error event 不泄露 prompt、credential、connector payload 或内部栈。
-- [x] trace/audit 能看到流式调用的 final 状态。
+- [x] stream event 能携带 trace、run/session、profile 和 schema version。
 - [x] tool progress / schema partial 有端到端验证。
 - [x] safe error event 有回归验证。
 
 ### R2 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-orchestrator`
 
 ### R2 提交
 
@@ -116,8 +115,7 @@
 
 - [x] 在 `agent-core` 定义 tool capability。
 - [x] 在 `agent-core` 定义 allowed tools、denied tools 和 effective tool set。
-- [x] Worker 从受控 agent config 转发 `requested_tools` 作为本次授权 tool
-  scope。
+- [x] Runtime input contract 支持调用方传入本次授权 `requested_tools` scope。
 - [x] 在 `agent-runtime` 执行前按 `requested_tools ∩ allowed_tools -
   denied_tools - non_read_only` 计算 effective tool set。
 - [x] 在 `agent-runtime` 拒绝越权 tool request。
@@ -126,8 +124,7 @@
 - [x] 空 `allowed_tools` 解释为无工具权限，不解释为通配符。
 - [x] 保持写入类工具必须走 Manager external-action apply/compensate。
 - [x] metadata 记录 effective tool set。
-- [x] Manager 创建 agent 时从 profile contract 生成默认授权 `requested_tools`；
-  Worker 对已有 agent 按 contract 做防御性派生。
+- [x] Runtime 不从 prompt 派生 tool scope，只接受显式 `requested_tools`。
 
 ### R3 验收
 
@@ -143,7 +140,6 @@
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-manager`
 
 ### R3 提交
 
@@ -159,7 +155,7 @@
 - [x] 在 `agent-core` 新增 `RuntimeStepPlan`。
 - [x] 在 `agent-core` 新增 `RuntimeStep`。
 - [x] 在 `agent-core` 新增 `RuntimeStepStatus`。
-- [x] 在 Worker 路径创建单个 `RuntimeStep` metadata。
+- [x] Runtime input contract 支持调用方传入单个 `RuntimeStep` metadata。
 - [x] 在 `agent-runtime` 只执行单个已授权 step。
 - [x] 单 step 输出通过 schema 校验后写入 `RuntimeOutput`。
 - [x] 当前复用 Runtime metadata、Gateway workflow state 和 audit；后续如需
@@ -185,7 +181,6 @@
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
 - [x] `runtime_step_plan_helper_materializes_step_contracts`
 - [x] `runtime_step_plan_validates_step_output_contract`
 
@@ -209,8 +204,7 @@
 - [x] tool output 通过 `output_ref` 和安全摘要传递；大 payload 不进入
   final `RuntimeOutput.metadata`。
 - [x] profile step 受最大 tool round 和 `max_runtime_seconds` 预算约束。
-- [x] Worker 路径 tool call / tool result 事件接入现有 append-only
-  `audit_logs`。
+- [x] RuntimeOutput metadata 返回安全 tool call / tool result event 摘要。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
 - [x] Runtime 只向 Hermes 暴露 read-only effective tool specs。
@@ -227,7 +221,8 @@
   step output。
 - [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
-- [x] Worker audit logs 能按 run trace 看到 runtime tool call / result 事件。
+- [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
+  runtime tool call / result 事件。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证。
 - [x] 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
@@ -235,7 +230,6 @@
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
 
@@ -256,7 +250,7 @@ Runtime 专项完成后可以声明：
 Runtime 专项完成条件：
 
 - [x] R1 到 R4.5 repo/local checkbox 全部关闭。
-- [x] 本次 Runtime/Core/Worker/Manager 对应测试命令通过。
+- [x] 本次 `agent-core` / `agent-runtime` 对应测试命令通过。
 - [x] `PROGRESS.md` 已更新当前状态和残余风险。
 
 领域 Gateway 接入的完成口径、测试和 Open WebUI 复测由对应领域设计文档
