@@ -380,26 +380,36 @@ where
     let mut had_failed_continued_step = false;
 
     for mut step in input.plan.steps.clone() {
-        let dependency_refs = step
-            .depends_on
-            .iter()
-            .map(|dependency| {
-                output_refs
-                    .get(dependency)
-                    .map(|output_ref| {
-                        json!({
-                            "step_id": dependency,
-                            "output_ref": output_ref,
-                        })
-                    })
-                    .ok_or_else(|| {
-                        AgentCoreError::coded(
-                            ErrorCode::Conflict,
-                            "runtime step dependency was not completed",
-                        )
-                    })
-            })
-            .collect::<CoreResult<Vec<_>>>()?;
+        let mut dependency_refs = Vec::new();
+        let mut dependency_error = None;
+        for dependency in &step.depends_on {
+            match output_refs.get(dependency) {
+                Some(output_ref) => dependency_refs.push(json!({
+                    "step_id": dependency,
+                    "output_ref": output_ref,
+                })),
+                None => {
+                    dependency_error = Some(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "runtime step dependency was not completed",
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = dependency_error {
+            record_runtime_step_failure(
+                &mut step,
+                &mut completed_steps,
+                &mut step_summaries,
+                "dependency_not_completed",
+            );
+            if step.fallback_policy == RuntimeStepFailurePolicy::Continue {
+                had_failed_continued_step = true;
+                continue;
+            }
+            return Err(error);
+        }
         let contract = contracts.get(&step.profile_id).cloned().ok_or_else(|| {
             AgentCoreError::coded(
                 ErrorCode::Conflict,
@@ -485,13 +495,36 @@ where
 
         match result {
             Ok(output) => {
-                validate_runtime_step_output(&step.output_contract, &output)?;
-                let output_ref = output.result_ref.clone().ok_or_else(|| {
-                    AgentCoreError::coded(
+                if let Err(error) = validate_runtime_step_output(&step.output_contract, &output) {
+                    record_runtime_step_failure(
+                        &mut step,
+                        &mut completed_steps,
+                        &mut step_summaries,
+                        "step_output_invalid",
+                    );
+                    if step.fallback_policy == RuntimeStepFailurePolicy::Continue {
+                        had_failed_continued_step = true;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                let Some(output_ref) = output.result_ref.clone() else {
+                    let error = AgentCoreError::coded(
                         ErrorCode::Conflict,
                         "runtime step did not produce output_ref",
-                    )
-                })?;
+                    );
+                    record_runtime_step_failure(
+                        &mut step,
+                        &mut completed_steps,
+                        &mut step_summaries,
+                        "step_missing_output_ref",
+                    );
+                    if step.fallback_policy == RuntimeStepFailurePolicy::Continue {
+                        had_failed_continued_step = true;
+                        continue;
+                    }
+                    return Err(error);
+                };
                 step.status = RuntimeStepStatus::Completed;
                 step.output_ref = Some(output_ref.clone());
                 output_refs.insert(step.step_id.clone(), output_ref.clone());
@@ -505,14 +538,12 @@ where
                 last_output = Some(output);
             }
             Err(error) => {
-                step.status = RuntimeStepStatus::Failed;
-                step_summaries.push(json!({
-                    "step_id": &step.step_id,
-                    "profile_id": &step.profile_id,
-                    "status": step.status,
-                    "error_code": "step_failed",
-                }));
-                completed_steps.push(step.clone());
+                record_runtime_step_failure(
+                    &mut step,
+                    &mut completed_steps,
+                    &mut step_summaries,
+                    "step_failed",
+                );
                 if step.fallback_policy == RuntimeStepFailurePolicy::Continue {
                     had_failed_continued_step = true;
                     continue;
@@ -545,6 +576,22 @@ where
     })?;
     output.metadata["runtime_step_outputs"] = json!(step_summaries);
     Ok(output)
+}
+
+fn record_runtime_step_failure(
+    step: &mut RuntimeStep,
+    completed_steps: &mut Vec<RuntimeStep>,
+    step_summaries: &mut Vec<Value>,
+    error_code: &str,
+) {
+    step.status = RuntimeStepStatus::Failed;
+    step_summaries.push(json!({
+        "step_id": &step.step_id,
+        "profile_id": &step.profile_id,
+        "status": step.status,
+        "error_code": error_code,
+    }));
+    completed_steps.push(step.clone());
 }
 
 fn json_schema_is_empty(schema: &Value) -> bool {

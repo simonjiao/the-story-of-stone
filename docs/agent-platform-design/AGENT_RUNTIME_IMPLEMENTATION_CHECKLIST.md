@@ -51,6 +51,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] 在 `agent-core` 新增 profile schema 校验错误类型。
 - [x] 在 `agent-runtime` 新增 profile contract registry。
 - [x] 在 `agent-runtime` 增加 runtime input schema validation。
+- [x] 在 `agent-runtime` 增加 `max_context_messages` 上下文预算校验。
 - [x] 在 `agent-runtime` 增加 runtime output schema validation。
 - [x] Runtime input contract 支持调用方传入 profile contract metadata。
 - [x] 当前不需要持久化 contract version；后续如需运营动态配置，再在
@@ -64,10 +65,12 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] schema invalid 不进入 successful runtime output。
 - [x] 错误不泄露 prompt、secret、connector payload 或内部栈。
 - [x] metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
+- [x] 超过 `max_context_messages` 时返回安全错误，不进入 successful output。
 
 ### R1 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `minimal_runtime_rejects_profile_context_over_budget`
 
 ### R1 提交
 
@@ -167,6 +170,8 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] step plan 执行器会实际使用 step 级 `output_contract` 和 `tool_policy`。
 - [x] step 输出只通过 schema 校验后的 `output_ref` 进入下一 step。
 - [x] 增加多 step 失败降级或终止策略。
+- [x] executor 侧 output contract 校验失败、缺失 `output_ref` 或依赖缺失时，
+  会按当前 step `fallback_policy` 降级或终止。
 
 ### R4 验收
 
@@ -176,6 +181,8 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] 多 step 失败不会导致权限扩大或未审计输出。
 - [x] step 级 tool policy 会收窄本 step 的 effective tool set。
 - [x] step 级 output contract 失败时不会产生 successful output。
+- [x] step 级 output contract 在 Runtime 客户端成功返回后失败时，也会走
+  `fallback_policy`，不会绕过显式降级/终止策略。
 
 ### R4 测试
 
@@ -183,6 +190,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `runtime_step_plan_helper_materializes_step_contracts`
 - [x] `runtime_step_plan_validates_step_output_contract`
+- [x] `runtime_step_plan_applies_fallback_to_executor_output_contract_failure`
 
 ### R4 提交
 

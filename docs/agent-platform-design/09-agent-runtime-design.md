@@ -213,10 +213,12 @@ ProfileContract
 
 1. `agent-core`：新增 `ProfileContract`、`ProfileContractVersion`、
    `RuntimeToolPolicy` 和 schema 校验错误类型。
-2. `agent-runtime`：新增 contract registry、input validation 和
-   output validation。
-3. `agent-worker`：调用 Runtime 时传入 profile contract metadata。
-4. `agent-store`：如需持久化 contract version，只新增非破坏字段或新表。
+2. `agent-runtime`：新增 contract registry、input validation、
+   `max_context_messages` 预算校验和 output validation。
+3. 调用方可以把 profile contract metadata 传给 Runtime；Worker、Gateway
+   或其他调用方如何生成和保存 contract version 属于各自集成边界。
+4. 如需运营态动态 contract registry，再另行在存储层设计非破坏字段或新表；
+   当前 Runtime 本体不修改 `agent-store`。
 
 验收：
 
@@ -224,12 +226,12 @@ ProfileContract
 2. schema invalid 时返回安全错误，不进入 successful runtime output。
 3. 错误不泄露 prompt、secret、connector payload 或内部栈。
 4. metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
+5. 超过 `max_context_messages` 时返回安全错误，不进入 successful runtime output。
 
 测试：
 
 ```bash
 cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime
-cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker
 ```
 
 提交建议：
@@ -253,6 +255,8 @@ RuntimeStreamEvent
   - sequence
   - event_type: started | delta | tool_progress | schema_partial | final | error
   - content_delta
+  - output
+  - error_code
   - metadata
 ```
 
@@ -361,7 +365,8 @@ dependency、fallback policy、step 级 `output_contract` / `tool_policy` 和
 1. step plan 必须由 Manager、Orchestrator 或领域 Gateway 明确创建。
 2. Runtime 只执行已授权 step，不自行追加新 profile step。
 3. step 之间只能传递 step output contract 校验后的 `output_ref`。
-4. 任一 step 失败必须有明确降级或终止策略。
+4. 任一 step 执行失败、依赖缺失、output_ref 缺失或输出契约失败，都必须有
+   明确降级或终止策略。
 
 代码范围：
 
@@ -383,7 +388,8 @@ dependency、fallback policy、step 级 `output_contract` / `tool_policy` 和
 1. 每个 profile step 独立可追踪。
 2. step output 未通过 schema 时不能作为 successful output 进入下一 step。
 3. Runtime 执行既有 step plan，不自行追加新 step。
-4. 多 step 依赖、fallback 和跨 step output_ref 流转有回归验证。
+4. 多 step 依赖、fallback、输出契约失败降级和跨 step output_ref 流转有
+   回归验证。
 5. step 级 tool policy 会收窄本 step 的 effective tool set。
 6. 持久 step audit 表不是当前 Runtime 本体完成条件。
 

@@ -11,11 +11,13 @@
 - Agent Runtime 完善专项已完成 R1 到 R4.5 的 repo/local 实现：
   profile contract、轻量 schema validation、Runtime streaming events、
   per-profile tool permission、multi-profile step plan 和 read-only tool loop
-  已落地；streaming 失败会返回安全 `error` event。
+  已落地；`max_context_messages` 会作为 Runtime 输入预算约束执行，
+  streaming 失败会返回安全 `error` event。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
   可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy
-  校验输出和收窄工具 scope。
+  校验输出和收窄工具 scope；依赖缺失、缺失 `output_ref` 或 executor 侧
+  output contract 失败也会按 step `fallback_policy` 降级或终止。
 - R4.5 Runtime Tool Execution Loop 已落地：Runtime 已有 tool call /
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool

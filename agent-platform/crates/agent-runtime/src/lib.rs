@@ -2179,7 +2179,35 @@ fn validate_contract_input(
     contract
         .tool_policy
         .validate_requested_tools(requested_tools)?;
+    validate_contract_context_budget(contract, input)?;
     validate_json_schema_value(&contract.input_schema, input)
+}
+
+fn validate_contract_context_budget(contract: &ProfileContract, input: &Value) -> CoreResult<()> {
+    let Some(max_context_messages) = contract.max_context_messages else {
+        return Ok(());
+    };
+    if runtime_context_message_count(input) > max_context_messages {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile exceeded max_context_messages",
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_context_message_count(input: &Value) -> usize {
+    let profile_messages = input
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let context_messages = input
+        .get("context")
+        .and_then(|context| context.get("recent_messages"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let current_message = usize::from(input.get("message").is_some());
+    profile_messages + context_messages + current_message
 }
 
 fn finalize_runtime_output(
@@ -2852,6 +2880,44 @@ mod tests {
 
     type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
 
+    #[derive(Debug, Default)]
+    struct RawProfileRuntimeClient;
+
+    #[async_trait]
+    impl RuntimeClient for RawProfileRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "raw profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "raw profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Ok(RuntimeOutput {
+                result_summary: format!("raw profile step {}", input.profile_id),
+                result_ref: Some(format!("result://raw/{}", input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                }),
+            })
+        }
+    }
+
     fn hermes_run_input(trace_id: String) -> RuntimeRunInput {
         RuntimeRunInput {
             trace_id: trace_id.clone(),
@@ -3021,6 +3087,35 @@ mod tests {
             .execute_profile_step(RuntimeProfileInput {
                 profile_id: "test-profile".to_string(),
                 messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_context_over_budget() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.max_context_messages = Some(1);
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "contract"),
+                    RuntimeProfileMessage::new("user", "hello"),
+                ],
                 metadata: json!({}),
                 profile_contract: Some(contract),
                 runtime_step: None,
@@ -3342,6 +3437,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_executor_output_contract_failure() {
+        let runtime = RawProfileRuntimeClient;
+        let bad_contract = ProfileContract::new("bad-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut bad_step = RuntimeStep::new("bad-profile", "v1", json!({}));
+        bad_step.output_contract = json!({
+            "type": "object",
+            "required": ["metadata"],
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "required": ["missing_field"]
+                }
+            }
+        });
+        bad_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![bad_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![bad_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "step_output_invalid"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
     }
 
     #[tokio::test]
