@@ -28,6 +28,8 @@ use std::{
 };
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 
+const DEFAULT_TOOL_RESULT_INLINE_BYTES: usize = 8192;
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeProfileRegistry {
     contracts: Arc<BTreeMap<String, ProfileContract>>,
@@ -341,6 +343,7 @@ pub struct HermesRuntimeClient {
     registry: RuntimeProfileRegistry,
     tool_executor: Arc<dyn RuntimeToolExecutor>,
     max_tool_rounds: usize,
+    max_tool_result_inline_bytes: usize,
 }
 
 impl HermesRuntimeClient {
@@ -355,6 +358,7 @@ impl HermesRuntimeClient {
             registry: RuntimeProfileRegistry::default(),
             tool_executor: Arc::new(DenyRuntimeToolExecutor),
             max_tool_rounds: 4,
+            max_tool_result_inline_bytes: DEFAULT_TOOL_RESULT_INLINE_BYTES,
         })
     }
 
@@ -363,6 +367,10 @@ impl HermesRuntimeClient {
         if let Some(config) = HttpRuntimeToolExecutorConfig::from_env() {
             client.tool_executor = Arc::new(HttpRuntimeToolExecutor::new(config)?);
         }
+        client.max_tool_result_inline_bytes = env_u64(
+            "AGENT_RUNTIME_TOOL_RESULT_INLINE_BYTES",
+            DEFAULT_TOOL_RESULT_INLINE_BYTES as u64,
+        ) as usize;
         Ok(client)
     }
 
@@ -378,6 +386,11 @@ impl HermesRuntimeClient {
 
     pub fn with_max_tool_rounds(mut self, max_tool_rounds: usize) -> Self {
         self.max_tool_rounds = max_tool_rounds;
+        self
+    }
+
+    pub fn with_max_tool_result_inline_bytes(mut self, bytes: usize) -> Self {
+        self.max_tool_result_inline_bytes = bytes;
         self
     }
 
@@ -492,8 +505,11 @@ impl HermesRuntimeClient {
         contract: Option<&ProfileContract>,
     ) -> CoreResult<(String, Value)> {
         let tools = tool_definitions(contract);
+        let started = Instant::now();
         let mut tool_results = Vec::new();
+        let mut tool_audit_events = Vec::new();
         for round in 0..=self.max_tool_rounds {
+            ensure_profile_budget(started, contract)?;
             let (message, mut metadata) = self
                 .chat_completion_message(messages.clone(), trace_id, runtime_profile, tools.clone())
                 .await?;
@@ -507,18 +523,22 @@ impl HermesRuntimeClient {
                 let tool_calls = message.tool_calls.clone();
                 messages.push(HermesChatMessage::assistant_tool_calls(tool_calls.clone()));
                 for tool_call in tool_calls {
+                    ensure_profile_budget(started, contract)?;
+                    tool_audit_events.push(runtime_tool_call_audit_event(
+                        runtime_profile,
+                        trace_id,
+                        &tool_call,
+                    ));
                     let result = self
                         .execute_runtime_tool_call(contract, runtime_profile, trace_id, tool_call)
                         .await?;
-                    let result_value = serde_json::to_value(&result)
-                        .map_err(|_| runtime_failure("runtime tool result was not serializable"))?;
+                    let result_summary = runtime_tool_result_summary(&result);
+                    tool_audit_events.push(runtime_tool_result_audit_event(&result));
                     messages.push(HermesChatMessage::tool_result(
                         result.call_id.clone(),
-                        serde_json::to_string(&result_value).map_err(|_| {
-                            runtime_failure("runtime tool result was not serializable")
-                        })?,
+                        runtime_tool_result_message(&result, self.max_tool_result_inline_bytes)?,
                     ));
-                    tool_results.push(result_value);
+                    tool_results.push(result_summary);
                 }
                 continue;
             }
@@ -526,6 +546,7 @@ impl HermesRuntimeClient {
             let content = message_content(message)?;
             metadata["tool_rounds"] = json!(round);
             metadata["tool_results"] = json!(tool_results);
+            metadata["tool_audit_events"] = json!(tool_audit_events);
             return Ok((content, metadata));
         }
         Err(AgentCoreError::coded(
@@ -2063,6 +2084,20 @@ fn message_content(message: HermesMessage) -> CoreResult<String> {
         })
 }
 
+fn ensure_profile_budget(started: Instant, contract: Option<&ProfileContract>) -> CoreResult<()> {
+    let Some(max_runtime_seconds) = contract.and_then(|contract| contract.max_runtime_seconds)
+    else {
+        return Ok(());
+    };
+    if started.elapsed() > Duration::from_secs(max_runtime_seconds) {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile exceeded max_runtime_seconds",
+        ));
+    }
+    Ok(())
+}
+
 fn tool_definitions(contract: Option<&ProfileContract>) -> Vec<HermesToolDefinition> {
     contract
         .map(|contract| {
@@ -2093,6 +2128,64 @@ fn parse_tool_arguments(arguments: &str) -> CoreResult<Value> {
             "runtime tool call arguments were malformed",
         )
     })
+}
+
+fn runtime_tool_call_audit_event(
+    runtime_profile: &str,
+    trace_id: &str,
+    tool_call: &HermesToolCall,
+) -> Value {
+    json!({
+        "event": "runtime_tool_call",
+        "call_id": &tool_call.id,
+        "profile_id": runtime_profile,
+        "tool_name": &tool_call.function.name,
+        "trace_id": trace_id,
+    })
+}
+
+fn runtime_tool_result_audit_event(result: &RuntimeToolResult) -> Value {
+    let mut value = runtime_tool_result_summary(result);
+    value["event"] = json!("runtime_tool_result");
+    value
+}
+
+fn runtime_tool_result_summary(result: &RuntimeToolResult) -> Value {
+    json!({
+        "call_id": &result.call_id,
+        "profile_id": &result.profile_id,
+        "tool_name": &result.tool_name,
+        "output_ref": &result.output_ref,
+        "output_summary": summarize_json(&result.output),
+        "metadata": &result.metadata,
+    })
+}
+
+fn runtime_tool_result_message(
+    result: &RuntimeToolResult,
+    inline_limit: usize,
+) -> CoreResult<String> {
+    let output_bytes = serde_json::to_vec(&result.output)
+        .map_err(|_| runtime_failure("runtime tool result was not serializable"))?
+        .len();
+    let content = if output_bytes <= inline_limit {
+        json!({
+            "call_id": &result.call_id,
+            "tool_name": &result.tool_name,
+            "output_ref": &result.output_ref,
+            "output": &result.output,
+        })
+    } else {
+        json!({
+            "call_id": &result.call_id,
+            "tool_name": &result.tool_name,
+            "output_ref": &result.output_ref,
+            "output_summary": summarize_json(&result.output),
+            "output_omitted": true,
+        })
+    };
+    serde_json::to_string(&content)
+        .map_err(|_| runtime_failure("runtime tool result was not serializable"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2865,7 +2958,197 @@ mod tests {
             output.metadata["tool_results"][0]["tool_name"],
             "tonglingyu.text.search"
         );
+        assert!(output.metadata["tool_results"][0].get("output").is_none());
+        assert_eq!(
+            output.metadata["tool_audit_events"][0]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(
+            output.metadata["tool_audit_events"][1]["event"],
+            "runtime_tool_result"
+        );
         assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_omits_large_tool_payload_from_model_and_metadata() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let has_tool_result = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["role"] == "tool")
+                    .cloned();
+                if let Some(message) = has_tool_result {
+                    let content: Value =
+                        serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(content["output_omitted"], true);
+                    assert!(content.get("output").is_none());
+                    Json(json!({
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "large result summarized"}}
+                        ]
+                    }))
+                } else {
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-large",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "tool.large",
+                                                "arguments": "{}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut contract = ProfileContract::new("large-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.large".to_string()]);
+        let executor = StaticRuntimeToolExecutor::new([(
+            "tool.large".to_string(),
+            json!({"text": "x".repeat(128)}),
+        )]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(executor))
+        .with_max_tool_result_inline_bytes(16);
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "large-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use large tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "large result summarized");
+        assert!(output.metadata["tool_results"][0].get("output").is_none());
+        assert!(
+            output.metadata["tool_results"][0]["output_ref"]
+                .as_str()
+                .unwrap()
+                .starts_with("runtime://tool-results/")
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_excessive_tool_rounds() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-loop",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.read",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("loop-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])))
+        .with_max_tool_rounds(1);
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "loop-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "loop")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_expired_profile_budget() {
+        let mut contract = ProfileContract::new("budget-profile", "v1");
+        contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "budget-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "budget")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

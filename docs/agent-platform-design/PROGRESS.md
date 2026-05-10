@@ -8,13 +8,14 @@
 - P2 仓库侧实现完成；默认部署仍关闭写入，真实第三方 provider / connector
   需要在目标环境配置并运行 contract smoke。
 - Bridge hardening 已单独记录，完成口径以 hardening checklist 和部署复测为准。
-- Agent Runtime 完善专项已完成 R1 到 R4 repo/local 实现：profile contract、
+- Agent Runtime 完善专项已完成 R1 到 R4.5 repo/local 实现：profile contract、
   schema validation、Runtime streaming、per-profile tool permission 和
   multi-profile step plan 已落地。
-- R5B Runtime Tool Execution Loop core 已落地：Runtime 已有 tool call /
+- R4.5 Runtime Tool Execution Loop 已落地：Runtime 已有 tool call /
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 per-profile
-  tool permission 和 tool output schema。
+  tool permission、tool schema、tool round、runtime budget 和 output ref/summary
+  约束；Worker 会把 tool call / tool result 写入现有 append-only audit logs。
 - R5 通灵玉接入已按“薄 Gateway + Runtime Agent”目标重新打开；旧的
   Gateway 内检索、证据包、reviewer 和确定性 text/commentary step 不再作为
   完成口径。
@@ -45,7 +46,5 @@
   reviewer 和 replay 归 Runtime profile 与 read-only tools 负责。
 - `honglou-text` 和 `honglou-commentary` 走 LLM profile，不再按确定性
   Gateway 检索 step 作为目标方案。
-- R5B 仍有一个审计集成尾项：tool call / tool result 事件需要进入
-  append-only audit 或等价 runtime trace。
 - 完成口径仍保留 R5 和部署侧限制：未完成薄 Gateway 改造和目标环境
   Open WebUI 单入口复测前，不能宣称通灵玉 Runtime 接入完成。

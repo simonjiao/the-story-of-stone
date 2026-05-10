@@ -375,6 +375,55 @@ cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker
 runtime: add multi-profile step plan
 ```
 
+### R4.5：Runtime Tool Execution Loop
+
+目标：Agent Runtime 本体支持 LLM profile 发起 read-only tool call，同时确保
+工具执行仍受 profile contract、schema、预算和审计约束。
+
+边界规则：
+
+1. Runtime 只执行 profile contract 允许的 read-only tools。
+2. 写入类工具仍只能走 Manager external-action apply/compensate。
+3. 每个 tool call 在执行前校验 tool name、input schema 和 profile tool policy。
+4. 每个 tool result 在回灌给 profile 前校验 output schema。
+5. 大 tool output 不进入 final `RuntimeOutput.metadata`；metadata 只保留
+   output_ref、summary、schema、tool name、call id 和 trace 信息。
+6. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
+7. tool call / tool result 必须进入现有 append-only audit logs，或等价的
+   append-only runtime trace。
+
+代码范围：
+
+1. `agent-core`：定义 `RuntimeToolCall`、`RuntimeToolResult`、
+   `RuntimeToolSpec` 和 `RuntimeToolExecutor`。
+2. `agent-runtime`：Hermes adapter 支持 OpenAI-compatible tool loop。
+3. `agent-runtime`：执行前校验 tool policy、tool input schema 和预算。
+4. `agent-runtime`：执行后校验 tool output schema，并生成安全 metadata 摘要。
+5. `agent-worker`：把 Runtime 返回的 tool audit events 追加到 `audit_logs`。
+
+验收：
+
+1. 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
+2. 未授权或 denied tool call 在执行前被拒绝。
+3. tool output schema invalid 时不会进入后续 profile step。
+4. final metadata 不包含大 payload，只包含 ref 和摘要。
+5. 超出 tool round 或 runtime budget 时返回安全错误。
+6. 按 run trace 可以看到 runtime tool call / result audit log。
+
+测试：
+
+```bash
+cargo test --manifest-path agent-platform/Cargo.toml -p agent-core
+cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime
+cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker
+```
+
+提交建议：
+
+```text
+runtime: audit profile tool execution
+```
+
 ### R5：通灵玉薄 Gateway + Runtime Agent 接入
 
 目标：把通灵玉从“Gateway 内部执行领域流程”调整为“Gateway 只做入口，
@@ -453,15 +502,14 @@ Runtime Agent 负责：
 
 代码范围：
 
-1. `agent-core` / `agent-runtime`：补齐 tool call / tool result / tool executor
-   contract，确保 tool output 可 schema 校验并以 `output_ref` 传递。
-2. `agent-runtime`：为通灵玉 read-only tools 接入 per-profile tool policy。
-3. `tonglingyu` 领域 tool/service：从 Gateway request path 中抽出 source
+1. `tonglingyu` 领域 tool/service：基于 R4.5 Runtime tool execution loop
+   接入通灵玉 read-only tools。
+2. `tonglingyu` 领域 tool/service：从 Gateway request path 中抽出 source
    snapshot、SQLite/FTS、证据卡片、证据包和 replay 逻辑。
-4. `agent-runtime`：注册通灵玉四 profile contract 和允许工具矩阵。
-5. `tonglingyu-gateway`：删除请求路径中的本地检索、证据包和 reviewer 执行，
+3. `agent-runtime`：注册通灵玉四 profile contract 和允许工具矩阵。
+4. `tonglingyu-gateway`：删除请求路径中的本地检索、证据包和 reviewer 执行，
    改为创建 Runtime step plan 并转发 streaming/final result。
-6. `tonglingyu-gateway`：保留 OpenAI-compatible 响应封装、模型隐藏和 trace
+5. `tonglingyu-gateway`：保留 OpenAI-compatible 响应封装、模型隐藏和 trace
    透传。
 
 验收：

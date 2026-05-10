@@ -246,6 +246,8 @@ impl Worker {
             .await?;
         self.audit_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
             .await;
+        self.audit_runtime_tool_events(&run.id, &run.trace_id, &output)
+            .await;
         let summary = output.result_summary.clone();
         self.append_runtime_messages(&run, &output).await?;
         self.store.finish_run(&run.id, output).await?;
@@ -309,6 +311,53 @@ impl Worker {
         let mut audit = AuditLog::new(None, action, decision, reason, trace_id.to_string());
         audit.run_id = Some(run_id.to_string());
         let _ = self.store.append_audit(audit).await;
+    }
+
+    async fn audit_runtime_tool_events(
+        &self,
+        run_id: &str,
+        trace_id: &str,
+        output: &RuntimeOutput,
+    ) {
+        let Some(events) = output
+            .metadata
+            .get("tool_audit_events")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return;
+        };
+        for event in events {
+            let action = event
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("runtime_tool_event");
+            let mut audit = AuditLog::new(
+                None,
+                action,
+                AuditDecision::Completed,
+                Some(safe_audit_reason(event)),
+                trace_id.to_string(),
+            );
+            audit.run_id = Some(run_id.to_string());
+            audit.resource_type = Some("runtime_tool".to_string());
+            audit.resource_id = event
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            let _ = self.store.append_audit(audit).await;
+        }
+    }
+}
+
+fn safe_audit_reason(value: &serde_json::Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    if text.len() <= 2048 {
+        text
+    } else {
+        format!(
+            "{}...<truncated>",
+            text.chars().take(2048).collect::<String>()
+        )
     }
 }
 
@@ -478,7 +527,26 @@ mod tests {
                 result_summary: "runtime assistant response".to_string(),
                 result_ref: Some("result://recording/session".to_string()),
                 messages: Vec::new(),
-                metadata: json!({"trace_id": input.trace_id}),
+                metadata: json!({
+                    "trace_id": input.trace_id,
+                    "tool_audit_events": [
+                        {
+                            "event": "runtime_tool_call",
+                            "call_id": "call-test",
+                            "profile_id": "test-profile",
+                            "tool_name": "tool.read",
+                            "trace_id": input.trace_id
+                        },
+                        {
+                            "event": "runtime_tool_result",
+                            "call_id": "call-test",
+                            "profile_id": "test-profile",
+                            "tool_name": "tool.read",
+                            "output_ref": "runtime://tool-results/call-test",
+                            "output_summary": "object_keys:value"
+                        }
+                    ]
+                }),
             })
         }
     }
@@ -598,6 +666,20 @@ mod tests {
                 && message.content_summary == "runtime assistant response"
                 && message.run_id.as_deref() == Some(run_id.as_str())
                 && message.content_ref.as_deref() == Some("result://recording/session")
+        }));
+        let audits = store.list_audit(100).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == "runtime_tool_call"
+                && audit.run_id.as_deref() == Some(run_id.as_str())
+                && audit.resource_id.as_deref() == Some("call-test")
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == "runtime_tool_result"
+                && audit.run_id.as_deref() == Some(run_id.as_str())
+                && audit.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("runtime://tool-results/call-test")
+                        && !reason.contains("\"output\":")
+                })
         }));
     }
 }

@@ -13,7 +13,7 @@
 - [x] R2 Runtime Streaming。
 - [x] R3 Per-profile Tool Permission Enforcement。
 - [x] R4 Multi-profile Step Plan。
-- [x] R5B Runtime Tool Execution Loop core。
+- [x] R4.5 Runtime Tool Execution Loop。
 - [ ] R5 通灵玉按薄 Gateway + Runtime Agent 目标重新接入。
 - [ ] 目标环境 Open WebUI 单入口复测。
 
@@ -178,6 +178,45 @@ R5 决策：
 
 - [x] `runtime: add multi-profile step plan`
 
+## R4.5 Runtime Tool Execution Loop
+
+目标：Agent Runtime 本体支持 LLM profile 发起 read-only tool call，并在
+真实执行前完成权限、schema、预算和审计约束。
+
+### R4.5 代码任务
+
+- [x] 在 `agent-core` / `agent-runtime` 补齐 `RuntimeToolCall`、
+  `RuntimeToolResult`、`RuntimeToolSpec` 和 `RuntimeToolExecutor` contract。
+- [x] Runtime adapter 能处理 LLM profile 发起的 read-only tool call。
+- [x] per-profile allowed tools 在真实 tool execution 前强制校验。
+- [x] tool input/output 都按 tool spec schema 校验。
+- [x] tool output 通过 `output_ref` 和安全摘要传递；大 payload 不进入
+  final `RuntimeOutput.metadata`。
+- [x] profile step 受最大 tool round 和 `max_runtime_seconds` 预算约束。
+- [x] tool call / tool result 事件接入现有 append-only `audit_logs`。
+- [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
+- [x] 写入类工具仍只能走 Manager external-action apply/compensate。
+
+### R4.5 验收
+
+- [x] 授权 tool call 会执行，并把安全 tool result 回灌给 profile。
+- [x] 未授权或 denied tool call 在执行前被拒绝。
+- [x] tool output schema invalid 时不会进入后续 profile step。
+- [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
+- [x] 超出 tool round 或 runtime budget 时返回安全错误。
+- [x] audit logs 能按 run trace 看到 runtime tool call / result 事件。
+
+### R4.5 测试
+
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
+
+### R4.5 提交
+
+- [x] `runtime: implement profile tool execution`
+- [x] `runtime: audit profile tool execution`
+
 ## R5 通灵玉薄 Gateway + Runtime Agent 接入
 
 目标：把通灵玉内部角色升级为真实 Runtime profile 执行边界，同时把 Gateway
@@ -194,20 +233,7 @@ R5 决策：
 - [ ] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
   内部 profile。
 
-### R5B Runtime Tool Execution Loop
-
-- [x] 在 `agent-core` / `agent-runtime` 补齐 `RuntimeToolCall`、
-  `RuntimeToolResult` 和 `RuntimeToolExecutor` 等价 contract。
-- [x] Runtime adapter 能处理 LLM profile 发起的 read-only tool call，或执行
-  受控 step tool call。
-- [x] per-profile allowed tools 在真实 tool execution 前强制校验。
-- [x] tool output 做 schema 校验，并通过 `output_ref` 或 evidence/package ref
-  传递给后续 step。
-- [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
-- [ ] tool call / tool result 事件接入 append-only audit 或等价 runtime trace。
-- [x] 写入类工具仍只能走 Manager external-action apply/compensate。
-
-### R5C 通灵玉 Evidence Read-only Tools
+### R5B 通灵玉 Evidence Read-only Tools
 
 - [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
 - [ ] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
@@ -221,7 +247,7 @@ R5 决策：
 - [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
 - [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
 
-### R5D 四 Profile 编排
+### R5C 四 Profile 编排
 
 - [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
 - [ ] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
@@ -237,7 +263,7 @@ R5 决策：
 - [ ] 四 profile step 的 schema、duration、tool set、output_ref 和 trace_id
   可追踪。
 
-### R5E Gateway 集成和验证
+### R5D Gateway 集成和验证
 
 - [ ] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
   step plan 调用。
@@ -267,7 +293,7 @@ Runtime 专项完成前，只能声明：
 Runtime 专项全部完成后，必须满足：
 
 - [x] R1 到 R4 repo/local checkbox 关闭。
-- [ ] R5A 到 R5E checkbox 关闭。
+- [ ] R5A 到 R5D checkbox 关闭。
 - [ ] 对应测试命令全部通过。
 - [ ] `PROGRESS.md` 更新完成状态和残余风险。
 - [ ] 通灵玉远端或目标部署完成 Open WebUI 单入口复测。
