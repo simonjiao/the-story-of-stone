@@ -26,7 +26,9 @@
   scope、per-profile tool permission、read-only capability、tool schema、
   tool round、runtime budget 和 output ref/summary 约束；普通和 streaming
   profile step 超出 runtime budget 都会返回安全错误；RuntimeOutput metadata
-  会返回安全 tool event 摘要；tool call 失败会写安全
+  和 adapter audit 只保留安全 tool event 摘要，不透传 tool executor
+  metadata payload，且不会让 executor 覆盖已授权 tool call 身份；tool call
+  失败会写安全
   `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
   可配置的 append-only JSONL audit sink。
 - Runtime 完整完成口径已关闭在 repo/local 范围内；完整 JSON Schema 和

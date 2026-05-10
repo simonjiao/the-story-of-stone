@@ -454,12 +454,14 @@ runtime: add multi-profile step plan
 3. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
    step output。
 4. final metadata 不包含大 payload，只包含 ref 和摘要。
-5. 超出 tool round 或 runtime budget 时返回安全错误。
-6. streaming profile step 超出 runtime budget 时返回安全 `error` event。
-7. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
+5. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
+6. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
+7. 超出 tool round 或 runtime budget 时返回安全错误。
+8. streaming profile step 超出 runtime budget 时返回安全 `error` event。
+9. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
-8. Runtime adapter 直连 JSONL audit sink 有单独验证。
-9. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
+10. Runtime adapter 直连 JSONL audit sink 有单独验证。
+11. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
 测试：
 

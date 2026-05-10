@@ -238,6 +238,8 @@ backpressure API 是后续项。
 - [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
   step output。
 - [x] final metadata 只保留 tool result ref、schema、summary 和 trace 信息。
+- [x] tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
+- [x] tool executor 返回的 call/profile/tool 身份不会覆盖 Runtime 已授权 tool call。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
 - [x] streaming profile step 超出 runtime budget 时返回安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
@@ -252,6 +254,7 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
+- [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
 
 ### R4.5 提交
 

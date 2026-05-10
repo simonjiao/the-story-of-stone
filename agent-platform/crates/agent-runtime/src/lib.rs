@@ -679,6 +679,8 @@ impl HermesRuntimeClient {
             .validate_tool_call(&tool_call.function.name, requested_tools)?;
         let arguments = parse_tool_arguments(&tool_call.function.arguments)?;
         validate_json_schema_value(&spec.input_schema, &arguments)?;
+        let call_id = tool_call.id.clone();
+        let tool_name = tool_call.function.name.clone();
         let call = RuntimeToolCall {
             call_id: tool_call.id,
             profile_id: runtime_profile.to_string(),
@@ -691,6 +693,13 @@ impl HermesRuntimeClient {
             }),
         };
         let mut result = self.tool_executor.execute_tool(call, spec.clone()).await?;
+        result.call_id = call_id;
+        result.profile_id = runtime_profile.to_string();
+        result.tool_name = tool_name;
+        if !result.metadata.is_object() {
+            result.metadata = json!({});
+        }
+        result.metadata["trace_id"] = json!(trace_id);
         if result.output_ref.is_none() {
             result.output_ref = Some(format!("runtime://tool-results/{}", result.call_id));
         }
@@ -2574,7 +2583,7 @@ fn runtime_tool_result_summary(result: &RuntimeToolResult) -> Value {
         "tool_name": &result.tool_name,
         "output_ref": &result.output_ref,
         "output_summary": summarize_json(&result.output),
-        "metadata": &result.metadata,
+        "trace_id": result.metadata.get("trace_id").and_then(Value::as_str),
     })
 }
 
@@ -3006,6 +3015,31 @@ mod tests {
                 metadata: json!({
                     "runtime_profile": input.profile_id,
                     "trace_id": input.trace_id,
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct LeakyMetadataToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for LeakyMetadataToolExecutor {
+        async fn execute_tool(
+            &self,
+            call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Ok(RuntimeToolResult {
+                call_id: "spoofed-call".to_string(),
+                profile_id: "spoofed-profile".to_string(),
+                tool_name: "spoofed-tool".to_string(),
+                output_ref: Some("runtime://tool-results/leaky".to_string()),
+                output: json!({"ok": true}),
+                metadata: json!({
+                    "trace_id": call.trace_id,
+                    "secret": "SECRET_TOOL_METADATA",
+                    "payload": {"raw": "SECRET_TOOL_PAYLOAD"}
                 }),
             })
         }
@@ -4205,6 +4239,107 @@ mod tests {
                 .unwrap()
                 .starts_with("runtime://tool-results/")
         );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let has_tool_result = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["role"] == "tool");
+                if has_tool_result {
+                    Json(json!({
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "metadata summarized"}}
+                        ]
+                    }))
+                } else {
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-metadata",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "tool.metadata",
+                                                "arguments": "{}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut contract = ProfileContract::new("metadata-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.metadata".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(LeakyMetadataToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "metadata-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use metadata tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.metadata".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        let encoded_metadata = serde_json::to_string(&output.metadata).unwrap();
+        assert!(!encoded_metadata.contains("SECRET_TOOL_METADATA"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_PAYLOAD"));
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_ref"],
+            "runtime://tool-results/leaky"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["call_id"],
+            "call-metadata"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["profile_id"],
+            "metadata-profile"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["tool_name"],
+            "tool.metadata"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["trace_id"].is_string(),
+            true
+        );
+        assert!(output.metadata["tool_results"][0].get("metadata").is_none());
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_result").count(), 1);
+        assert!(!log.contains("spoofed-call"));
+        assert!(!log.contains("spoofed-profile"));
+        assert!(!log.contains("spoofed-tool"));
+        assert!(!log.contains("SECRET_TOOL_METADATA"));
+        assert!(!log.contains("SECRET_TOOL_PAYLOAD"));
+        let _ = tokio::fs::remove_file(audit_path).await;
     }
 
     #[tokio::test]
