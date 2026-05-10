@@ -11,14 +11,19 @@
 - Agent Runtime 完善专项已完成 R1 到 R4.5 的 repo/local 实现：
   profile contract、轻量 schema validation、Runtime streaming events、
   per-profile tool permission、multi-profile step plan 和 read-only tool loop
-  已落地。
+  已落地；streaming 失败会返回安全 `error` event。
+- R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
+  `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
+  可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy
+  校验输出和收窄工具 scope。
 - R4.5 Runtime Tool Execution Loop 已落地：Runtime 已有 tool call /
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool
   scope、per-profile tool permission、read-only capability、tool schema、
   tool round、runtime budget 和 output ref/summary 约束；Worker 会把
-  tool call / tool result 写入现有 append-only audit logs，Runtime adapter
-  也提供直连场景可配置的 append-only JSONL audit sink。
+  tool call / tool result 写入现有 append-only audit logs；tool call 失败会写
+  安全 `runtime_tool_error` audit event；Runtime adapter 也提供直连场景
+  可配置的 append-only JSONL audit sink。
 - Runtime 完整完成口径已关闭在 repo/local 范围内；完整 JSON Schema 和
   领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
 - 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime

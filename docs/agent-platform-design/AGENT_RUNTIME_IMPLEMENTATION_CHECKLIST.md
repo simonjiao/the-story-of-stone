@@ -10,12 +10,13 @@
 
 - [x] R0 文档整合完成。
 - [x] R1 Profile Contract 和轻量 Schema Validation。
-- [x] R2 Runtime Streaming 基础事件。
+- [x] R2 Runtime Streaming 基础事件和安全 error event。
 - [x] R2 tool progress / schema partial streaming 扩展。
 - [x] R3 Per-profile Tool Permission Enforcement。
 - [x] R4 Step Plan 数据模型和单 step metadata。
-- [x] R4 Multi-profile Step Plan 执行器、依赖、fallback 和 output_ref 流转。
-- [x] R4.5 Runtime Tool Execution Loop。
+- [x] R4 Multi-profile Step Plan 执行器、step contract、依赖、fallback 和
+  output_ref 流转。
+- [x] R4.5 Runtime Tool Execution Loop 和成功/失败 tool audit。
 - [x] Agent Runtime 本体 repo/local 完成口径复核；领域 Gateway 接入不作为
   本 checklist 范围。
 
@@ -86,6 +87,8 @@
 - [x] 保留非 streaming path 的原有行为。
 - [x] 增加 tool progress streaming event。
 - [x] 增加 schema partial streaming event。
+- [x] streaming path 失败时返回安全 `error` event，不泄露 prompt、
+  upstream response body、credential、connector payload 或内部栈。
 
 ### R2 验收
 
@@ -94,6 +97,7 @@
 - [x] error event 不泄露 prompt、credential、connector payload 或内部栈。
 - [x] trace/audit 能看到流式调用的 final 状态。
 - [x] tool progress / schema partial 有端到端验证。
+- [x] safe error event 有回归验证。
 
 ### R2 测试
 
@@ -161,6 +165,10 @@
 - [x] 当前复用 Runtime metadata、Gateway workflow state 和 audit；后续如需
   跨 gateway 查询，再新增 append-only step audit 表。
 - [x] 在 `agent-core` / `RuntimeClient` 中提供完整 `RuntimeStepPlan` 执行器。
+- [x] `RuntimeStep` 携带 step 级 `output_contract` 和 `tool_policy`。
+- [x] `RuntimeStepPlan::for_profile_contracts()` 可从 profile contract 创建完整
+  step plan。
+- [x] step plan 执行器会实际使用 step 级 `output_contract` 和 `tool_policy`。
 - [x] step 输出只通过 schema 校验后的 `output_ref` 进入下一 step。
 - [x] 增加多 step 失败降级或终止策略。
 
@@ -170,12 +178,16 @@
 - [x] 单 step output 未通过 schema 时不能作为 successful output 返回。
 - [x] Runtime 不能自行创建新 step。
 - [x] 多 step 失败不会导致权限扩大或未审计输出。
+- [x] step 级 tool policy 会收窄本 step 的 effective tool set。
+- [x] step 级 output contract 失败时不会产生 successful output。
 
 ### R4 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
+- [x] `runtime_step_plan_helper_materializes_step_contracts`
+- [x] `runtime_step_plan_validates_step_output_contract`
 
 ### R4 提交
 
@@ -203,6 +215,7 @@
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
 - [x] Runtime 只向 Hermes 暴露 read-only effective tool specs。
 - [x] Runtime adapter 提供直连场景可配置的 append-only JSONL audit sink。
+- [x] tool call 失败时追加安全 `runtime_tool_error` audit event。
 
 ### R4.5 验收
 
@@ -216,12 +229,15 @@
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
 - [x] Worker audit logs 能按 run trace 看到 runtime tool call / result 事件。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证。
+- [x] 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
 ### R4.5 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-worker`
+- [x] `hermes_runtime_streams_safe_error_event`
+- [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
 
 ### R4.5 提交
 

@@ -167,6 +167,35 @@ impl RuntimeStreamEvent {
             metadata,
         }
     }
+
+    pub fn error(
+        sequence: u64,
+        profile_id: impl Into<String>,
+        trace_id: impl Into<String>,
+        code: ErrorCode,
+    ) -> Self {
+        Self {
+            sequence,
+            event_type: RuntimeStreamEventType::Error,
+            profile_id: profile_id.into(),
+            trace_id: trace_id.into(),
+            content_delta: None,
+            output: None,
+            error_code: Some(code.as_str().to_string()),
+            metadata: json!({
+                "safe_message": code.safe_message(),
+            }),
+        }
+    }
+}
+
+pub fn runtime_stream_error_event(
+    sequence: u64,
+    profile_id: impl Into<String>,
+    trace_id: impl Into<String>,
+    error: &AgentCoreError,
+) -> RuntimeStreamEvent {
+    RuntimeStreamEvent::error(sequence, profile_id, trace_id, error.code())
 }
 
 #[async_trait]
@@ -202,10 +231,14 @@ pub trait RuntimeClient: Send + Sync {
             })
             .unwrap_or_else(|| "agent-platform-runtime".to_string());
         let trace_id = input.trace_id.clone();
-        let output = self.execute_run(input).await?;
-        Ok(vec![RuntimeStreamEvent::final_output(
-            profile_id, trace_id, output,
-        )])
+        match self.execute_run(input).await {
+            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
+                profile_id, trace_id, output,
+            )]),
+            Err(error) => Ok(vec![runtime_stream_error_event(
+                0, profile_id, trace_id, &error,
+            )]),
+        }
     }
 
     async fn stream_session_message(
@@ -224,10 +257,14 @@ pub trait RuntimeClient: Send + Sync {
             })
             .unwrap_or_else(|| input.agent_id.clone());
         let trace_id = input.trace_id.clone();
-        let output = self.send_session_message(input).await?;
-        Ok(vec![RuntimeStreamEvent::final_output(
-            profile_id, trace_id, output,
-        )])
+        match self.send_session_message(input).await {
+            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
+                profile_id, trace_id, output,
+            )]),
+            Err(error) => Ok(vec![runtime_stream_error_event(
+                0, profile_id, trace_id, &error,
+            )]),
+        }
     }
 
     async fn stream_profile_step(
@@ -236,10 +273,14 @@ pub trait RuntimeClient: Send + Sync {
     ) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let profile_id = input.profile_id.clone();
         let trace_id = input.trace_id.clone();
-        let output = self.execute_profile_step(input).await?;
-        Ok(vec![RuntimeStreamEvent::final_output(
-            profile_id, trace_id, output,
-        )])
+        match self.execute_profile_step(input).await {
+            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
+                profile_id, trace_id, output,
+            )]),
+            Err(error) => Ok(vec![runtime_stream_error_event(
+                0, profile_id, trace_id, &error,
+            )]),
+        }
     }
 }
 
@@ -324,6 +365,20 @@ where
             ));
         }
 
+        let step_has_tool_policy = step.tool_policy.has_rules();
+        let step_has_output_contract = !json_schema_is_empty(&step.output_contract);
+        let mut step_contract = contract.clone();
+        if step_has_tool_policy {
+            step_contract.tool_policy = step.tool_policy.clone();
+        } else {
+            step.tool_policy = contract.tool_policy.clone();
+        }
+        if step_has_output_contract {
+            step_contract.output_schema = step.output_contract.clone();
+        } else {
+            step.output_contract = contract.output_schema.clone();
+        }
+
         step.status = RuntimeStepStatus::Executing;
         step.input_ref = dependency_refs
             .first()
@@ -343,11 +398,24 @@ where
                 format!("runtime_step_input_ref {encoded}"),
             ));
         }
-        let requested_tools = input
+        let profile_requested_tools = input
             .requested_tools_by_profile
             .get(&step.profile_id)
             .cloned()
             .unwrap_or_else(|| contract.tool_policy.effective_tools());
+        contract
+            .tool_policy
+            .validate_requested_tools(&profile_requested_tools)?;
+        let requested_tools = if step_has_tool_policy {
+            step_contract
+                .tool_policy
+                .effective_tools_for_request(&profile_requested_tools)
+        } else {
+            profile_requested_tools
+        };
+        step_contract
+            .tool_policy
+            .validate_requested_tools(&requested_tools)?;
         let step_metadata = json!({
             "plan_id": &input.plan.plan_id,
             "plan_owner": input.plan.owner,
@@ -360,7 +428,7 @@ where
                 profile_id: step.profile_id.clone(),
                 messages: step_messages,
                 metadata: step_metadata,
-                profile_contract: Some(contract),
+                profile_contract: Some(step_contract),
                 runtime_step: Some(step.clone()),
                 requested_tools,
                 trace_id: input.trace_id.clone(),
@@ -369,6 +437,7 @@ where
 
         match result {
             Ok(output) => {
+                validate_runtime_step_output(&step.output_contract, &output)?;
                 let output_ref = output.result_ref.clone().ok_or_else(|| {
                     AgentCoreError::coded(
                         ErrorCode::Conflict,
@@ -428,6 +497,23 @@ where
     })?;
     output.metadata["runtime_step_outputs"] = json!(step_summaries);
     Ok(output)
+}
+
+fn json_schema_is_empty(schema: &Value) -> bool {
+    schema.as_object().is_none_or(serde_json::Map::is_empty)
+}
+
+fn validate_runtime_step_output(schema: &Value, output: &RuntimeOutput) -> CoreResult<()> {
+    if json_schema_is_empty(schema) {
+        return Ok(());
+    }
+    let value = serde_json::to_value(output).map_err(|_| {
+        AgentCoreError::coded(
+            ErrorCode::InternalError,
+            "runtime step output was not serializable",
+        )
+    })?;
+    validate_json_schema_value(schema, &value)
 }
 
 #[async_trait]

@@ -432,6 +432,12 @@ impl RuntimeToolPolicy {
             .collect()
     }
 
+    pub fn has_rules(&self) -> bool {
+        !(self.allowed_tools.is_empty()
+            && self.denied_tools.is_empty()
+            && self.tool_specs.is_empty())
+    }
+
     fn spec_for_contract_tool(&self, tool: &str) -> Option<RuntimeToolSpec> {
         if self.denied_tools.iter().any(|denied| denied == tool) {
             return None;
@@ -533,6 +539,10 @@ pub struct RuntimeStep {
     #[serde(default = "default_runtime_step_failure_policy")]
     pub fallback_policy: RuntimeStepFailurePolicy,
     #[serde(default)]
+    pub output_contract: Value,
+    #[serde(default)]
+    pub tool_policy: RuntimeToolPolicy,
+    #[serde(default)]
     pub input_ref: Option<String>,
     #[serde(default)]
     pub output_ref: Option<String>,
@@ -553,10 +563,23 @@ impl RuntimeStep {
             status: RuntimeStepStatus::Planned,
             depends_on: Vec::new(),
             fallback_policy: RuntimeStepFailurePolicy::Stop,
+            output_contract: json!({}),
+            tool_policy: RuntimeToolPolicy::default(),
             input_ref: None,
             output_ref: None,
             metadata,
         }
+    }
+
+    pub fn from_profile_contract(contract: &ProfileContract, metadata: Value) -> Self {
+        let mut step = Self::new(
+            contract.profile_id.clone(),
+            contract.version.version.clone(),
+            metadata,
+        );
+        step.output_contract = contract.output_schema.clone();
+        step.tool_policy = contract.tool_policy.clone();
+        step
     }
 }
 
@@ -582,6 +605,24 @@ impl RuntimeStepPlan {
             steps,
             metadata: json!({}),
         }
+    }
+
+    pub fn for_profile_contracts(
+        trace_id: impl Into<String>,
+        owner: RuntimeStepPlanOwner,
+        contracts: impl IntoIterator<Item = ProfileContract>,
+        metadata: Value,
+    ) -> Self {
+        let mut plan = Self::new(
+            trace_id,
+            contracts
+                .into_iter()
+                .map(|contract| RuntimeStep::from_profile_contract(&contract, json!({})))
+                .collect(),
+        );
+        plan.owner = owner;
+        plan.metadata = metadata;
+        plan
     }
 }
 
