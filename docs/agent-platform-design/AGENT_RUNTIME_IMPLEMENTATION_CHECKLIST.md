@@ -248,7 +248,9 @@ backpressure API 是后续项。
   不会被 Runtime 自动补全成 successful tool result。
 - [x] run、session message 和 profile step 都受 `max_runtime_seconds`
   预算约束；tool loop 还受最大 tool round 约束。
-- [x] RuntimeOutput metadata 返回安全 tool call / tool result event 摘要。
+- [x] RuntimeOutput metadata 返回成功路径的安全 tool call / tool result
+  event 摘要；失败路径写配置的 adapter audit sink，不形成 successful
+  `RuntimeOutput`。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
 - [x] Runtime 只向 Hermes 的 run、session message 和 profile step 路径暴露
@@ -287,7 +289,7 @@ backpressure API 是后续项。
 - [x] streaming run、session message 和 profile step 超出 runtime budget 时返回
   安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
-  runtime tool call / result 事件。
+  runtime tool call / result / error 事件。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证，且确认已有 JSONL
   记录不会被覆盖。
 - [x] 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
@@ -344,6 +346,11 @@ backpressure API 是后续项。
 
 - [x] `runtime: implement profile tool execution`
 - [x] `runtime: audit profile tool execution`
+- [x] `runtime: verify non-read-only tool calls`
+- [x] `runtime: verify no-contract tool calls`
+- [x] `runtime: reject no-tool path tool calls`
+- [x] `runtime: reject streaming no-tool calls`
+- [x] `runtime: verify streaming profile no-tool calls`
 
 ## 后续项
 

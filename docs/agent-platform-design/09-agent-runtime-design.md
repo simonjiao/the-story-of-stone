@@ -447,11 +447,13 @@ runtime: add multi-profile step plan
    `output_ref` 必须失败，不能由 Runtime 自动补全后当作成功结果。
 7. run、session message 和 profile step 都必须受 `max_runtime_seconds`
    预算约束；tool loop 还必须受最大 tool round 约束。
-8. RuntimeOutput metadata 中必须返回安全 tool event 摘要；Runtime adapter
-   直连场景必须配置等价 append-only audit sink。
-9. tool call 失败时必须写安全 `runtime_tool_error` audit event，且不记录
-   tool arguments、明文 payload、未授权/未知 raw tool name 或对应 raw
-   call id。
+8. RuntimeOutput metadata 中必须返回成功路径的安全 tool event 摘要；
+   Runtime adapter 提供 `with_audit_sink()` 和 `AGENT_RUNTIME_AUDIT_LOG`
+   配置入口；直连集成必须通过这些入口启用等价 append-only audit sink，
+   默认 Noop sink 不等价于持久审计。
+9. tool call 失败时必须生成安全 `runtime_tool_error` audit event，并写入
+   配置的 `RuntimeAuditSink`；event 不记录 tool arguments、明文 payload、
+   未授权/未知 raw tool name 或对应 raw call id。
 10. tool executor 自身失败时，Runtime 对调用方返回安全错误 message，只保留
     error code，不透传 executor error payload。
 
@@ -508,11 +510,7 @@ cargo test --manifest-path agent-platform/Cargo.toml -p agent-core
 cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime
 ```
 
-提交建议：
-
-```text
-runtime: audit profile tool execution
-```
+提交记录以 `AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md` 的 R4.5 提交段为准。
 
 ## 状态口径
 
@@ -532,4 +530,5 @@ P2 已完成 Runtime 全量完善。
 Agent Runtime 本体完成等于完整 JSON Schema 或领域 Gateway 接入完成。
 Runtime 本体完成即可代表任何领域 Gateway 已完成接入。
 Runtime 已提供调用方可边读边转发的 async stream/backpressure API。
+Runtime 默认构造器已经启用持久 append-only audit。
 ```
