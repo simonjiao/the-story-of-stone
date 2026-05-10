@@ -93,13 +93,20 @@
 - 完整通灵玉产品 Gateway 的本地代码级差距已收敛：接口层鉴权、会话映射、
   状态机、证据源强制策略、claim-to-evidence 映射、审校拦截、审计查询、
   脱敏错误、streaming 追踪、备份和保留清理均已有测试覆盖。
+- R5 Runtime 接入已开始实现：新增
+  `agent-platform/crates/tonglingyu-runtime/`，先承接证据包创建和读取、
+  claim-to-evidence 映射、reviewer 规则、本地受控回答和 package replay；
+  Gateway 请求路径改为调用该 runtime crate，不再在 Gateway 内维护这些领域逻辑。
+- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
+  source snapshot loader、SQLite/FTS 检索和 evidence card 构建，且 Runtime
+  profile/read-only tools 尚未接入 `agent-runtime` 执行面。
 
 ## 下一步
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 按 `20_Runtime接入设计与实施计划.md` 将 Gateway 内领域流程迁入
-   Runtime profile 与 read-only tools。
+2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway 内 source snapshot
+   loader、SQLite/FTS 检索和 evidence card 构建迁入 Runtime/tool 边界。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
