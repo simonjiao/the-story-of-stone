@@ -749,6 +749,9 @@ impl HermesRuntimeClient {
             event_type: RuntimeStreamEventType::Started,
             profile_id: runtime_profile.to_string(),
             trace_id: trace_id.to_string(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
             content_delta: None,
             output: None,
             error_code: None,
@@ -943,6 +946,11 @@ impl RuntimeClient for HermesRuntimeClient {
     async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let runtime_profile = runtime_profile_for_run(&input, "agent-platform-hermes");
         let trace_id = input.trace_id.clone();
+        let run_id = input.run.id.clone();
+        let error_schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         let error_profile = runtime_profile.clone();
         let error_trace_id = trace_id.clone();
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
@@ -972,18 +980,20 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 input.runtime_step.as_ref(),
             )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
             push_schema_partial_event(&mut events, &runtime_profile, &trace_id, &output);
             push_final_output_event(&mut events, runtime_profile, trace_id, output);
+            annotate_stream_events(&mut events, Some(&run_id), None, schema_version);
             Ok(events)
         }
         .await;
         Ok(result.unwrap_or_else(|error| {
-            vec![runtime_stream_error_event(
-                0,
-                error_profile,
-                error_trace_id,
-                &error,
-            )]
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.run_id = Some(run_id);
+            event.schema_version = error_schema_version;
+            vec![event]
         }))
     }
 
@@ -993,6 +1003,11 @@ impl RuntimeClient for HermesRuntimeClient {
     ) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let runtime_profile = runtime_profile_for_session(&input, &input.agent_id);
         let trace_id = input.trace_id.clone();
+        let session_id = input.session_id.clone();
+        let error_schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         let error_profile = runtime_profile.clone();
         let error_trace_id = trace_id.clone();
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
@@ -1029,18 +1044,20 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 input.runtime_step.as_ref(),
             )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
             push_schema_partial_event(&mut events, &runtime_profile, &trace_id, &output);
             push_final_output_event(&mut events, runtime_profile, trace_id, output);
+            annotate_stream_events(&mut events, None, Some(&session_id), schema_version);
             Ok(events)
         }
         .await;
         Ok(result.unwrap_or_else(|error| {
-            vec![runtime_stream_error_event(
-                0,
-                error_profile,
-                error_trace_id,
-                &error,
-            )]
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.session_id = Some(session_id);
+            event.schema_version = error_schema_version;
+            vec![event]
         }))
     }
 
@@ -1050,6 +1067,10 @@ impl RuntimeClient for HermesRuntimeClient {
     ) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let error_profile = input.profile_id.clone();
         let error_trace_id = input.trace_id.clone();
+        let error_schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
             let contract = input
                 .profile_contract
@@ -1075,6 +1096,9 @@ impl RuntimeClient for HermesRuntimeClient {
                     event_type: RuntimeStreamEventType::Started,
                     profile_id: profile_id.clone(),
                     trace_id: trace_id.clone(),
+                    run_id: None,
+                    session_id: None,
+                    schema_version: None,
                     content_delta: None,
                     output: None,
                     error_code: None,
@@ -1083,6 +1107,10 @@ impl RuntimeClient for HermesRuntimeClient {
                 push_tool_progress_events(&mut events, &profile_id, &trace_id, &output);
                 push_schema_partial_event(&mut events, &profile_id, &trace_id, &output);
                 push_final_output_event(&mut events, profile_id, trace_id, output);
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                annotate_stream_events(&mut events, None, None, schema_version);
                 return Ok(events);
             }
             let messages = input
@@ -1107,18 +1135,19 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 input.runtime_step.as_ref(),
             )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
             push_schema_partial_event(&mut events, &input.profile_id, &input.trace_id, &output);
             push_final_output_event(&mut events, input.profile_id, input.trace_id, output);
+            annotate_stream_events(&mut events, None, None, schema_version);
             Ok(events)
         }
         .await;
         Ok(result.unwrap_or_else(|error| {
-            vec![runtime_stream_error_event(
-                0,
-                error_profile,
-                error_trace_id,
-                &error,
-            )]
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.schema_version = error_schema_version;
+            vec![event]
         }))
     }
 }
@@ -2251,6 +2280,25 @@ fn push_final_output_event(
     events.push(event);
 }
 
+fn annotate_stream_events(
+    events: &mut [RuntimeStreamEvent],
+    run_id: Option<&str>,
+    session_id: Option<&str>,
+    schema_version: Option<&str>,
+) {
+    for event in events {
+        if event.run_id.is_none() {
+            event.run_id = run_id.map(ToString::to_string);
+        }
+        if event.session_id.is_none() {
+            event.session_id = session_id.map(ToString::to_string);
+        }
+        if event.schema_version.is_none() {
+            event.schema_version = schema_version.map(ToString::to_string);
+        }
+    }
+}
+
 fn runtime_run_contract_payload(input: &RuntimeRunInput, runtime_profile: &str) -> Value {
     json!({
         "kind": "run",
@@ -2509,6 +2557,9 @@ fn process_sse_line(
         event_type: RuntimeStreamEventType::Delta,
         profile_id: runtime_profile.to_string(),
         trace_id: trace_id.to_string(),
+        run_id: None,
+        session_id: None,
+        schema_version: None,
         content_delta: Some(delta.to_string()),
         output: None,
         error_code: None,
@@ -2903,6 +2954,7 @@ mod tests {
         let events = runtime.stream_profile_step(input).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type.as_str(), "final");
+        assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
         assert!(events[0].output.is_some());
     }
 
@@ -3080,6 +3132,58 @@ mod tests {
         let output = events[4].output.as_ref().unwrap();
         assert_eq!(output.result_summary, "hello world");
         assert_eq!(output.metadata["streaming"], true);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_sets_run_id_on_events() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["stream"], true);
+                (
+                    StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream; charset=utf-8",
+                    )],
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"run\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\" ok\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let input = hermes_run_input(new_trace_id());
+        let run_id = input.run.id.clone();
+
+        let events = runtime.stream_run(input).await.unwrap();
+
+        assert!(
+            events
+                .iter()
+                .all(|event| event.run_id.as_deref() == Some(run_id.as_str()))
+        );
+        assert!(events.iter().all(|event| event.session_id.is_none()));
+        assert_eq!(events.last().unwrap().event_type.as_str(), "final");
+        assert_eq!(
+            events
+                .last()
+                .unwrap()
+                .output
+                .as_ref()
+                .unwrap()
+                .result_summary,
+            "run ok"
+        );
     }
 
     #[tokio::test]
@@ -3530,6 +3634,11 @@ mod tests {
         );
         assert_eq!(events[3].event_type.as_str(), "schema_partial");
         assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.schema_version.as_deref() == Some("v1"))
+        );
     }
 
     #[tokio::test]

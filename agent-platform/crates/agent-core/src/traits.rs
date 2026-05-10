@@ -107,6 +107,12 @@ pub struct RuntimeStreamEvent {
     pub event_type: RuntimeStreamEventType,
     pub profile_id: String,
     pub trace_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub schema_version: Option<String>,
     pub content_delta: Option<String>,
     pub output: Option<RuntimeOutput>,
     pub error_code: Option<String>,
@@ -125,6 +131,9 @@ impl RuntimeStreamEvent {
             event_type: RuntimeStreamEventType::Final,
             profile_id: profile_id.into(),
             trace_id: trace_id.into(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
             content_delta: None,
             output: Some(output),
             error_code: None,
@@ -143,6 +152,9 @@ impl RuntimeStreamEvent {
             event_type: RuntimeStreamEventType::ToolProgress,
             profile_id: profile_id.into(),
             trace_id: trace_id.into(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
             content_delta: None,
             output: None,
             error_code: None,
@@ -161,6 +173,9 @@ impl RuntimeStreamEvent {
             event_type: RuntimeStreamEventType::SchemaPartial,
             profile_id: profile_id.into(),
             trace_id: trace_id.into(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
             content_delta: None,
             output: None,
             error_code: None,
@@ -179,6 +194,9 @@ impl RuntimeStreamEvent {
             event_type: RuntimeStreamEventType::Error,
             profile_id: profile_id.into(),
             trace_id: trace_id.into(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
             content_delta: None,
             output: None,
             error_code: Some(code.as_str().to_string()),
@@ -231,13 +249,24 @@ pub trait RuntimeClient: Send + Sync {
             })
             .unwrap_or_else(|| "agent-platform-runtime".to_string());
         let trace_id = input.trace_id.clone();
+        let run_id = input.run.id.clone();
+        let schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         match self.execute_run(input).await {
-            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
-                profile_id, trace_id, output,
-            )]),
-            Err(error) => Ok(vec![runtime_stream_error_event(
-                0, profile_id, trace_id, &error,
-            )]),
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
         }
     }
 
@@ -257,13 +286,24 @@ pub trait RuntimeClient: Send + Sync {
             })
             .unwrap_or_else(|| input.agent_id.clone());
         let trace_id = input.trace_id.clone();
+        let session_id = input.session_id.clone();
+        let schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         match self.send_session_message(input).await {
-            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
-                profile_id, trace_id, output,
-            )]),
-            Err(error) => Ok(vec![runtime_stream_error_event(
-                0, profile_id, trace_id, &error,
-            )]),
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
         }
     }
 
@@ -273,13 +313,21 @@ pub trait RuntimeClient: Send + Sync {
     ) -> CoreResult<Vec<RuntimeStreamEvent>> {
         let profile_id = input.profile_id.clone();
         let trace_id = input.trace_id.clone();
+        let schema_version = input
+            .profile_contract
+            .as_ref()
+            .map(|contract| contract.version.version.clone());
         match self.execute_profile_step(input).await {
-            Ok(output) => Ok(vec![RuntimeStreamEvent::final_output(
-                profile_id, trace_id, output,
-            )]),
-            Err(error) => Ok(vec![runtime_stream_error_event(
-                0, profile_id, trace_id, &error,
-            )]),
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
         }
     }
 }
