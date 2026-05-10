@@ -452,6 +452,8 @@ runtime: add multi-profile step plan
 9. tool call 失败时必须写安全 `runtime_tool_error` audit event，且不记录
    tool arguments、明文 payload、未授权/未知 raw tool name 或对应 raw
    call id。
+10. tool executor 自身失败时，Runtime 对调用方返回安全错误 message，只保留
+    error code，不透传 executor error payload。
 
 代码范围：
 
@@ -463,7 +465,8 @@ runtime: add multi-profile step plan
 4. `agent-runtime`：执行后校验 tool output schema，并生成安全 metadata 摘要。
 5. `agent-runtime`：提供 `RuntimeAuditSink` 和 JSONL append-only sink，供
    Gateway 直连 Runtime 时显式配置。
-6. `agent-runtime`：tool call 执行失败时追加 `runtime_tool_error` audit
+6. `agent-runtime`：tool executor error 包装为安全 Runtime 错误。
+7. `agent-runtime`：tool call 执行失败时追加 `runtime_tool_error` audit
    event。
 
 验收：
@@ -476,22 +479,24 @@ runtime: add multi-profile step plan
    result，并写安全 `runtime_tool_error` audit event。
 5. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
    step output，并写安全 `runtime_tool_error` audit event。
-6. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
-7. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
-8. tool output summary 不泄漏 raw string、object key 名或 executor metadata
+6. tool executor 自身失败时，Runtime 返回安全错误 message，并写安全
+   `runtime_tool_error` audit event。
+7. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
+8. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
+9. tool output summary 不泄漏 raw string、object key 名或 executor metadata
    payload。
-9. required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
+10. required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
    audit event。
-10. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
-11. 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
+11. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
+12. 超出 tool round 时返回安全错误并写 `runtime_tool_error` audit event；
    超出 runtime budget 时返回安全错误。
-12. streaming run、session message 或 profile step 超出 runtime budget 时返回
+13. streaming run、session message 或 profile step 超出 runtime budget 时返回
     安全 `error` event。
-13. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
+14. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
-14. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
+15. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
     记录不会被覆盖。
-15. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
+16. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
     raw tool name / raw call id。
 
 测试：

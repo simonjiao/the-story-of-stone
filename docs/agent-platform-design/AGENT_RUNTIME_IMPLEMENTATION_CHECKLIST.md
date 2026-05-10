@@ -252,6 +252,8 @@ backpressure API 是后续项。
 - [x] Runtime 只向 Hermes 的 run、session message 和 profile step 路径暴露
   read-only effective tool specs。
 - [x] Runtime adapter 提供直连场景可配置的 append-only JSONL audit sink。
+- [x] tool executor 自身失败时，Runtime 包装为安全错误 message，只保留
+  error code，不透传 executor error payload。
 - [x] tool call 失败时追加安全 `runtime_tool_error` audit event。
 
 ### R4.5 验收
@@ -266,6 +268,8 @@ backpressure API 是后续项。
   tool result，并写安全 `runtime_tool_error` audit event。
 - [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
   step output，并写安全 `runtime_tool_error` audit event。
+- [x] tool executor 自身失败时，Runtime 返回安全错误 message，并写安全
+  `runtime_tool_error` audit event。
 - [x] profile 回灌和 final metadata 只保留 tool result ref、已校验的
   output_schema contract、summary 和 trace 信息，不包含 raw tool output。
 - [x] tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
@@ -305,6 +309,8 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_streams_safe_error_for_malformed_tool_arguments`
   覆盖 malformed arguments 不执行 executor、streaming safe error event 和
   audit 不泄漏 arguments。
+- [x] `hermes_runtime_sanitizes_tool_executor_failure_with_safe_audit`
+  覆盖 tool executor error payload 不进入 Runtime 错误 message 或 audit。
 - [x] `hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit`
   覆盖 tool output schema invalid 不回灌、不形成 result event、audit 不泄漏
   raw output。

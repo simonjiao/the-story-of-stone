@@ -801,7 +801,11 @@ impl HermesRuntimeClient {
                 "tool_call_type": tool_call.kind,
             }),
         };
-        let mut result = self.tool_executor.execute_tool(call, spec.clone()).await?;
+        let mut result = self
+            .tool_executor
+            .execute_tool(call, spec.clone())
+            .await
+            .map_err(runtime_tool_executor_error)?;
         result.call_id = call_id;
         result.profile_id = runtime_profile.to_string();
         result.tool_name = tool_name;
@@ -2771,6 +2775,10 @@ fn parse_tool_arguments(arguments: &str) -> CoreResult<Value> {
     })
 }
 
+fn runtime_tool_executor_error(error: AgentCoreError) -> AgentCoreError {
+    AgentCoreError::coded(error.code(), "runtime tool executor failed")
+}
+
 fn runtime_tool_call_audit_event(
     runtime_profile: &str,
     trace_id: &str,
@@ -3362,6 +3370,23 @@ mod tests {
                 output: json!({"ok": true}),
                 metadata: json!({"trace_id": call.trace_id}),
             })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingRuntimeToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for FailingRuntimeToolExecutor {
+        async fn execute_tool(
+            &self,
+            _call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "SECRET_EXECUTOR_FAILURE_PAYLOAD",
+            ))
         }
     }
 
@@ -5054,6 +5079,77 @@ mod tests {
         assert!(log.contains("tool.malformed_args"));
         assert!(!log.contains("\"arguments\""));
         assert!(!log.contains("SECRET_ARGUMENT_FIELD"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_sanitizes_tool_executor_failure_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-executor-fails",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.executor_fails",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-executor-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.executor_fails".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(FailingRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-executor-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use failing tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.executor_fails".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        let encoded_error = error.to_string();
+        assert!(encoded_error.contains("runtime tool executor failed"));
+        assert!(!encoded_error.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-executor-fails"));
+        assert!(log.contains("tool.executor_fails"));
+        assert!(log.contains("\"error_code\":\"internal_error\""));
+        assert!(!log.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!log.contains("\"arguments\""));
         let _ = tokio::fs::remove_file(audit_path).await;
     }
 
