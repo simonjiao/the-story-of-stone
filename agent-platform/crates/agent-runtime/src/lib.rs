@@ -3687,6 +3687,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_step_plan_requires_explicit_requested_tool_scope() {
+        let runtime = MinimalRuntimeClient::default();
+        let mut contract = ProfileContract::new("profile-a", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string()]);
+        let trace_id = new_trace_id();
+        let plan = RuntimeStepPlan::for_profile_contracts(
+            trace_id.clone(),
+            RuntimeStepPlanOwner::Manager,
+            vec![contract.clone()],
+            json!({}),
+        );
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan,
+                messages: vec![RuntimeProfileMessage::new("user", "no tool scope")],
+                metadata: json!({}),
+                profile_contracts: vec![contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            output.metadata["requested_tools"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            output.metadata["effective_tool_set"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn runtime_step_plan_validates_step_output_contract() {
         let runtime = MinimalRuntimeClient::default();
         let contract = ProfileContract::new("profile-a", "v1");

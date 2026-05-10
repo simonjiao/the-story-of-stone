@@ -460,7 +460,7 @@ where
             .requested_tools_by_profile
             .get(&step.profile_id)
             .cloned()
-            .unwrap_or_else(|| contract.tool_policy.effective_tools());
+            .unwrap_or_default();
         contract
             .tool_policy
             .validate_requested_tools(&profile_requested_tools)?;

@@ -392,7 +392,9 @@ dependency、fallback policy、step 级 `output_contract` / `tool_policy` 和
 4. `agent-core`：提供 `RuntimeStepPlan::for_profile_contracts()` 作为完整
    step plan 创建 helper；Manager、Orchestrator 或领域 Gateway 可以使用该
    helper 或生成等价完整 plan。
-5. 持久 step audit / 跨进程 step 查询是调用方或存储层集成边界，不属于
+5. `requested_tools_by_profile` 缺省时按空工具 scope 处理，不能退回到
+   profile contract 的全部 allowed tools。
+6. 持久 step audit / 跨进程 step 查询是调用方或存储层集成边界，不属于
    Runtime 本体完成条件。
 
 验收：
@@ -403,7 +405,8 @@ dependency、fallback policy、step 级 `output_contract` / `tool_policy` 和
 4. 多 step 依赖、fallback、输出契约失败降级和跨 step output_ref 流转有
    回归验证。
 5. step 级 tool policy 会收窄本 step 的 effective tool set。
-6. 持久 step audit 表不是当前 Runtime 本体完成条件。
+6. step plan 未显式传入本次 requested tool scope 时不会默认授权任何工具。
+7. 持久 step audit 表不是当前 Runtime 本体完成条件。
 
 测试：
 

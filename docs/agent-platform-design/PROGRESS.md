@@ -20,8 +20,10 @@
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
   可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy
-  校验输出和收窄工具 scope；依赖缺失、缺失 `output_ref` 或 executor 侧
-  output contract 失败也会按 step `fallback_policy` 降级或终止。
+  校验输出和收窄工具 scope；`requested_tools_by_profile` 缺省时按空工具 scope
+  处理，不会默认授权 profile contract 的全部 allowed tools；依赖缺失、缺失
+  `output_ref` 或 executor 侧 output contract 失败也会按 step `fallback_policy`
+  降级或终止。
 - R4.5 Runtime Tool Execution Loop 已落地：Runtime 已有 tool call /
   tool result / tool executor contract，Hermes profile step 可执行
   OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool

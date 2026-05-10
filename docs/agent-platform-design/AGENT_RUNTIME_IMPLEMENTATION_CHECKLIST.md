@@ -182,6 +182,8 @@ backpressure API 是后续项。
 - [x] `RuntimeStepPlan::for_profile_contracts()` 可从 profile contract 创建完整
   step plan。
 - [x] step plan 执行器会实际使用 step 级 `output_contract` 和 `tool_policy`。
+- [x] `requested_tools_by_profile` 缺省时按空工具 scope 处理，不默认授权
+  profile contract 的全部 allowed tools。
 - [x] step 输出只通过 schema 校验后的 `output_ref` 进入下一 step。
 - [x] 增加多 step 失败降级或终止策略。
 - [x] executor 侧 output contract 校验失败、缺失 `output_ref` 或依赖缺失时，
@@ -194,6 +196,7 @@ backpressure API 是后续项。
 - [x] Runtime 不能自行创建新 step。
 - [x] 多 step 失败不会导致权限扩大或未审计输出。
 - [x] step 级 tool policy 会收窄本 step 的 effective tool set。
+- [x] step plan 未显式传入本次 requested tool scope 时不会默认授权任何工具。
 - [x] step 级 output contract 失败时不会产生 successful output。
 - [x] step 级 output contract 在 Runtime 客户端成功返回后失败时，也会走
   `fallback_policy`，不会绕过显式降级/终止策略。
@@ -203,6 +206,7 @@ backpressure API 是后续项。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `runtime_step_plan_helper_materializes_step_contracts`
+- [x] `runtime_step_plan_requires_explicit_requested_tool_scope`
 - [x] `runtime_step_plan_validates_step_output_contract`
 - [x] `runtime_step_plan_applies_fallback_to_executor_output_contract_failure`
 
