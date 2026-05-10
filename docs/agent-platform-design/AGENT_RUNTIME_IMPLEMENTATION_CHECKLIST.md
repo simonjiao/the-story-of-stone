@@ -210,6 +210,8 @@ backpressure API 是后续项。
 - [x] `runtime_step_plan_requires_explicit_requested_tool_scope`
 - [x] `runtime_step_plan_validates_step_output_contract`
 - [x] `runtime_step_plan_applies_fallback_to_executor_output_contract_failure`
+- [x] `runtime_step_plan_applies_fallback_to_missing_output_ref`
+- [x] `runtime_step_plan_applies_fallback_to_missing_dependency`
 
 ### R4 提交
 

@@ -3037,6 +3037,46 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    struct MissingStepOutputRefRuntimeClient;
+
+    #[async_trait]
+    impl RuntimeClient for MissingStepOutputRefRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "missing-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "missing-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let result_ref = (input.profile_id != "missing-ref-profile")
+                .then(|| format!("result://raw/{}", input.profile_id));
+            Ok(RuntimeOutput {
+                result_summary: format!("raw profile step {}", input.profile_id),
+                result_ref,
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
     struct LeakyMetadataToolExecutor;
 
     #[async_trait]
@@ -3769,6 +3809,73 @@ mod tests {
         assert_eq!(
             output.metadata["runtime_step_outputs"][0]["error_code"],
             "step_output_invalid"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_missing_output_ref() {
+        let runtime = MissingStepOutputRefRuntimeClient;
+        let missing_ref_contract = ProfileContract::new("missing-ref-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut missing_ref_step = RuntimeStep::new("missing-ref-profile", "v1", json!({}));
+        missing_ref_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![missing_ref_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![missing_ref_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "step_missing_output_ref"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_missing_dependency() {
+        let runtime = RawProfileRuntimeClient;
+        let blocked_contract = ProfileContract::new("blocked-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut blocked_step = RuntimeStep::new("blocked-profile", "v1", json!({}));
+        blocked_step.depends_on = vec!["never-completed-step".to_string()];
+        blocked_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![blocked_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![blocked_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "dependency_not_completed"
         );
         assert_eq!(
             output.metadata["runtime_step_outputs"][1]["status"],
