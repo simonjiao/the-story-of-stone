@@ -439,7 +439,7 @@ runtime: add multi-profile step plan
 8. RuntimeOutput metadata 中必须返回安全 tool event 摘要；Runtime adapter
    直连场景必须配置等价 append-only audit sink。
 9. tool call 失败时必须写安全 `runtime_tool_error` audit event，且不记录
-   tool arguments 或明文 payload。
+   tool arguments、明文 payload 或未授权/未知 raw tool name。
 
 代码范围：
 
@@ -472,7 +472,8 @@ runtime: add multi-profile step plan
    tool call / result / error event。
 12. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
     记录不会被覆盖。
-13. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
+13. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
+    raw tool name。
 
 测试：
 
