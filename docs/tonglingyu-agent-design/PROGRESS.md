@@ -97,8 +97,11 @@
   `agent-platform/crates/tonglingyu-runtime/`，先承接证据包创建和读取、
   claim-to-evidence 映射、reviewer 规则、本地受控回答和 package replay；
   Gateway 请求路径改为调用该 runtime crate，不再在 Gateway 内维护这些领域逻辑。
+- Runtime crate 已继续承接 SQLite/FTS 检索、alias 取词、exact term 保护和
+  evidence card 构建；Gateway 保留 search policy/plan 决策，只把
+  `required_evidence_types` 交给 runtime 执行。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  source snapshot loader、SQLite/FTS 检索和 evidence card 构建，且 Runtime
+  source snapshot loader、SQLite 连接和 schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。
 
 ## 下一步
@@ -106,7 +109,8 @@
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
 2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway 内 source snapshot
-   loader、SQLite/FTS 检索和 evidence card 构建迁入 Runtime/tool 边界。
+   loader、SQLite schema/open/init、运行时 profile 调用和 read-only tools
+   迁入 Runtime/tool 边界。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前

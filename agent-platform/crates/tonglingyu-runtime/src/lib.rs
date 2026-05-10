@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
 };
 use time::OffsetDateTime;
@@ -240,6 +240,82 @@ pub fn load_evidence_package(db: &Path, package_id: &str) -> Result<Option<Evide
     }))
 }
 
+pub fn search_evidence(
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    required_evidence_types: &[String],
+) -> Result<Vec<EvidenceCard>> {
+    let terms = extract_terms(conn, question)?;
+    let mut scored: BTreeMap<String, (i64, EvidenceCard)> = BTreeMap::new();
+    for term in &terms {
+        for block in query_blocks_like(conn, term, limit * 4)? {
+            let score = score_block(question, term, &block);
+            let card = evidence_card_from_block_with_focus(block, term);
+            scored
+                .entry(card.block_id.clone())
+                .and_modify(|(existing, _)| *existing += score)
+                .or_insert((score, card));
+        }
+    }
+    if scored.is_empty() {
+        for block in query_blocks_like(conn, question, limit * 2)? {
+            let card = evidence_card_from_block_with_focus(block, question);
+            scored.insert(card.block_id.clone(), (1, card));
+        }
+    }
+    let mut ranked: Vec<_> = scored.into_values().collect();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.block_id.cmp(&right.1.block_id))
+    });
+    ranked.truncate(limit);
+    let mut cards = ranked.into_iter().map(|(_, card)| card).collect::<Vec<_>>();
+    let mut seen = cards
+        .iter()
+        .map(|card| card.block_id.clone())
+        .collect::<HashSet<_>>();
+    for exact_term in required_exact_terms(question) {
+        for block in query_blocks_exact_text(conn, exact_term, limit * 8)? {
+            if !block.text.contains(exact_term) {
+                continue;
+            }
+            let card = evidence_card_from_block(block);
+            if seen.insert(card.block_id.clone()) {
+                cards.insert(0, card);
+                break;
+            }
+        }
+    }
+    for required_type in required_evidence_types {
+        if cards
+            .iter()
+            .any(|card| card.evidence_type == required_type.as_str())
+        {
+            continue;
+        }
+        for term in &terms {
+            for block in query_blocks_like(conn, term, limit * 8)? {
+                let card = evidence_card_from_block(block);
+                if card.evidence_type == *required_type && seen.insert(card.block_id.clone()) {
+                    cards.insert(0, card);
+                    break;
+                }
+            }
+            if cards
+                .iter()
+                .any(|card| card.evidence_type == required_type.as_str())
+            {
+                break;
+            }
+        }
+    }
+    cards.truncate(limit.max(required_evidence_types.len()));
+    Ok(cards)
+}
+
 pub fn package_json(package: &EvidencePackage) -> Value {
     let evidence_ids: Vec<_> = package
         .cards
@@ -464,6 +540,482 @@ fn claim_evidence_map(claims: &[String], cards: &[EvidenceCard]) -> Vec<ClaimEvi
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SearchBlockRecord {
+    block_id: String,
+    kind: String,
+    revision_id: Option<i64>,
+    source_id: String,
+    source_title: String,
+    source_url: String,
+    text: String,
+}
+
+fn required_exact_terms(question: &str) -> Vec<&'static str> {
+    let mut terms = Vec::new();
+    if question.contains("寳玉") {
+        terms.push("寳玉");
+    }
+    if question.contains("寳釵") {
+        terms.push("寳釵");
+    }
+    terms
+}
+
+fn extract_terms(conn: &Connection, question: &str) -> Result<Vec<String>> {
+    let mut terms = Vec::new();
+    let normalized = normalize_text(question);
+    let seed_terms = [
+        ("通灵玉", "通靈玉"),
+        ("通灵宝玉", "通靈寶玉"),
+        ("莫失莫忘", "莫失莫忘"),
+        ("仙寿恒昌", "仙壽恒昌"),
+        ("一除邪祟", "一除邪祟"),
+        ("二疗冤疾", "二療冤疾"),
+        ("三知祸福", "三知禍福"),
+        ("石头", "石頭"),
+        ("顽石", "頑石"),
+        ("寳玉", "寳玉"),
+        ("青埂峰", "青埂峰"),
+        ("金陵十二钗", "金陵十二釵"),
+        ("判词", "判詞"),
+        ("葬花", "葬花"),
+        ("好了歌", "好了歌"),
+        ("太虚幻境", "太虛幻境"),
+        ("脂批", "脂批"),
+        ("甲戌", "甲戌"),
+        ("程甲", "程甲"),
+        ("程乙", "程乙"),
+        ("前八十回", "前八十回"),
+        ("后四十回", "後四十回"),
+        ("第八十一回", "第八十一回"),
+        ("宝玉", "寶玉"),
+        ("黛玉", "黛玉"),
+        ("宝钗", "寶釵"),
+        ("凤姐", "鳳姐"),
+        ("贾母", "賈母"),
+        ("袭人", "襲人"),
+        ("李纨", "李紈"),
+        ("女娲", "女媧"),
+        ("补天", "補天"),
+        ("甄士隐", "甄士隱"),
+        ("贾雨村", "賈雨村"),
+        ("冷子兴", "冷子興"),
+        ("刘姥姥", "劉姥姥"),
+        ("大观园", "大觀園"),
+        ("怡红院", "怡紅院"),
+        ("潇湘馆", "瀟湘館"),
+        ("蘅芜苑", "蘅蕪苑"),
+        ("荣国府", "榮國府"),
+        ("宁国府", "寧國府"),
+        ("贾府", "賈府"),
+        ("薛蟠", "薛蟠"),
+        ("香菱", "香菱"),
+        ("平儿", "平兒"),
+        ("尤氏", "尤氏"),
+        ("贾琏", "賈璉"),
+        ("秦钟", "秦鐘"),
+        ("北静王", "北靜王"),
+        ("金陵", "金陵"),
+        ("红楼梦", "紅樓夢"),
+        ("风月宝鉴", "風月寶鑒"),
+        ("芙蓉女儿", "芙蓉女兒"),
+        ("桃花社", "桃花社"),
+        ("海棠", "海棠"),
+        ("菊花", "菊花"),
+        ("灯谜", "燈謎"),
+        ("省亲", "省親"),
+        ("第八回", "第八回"),
+        ("第一回", "第一回"),
+        ("脂砚斋", "脂硯齋"),
+    ];
+    for (simple, traditional) in seed_terms {
+        if question.contains(simple)
+            || question.contains(traditional)
+            || normalized.contains(&normalize_text(simple))
+        {
+            push_term(&mut terms, simple);
+            push_term(&mut terms, traditional);
+        }
+    }
+    let asks_inscription = question.contains('字')
+        || question.contains("铭")
+        || question.contains("銘")
+        || question.contains("写")
+        || question.contains("寫");
+    let asks_tonglingyu =
+        question.contains("通灵玉") || question.contains("通靈玉") || normalized.contains("通灵玉");
+    if asks_inscription && asks_tonglingyu {
+        for term in [
+            "莫失莫忘",
+            "仙寿恒昌",
+            "仙壽恒昌",
+            "一除邪祟",
+            "二疗冤疾",
+            "二療冤疾",
+            "三知祸福",
+            "三知禍福",
+        ] {
+            push_term(&mut terms, term);
+        }
+    }
+    if question.contains("顽石") || question.contains("頑石") {
+        push_term(&mut terms, "石頭");
+        push_term(&mut terms, "石头");
+    }
+    if question.contains("后四十") || question.contains("後四十") {
+        push_term(&mut terms, "第八十一回");
+        push_term(&mut terms, "第081回");
+        push_term(&mut terms, "八十一");
+    }
+
+    let mut stmt = conn.prepare("SELECT alias FROM aliases")?;
+    let aliases = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for alias in aliases {
+        let alias = alias?;
+        if question.contains(&alias) || normalized.contains(&normalize_text(&alias)) {
+            push_term(&mut terms, &alias);
+        }
+    }
+
+    for token in cjk_tokens(question) {
+        if token.chars().count() >= 2 && token.chars().count() <= 8 {
+            push_term(&mut terms, &token);
+        }
+    }
+    if terms.is_empty() && question.chars().count() <= 24 {
+        push_term(&mut terms, question);
+    }
+    Ok(terms)
+}
+
+fn query_blocks_like(
+    conn: &Connection,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<SearchBlockRecord>> {
+    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+    let normalized_like = format!(
+        "%{}%",
+        normalize_text(term).replace('%', "\\%").replace('_', "\\_")
+    );
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT block_id, kind, revision_id, source_id, source_title, source_url, text
+        FROM blocks
+        WHERE text LIKE ?1 ESCAPE '\'
+           OR source_title LIKE ?1 ESCAPE '\'
+           OR normalized_text LIKE ?2 ESCAPE '\'
+        ORDER BY
+          CASE evidence_type
+            WHEN 'base_text' THEN 1
+            WHEN 'commentary' THEN 2
+            WHEN 'version_note' THEN 3
+            ELSE 4
+          END,
+          LENGTH(text) ASC
+        LIMIT ?3
+        "#,
+    )?;
+    let rows = stmt.query_map(params![like, normalized_like, limit as i64], |row| {
+        Ok(SearchBlockRecord {
+            block_id: row.get(0)?,
+            kind: row.get(1)?,
+            revision_id: row.get(2)?,
+            source_id: row.get(3)?,
+            source_title: row.get(4)?,
+            source_url: row.get(5)?,
+            text: row.get(6)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_blocks_exact_text(
+    conn: &Connection,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<SearchBlockRecord>> {
+    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT block_id, kind, revision_id, source_id, source_title, source_url, text
+        FROM blocks
+        WHERE text LIKE ?1 ESCAPE '\'
+        ORDER BY
+          CASE
+            WHEN source_id LIKE '%chengjia%' THEN 1
+            WHEN source_id LIKE '%chengyi%' THEN 2
+            ELSE 3
+          END,
+          LENGTH(text) ASC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![like, limit as i64], |row| {
+        Ok(SearchBlockRecord {
+            block_id: row.get(0)?,
+            kind: row.get(1)?,
+            revision_id: row.get(2)?,
+            source_id: row.get(3)?,
+            source_title: row.get(4)?,
+            source_url: row.get(5)?,
+            text: row.get(6)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn evidence_card_from_block(block: SearchBlockRecord) -> EvidenceCard {
+    evidence_card_from_block_text(block, None)
+}
+
+fn evidence_card_from_block_with_focus(block: SearchBlockRecord, focus: &str) -> EvidenceCard {
+    evidence_card_from_block_text(block, Some(focus))
+}
+
+fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) -> EvidenceCard {
+    let evidence_type =
+        if block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu") {
+            "commentary"
+        } else if block.text.contains("程甲")
+            || block.text.contains("程乙")
+            || block.text.contains("脂評本")
+        {
+            "version_note"
+        } else {
+            "base_text"
+        };
+    let (support_scope, unsupported_scope, evidence_level, confidence) = match evidence_type {
+        "commentary" => (
+            "可支持脂批、评语或版本线索层面的说明；必须标注为脂批来源。".to_string(),
+            "不能单独证明正文事实，也不能扩展为所有版本共同结论。".to_string(),
+            "脂批提示".to_string(),
+            "medium".to_string(),
+        ),
+        "version_note" => (
+            "可支持版本边界、整理来源或版本系统说明。".to_string(),
+            "不能单独证明情节事实，不能替代影印或权威校注本校勘。".to_string(),
+            "版本边界".to_string(),
+            "medium".to_string(),
+        ),
+        _ => (
+            "可支持该版本该 block 中直接出现的原文事实或文本定位。".to_string(),
+            "不能证明未出现的情节、人物命运定论或其他版本必然相同。".to_string(),
+            "正文直接".to_string(),
+            "high".to_string(),
+        ),
+    };
+    EvidenceCard {
+        evidence_id: format!("ev-{}", uuid::Uuid::now_v7().simple()),
+        evidence_type: evidence_type.to_string(),
+        source_id: block.source_id,
+        source_title: block.source_title,
+        source_url: block.source_url,
+        revision_id: block.revision_id,
+        block_id: block.block_id,
+        text: match focus {
+            Some(focus) => trim_text_around(&block.text, focus, 520),
+            None => trim_text(&block.text, 520),
+        },
+        support_scope,
+        unsupported_scope,
+        evidence_level,
+        confidence,
+        verification_status: "source_snapshot_ready_not_scholarly_collated".to_string(),
+    }
+}
+
+fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
+    let mut score = 1;
+    if block.text.contains(term) {
+        score += 10;
+    }
+    if normalize_text(&block.text).contains(&normalize_text(term)) {
+        score += 8;
+    }
+    if block.source_title.contains(term) {
+        score += 5;
+    }
+    if question.contains("脂批")
+        && (block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu"))
+    {
+        score += 8;
+    }
+    if question.contains("程甲") && block.source_id.contains("chengjia") {
+        score += 40;
+    }
+    if question.contains("程乙") && block.source_id.contains("chengyi") {
+        score += 40;
+    }
+    if block.kind == "heading" {
+        score -= 2;
+    }
+    let asks_inscription = question.contains('字')
+        || question.contains("铭")
+        || question.contains("銘")
+        || question.contains("写")
+        || question.contains("寫");
+    let looks_like_inscription = block.text.contains("莫失莫忘")
+        || block.text.contains("仙壽")
+        || block.text.contains("仙寿")
+        || block.text.contains("一除邪祟")
+        || block.text.contains("二療冤疾")
+        || block.text.contains("二疗冤疾")
+        || block.text.contains("三知禍福")
+        || block.text.contains("三知祸福");
+    if asks_inscription && looks_like_inscription {
+        score += 50;
+    } else if (term.contains("通灵") || term.contains("通靈")) && looks_like_inscription {
+        score += 20;
+    }
+    score
+}
+
+fn normalize_text(input: &str) -> String {
+    let replacements = [
+        ("紅", "红"),
+        ("樓", "楼"),
+        ("夢", "梦"),
+        ("寶", "宝"),
+        ("寳", "宝"),
+        ("賈", "贾"),
+        ("襲", "袭"),
+        ("紈", "纨"),
+        ("媧", "娲"),
+        ("隱", "隐"),
+        ("興", "兴"),
+        ("劉", "刘"),
+        ("觀", "观"),
+        ("園", "园"),
+        ("院", "院"),
+        ("瀟", "潇"),
+        ("館", "馆"),
+        ("蕪", "芜"),
+        ("榮", "荣"),
+        ("國", "国"),
+        ("寧", "宁"),
+        ("兒", "儿"),
+        ("璉", "琏"),
+        ("鐘", "钟"),
+        ("靜", "静"),
+        ("鑒", "鉴"),
+        ("補", "补"),
+        ("燈", "灯"),
+        ("親", "亲"),
+        ("鎖", "锁"),
+        ("玉寶靈通", "玉宝灵通"),
+        ("靈", "灵"),
+        ("釵", "钗"),
+        ("鳳", "凤"),
+        ("壽", "寿"),
+        ("恆", "恒"),
+        ("恒", "恒"),
+        ("僊", "仙"),
+        ("癒", "愈"),
+        ("療", "疗"),
+        ("禍", "祸"),
+        ("硯", "砚"),
+        ("齋", "斋"),
+        ("評", "评"),
+        ("衆", "众"),
+        ("眾", "众"),
+        ("裏", "里"),
+        ("裡", "里"),
+        ("説", "说"),
+        ("說", "说"),
+        ("冩", "写"),
+        ("臺", "台"),
+        ("檯", "台"),
+        ("後", "后"),
+    ];
+    let mut output = input.to_lowercase();
+    for (from, to) in replacements {
+        output = output.replace(from, to);
+    }
+    output
+}
+
+fn cjk_tokens(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        if is_cjk(ch) {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.extend(split_cjk_token(&current));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        tokens.extend(split_cjk_token(&current));
+    }
+    tokens
+}
+
+fn split_cjk_token(token: &str) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 8 {
+        return vec![token.to_string()];
+    }
+    chars
+        .windows(4)
+        .map(|window| window.iter().collect::<String>())
+        .collect()
+}
+
+fn is_cjk(ch: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&ch)
+        || ('\u{3400}'..='\u{4dbf}').contains(&ch)
+        || ('\u{20000}'..='\u{2a6df}').contains(&ch)
+        || ('\u{2a700}'..='\u{2b73f}').contains(&ch)
+        || ('\u{2b740}'..='\u{2b81f}').contains(&ch)
+        || ('\u{2b820}'..='\u{2ceaf}').contains(&ch)
+}
+
+fn push_term(terms: &mut Vec<String>, term: &str) {
+    let term = term.trim();
+    if !term.is_empty() && !terms.iter().any(|item| item == term) {
+        terms.push(term.to_string());
+    }
+}
+
+fn trim_text(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            break;
+        }
+        output.push(ch);
+    }
+    output
+}
+
+fn trim_text_around(text: &str, focus: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let Some(byte_index) = text.find(focus) else {
+        return trim_text(text, max_chars);
+    };
+    let focus_index = text[..byte_index].chars().count();
+    let half = max_chars / 2;
+    let start = focus_index.saturating_sub(half);
+    let end = (start + max_chars).min(chars.len());
+    let mut output = String::new();
+    if start > 0 {
+        output.push_str("...");
+    }
+    for ch in &chars[start..end] {
+        output.push(*ch);
+    }
+    if end < chars.len() {
+        output.push_str("...");
+    }
+    output
 }
 
 fn blocked_prompt_controls(question: &str) -> Vec<String> {

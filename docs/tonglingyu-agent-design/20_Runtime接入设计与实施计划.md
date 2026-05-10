@@ -174,6 +174,18 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
 - [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
 
+### R5B 当前实现校准
+
+当前代码已新增 `tonglingyu-runtime` crate，并把证据包 create/read/replay、
+claim-to-evidence 映射、reviewer 规则、本地受控回答、SQLite/FTS 检索和
+evidence card 构建从 Gateway 函数体中迁出。Gateway 现在只生成
+search policy/plan 并调用 runtime API。
+
+这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite、初始化 schema、
+构建 source snapshot KB，并且尚未通过 `agent-runtime` 执行四 profile 或
+read-only tool contract。R5A/R5C/R5D 必须等 Runtime profile、tool contract
+和目标环境 Open WebUI 复测完成后再勾选。
+
 ### R5C 四 Profile 编排
 
 - [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
