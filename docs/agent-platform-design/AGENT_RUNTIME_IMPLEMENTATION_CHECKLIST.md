@@ -223,10 +223,14 @@ backpressure API 是后续项。
 - [x] `runtime_step_plan_applies_fallback_to_executor_output_contract_failure`
 - [x] `runtime_step_plan_applies_fallback_to_missing_output_ref`
 - [x] `runtime_step_plan_applies_fallback_to_missing_dependency`
+- [x] `runtime_step_plan_continues_optional_failed_step`
 
 ### R4 提交
 
 - [x] `runtime: add multi-profile step plan`
+- [x] `runtime: enforce step plan contract fallbacks`
+- [x] `runtime: require explicit step tool scope`
+- [x] `runtime: cover step fallback edge cases`
 
 ## R4.5 Runtime Tool Execution Loop
 
