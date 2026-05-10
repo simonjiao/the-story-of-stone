@@ -12,7 +12,8 @@
   profile contract、轻量 schema validation、Runtime streaming events、
   per-profile tool permission、multi-profile step plan 和 read-only tool loop
   已落地；`max_context_messages` 会作为 Runtime 输入预算约束执行，
-  streaming 失败会返回安全 `error` event。
+  确定性 `safety_policy` 子集会在进入模型前执行，streaming 失败会返回
+  安全 `error` event。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
   `output_contract` 和 `tool_policy`，`RuntimeStepPlan::for_profile_contracts()`
   可从 profile contract 创建完整 plan，执行器会用 step 级 schema/tool policy

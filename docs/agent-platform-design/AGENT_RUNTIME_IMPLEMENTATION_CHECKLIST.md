@@ -52,6 +52,8 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] 在 `agent-runtime` 新增 profile contract registry。
 - [x] 在 `agent-runtime` 增加 runtime input schema validation。
 - [x] 在 `agent-runtime` 增加 `max_context_messages` 上下文预算校验。
+- [x] 在 `agent-runtime` 增加确定性 `safety_policy` 子集校验：
+  `deny_message_roles` 和 `max_message_bytes`。
 - [x] 在 `agent-runtime` 增加 runtime output schema validation。
 - [x] Runtime input contract 支持调用方传入 profile contract metadata。
 - [x] 当前不需要持久化 contract version；后续如需运营动态配置，再在
@@ -66,11 +68,16 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] 错误不泄露 prompt、secret、connector payload 或内部栈。
 - [x] metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
 - [x] 超过 `max_context_messages` 时返回安全错误，不进入 successful output。
+- [x] `safety_policy` 拒绝指定 message role 或超大消息时返回安全错误。
+- [x] 未支持的 `safety_policy` 字段 fail closed，不被静默忽略。
 
 ### R1 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `minimal_runtime_rejects_profile_context_over_budget`
+- [x] `minimal_runtime_rejects_profile_safety_denied_role`
+- [x] `minimal_runtime_rejects_profile_safety_oversized_message`
+- [x] `minimal_runtime_rejects_profile_safety_unknown_field`
 
 ### R1 提交
 

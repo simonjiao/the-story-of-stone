@@ -94,7 +94,7 @@ Runtime 完善专项的目标不是让 Runtime 变成控制面，而是把执行
 1. Runtime 可以返回非流式和流式两类输出，并保留最终 `RuntimeOutput`
    语义；Worker/Orchestrator 如何消费这些输出不属于 Runtime 本体实现。
 2. 每个 profile 可以声明输入 schema、输出 schema、允许工具、禁止工具和
-   安全策略。
+   安全策略；当前 Runtime 本体执行确定性安全策略子集，不做 LLM 安全判断。
 3. Runtime 对 profile 输出做 schema 校验，失败时返回安全错误，不泄露 prompt、
    credential、connector payload 或内部栈。
 4. 多 profile 编排必须由 Manager、Orchestrator 或领域 Gateway 明确授权和记录；
@@ -214,7 +214,8 @@ ProfileContract
 1. `agent-core`：新增 `ProfileContract`、`ProfileContractVersion`、
    `RuntimeToolPolicy` 和 schema 校验错误类型。
 2. `agent-runtime`：新增 contract registry、input validation、
-   `max_context_messages` 预算校验和 output validation。
+   `max_context_messages` 预算校验、确定性 `safety_policy` 校验和
+   output validation。
 3. 调用方可以把 profile contract metadata 传给 Runtime；Worker、Gateway
    或其他调用方如何生成和保存 contract version 属于各自集成边界。
 4. 如需运营态动态 contract registry，再另行在存储层设计非破坏字段或新表；
@@ -227,6 +228,9 @@ ProfileContract
 3. 错误不泄露 prompt、secret、connector payload 或内部栈。
 4. metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
 5. 超过 `max_context_messages` 时返回安全错误，不进入 successful runtime output。
+6. `safety_policy.deny_message_roles` 和 `safety_policy.max_message_bytes`
+   会在进入模型前执行，未知 safety policy 字段 fail closed，失败时返回
+   安全错误。
 
 测试：
 

@@ -2180,6 +2180,7 @@ fn validate_contract_input(
         .tool_policy
         .validate_requested_tools(requested_tools)?;
     validate_contract_context_budget(contract, input)?;
+    validate_contract_safety_policy(contract, input)?;
     validate_json_schema_value(&contract.input_schema, input)
 }
 
@@ -2208,6 +2209,93 @@ fn runtime_context_message_count(input: &Value) -> usize {
         .map_or(0, Vec::len);
     let current_message = usize::from(input.get("message").is_some());
     profile_messages + context_messages + current_message
+}
+
+fn validate_contract_safety_policy(contract: &ProfileContract, input: &Value) -> CoreResult<()> {
+    if json_schema_is_empty(&contract.safety_policy) || contract.safety_policy.is_null() {
+        return Ok(());
+    }
+    let Some(policy) = contract.safety_policy.as_object() else {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile safety policy was invalid",
+        ));
+    };
+    for field in policy.keys() {
+        if !matches!(field.as_str(), "deny_message_roles" | "max_message_bytes") {
+            return Err(invalid_safety_policy(field));
+        }
+    }
+    if let Some(denied_roles) = policy.get("deny_message_roles") {
+        let denied_roles = denied_roles
+            .as_array()
+            .ok_or_else(|| invalid_safety_policy("deny_message_roles"))?;
+        for denied_role in denied_roles {
+            let denied_role = denied_role
+                .as_str()
+                .ok_or_else(|| invalid_safety_policy("deny_message_roles"))?;
+            if runtime_message_values(input).into_iter().any(|message| {
+                message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role == denied_role)
+            }) {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "runtime profile safety policy rejected message role",
+                ));
+            }
+        }
+    }
+    if let Some(max_message_bytes) = policy.get("max_message_bytes") {
+        let max_message_bytes = max_message_bytes
+            .as_u64()
+            .ok_or_else(|| invalid_safety_policy("max_message_bytes"))?
+            as usize;
+        if runtime_message_values(input)
+            .into_iter()
+            .filter_map(runtime_message_content)
+            .any(|content| content.len() > max_message_bytes)
+        {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime profile safety policy rejected oversized message",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_safety_policy(field: &str) -> AgentCoreError {
+    AgentCoreError::coded(
+        ErrorCode::Conflict,
+        format!("runtime profile safety policy field {field} was invalid"),
+    )
+}
+
+fn runtime_message_values(input: &Value) -> Vec<&Value> {
+    let mut messages = Vec::new();
+    if let Some(profile_messages) = input.get("messages").and_then(Value::as_array) {
+        messages.extend(profile_messages);
+    }
+    if let Some(current_message) = input.get("message") {
+        messages.push(current_message);
+    }
+    if let Some(context_messages) = input
+        .get("context")
+        .and_then(|context| context.get("recent_messages"))
+        .and_then(Value::as_array)
+    {
+        messages.extend(context_messages);
+    }
+    messages
+}
+
+fn runtime_message_content(message: &Value) -> Option<&str> {
+    message
+        .get("content")
+        .or_else(|| message.get("content_summary"))
+        .and_then(Value::as_str)
 }
 
 fn finalize_runtime_output(
@@ -3116,6 +3204,93 @@ mod tests {
                     RuntimeProfileMessage::new("system", "contract"),
                     RuntimeProfileMessage::new("user", "hello"),
                 ],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_denied_role() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "deny_message_roles": ["system"]
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "do not allow this role"),
+                    RuntimeProfileMessage::new("user", "hello"),
+                ],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_oversized_message() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "max_message_bytes": 4
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_unknown_field() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "future_policy": true
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
                 metadata: json!({}),
                 profile_contract: Some(contract),
                 runtime_step: None,
