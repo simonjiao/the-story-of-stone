@@ -251,7 +251,8 @@ backpressure API 是后续项。
 - [x] streaming profile step 超出 runtime budget 时返回安全 `error` event。
 - [x] RuntimeOutput metadata 或 Runtime adapter audit sink 能按 trace 看到
   runtime tool call / result 事件。
-- [x] Runtime adapter 直连 JSONL audit sink 有回归验证。
+- [x] Runtime adapter 直连 JSONL audit sink 有回归验证，且确认已有 JSONL
+  记录不会被覆盖。
 - [x] 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
 ### R4.5 测试
@@ -265,6 +266,8 @@ backpressure API 是后续项。
   覆盖 executor metadata、raw string output summary 和 adapter audit 不泄漏。
 - [x] tool result metadata / adapter audit 覆盖已校验 output_schema contract。
 - [x] `hermes_runtime_rejects_required_tool_output_ref_missing`
+- [x] `hermes_runtime_writes_tool_events_to_jsonl_audit_sink` 覆盖 append-only
+  保留已有记录。
 
 ### R4.5 提交
 

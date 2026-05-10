@@ -468,7 +468,8 @@ runtime: add multi-profile step plan
 10. streaming profile step 超出 runtime budget 时返回安全 `error` event。
 11. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
-12. Runtime adapter 直连 JSONL audit sink 有单独验证。
+12. Runtime adapter 直连 JSONL audit sink 有单独验证，且确认已有 JSONL
+    记录不会被覆盖。
 13. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
 测试：

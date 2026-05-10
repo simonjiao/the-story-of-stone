@@ -32,7 +32,7 @@
   payload、raw string output 或 object key 名，且不会让 executor 覆盖已授权
   tool call 身份；tool call 失败会写安全
   `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
-  可配置的 append-only JSONL audit sink。
+  可配置的 append-only JSONL audit sink，并有保留已有记录的回归验证。
 - Runtime repo/local checklist 当前已关闭；完成口径限定为 Agent Runtime 本体，
   完整 JSON Schema 和领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
 - 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime

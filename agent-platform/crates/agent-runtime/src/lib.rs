@@ -4076,6 +4076,10 @@ mod tests {
         let mut contract = ProfileContract::new("audit-profile", "v1");
         contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
         let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let existing_event = r#"{"event":"existing_runtime_event"}"#;
+        tokio::fs::write(&audit_path, format!("{existing_event}\n"))
+            .await
+            .unwrap();
         let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
             base_url: spawn_server(app).await,
             api_key: None,
@@ -4104,6 +4108,9 @@ mod tests {
             .unwrap();
 
         let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.first().copied(), Some(existing_event));
+        assert_eq!(lines.len(), 3);
         assert_eq!(log.matches("runtime_tool_call").count(), 1);
         assert_eq!(log.matches("runtime_tool_result").count(), 1);
         assert!(log.contains("\"output_schema\""));
