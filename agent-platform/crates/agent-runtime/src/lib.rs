@@ -886,6 +886,8 @@ impl HermesRuntimeClient {
         messages: Vec<HermesChatMessage>,
         trace_id: &str,
         runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
     ) -> CoreResult<(String, Value, Vec<RuntimeStreamEvent>)> {
         let started = Instant::now();
         let model = self.config.model_for_profile(runtime_profile);
@@ -942,6 +944,7 @@ impl HermesRuntimeClient {
         let mut content = String::new();
         let mut sequence = 1;
         let mut pending = String::new();
+        let mut unexpected_tool_calls = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(map_reqwest_error)?;
@@ -954,8 +957,17 @@ impl HermesRuntimeClient {
                 &mut sequence,
                 &mut content,
                 &mut events,
+                &mut unexpected_tool_calls,
                 false,
             )?;
+            self.reject_unexpected_stream_tool_calls(
+                &unexpected_tool_calls,
+                runtime_profile,
+                trace_id,
+                contract,
+                requested_tools,
+            )
+            .await?;
         }
         process_sse_lines(
             &mut pending,
@@ -965,8 +977,17 @@ impl HermesRuntimeClient {
             &mut sequence,
             &mut content,
             &mut events,
+            &mut unexpected_tool_calls,
             true,
         )?;
+        self.reject_unexpected_stream_tool_calls(
+            &unexpected_tool_calls,
+            runtime_profile,
+            trace_id,
+            contract,
+            requested_tools,
+        )
+        .await?;
         let content = content.trim().to_string();
         if content.is_empty() {
             return Err(AgentCoreError::coded(
@@ -1000,14 +1021,61 @@ impl HermesRuntimeClient {
         trace_id: &str,
         runtime_profile: &str,
         contract: Option<&ProfileContract>,
+        requested_tools: &[String],
     ) -> CoreResult<(String, Value, Vec<RuntimeStreamEvent>)> {
         let started = Instant::now();
         ensure_profile_budget(started, contract)?;
         let result = self
-            .chat_completion_stream(messages, trace_id, runtime_profile)
+            .chat_completion_stream(
+                messages,
+                trace_id,
+                runtime_profile,
+                contract,
+                requested_tools,
+            )
             .await?;
         ensure_profile_budget(started, contract)?;
         Ok(result)
+    }
+
+    async fn reject_unexpected_stream_tool_calls(
+        &self,
+        tool_calls: &[HermesStreamToolCall],
+        runtime_profile: &str,
+        trace_id: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<()> {
+        if tool_calls.is_empty() {
+            return Ok(());
+        }
+        let error = AgentCoreError::coded(
+            ErrorCode::Forbidden,
+            "runtime profile requested a tool outside authorized scope",
+        );
+        for tool_call in tool_calls {
+            let audit_tool_name = tool_call
+                .name
+                .as_deref()
+                .and_then(|name| runtime_tool_audit_name(contract, requested_tools, name));
+            let audit_call_id = audit_tool_name.as_ref().and_then(|_| tool_call.id.clone());
+            let call_event = runtime_tool_call_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+            );
+            self.audit_sink.append_runtime_event(call_event).await?;
+            let failure_event = runtime_tool_error_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+                &error,
+            );
+            self.audit_sink.append_runtime_event(failure_event).await?;
+        }
+        Err(error)
     }
 }
 
@@ -1216,6 +1284,7 @@ impl RuntimeClient for HermesRuntimeClient {
                     &trace_id,
                     &runtime_profile,
                     contract.as_ref(),
+                    &input.requested_tools,
                 )
                 .await?;
             let output = finalize_runtime_output(
@@ -1292,6 +1361,7 @@ impl RuntimeClient for HermesRuntimeClient {
                     &trace_id,
                     &runtime_profile,
                     contract.as_ref(),
+                    &input.requested_tools,
                 )
                 .await?;
             let assistant_message = AgentSessionMessage::new(
@@ -1376,7 +1446,13 @@ impl RuntimeClient for HermesRuntimeClient {
             let started = Instant::now();
             ensure_profile_budget(started, contract.as_ref())?;
             let (content, metadata, mut events) = self
-                .chat_completion_stream(messages, &input.trace_id, &input.profile_id)
+                .chat_completion_stream(
+                    messages,
+                    &input.trace_id,
+                    &input.profile_id,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
                 .await?;
             ensure_profile_budget(started, contract.as_ref())?;
             let output = finalize_runtime_output(
@@ -2934,6 +3010,7 @@ fn process_sse_lines(
     sequence: &mut u64,
     content: &mut String,
     events: &mut Vec<RuntimeStreamEvent>,
+    unexpected_tool_calls: &mut Vec<HermesStreamToolCall>,
     flush: bool,
 ) -> CoreResult<()> {
     loop {
@@ -2949,6 +3026,7 @@ fn process_sse_lines(
             sequence,
             content,
             events,
+            unexpected_tool_calls,
         )?;
     }
     if flush && !pending.trim().is_empty() {
@@ -2961,6 +3039,7 @@ fn process_sse_lines(
             sequence,
             content,
             events,
+            unexpected_tool_calls,
         )?;
     }
     Ok(())
@@ -2974,6 +3053,7 @@ fn process_sse_line(
     sequence: &mut u64,
     content: &mut String,
     events: &mut Vec<RuntimeStreamEvent>,
+    unexpected_tool_calls: &mut Vec<HermesStreamToolCall>,
 ) -> CoreResult<()> {
     let Some(data) = line.strip_prefix("data:") else {
         return Ok(());
@@ -2984,6 +3064,7 @@ fn process_sse_line(
     }
     let value = serde_json::from_str::<Value>(data)
         .map_err(|_| runtime_failure("Hermes Runtime stream event was malformed"))?;
+    collect_stream_tool_calls(&value, unexpected_tool_calls);
     let Some(delta) = value
         .pointer("/choices/0/delta/content")
         .or_else(|| value.pointer("/choices/0/message/content"))
@@ -3011,6 +3092,54 @@ fn process_sse_line(
     });
     *sequence += 1;
     Ok(())
+}
+
+fn collect_stream_tool_calls(value: &Value, tool_calls: &mut Vec<HermesStreamToolCall>) {
+    for pointer in [
+        "/choices/0/delta/tool_calls",
+        "/choices/0/message/tool_calls",
+    ] {
+        let Some(items) = value.pointer(pointer) else {
+            continue;
+        };
+        let Some(items) = items.as_array() else {
+            if !items.is_null() {
+                tool_calls.push(HermesStreamToolCall {
+                    id: None,
+                    name: None,
+                });
+            }
+            continue;
+        };
+        for item in items {
+            tool_calls.push(HermesStreamToolCall {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                name: item
+                    .pointer("/function/name")
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            });
+        }
+    }
+    for pointer in [
+        "/choices/0/delta/function_call",
+        "/choices/0/message/function_call",
+    ] {
+        let Some(function_call) = value.pointer(pointer) else {
+            continue;
+        };
+        tool_calls.push(HermesStreamToolCall {
+            id: None,
+            name: function_call
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        });
+    }
 }
 
 fn summarize_json(value: &Value) -> String {
@@ -3163,6 +3292,12 @@ struct HermesToolFunctionCall {
     name: String,
     #[serde(default)]
     arguments: String,
+}
+
+#[derive(Debug, Clone)]
+struct HermesStreamToolCall {
+    id: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6241,6 +6376,101 @@ mod tests {
         assert_eq!(log.matches("\"tool_name\":null").count(), 4);
         assert!(!log.contains("SECRET_NO_TOOL_SCOPE_CALL"));
         assert!(!log.contains("SECRET_NO_TOOL_SCOPE_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_rejects_unrequested_run_and_session_tool_calls() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        assert_eq!(body["stream"], true);
+                        assert!(body.get("tools").is_none());
+                        let call_id = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            format!("SECRET_STREAM_NO_TOOL_CALL_{}", *calls)
+                        };
+                        let event = json!({
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "SECRET_STREAM_NO_TOOL",
+                                                    "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        });
+                        (
+                            StatusCode::OK,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/event-stream; charset=utf-8",
+                            )],
+                            format!("data: {event}\n\ndata: [DONE]\n\n"),
+                        )
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let run_input = hermes_run_input(new_trace_id());
+        let run_id = run_input.run.id.clone();
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+        assert_eq!(run_events.len(), 1);
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(run_events[0].run_id.as_deref(), Some(run_id.as_str()));
+
+        let session_input = hermes_session_input(new_trace_id(), "hallucinate a stream tool");
+        let session_id = session_input.session_id.clone();
+        let session_events = runtime.stream_session_message(session_input).await.unwrap();
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(session_events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(
+            session_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+        let encoded_events = serde_json::to_string(&json!([run_events, session_events])).unwrap();
+        assert!(!encoded_events.contains("SECRET_STREAM_NO_TOOL"));
+        assert!(!encoded_events.contains("SECRET_ARGUMENT"));
+        assert!(!encoded_events.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_error").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 4);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 4);
+        assert!(!log.contains("SECRET_STREAM_NO_TOOL_CALL"));
+        assert!(!log.contains("SECRET_STREAM_NO_TOOL"));
         assert!(!log.contains("SECRET_ARGUMENT"));
         assert!(!log.contains("SECRET_VALUE"));
         assert!(!log.contains("\"arguments\""));
