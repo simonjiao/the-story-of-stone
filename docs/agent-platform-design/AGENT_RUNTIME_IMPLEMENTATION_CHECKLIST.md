@@ -137,6 +137,9 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_streams_delta_and_final_output`
 - [x] `hermes_runtime_stream_run_sets_run_id_on_events`
 - [x] `hermes_runtime_streams_safe_error_event`
+- [x] `hermes_runtime_streams_tool_progress_and_schema_partial_events`
+- [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
+- [x] `hermes_runtime_stream_run_with_tools_emits_tool_progress_events`
 - [x] `minimal_runtime_stream_registry_contract_error_preserves_schema_version`
 - [x] `hermes_runtime_stream_registry_contract_errors_preserve_schema_version`
 
@@ -238,6 +241,7 @@ backpressure API 是后续项。
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `runtime_executes_multi_step_plan_with_output_refs`
 - [x] `runtime_step_plan_helper_materializes_step_contracts`
 - [x] `runtime_step_plan_requires_explicit_requested_tool_scope`
 - [x] `runtime_step_plan_validates_step_output_contract`
@@ -324,6 +328,7 @@ backpressure API 是后续项。
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `hermes_runtime_executes_authorized_profile_tool_call`
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
   覆盖未授权 raw tool name / raw call id 在 call/error audit 中脱敏。
@@ -339,8 +344,10 @@ backpressure API 是后续项。
   覆盖 no-tool streaming profile step path 中 hallucinated tool call 的安全
   error event 和 audit 脱敏。
 - [x] `hermes_runtime_execute_run_exposes_requested_profile_tools`
+- [x] `hermes_runtime_streams_tool_progress_and_schema_partial_events`
 - [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
 - [x] `hermes_runtime_stream_run_with_tools_emits_tool_progress_events`
+- [x] `hermes_runtime_rejects_expired_profile_budget`
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 - [x] `hermes_runtime_run_and_session_reject_expired_contract_budget`
 - [x] `hermes_runtime_stream_run_and_session_safe_error_for_expired_contract_budget`
@@ -365,6 +372,8 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 profile 回灌、executor metadata、raw string output summary 和 adapter
   audit 不泄漏。
+- [x] `hermes_runtime_omits_large_tool_payload_from_model_and_metadata`
+- [x] `summarize_json_omits_values_and_object_keys`
 - [x] tool result metadata / adapter audit 覆盖已校验 output_schema contract。
 - [x] `hermes_runtime_rejects_required_tool_output_ref_missing`
 - [x] `hermes_runtime_writes_tool_events_to_jsonl_audit_sink` 覆盖 append-only
@@ -379,6 +388,9 @@ backpressure API 是后续项。
 - [x] `runtime: audit profile tool execution`
 - [x] `runtime: enforce required tool output refs`
 - [x] `runtime: verify audit sink append semantics`
+- [x] `runtime: include tool output schema in summaries`
+- [x] `runtime: harden tool output summaries`
+- [x] `runtime: sanitize tool result metadata`
 - [x] `runtime: redact unauthorized tool audit names`
 - [x] `runtime: redact unauthorized tool audit call ids`
 - [x] `runtime: omit raw tool outputs from profile context`
