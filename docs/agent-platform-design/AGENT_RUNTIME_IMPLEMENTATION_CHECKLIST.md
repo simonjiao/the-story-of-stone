@@ -256,7 +256,7 @@ backpressure API 是后续项。
 - [x] Runtime adapter 直连 JSONL audit sink 有回归验证，且确认已有 JSONL
   记录不会被覆盖。
 - [x] 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments 或
-  raw tool name。
+  raw tool name / raw call id。
 
 ### R4.5 测试
 
@@ -264,7 +264,7 @@ backpressure API 是后续项。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
-  覆盖未授权 raw tool name 在 call/error audit 中脱敏。
+  覆盖未授权 raw tool name / raw call id 在 call/error audit 中脱敏。
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 executor metadata、raw string output summary 和 adapter audit 不泄漏。

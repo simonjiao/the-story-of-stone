@@ -603,17 +603,17 @@ impl HermesRuntimeClient {
                         requested_tools,
                         &tool_call.function.name,
                     );
+                    let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
                     let call_event = runtime_tool_call_audit_event(
                         runtime_profile,
                         trace_id,
-                        &tool_call.id,
+                        audit_call_id.as_deref(),
                         audit_tool_name.as_deref(),
                     );
                     self.audit_sink
                         .append_runtime_event(call_event.clone())
                         .await?;
                     tool_audit_events.push(call_event);
-                    let tool_call_id = tool_call.id.clone();
                     let (result, output_schema) = match self
                         .execute_runtime_tool_call(
                             contract,
@@ -629,7 +629,7 @@ impl HermesRuntimeClient {
                             let failure_event = runtime_tool_error_audit_event(
                                 runtime_profile,
                                 trace_id,
-                                &tool_call_id,
+                                audit_call_id.as_deref(),
                                 audit_tool_name.as_deref(),
                                 &error,
                             );
@@ -2503,7 +2503,7 @@ fn ensure_profile_budget(started: Instant, contract: Option<&ProfileContract>) -
     else {
         return Ok(());
     };
-    if started.elapsed() > Duration::from_secs(max_runtime_seconds) {
+    if max_runtime_seconds == 0 || started.elapsed() > Duration::from_secs(max_runtime_seconds) {
         return Err(AgentCoreError::coded(
             ErrorCode::Conflict,
             "runtime profile exceeded max_runtime_seconds",
@@ -2550,15 +2550,16 @@ fn parse_tool_arguments(arguments: &str) -> CoreResult<Value> {
 fn runtime_tool_call_audit_event(
     runtime_profile: &str,
     trace_id: &str,
-    call_id: &str,
+    call_id: Option<&str>,
     tool_name: Option<&str>,
 ) -> Value {
     json!({
         "event": "runtime_tool_call",
         "call_id": call_id,
+        "call_id_status": runtime_tool_identity_status(call_id),
         "profile_id": runtime_profile,
         "tool_name": tool_name,
-        "tool_name_status": runtime_tool_name_status(tool_name),
+        "tool_name_status": runtime_tool_identity_status(tool_name),
         "trace_id": trace_id,
     })
 }
@@ -2578,8 +2579,8 @@ fn runtime_tool_audit_name(
         .map(|spec| spec.name)
 }
 
-fn runtime_tool_name_status(tool_name: Option<&str>) -> &'static str {
-    if tool_name.is_some() {
+fn runtime_tool_identity_status(value: Option<&str>) -> &'static str {
+    if value.is_some() {
         "validated"
     } else {
         "redacted"
@@ -2595,16 +2596,17 @@ fn runtime_tool_result_audit_event(result: &RuntimeToolResult, output_schema: &V
 fn runtime_tool_error_audit_event(
     runtime_profile: &str,
     trace_id: &str,
-    call_id: &str,
+    call_id: Option<&str>,
     tool_name: Option<&str>,
     error: &AgentCoreError,
 ) -> Value {
     json!({
         "event": "runtime_tool_error",
         "call_id": call_id,
+        "call_id_status": runtime_tool_identity_status(call_id),
         "profile_id": runtime_profile,
         "tool_name": tool_name,
-        "tool_name_status": runtime_tool_name_status(tool_name),
+        "tool_name_status": runtime_tool_identity_status(tool_name),
         "trace_id": trace_id,
         "error_code": error.code().as_str(),
     })
@@ -4653,7 +4655,7 @@ mod tests {
                                 "role": "assistant",
                                 "tool_calls": [
                                     {
-                                        "id": "call-1",
+                                        "id": "SECRET_UNAUTHORIZED_CALL_ID",
                                         "type": "function",
                                         "function": {
                                             "name": "SECRET_UNAUTHORIZED_TOOL",
@@ -4704,8 +4706,11 @@ mod tests {
         let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
         assert_eq!(log.matches("runtime_tool_call").count(), 1);
         assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("\"call_id\":null"));
+        assert!(log.contains("\"call_id_status\":\"redacted\""));
         assert!(log.contains("\"tool_name\":null"));
         assert!(log.contains("\"tool_name_status\":\"redacted\""));
+        assert!(!log.contains("SECRET_UNAUTHORIZED_CALL_ID"));
         assert!(!log.contains("SECRET_UNAUTHORIZED_TOOL"));
         assert!(!log.contains("\"arguments\""));
         let _ = tokio::fs::remove_file(audit_path).await;
