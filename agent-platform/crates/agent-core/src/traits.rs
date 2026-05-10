@@ -695,7 +695,7 @@ fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreRes
                 if !properties.contains_key(field) {
                     return Err(AgentCoreError::coded(
                         ErrorCode::Conflict,
-                        format!("schema validation failed at {path}: unexpected {field}"),
+                        format!("schema validation failed at {path}: unexpected property"),
                     ));
                 }
             }
@@ -722,6 +722,29 @@ fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreRes
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_validation_error_omits_unexpected_property_name() {
+        let error = validate_json_schema_value(
+            &json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            &json!({"SECRET_UNEXPECTED_FIELD": "SECRET_UNEXPECTED_VALUE"}),
+        )
+        .unwrap_err();
+
+        let encoded = error.to_string();
+        assert!(encoded.contains("unexpected property"));
+        assert!(!encoded.contains("SECRET_UNEXPECTED_FIELD"));
+        assert!(!encoded.contains("SECRET_UNEXPECTED_VALUE"));
+    }
 }
 
 #[async_trait]

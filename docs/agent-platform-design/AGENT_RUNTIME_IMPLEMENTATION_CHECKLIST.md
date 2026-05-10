@@ -65,6 +65,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] schema invalid 时返回安全错误。
 - [x] schema invalid 不进入 successful runtime output。
 - [x] 错误不泄露 prompt、secret、connector payload 或内部栈。
+- [x] schema validation 的 unexpected property 错误不回显输入侧未知字段名或值。
 - [x] metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
 - [x] 超过 `max_context_messages` 时返回安全错误，不进入 successful output。
 - [x] `safety_policy` 拒绝指定 message role 或超大消息时返回安全错误。
@@ -77,6 +78,7 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 - [x] `minimal_runtime_rejects_profile_safety_denied_role`
 - [x] `minimal_runtime_rejects_profile_safety_oversized_message`
 - [x] `minimal_runtime_rejects_profile_safety_unknown_field`
+- [x] `schema_validation_error_omits_unexpected_property_name`
 
 ### R1 提交
 

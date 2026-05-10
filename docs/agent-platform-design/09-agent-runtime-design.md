@@ -226,9 +226,11 @@ ProfileContract
 1. schema valid 时正常返回 `RuntimeOutput`。
 2. schema invalid 时返回安全错误，不进入 successful runtime output。
 3. 错误不泄露 prompt、secret、connector payload 或内部栈。
-4. metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
-5. 超过 `max_context_messages` 时返回安全错误，不进入 successful runtime output。
-6. `safety_policy.deny_message_roles` 和 `safety_policy.max_message_bytes`
+4. schema validation 对输入侧 unexpected property 只返回安全错误类型，不回显
+   未知字段名或字段值。
+5. metadata 包含 `profile_id`、`schema_version` 和 `runtime_profile`。
+6. 超过 `max_context_messages` 时返回安全错误，不进入 successful runtime output。
+7. `safety_policy.deny_message_roles` 和 `safety_policy.max_message_bytes`
    会在进入模型前执行，未知 safety policy 字段 fail closed，失败时返回
    安全错误。
 
