@@ -29,8 +29,6 @@ use std::{
 };
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 
-const DEFAULT_TOOL_RESULT_INLINE_BYTES: usize = 8192;
-
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeProfileRegistry {
     contracts: Arc<BTreeMap<String, ProfileContract>>,
@@ -404,7 +402,6 @@ pub struct HermesRuntimeClient {
     tool_executor: Arc<dyn RuntimeToolExecutor>,
     audit_sink: Arc<dyn RuntimeAuditSink>,
     max_tool_rounds: usize,
-    max_tool_result_inline_bytes: usize,
 }
 
 impl HermesRuntimeClient {
@@ -420,7 +417,6 @@ impl HermesRuntimeClient {
             tool_executor: Arc::new(DenyRuntimeToolExecutor),
             audit_sink: Arc::new(NoopRuntimeAuditSink),
             max_tool_rounds: 4,
-            max_tool_result_inline_bytes: DEFAULT_TOOL_RESULT_INLINE_BYTES,
         })
     }
 
@@ -434,10 +430,6 @@ impl HermesRuntimeClient {
         {
             client.audit_sink = Arc::new(JsonlRuntimeAuditSink::new(path));
         }
-        client.max_tool_result_inline_bytes = env_u64(
-            "AGENT_RUNTIME_TOOL_RESULT_INLINE_BYTES",
-            DEFAULT_TOOL_RESULT_INLINE_BYTES as u64,
-        ) as usize;
         Ok(client)
     }
 
@@ -458,11 +450,6 @@ impl HermesRuntimeClient {
 
     pub fn with_max_tool_rounds(mut self, max_tool_rounds: usize) -> Self {
         self.max_tool_rounds = max_tool_rounds;
-        self
-    }
-
-    pub fn with_max_tool_result_inline_bytes(mut self, bytes: usize) -> Self {
-        self.max_tool_result_inline_bytes = bytes;
         self
     }
 
@@ -649,7 +636,7 @@ impl HermesRuntimeClient {
                     tool_audit_events.push(result_event);
                     messages.push(HermesChatMessage::tool_result(
                         result.call_id.clone(),
-                        runtime_tool_result_message(&result, self.max_tool_result_inline_bytes)?,
+                        runtime_tool_result_message(&result)?,
                     ));
                     tool_results.push(result_summary);
                 }
@@ -2619,29 +2606,14 @@ fn runtime_tool_result_summary(result: &RuntimeToolResult, output_schema: &Value
     })
 }
 
-fn runtime_tool_result_message(
-    result: &RuntimeToolResult,
-    inline_limit: usize,
-) -> CoreResult<String> {
-    let output_bytes = serde_json::to_vec(&result.output)
-        .map_err(|_| runtime_failure("runtime tool result was not serializable"))?
-        .len();
-    let content = if output_bytes <= inline_limit {
-        json!({
-            "call_id": &result.call_id,
-            "tool_name": &result.tool_name,
-            "output_ref": &result.output_ref,
-            "output": &result.output,
-        })
-    } else {
-        json!({
-            "call_id": &result.call_id,
-            "tool_name": &result.tool_name,
-            "output_ref": &result.output_ref,
-            "output_summary": summarize_json(&result.output),
-            "output_omitted": true,
-        })
-    };
+fn runtime_tool_result_message(result: &RuntimeToolResult) -> CoreResult<String> {
+    let content = json!({
+        "call_id": &result.call_id,
+        "tool_name": &result.tool_name,
+        "output_ref": &result.output_ref,
+        "output_summary": summarize_json(&result.output),
+        "output_omitted": true,
+    });
     serde_json::to_string(&content)
         .map_err(|_| runtime_failure("runtime tool result was not serializable"))
 }
@@ -4344,8 +4316,7 @@ mod tests {
             timeout: Duration::from_secs(2),
         })
         .unwrap()
-        .with_tool_executor(Arc::new(executor))
-        .with_max_tool_result_inline_bytes(16);
+        .with_tool_executor(Arc::new(executor));
 
         let output = runtime
             .execute_profile_step(RuntimeProfileInput {
@@ -4372,43 +4343,52 @@ mod tests {
 
     #[tokio::test]
     async fn hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit() {
-        let app = Router::new().route(
-            "/chat/completions",
-            post(|Json(body): Json<Value>| async move {
-                let has_tool_result = body["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| message["role"] == "tool");
-                if has_tool_result {
-                    Json(json!({
-                        "choices": [
-                            {"message": {"role": "assistant", "content": "metadata summarized"}}
-                        ]
-                    }))
-                } else {
-                    Json(json!({
-                        "choices": [
-                            {
-                                "message": {
-                                    "role": "assistant",
-                                    "tool_calls": [
-                                        {
-                                            "id": "call-metadata",
-                                            "type": "function",
-                                            "function": {
-                                                "name": "tool.metadata",
-                                                "arguments": "{}"
-                                            }
+        let seen_tool_content = Arc::new(Mutex::new(None::<String>));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(seen_tool_content): State<Arc<Mutex<Option<String>>>>,
+                     Json(body): Json<Value>| async move {
+                        let tool_result = body["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|message| message["role"] == "tool")
+                            .cloned();
+                        if let Some(message) = tool_result {
+                            *seen_tool_content.lock().unwrap() =
+                                message["content"].as_str().map(ToString::to_string);
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "metadata summarized"}}
+                                ]
+                            }))
+                        } else {
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-metadata",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.metadata",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
                                         }
-                                    ]
-                                }
-                            }
-                        ]
-                    }))
-                }
-            }),
-        );
+                                    }
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(seen_tool_content.clone());
         let mut contract = ProfileContract::new("metadata-profile", "v1");
         contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.metadata".to_string()]);
         let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
@@ -4441,6 +4421,13 @@ mod tests {
         assert!(!encoded_metadata.contains("SECRET_TOOL_PAYLOAD"));
         assert!(!encoded_metadata.contains("SECRET_TOOL_OUTPUT"));
         assert!(!encoded_metadata.contains("SECRET_TOOL_VALUE"));
+        let tool_content = seen_tool_content.lock().unwrap().clone().unwrap();
+        let tool_content_json: Value = serde_json::from_str(&tool_content).unwrap();
+        assert_eq!(tool_content_json["output_omitted"], true);
+        assert_eq!(tool_content_json["output_summary"], "object_keys_len:1");
+        assert!(tool_content_json.get("output").is_none());
+        assert!(!tool_content.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!tool_content.contains("SECRET_TOOL_VALUE"));
         assert_eq!(
             output.metadata["tool_results"][0]["output_ref"],
             "runtime://tool-results/leaky"

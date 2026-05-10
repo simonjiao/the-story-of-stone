@@ -432,10 +432,11 @@ runtime: add multi-profile step plan
 2. 写入类工具仍只能走 Manager external-action apply/compensate。
 3. 每个 tool call 在执行前校验 tool name、input schema 和 profile tool policy。
 4. 每个 tool result 在回灌给 profile 前校验 output schema。
-5. 大 tool output 不进入 final `RuntimeOutput.metadata`；metadata 只保留
-   output_ref、类型/长度/数量摘要、已校验的 output_schema contract、
-   tool name、call id 和 trace 信息。
-   摘要不得包含 raw string、object key 名或 executor metadata payload。
+5. tool output 不以 raw output 形式回灌给 profile，也不进入 final
+   `RuntimeOutput.metadata`；profile 回灌和 metadata 只保留 output_ref、
+   类型/长度/数量摘要、已校验的 output_schema contract、tool name、call id
+   和 trace 信息。摘要不得包含 raw string、object key 名或 executor
+   metadata payload。
 6. `RuntimeToolSpec.output_ref_required=true` 时，tool executor 缺失
    `output_ref` 必须失败，不能由 Runtime 自动补全后当作成功结果。
 7. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
@@ -463,7 +464,7 @@ runtime: add multi-profile step plan
 2. 未授权或 denied tool call 在执行前被拒绝。
 3. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
    step output。
-4. final metadata 不包含大 payload，只包含 ref 和摘要。
+4. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
 5. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
 6. tool output summary 不泄漏 raw string、object key 名或 executor metadata
    payload。
