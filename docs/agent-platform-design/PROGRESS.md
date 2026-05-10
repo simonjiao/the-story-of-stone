@@ -44,9 +44,10 @@
   malformed arguments 和 tool input/output schema invalid 有直接回归验证，
   失败时不会执行越界 executor、回灌 raw arguments/output 或形成
   successful tool result；tool executor 自身失败会包装为安全 Runtime
-  错误，不透传 executor error payload；tool call 失败会写安全
-  `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
-  可配置的 append-only JSONL audit sink，并有保留已有记录的回归验证。
+  错误，streaming path 返回安全 `error` event，不透传 executor error
+  payload；tool call 失败会写安全 `runtime_tool_error` adapter audit event；
+  Runtime adapter 也提供直连场景可配置的 append-only JSONL audit sink，并有
+  保留已有记录的回归验证。
 - Runtime repo/local checklist 当前已关闭；完成口径限定为 Agent Runtime 本体，
   完整 JSON Schema 和领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
 - 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime

@@ -268,8 +268,8 @@ backpressure API 是后续项。
   tool result，并写安全 `runtime_tool_error` audit event。
 - [x] tool output schema invalid 时不会回灌给 profile 或形成 successful
   step output，并写安全 `runtime_tool_error` audit event。
-- [x] tool executor 自身失败时，Runtime 返回安全错误 message，并写安全
-  `runtime_tool_error` audit event。
+- [x] tool executor 自身失败时，Runtime 返回安全错误 message；streaming path
+  返回安全 `error` event；两者都会写安全 `runtime_tool_error` audit event。
 - [x] profile 回灌和 final metadata 只保留 tool result ref、已校验的
   output_schema contract、summary 和 trace 信息，不包含 raw tool output。
 - [x] tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
@@ -311,6 +311,9 @@ backpressure API 是后续项。
   audit 不泄漏 arguments。
 - [x] `hermes_runtime_sanitizes_tool_executor_failure_with_safe_audit`
   覆盖 tool executor error payload 不进入 Runtime 错误 message 或 audit。
+- [x] `hermes_runtime_stream_run_safe_error_for_tool_executor_failure`
+  覆盖 streaming tool loop 的 executor failure 不泄漏 error payload，并保留
+  run/schema/audit 边界。
 - [x] `hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit`
   覆盖 tool output schema invalid 不回灌、不形成 result event、audit 不泄漏
   raw output。

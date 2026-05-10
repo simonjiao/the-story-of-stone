@@ -479,8 +479,8 @@ runtime: add multi-profile step plan
    result，并写安全 `runtime_tool_error` audit event。
 5. tool output schema invalid 时不会回灌给 profile，也不会形成 successful
    step output，并写安全 `runtime_tool_error` audit event。
-6. tool executor 自身失败时，Runtime 返回安全错误 message，并写安全
-   `runtime_tool_error` audit event。
+6. tool executor 自身失败时，Runtime 返回安全错误 message；streaming path
+   返回安全 `error` event；两者都会写安全 `runtime_tool_error` audit event。
 7. profile 回灌和 final metadata 不包含 raw tool output，只包含 ref 和摘要。
 8. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
 9. tool output summary 不泄漏 raw string、object key 名或 executor metadata
