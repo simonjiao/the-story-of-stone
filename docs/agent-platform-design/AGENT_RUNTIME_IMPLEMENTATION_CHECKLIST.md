@@ -76,6 +76,8 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 ### R1 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `minimal_runtime_profile_step_validates_contract_and_streams_final_event`
+- [x] `minimal_runtime_rejects_invalid_profile_input_schema`
 - [x] `minimal_runtime_rejects_profile_context_over_budget`
 - [x] `minimal_runtime_rejects_profile_safety_denied_role`
 - [x] `minimal_runtime_rejects_profile_safety_oversized_message`
@@ -86,6 +88,11 @@ Manager、Worker、Orchestrator 和领域 Gateway 只作为调用方或集成边
 ### R1 提交
 
 - [x] `runtime: add profile contract validation`
+- [x] `runtime: complete agent runtime contract enforcement`
+- [x] `runtime: enforce profile safety policy subset`
+- [x] `runtime: redact schema unexpected property errors`
+- [x] `runtime: redact invalid safety policy errors`
+- [x] `runtime: sanitize schema validation errors`
 
 ## R2 Runtime Streaming Events
 
@@ -127,12 +134,19 @@ backpressure API 是后续项。
 ### R2 测试
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `hermes_runtime_streams_delta_and_final_output`
+- [x] `hermes_runtime_stream_run_sets_run_id_on_events`
+- [x] `hermes_runtime_streams_safe_error_event`
 - [x] `minimal_runtime_stream_registry_contract_error_preserves_schema_version`
 - [x] `hermes_runtime_stream_registry_contract_errors_preserve_schema_version`
 
 ### R2 提交
 
 - [x] `runtime: add streaming event contract`
+- [x] `runtime: align stream event contract fields`
+- [x] `docs: clarify runtime streaming completion scope`
+- [x] `runtime: enforce profile budget on streaming path`
+- [x] `runtime: preserve registry stream schema`
 
 ## R3 Per-profile Tool Permission Enforcement
 
@@ -167,12 +181,19 @@ backpressure API 是后续项。
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `minimal_runtime_rejects_denied_profile_tool`
+- [x] `minimal_runtime_rejects_unallowed_profile_tool`
 - [x] `runtime_tool_policy_rejects_non_read_only_tool_call` 覆盖
   non-read-only tool scope 和 tool call 两层拒绝。
+- [x] `hermes_runtime_exposes_only_requested_profile_tools`
+- [x] `hermes_runtime_execute_run_exposes_requested_profile_tools`
+- [x] `hermes_runtime_rejects_write_capability_tool_scope`
 
 ### R3 提交
 
 - [x] `runtime: enforce profile tool policy`
+- [x] `Tighten agent runtime tool scope`
+- [x] `runtime: verify non-read-only tool calls`
 
 ## R4 Multi-profile Step Plan
 
