@@ -250,6 +250,7 @@ for state in [
     "Authenticated",
     "Normalized",
     "Planned",
+    "Runtime Executed",
     "Evidence Retrieved",
     "Bundle Created",
     "Drafted",
@@ -263,6 +264,7 @@ for event_type in [
     "request_normalized",
     "retrieval_plan_created",
     "agent_invocation_completed",
+    "runtime_profile_step_completed",
     "evidence_package_created",
     "review_completed",
     "response_finalized",
@@ -294,6 +296,8 @@ assert dry_run["object"] == "tonglingyu.runtime_dry_run", dry_run
 assert dry_run["status"] == "passed", dry_run
 assert dry_run["package_id"] in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
+assert dry_run["runtime_step_outputs"], dry_run
+assert all("output_ref" in step for step in dry_run["runtime_step_outputs"]), dry_run
 assert any(
     "tonglingyu.text.search" in step["allowed_tools"]
     for step in dry_run["runtime_step_plan"]["steps"]

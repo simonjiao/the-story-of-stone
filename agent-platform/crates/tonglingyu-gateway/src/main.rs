@@ -22,8 +22,9 @@ use std::{
 };
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
-    EvidenceCard, EvidencePackage, TonglingyuToolCall, TonglingyuToolOutput, enforce_review,
-    execute_tool, local_answer, package_json, replay_answer,
+    EvidenceCard, EvidencePackage, RuntimeWorkflowInput, RuntimeWorkflowProfiles,
+    TonglingyuToolCall, TonglingyuToolOutput, execute_runtime_workflow, execute_tool, package_json,
+    replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -234,6 +235,7 @@ struct AppState {
     upstream_base_url: Option<String>,
     upstream_api_key: Option<String>,
     upstream_model: String,
+    upstream_timeout_secs: u64,
     max_evidence: usize,
     gateway_api_keys: Vec<String>,
     admin_api_keys: Vec<String>,
@@ -243,7 +245,6 @@ struct AppState {
     retention_days: u32,
     profiles: InternalProfiles,
     started_at: String,
-    client: reqwest::Client,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +253,15 @@ struct InternalProfiles {
     text: String,
     commentary: String,
     reviewer: String,
+}
+
+fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProfiles {
+    RuntimeWorkflowProfiles {
+        main: profiles.main.clone(),
+        text: profiles.text.clone(),
+        commentary: profiles.commentary.clone(),
+        reviewer: profiles.reviewer.clone(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -607,6 +617,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             .map(|value| value.trim_end_matches('/').to_string()),
         upstream_api_key: args.upstream_api_key.filter(|value| !value.is_empty()),
         upstream_model: args.upstream_model,
+        upstream_timeout_secs: args.upstream_timeout_secs,
         max_evidence: args.max_evidence,
         gateway_api_keys: configured_keys(args.gateway_api_key, args.gateway_api_keys),
         admin_api_keys: configured_keys(args.admin_api_key, args.admin_api_keys),
@@ -621,9 +632,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
             reviewer: args.profile_reviewer,
         },
         started_at: now_rfc3339(),
-        client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(args.upstream_timeout_secs))
-            .build()?,
     });
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -1049,10 +1057,20 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         commentary: "honglou-commentary".to_string(),
         reviewer: "honglou-reviewer".to_string(),
     };
-    let (cards, mut policy) = search_evidence_with_policy(&conn, &args.question, args.limit)?;
+    let mut policy = search_policy(&args.question);
     policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
-    let package = runtime_create_package(&conn, &trace_id, &args.question, cards)?;
+    let workflow = execute_runtime_workflow(
+        &conn,
+        RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: args.question.clone(),
+            limit: args.limit,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&profiles),
+        },
+    )?;
+    let package = workflow.package;
     let replay = runtime_replay_package(&conn, &package.package_id)?
         .ok_or_else(|| anyhow!("runtime dry run package replay missing"))?;
     Ok(json!({
@@ -1062,14 +1080,17 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "question": &args.question,
         "policy": policy,
         "runtime_step_plan": runtime_step_plan,
+        "runtime_step_outputs": workflow.steps,
         "package_id": &package.package_id,
         "review": &package.review,
+        "final_answer": workflow.final_answer,
         "replay": replay,
         "elapsed_ms": elapsed_ms(started),
         "checks": {
             "card_count": package.cards.len(),
             "claim_count": package.claims.len(),
             "reviewer_enforced": true,
+            "profile_step_count": workflow.steps.len(),
             "runtime_tools_used": [
                 "tonglingyu.text.search",
                 "tonglingyu.evidence.package.create",
@@ -2297,27 +2318,7 @@ async fn chat_completions(
         return Json(value).into_response();
     }
 
-    let (cards, mut policy) =
-        match search_evidence_with_policy(&conn, &question, state.max_evidence) {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = record_workflow_state(
-                    &conn,
-                    &trace_id,
-                    Some(&session_id),
-                    None,
-                    "Failed with Controlled Response",
-                    "evidence_retrieval_failed",
-                    &json!({"error": error.to_string()}),
-                );
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "evidence_retrieval_failed",
-                    "evidence retrieval failed",
-                    Some(&trace_id),
-                );
-            }
-        };
+    let mut policy = search_policy(&question);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let _ = record_workflow_state(
@@ -2345,16 +2346,58 @@ async fn chat_completions(
             "runtime_step_plan": &runtime_step_plan,
         }),
     );
+    let workflow = match execute_runtime_workflow(
+        &conn,
+        RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: question.clone(),
+            limit: state.max_evidence,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&state.profiles),
+        },
+    ) {
+        Ok(workflow) => workflow,
+        Err(error) => {
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&session_id),
+                None,
+                "Failed with Controlled Response",
+                "runtime_workflow_failed",
+                &json!({"error": error.to_string()}),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime_workflow_failed",
+                "runtime workflow failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let package = workflow.package;
     let _ = record_workflow_state(
         &conn,
         &trace_id,
         Some(&session_id),
-        None,
+        Some(&package.package_id),
+        "Runtime Executed",
+        "ok",
+        &json!({
+            "runtime_step_outputs": &workflow.steps,
+            "step_count": workflow.steps.len(),
+        }),
+    );
+    let _ = record_workflow_state(
+        &conn,
+        &trace_id,
+        Some(&session_id),
+        Some(&package.package_id),
         "Evidence Retrieved",
         "ok",
         &json!({
-            "card_count": cards.len(),
-            "evidence_types": cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "card_count": package.cards.len(),
+            "evidence_types": package.cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
         }),
     );
     let _ = insert_audit_event(
@@ -2364,32 +2407,13 @@ async fn chat_completions(
         &json!({
             "session_id": &session_id,
             "profiles": &policy.planned_profiles,
-            "operation": "evidence_retrieval",
-            "card_count": cards.len(),
-            "evidence_types": cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "operation": "runtime_profile_workflow",
+            "package_id": &package.package_id,
+            "card_count": package.cards.len(),
+            "evidence_types": package.cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "runtime_step_outputs": &workflow.steps,
         }),
     );
-
-    let package = match runtime_create_package(&conn, &trace_id, &question, cards) {
-        Ok(package) => package,
-        Err(error) => {
-            let _ = record_workflow_state(
-                &conn,
-                &trace_id,
-                Some(&session_id),
-                None,
-                "Failed with Controlled Response",
-                "evidence_package_failed",
-                &json!({"error": error.to_string()}),
-            );
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "evidence_pipeline_failed",
-                "evidence package creation failed",
-                Some(&trace_id),
-            );
-        }
-    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -2404,38 +2428,6 @@ async fn chat_completions(
         }),
     );
 
-    let _ = insert_audit_event(
-        &conn,
-        &trace_id,
-        "agent_invocation_started",
-        &json!({
-            "session_id": &session_id,
-            "package_id": &package.package_id,
-            "profile": "honglou-main",
-            "operation": "draft_answer",
-        }),
-    );
-    let draft = match answer_with_optional_upstream(&state, &question, &package).await {
-        Ok(draft) => draft,
-        Err(error) => {
-            tracing::warn!(%trace_id, error = %error, "upstream answer failed; using local fallback");
-            let _ = insert_audit_event(
-                &conn,
-                &trace_id,
-                "upstream_call_failed",
-                &json!({
-                    "session_id": &session_id,
-                    "package_id": &package.package_id,
-                    "upstream_configured": state.upstream_base_url.is_some(),
-                    "error": safe_error_detail(&error),
-                }),
-            );
-            AnswerDraft {
-                content: local_answer(&question, &package),
-                source: "local_fallback_after_upstream_failure".to_string(),
-            }
-        }
-    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -2444,8 +2436,7 @@ async fn chat_completions(
         "Drafted",
         "ok",
         &json!({
-            "upstream_configured": state.upstream_base_url.is_some(),
-            "answer_source": &draft.source,
+            "answer_source": &workflow.answer_source,
         }),
     );
     let _ = insert_audit_event(
@@ -2457,10 +2448,10 @@ async fn chat_completions(
             "package_id": &package.package_id,
             "profile": "honglou-main",
             "operation": "draft_answer",
-            "answer_source": &draft.source,
+            "answer_source": &workflow.answer_source,
         }),
     );
-    let final_answer = enforce_review(draft.content, &package);
+    let final_answer = workflow.final_answer;
     let revision_status = if package.review.status == "passed" {
         "not_needed"
     } else {
@@ -2545,83 +2536,6 @@ async fn chat_completions(
     } else {
         Json(value).into_response()
     }
-}
-
-async fn answer_with_optional_upstream(
-    state: &AppState,
-    question: &str,
-    package: &EvidencePackage,
-) -> Result<AnswerDraft> {
-    let Some(base_url) = &state.upstream_base_url else {
-        return Ok(AnswerDraft {
-            content: local_answer(question, package),
-            source: "local".to_string(),
-        });
-    };
-    let prompt = upstream_prompt(question, package);
-    let mut request = state
-        .client
-        .post(format!("{base_url}/chat/completions"))
-        .json(&json!({
-            "model": state.upstream_model,
-            "stream": false,
-            "metadata": {
-                "tonglingyu_profile": &state.profiles.main,
-                "evidence_package_id": &package.package_id,
-                "trace_id": &package.trace_id,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你是通灵玉的回答生成层。只能依据给定证据包回答；必须保留版本边界、支持范围和不支持范围；证据不足时直说证据不足。"
-                },
-                {"role": "user", "content": prompt}
-            ]
-        }));
-    if let Some(key) = &state.upstream_api_key {
-        request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
-    }
-    let response = request.send().await?.error_for_status()?;
-    let value: Value = response.json().await?;
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("upstream response missing choices[0].message.content"))?;
-    Ok(AnswerDraft {
-        content: format!(
-            "{}\n\n证据包：{}\nreviewer：{}",
-            content.trim(),
-            package.package_id,
-            package.review.summary
-        ),
-        source: "upstream".to_string(),
-    })
-}
-
-fn upstream_prompt(question: &str, package: &EvidencePackage) -> String {
-    let evidence = package
-        .cards
-        .iter()
-        .enumerate()
-        .map(|(index, card)| {
-            format!(
-                "[{}] {} {} {} rev={:?}\n证据：{}\n支持：{}\n不支持：{}",
-                index + 1,
-                card.evidence_type,
-                card.source_id,
-                card.source_title,
-                card.revision_id,
-                card.text,
-                card.support_scope,
-                card.unsupported_scope
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!(
-        "问题：{}\n\n证据包编号：{}\n审校预判：{}\n\n证据：\n{}\n\n请给出简洁中文回答。",
-        question, package.package_id, package.review.summary, evidence
-    )
 }
 
 fn completion_value(
@@ -2899,12 +2813,6 @@ fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
     })))
 }
 
-#[derive(Debug)]
-struct AnswerDraft {
-    content: String,
-    source: String,
-}
-
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
     let runtime_stats = tonglingyu_runtime::runtime_store_stats(&conn)?;
@@ -2920,6 +2828,9 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "dependencies": {
             "sqlite": "ok",
             "upstream": if state.upstream_base_url.is_some() { "configured" } else { "local" },
+            "upstream_model": &state.upstream_model,
+            "upstream_api_key_configured": state.upstream_api_key.is_some(),
+            "upstream_timeout_secs": state.upstream_timeout_secs,
         },
         "security": {
             "gateway_key_count": state.gateway_api_keys.len(),

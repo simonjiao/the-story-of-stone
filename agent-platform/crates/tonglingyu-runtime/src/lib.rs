@@ -8,6 +8,7 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::Path,
+    time::Instant,
 };
 use time::OffsetDateTime;
 
@@ -98,6 +99,63 @@ pub struct RuntimeStoreStats {
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowProfiles {
+    pub main: String,
+    pub text: String,
+    pub commentary: String,
+    pub reviewer: String,
+}
+
+impl Default for RuntimeWorkflowProfiles {
+    fn default() -> Self {
+        Self {
+            main: "honglou-main".to_string(),
+            text: "honglou-text".to_string(),
+            commentary: "honglou-commentary".to_string(),
+            reviewer: "honglou-reviewer".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowInput {
+    pub trace_id: String,
+    pub question: String,
+    pub limit: usize,
+    #[serde(default)]
+    pub required_evidence_types: Vec<String>,
+    pub profiles: RuntimeWorkflowProfiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowStepReport {
+    pub step_id: String,
+    pub profile: String,
+    pub profile_contract_version: String,
+    pub operation: String,
+    pub status: String,
+    pub required: bool,
+    pub allowed_tools: Vec<String>,
+    pub tool_calls: Vec<String>,
+    pub input_ref: Option<String>,
+    pub output_ref: String,
+    pub duration_ms: u128,
+    pub trace_id: String,
+    pub output: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowOutput {
+    pub trace_id: String,
+    pub question: String,
+    pub package: EvidencePackage,
+    pub draft_answer: String,
+    pub final_answer: String,
+    pub answer_source: String,
+    pub steps: Vec<RuntimeWorkflowStepReport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +457,281 @@ pub fn execute_tool(conn: &Connection, call: TonglingyuToolCall) -> Result<Tongl
             })
         }
     }
+}
+
+pub fn execute_runtime_workflow(
+    conn: &Connection,
+    input: RuntimeWorkflowInput,
+) -> Result<RuntimeWorkflowOutput> {
+    if input.limit == 0 {
+        return Err(anyhow!("runtime workflow limit must be greater than 0"));
+    }
+    let mut steps = Vec::new();
+    let mut cards = Vec::new();
+    let mut text_required_types = input
+        .required_evidence_types
+        .iter()
+        .filter(|item| item.as_str() != "commentary")
+        .cloned()
+        .collect::<Vec<_>>();
+    if !text_required_types.iter().any(|item| item == "base_text") {
+        text_required_types.push("base_text".to_string());
+    }
+    let text_started = Instant::now();
+    let text_cards = match execute_tool(
+        conn,
+        TonglingyuToolCall::TextSearch {
+            question: input.question.clone(),
+            limit: input.limit,
+            required_evidence_types: text_required_types,
+        },
+    )? {
+        TonglingyuToolOutput::EvidenceCards { cards, .. } => cards,
+        other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+    };
+    cards = merge_cards(cards, text_cards.clone());
+    steps.push(workflow_step_report(
+        conn,
+        WorkflowStepReportInput {
+            trace_id: &input.trace_id,
+            step_id: "step-01-text-search",
+            profile: &input.profiles.text,
+            operation: "text_evidence_search",
+            required: true,
+            allowed_tools: vec!["tonglingyu.text.search".to_string()],
+            tool_calls: vec!["tonglingyu.text.search".to_string()],
+            input_ref: None,
+            duration_ms: elapsed_ms(text_started),
+            output: json!({
+            "object": "tonglingyu.text.evidence_analysis",
+            "card_count": text_cards.len(),
+            "evidence_ids": evidence_ids(&text_cards),
+            "evidence_types": evidence_types(&text_cards),
+            }),
+        },
+    )?);
+
+    if input
+        .required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+    {
+        let commentary_started = Instant::now();
+        let commentary_cards = match execute_tool(
+            conn,
+            TonglingyuToolCall::CommentarySearch {
+                question: input.question.clone(),
+                limit: input.limit,
+            },
+        )? {
+            TonglingyuToolOutput::EvidenceCards { cards, .. } => cards,
+            other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        };
+        cards = merge_cards(cards, commentary_cards.clone());
+        steps.push(workflow_step_report(
+            conn,
+            WorkflowStepReportInput {
+                trace_id: &input.trace_id,
+                step_id: "step-02-commentary-search",
+                profile: &input.profiles.commentary,
+                operation: "commentary_evidence_search",
+                required: true,
+                allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
+                tool_calls: vec!["tonglingyu.commentary.search".to_string()],
+                input_ref: None,
+                duration_ms: elapsed_ms(commentary_started),
+                output: json!({
+                "object": "tonglingyu.commentary.evidence_analysis",
+                "card_count": commentary_cards.len(),
+                "evidence_ids": evidence_ids(&commentary_cards),
+                "evidence_types": evidence_types(&commentary_cards),
+                "base_text_limits": "commentary evidence cannot prove base text facts alone",
+                }),
+            },
+        )?);
+    }
+
+    let package_started = Instant::now();
+    let package = match execute_tool(
+        conn,
+        TonglingyuToolCall::EvidencePackageCreate {
+            trace_id: input.trace_id.clone(),
+            question: input.question.clone(),
+            cards,
+        },
+    )? {
+        TonglingyuToolOutput::EvidencePackage { package, .. } => *package,
+        other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+    };
+    let package_step_id = step_id(steps.len() + 1, "package-create");
+    let package_output_ref = workflow_output_ref(&input.trace_id, &package_step_id);
+    steps.push(workflow_step_report(
+        conn,
+        WorkflowStepReportInput {
+            trace_id: &input.trace_id,
+            step_id: &package_step_id,
+            profile: &input.profiles.main,
+            operation: "evidence_package_create",
+            required: true,
+            allowed_tools: vec!["tonglingyu.evidence.package.create".to_string()],
+            tool_calls: vec!["tonglingyu.evidence.package.create".to_string()],
+            input_ref: None,
+            duration_ms: elapsed_ms(package_started),
+            output: json!({
+            "object": "tonglingyu.evidence.package_ref",
+            "package_id": &package.package_id,
+            "card_count": package.cards.len(),
+            "claim_count": package.claims.len(),
+            "review_status": &package.review.status,
+            }),
+        },
+    )?);
+    let draft_started = Instant::now();
+    let draft_answer = local_answer(&input.question, &package);
+    let draft_step_id = step_id(steps.len() + 1, "draft-answer");
+    steps.push(workflow_step_report(
+        conn,
+        WorkflowStepReportInput {
+            trace_id: &input.trace_id,
+            step_id: &draft_step_id,
+            profile: &input.profiles.main,
+            operation: "draft_answer",
+            required: true,
+            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+            tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+            input_ref: Some(package_output_ref.clone()),
+            duration_ms: elapsed_ms(draft_started),
+            output: json!({
+            "object": "tonglingyu.draft_answer",
+            "package_id": &package.package_id,
+            "claim_statements": &package.claims,
+            "answer_source": "runtime_local_profile",
+            }),
+        },
+    )?);
+    let review_started = Instant::now();
+    let final_answer = enforce_review(draft_answer.clone(), &package);
+    let review_step_id = step_id(steps.len() + 1, "review-answer");
+    steps.push(workflow_step_report(
+        conn,
+        WorkflowStepReportInput {
+            trace_id: &input.trace_id,
+            step_id: &review_step_id,
+            profile: &input.profiles.reviewer,
+            operation: "review_answer",
+            required: true,
+            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+            tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+            input_ref: Some(package_output_ref),
+            duration_ms: elapsed_ms(review_started),
+            output: json!({
+            "object": "tonglingyu.review_result",
+            "package_id": &package.package_id,
+            "draft_consumed": true,
+            "claim_statements": &package.claims,
+            "review": &package.review,
+            "revision_applied": package.review.status != "passed",
+            }),
+        },
+    )?);
+    Ok(RuntimeWorkflowOutput {
+        trace_id: input.trace_id,
+        question: input.question,
+        package,
+        draft_answer,
+        final_answer,
+        answer_source: "runtime_local_profile".to_string(),
+        steps,
+    })
+}
+
+struct WorkflowStepReportInput<'a> {
+    trace_id: &'a str,
+    step_id: &'a str,
+    profile: &'a str,
+    operation: &'a str,
+    required: bool,
+    allowed_tools: Vec<String>,
+    tool_calls: Vec<String>,
+    input_ref: Option<String>,
+    duration_ms: u128,
+    output: Value,
+}
+
+fn workflow_step_report(
+    conn: &Connection,
+    input: WorkflowStepReportInput<'_>,
+) -> Result<RuntimeWorkflowStepReport> {
+    let report = RuntimeWorkflowStepReport {
+        step_id: input.step_id.to_string(),
+        profile: input.profile.to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: input.operation.to_string(),
+        status: "completed".to_string(),
+        required: input.required,
+        allowed_tools: input.allowed_tools,
+        tool_calls: input.tool_calls,
+        input_ref: input.input_ref,
+        output_ref: workflow_output_ref(input.trace_id, input.step_id),
+        duration_ms: input.duration_ms,
+        trace_id: input.trace_id.to_string(),
+        output: input.output,
+    };
+    append_runtime_audit_event(
+        conn,
+        input.trace_id,
+        "runtime_profile_step_completed",
+        &json!({
+            "step_id": &report.step_id,
+            "profile": &report.profile,
+            "operation": &report.operation,
+            "status": &report.status,
+            "allowed_tools": &report.allowed_tools,
+            "tool_calls": &report.tool_calls,
+            "input_ref": &report.input_ref,
+            "output_ref": &report.output_ref,
+            "duration_ms": report.duration_ms,
+        }),
+    )?;
+    Ok(report)
+}
+
+fn workflow_output_ref(trace_id: &str, step_id: &str) -> String {
+    format!("runtime://tonglingyu/{trace_id}/{step_id}")
+}
+
+fn step_id(index: usize, name: &str) -> String {
+    format!("step-{index:02}-{name}")
+}
+
+fn merge_cards(mut left: Vec<EvidenceCard>, right: Vec<EvidenceCard>) -> Vec<EvidenceCard> {
+    let mut seen = left
+        .iter()
+        .map(|card| card.block_id.clone())
+        .collect::<HashSet<_>>();
+    for card in right {
+        if seen.insert(card.block_id.clone()) {
+            left.push(card);
+        }
+    }
+    left
+}
+
+fn evidence_ids(cards: &[EvidenceCard]) -> Vec<String> {
+    cards.iter().map(|card| card.evidence_id.clone()).collect()
+}
+
+fn evidence_types(cards: &[EvidenceCard]) -> Vec<String> {
+    cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn elapsed_ms(started: Instant) -> u128 {
+    started.elapsed().as_millis()
 }
 
 pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
@@ -2441,6 +2774,49 @@ mod tests {
         let answer = replay_answer(&package);
         assert!(answer.contains("pkg-test"));
         assert!(answer.contains("证据不足"));
+    }
+
+    #[test]
+    fn runtime_workflow_emits_profile_step_refs_and_review() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let workflow = execute_runtime_workflow(
+            &conn,
+            RuntimeWorkflowInput {
+                trace_id: "trace-workflow-test".to_string(),
+                question: "量子红学理论如何解释通灵玉？".to_string(),
+                limit: 3,
+                required_evidence_types: vec!["base_text".to_string()],
+                profiles: RuntimeWorkflowProfiles::default(),
+            },
+        )
+        .expect("workflow executes");
+
+        assert_eq!(workflow.steps.len(), 4);
+        assert_eq!(workflow.package.review.status, "needs_revision");
+        assert!(workflow.final_answer.contains(&workflow.package.package_id));
+        assert!(
+            workflow
+                .steps
+                .iter()
+                .all(|step| step.output_ref.starts_with("runtime://tonglingyu/"))
+        );
+        assert!(
+            workflow
+                .steps
+                .iter()
+                .any(|step| step.operation == "review_answer"
+                    && step.output["draft_consumed"] == true)
+        );
+        let profile_step_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'runtime_profile_step_completed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert_eq!(profile_step_events, workflow.steps.len() as i64);
     }
 
     #[test]
