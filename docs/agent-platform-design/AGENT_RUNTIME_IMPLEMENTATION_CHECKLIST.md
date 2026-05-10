@@ -352,11 +352,30 @@ backpressure API 是后续项。
 
 - [x] `runtime: implement profile tool execution`
 - [x] `runtime: audit profile tool execution`
+- [x] `runtime: enforce required tool output refs`
+- [x] `runtime: verify audit sink append semantics`
+- [x] `runtime: redact unauthorized tool audit names`
+- [x] `runtime: redact unauthorized tool audit call ids`
+- [x] `runtime: omit raw tool outputs from profile context`
+- [x] `runtime: cover run session tool loops`
+- [x] `runtime: verify run tool streaming`
+- [x] `runtime: enforce run session budgets`
+- [x] `runtime: preserve registry stream schema`
+- [x] `runtime: audit tool round violations`
+- [x] `runtime: verify tool schema failures`
+- [x] `runtime: verify malformed tool arguments`
+- [x] `runtime: sanitize tool executor failures`
+- [x] `runtime: verify streaming executor failures`
 - [x] `runtime: verify non-read-only tool calls`
 - [x] `runtime: verify no-contract tool calls`
 - [x] `runtime: reject no-tool path tool calls`
 - [x] `runtime: reject streaming no-tool calls`
 - [x] `runtime: verify streaming profile no-tool calls`
+- [x] `runtime: tighten audit completion wording`
+- [x] `runtime: audit tool round calls`
+- [x] `runtime: verify audit env configuration`
+- [x] `runtime: verify streaming wrapper tool failures`
+- [x] `runtime: align checklist commit evidence`
 
 ## 后续项
 
