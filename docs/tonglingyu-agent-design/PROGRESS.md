@@ -100,6 +100,10 @@
 - Runtime crate 已继续承接 SQLite/FTS 检索、alias 取词、exact term 保护和
   evidence card 构建；Gateway 保留 search policy/plan 决策，只把
   `required_evidence_types` 交给 runtime 执行。
+- Gateway 已新增 `tonglingyu-gateway::plan` 模块，集中维护 search policy、
+  Runtime step plan schema/policy 版本和受控 step 快照；Gateway 审计中的
+  Planned 状态会记录该 runtime step plan，但当前仍是本地 runtime API 调用，
+  不是完整 `agent-runtime` step 执行。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
   source snapshot loader、SQLite 连接和 schema 初始化，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。

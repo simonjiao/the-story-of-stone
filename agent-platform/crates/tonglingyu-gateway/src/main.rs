@@ -29,6 +29,12 @@ use tonglingyu_runtime::{
 };
 use tower_http::trace::TraceLayer;
 
+mod plan;
+
+use crate::plan::{
+    RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
+};
+
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
 const DEFAULT_MODEL_NAME: &str = "通灵玉";
 
@@ -303,14 +309,6 @@ struct GatewayRequestContext {
     external_message_id: String,
     external_message_id_provided: bool,
     auth_subject: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SearchPolicy {
-    question_type: String,
-    required_evidence_types: Vec<String>,
-    planned_profiles: Vec<String>,
-    blocked_controls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1528,112 +1526,6 @@ fn search_evidence_with_policy(
     let policy = search_policy(question);
     let cards = runtime_search_evidence(conn, question, limit, &policy.required_evidence_types)?;
     Ok((cards, policy))
-}
-
-fn search_policy(question: &str) -> SearchPolicy {
-    let normalized = normalize_text(question);
-    let mut required = BTreeSet::new();
-    required.insert("base_text".to_string());
-    let asks_commentary = question.contains("脂批")
-        || question.contains("脂評")
-        || question.contains("甲戌")
-        || normalized.contains("脂批");
-    let asks_version = question.contains("程甲")
-        || question.contains("程乙")
-        || question.contains("版本")
-        || question.contains("前八十")
-        || question.contains("后四十")
-        || question.contains("後四十");
-    if asks_commentary {
-        required.insert("commentary".to_string());
-    }
-    if asks_version {
-        required.insert("version_note".to_string());
-    }
-    let blocked_controls = blocked_prompt_controls(question);
-    let question_type = if !blocked_controls.is_empty() {
-        "control_injection"
-    } else if asks_commentary {
-        "commentary"
-    } else if asks_version {
-        "version"
-    } else if question.contains("判词") || question.contains("判詞") || question.contains("诗")
-    {
-        "poem_or_judgement"
-    } else {
-        "base_text"
-    };
-    let mut profiles = vec![
-        "honglou-text".to_string(),
-        "honglou-main".to_string(),
-        "honglou-reviewer".to_string(),
-    ];
-    if asks_commentary {
-        profiles.insert(1, "honglou-commentary".to_string());
-    }
-    SearchPolicy {
-        question_type: question_type.to_string(),
-        required_evidence_types: required.into_iter().collect(),
-        planned_profiles: profiles,
-        blocked_controls,
-    }
-}
-
-fn public_search_policy(policy: &SearchPolicy) -> Value {
-    json!({
-        "question_type": &policy.question_type,
-        "required_evidence_types": &policy.required_evidence_types,
-        "blocked_controls": &policy.blocked_controls,
-    })
-}
-
-fn planned_profiles_for_policy(profiles: &InternalProfiles, policy: &SearchPolicy) -> Vec<String> {
-    let mut planned = vec![profiles.text.clone()];
-    if policy
-        .required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        planned.push(profiles.commentary.clone());
-    }
-    planned.push(profiles.main.clone());
-    planned.push(profiles.reviewer.clone());
-    planned
-}
-
-fn blocked_prompt_controls(question: &str) -> Vec<String> {
-    let controls = [
-        ("跳过reviewer", "attempted_reviewer_bypass"),
-        ("跳过 reviewer", "attempted_reviewer_bypass"),
-        ("关闭审校", "attempted_reviewer_bypass"),
-        ("不要审校", "attempted_reviewer_bypass"),
-        ("skip reviewer", "attempted_reviewer_bypass"),
-        ("disable_reviewer", "attempted_reviewer_bypass"),
-        ("disable reviewer", "attempted_reviewer_bypass"),
-        ("只凭模型记忆", "attempted_memory_only_answer"),
-        ("不要证据", "attempted_evidence_bypass"),
-        ("忽略证据", "attempted_evidence_bypass"),
-        ("绕过证据", "attempted_evidence_bypass"),
-        ("honglou-", "attempted_internal_agent_control"),
-        ("内部 agent", "attempted_internal_agent_control"),
-        ("内部Agent", "attempted_internal_agent_control"),
-        ("内部配置", "attempted_internal_config_leak"),
-        ("系统提示词", "attempted_internal_prompt_leak"),
-        ("system prompt", "attempted_internal_prompt_leak"),
-    ];
-    let lowered = question.to_lowercase();
-    controls
-        .iter()
-        .filter_map(|(needle, code)| {
-            if lowered.contains(&needle.to_lowercase()) {
-                Some((*code).to_string())
-            } else {
-                None
-            }
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn insert_audit_event(
@@ -3023,6 +2915,7 @@ async fn chat_completions(
             }
         };
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -3030,7 +2923,10 @@ async fn chat_completions(
         None,
         "Planned",
         "ok",
-        &json!({"policy": policy}),
+        &json!({
+            "policy": &policy,
+            "runtime_step_plan": &runtime_step_plan,
+        }),
     );
     let _ = insert_audit_event(
         &conn,
@@ -3042,6 +2938,7 @@ async fn chat_completions(
             "required_evidence_types": &policy.required_evidence_types,
             "planned_profiles": &policy.planned_profiles,
             "blocked_controls": &policy.blocked_controls,
+            "runtime_step_plan": &runtime_step_plan,
         }),
     );
     let _ = record_workflow_state(
