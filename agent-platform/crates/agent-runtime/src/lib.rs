@@ -838,9 +838,20 @@ impl RuntimeClient for HermesRuntimeClient {
             &runtime_profile,
         )?;
         let messages = run_messages(&input, &runtime_profile);
-        let (content, metadata) = self
-            .chat_completion(messages, &input.trace_id, &runtime_profile)
-            .await?;
+        let (content, metadata) =
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                self.profile_chat_completion(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            } else {
+                self.chat_completion(messages, &input.trace_id, &runtime_profile)
+                    .await?
+            };
         finalize_runtime_output(
             RuntimeOutput {
                 result_summary: content,
@@ -867,9 +878,20 @@ impl RuntimeClient for HermesRuntimeClient {
             &runtime_profile,
         )?;
         let messages = session_messages(&input, &runtime_profile);
-        let (content, metadata) = self
-            .chat_completion(messages, &input.trace_id, &runtime_profile)
-            .await?;
+        let (content, metadata) =
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                self.profile_chat_completion(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            } else {
+                self.chat_completion(messages, &input.trace_id, &runtime_profile)
+                    .await?
+            };
         let assistant_message = AgentSessionMessage::new(
             input.session_id.clone(),
             input.message.sequence + 1,
@@ -971,6 +993,20 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 &runtime_profile,
             )?;
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                let output = self.execute_run(input).await?;
+                return Ok(tool_loop_stream_events(
+                    runtime_profile,
+                    trace_id,
+                    output,
+                    Some(&run_id),
+                    None,
+                    schema_version,
+                ));
+            }
             let messages = run_messages(&input, &runtime_profile);
             let (content, metadata, mut events) = self
                 .chat_completion_stream(messages, &trace_id, &runtime_profile)
@@ -1027,6 +1063,20 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 &runtime_profile,
             )?;
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                let output = self.send_session_message(input).await?;
+                return Ok(tool_loop_stream_events(
+                    runtime_profile,
+                    trace_id,
+                    output,
+                    None,
+                    Some(&session_id),
+                    schema_version,
+                ));
+            }
             let messages = session_messages(&input, &runtime_profile);
             let (content, metadata, mut events) = self
                 .chat_completion_stream(messages, &trace_id, &runtime_profile)
@@ -1088,36 +1138,21 @@ impl RuntimeClient for HermesRuntimeClient {
                 &input.requested_tools,
                 &input.profile_id,
             )?;
-            if contract.as_ref().is_some_and(|contract| {
-                !contract
-                    .tool_policy
-                    .effective_tools_for_request(&input.requested_tools)
-                    .is_empty()
-            }) {
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
                 let profile_id = input.profile_id.clone();
                 let trace_id = input.trace_id.clone();
-                let output = self.execute_profile_step(input).await?;
-                let mut events = vec![RuntimeStreamEvent {
-                    sequence: 0,
-                    event_type: RuntimeStreamEventType::Started,
-                    profile_id: profile_id.clone(),
-                    trace_id: trace_id.clone(),
-                    run_id: None,
-                    session_id: None,
-                    schema_version: None,
-                    content_delta: None,
-                    output: None,
-                    error_code: None,
-                    metadata: json!({"runtime": "hermes", "tool_loop": true}),
-                }];
-                push_tool_progress_events(&mut events, &profile_id, &trace_id, &output);
-                push_schema_partial_event(&mut events, &profile_id, &trace_id, &output);
-                push_final_output_event(&mut events, profile_id, trace_id, output);
                 let schema_version = contract
                     .as_ref()
                     .map(|contract| contract.version.version.as_str());
-                annotate_stream_events(&mut events, None, None, schema_version);
-                return Ok(events);
+                let output = self.execute_profile_step(input).await?;
+                return Ok(tool_loop_stream_events(
+                    profile_id,
+                    trace_id,
+                    output,
+                    None,
+                    None,
+                    schema_version,
+                ));
             }
             let messages = input
                 .messages
@@ -2517,6 +2552,46 @@ fn tool_definitions(
         .unwrap_or_default()
 }
 
+fn has_effective_runtime_tools(
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+) -> bool {
+    contract.is_some_and(|contract| {
+        !contract
+            .tool_policy
+            .effective_tools_for_request(requested_tools)
+            .is_empty()
+    })
+}
+
+fn tool_loop_stream_events(
+    profile_id: String,
+    trace_id: String,
+    output: RuntimeOutput,
+    run_id: Option<&str>,
+    session_id: Option<&str>,
+    schema_version: Option<&str>,
+) -> Vec<RuntimeStreamEvent> {
+    let mut events = vec![RuntimeStreamEvent {
+        sequence: 0,
+        event_type: RuntimeStreamEventType::Started,
+        profile_id: profile_id.clone(),
+        trace_id: trace_id.clone(),
+        run_id: None,
+        session_id: None,
+        schema_version: None,
+        content_delta: None,
+        output: None,
+        error_code: None,
+        metadata: json!({"runtime": "hermes", "tool_loop": true}),
+    }];
+    push_tool_progress_events(&mut events, &profile_id, &trace_id, &output);
+    push_schema_partial_event(&mut events, &profile_id, &trace_id, &output);
+    push_final_output_event(&mut events, profile_id, trace_id, output);
+    annotate_stream_events(&mut events, run_id, session_id, schema_version);
+    events
+}
+
 fn parse_tool_arguments(arguments: &str) -> CoreResult<Value> {
     if arguments.trim().is_empty() {
         return Ok(json!({}));
@@ -2968,7 +3043,8 @@ mod tests {
         AgentInstance, AgentRun, CredentialLeaseStatus, ExternalActionPlan, ProfileContract,
         RiskLevel, RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep,
         RuntimeStepFailurePolicy, RuntimeStepPlan, RuntimeStepPlanInput, RuntimeStepPlanOwner,
-        RuntimeToolCapability, RuntimeToolPolicy, RuntimeToolSpec, TriggerType, new_trace_id,
+        RuntimeToolCapability, RuntimeToolPolicy, RuntimeToolSpec, SessionContext, TriggerType,
+        new_trace_id,
     };
     use axum::{
         Json, Router,
@@ -4105,6 +4181,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_runtime_execute_run_exposes_requested_profile_tools() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            let tools = body["tools"].as_array().unwrap();
+                            assert_eq!(tools.len(), 1);
+                            assert_eq!(tools[0]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-run",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(
+                                body["messages"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .any(|message| message["role"] == "tool"
+                                        && message["tool_call_id"] == "call-run")
+                            );
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "run tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("run-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let mut input = hermes_run_input(new_trace_id());
+        input.profile_contract = Some(contract);
+        input.requested_tools = vec!["tool.read".to_string()];
+
+        let output = runtime.execute_run(input).await.unwrap();
+
+        assert_eq!(output.result_summary, "run tool answer");
+        assert_eq!(output.metadata["tool_rounds"], 1);
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.read");
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn hermes_runtime_streams_tool_progress_and_schema_partial_events() {
         let calls = Arc::new(Mutex::new(0usize));
         let app = Router::new()
@@ -4191,6 +4349,130 @@ mod tests {
                 .iter()
                 .all(|event| event.schema_version.as_deref() == Some("v1"))
         );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_session_with_tools_emits_tool_progress_events() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            assert_eq!(body["tools"][0]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-session",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(body["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|message| message["role"] == "tool"
+                                    && message["tool_call_id"] == "call-session"));
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "session tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("session-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let trace_id = new_trace_id();
+        let session_id = "session-tool-1".to_string();
+        let input = RuntimeSessionInput {
+            session_id: session_id.clone(),
+            agent_id: "agent-1".to_string(),
+            agent: None,
+            message: AgentSessionMessage::new(
+                session_id.clone(),
+                1,
+                MessageRole::User,
+                Some("use a read tool".to_string()),
+                None,
+                trace_id.clone(),
+            ),
+            context: SessionContext {
+                session_id: session_id.clone(),
+                agent_id: "agent-1".to_string(),
+                context_summary: None,
+                recent_messages: Vec::new(),
+                resource_scope: json!({"resource": "resource:team/project-alpha"}),
+                trace_id: trace_id.clone(),
+            },
+            snapshot: None,
+            profile_contract: Some(contract),
+            runtime_step: None,
+            requested_tools: vec!["tool.read".to_string()],
+            trace_id,
+        };
+
+        let events = runtime.stream_session_message(input).await.unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[1].metadata["tool_event"]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(events[2].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[2].metadata["tool_event"]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(events.iter().all(|event| {
+            event.session_id.as_deref() == Some(session_id.as_str())
+                && event.run_id.is_none()
+                && event.schema_version.as_deref() == Some("v1")
+        }));
+        let output = events[4].output.as_ref().unwrap();
+        assert_eq!(output.result_summary, "session tool answer");
+        assert_eq!(
+            output.messages[0].content_summary.as_deref(),
+            Some("session tool answer")
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
     }
 
     #[tokio::test]

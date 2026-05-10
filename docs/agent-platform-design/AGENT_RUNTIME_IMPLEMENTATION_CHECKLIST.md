@@ -113,7 +113,8 @@ backpressure API 是后续项。
 - [x] streaming final 和非 streaming 输出语义一致。
 - [x] error event 不泄露 prompt、credential、connector payload 或内部栈。
 - [x] stream event 能携带 trace、run/session、profile 和 schema version。
-- [x] tool progress / schema partial 有端到端验证。
+- [x] run、session message 和 profile step 的 tool progress /
+  schema partial 有端到端验证。
 - [x] safe error event 有回归验证。
 - [x] 当前完成口径不声明下游 async stream/backpressure API。
 
@@ -226,7 +227,8 @@ backpressure API 是后续项。
 
 - [x] 在 `agent-core` / `agent-runtime` 补齐 `RuntimeToolCall`、
   `RuntimeToolResult`、`RuntimeToolSpec` 和 `RuntimeToolExecutor` contract。
-- [x] Runtime adapter 能处理 LLM profile 发起的 read-only tool call。
+- [x] Runtime adapter 能处理 run、session message 和 profile step 中
+  LLM profile 发起的 read-only tool call。
 - [x] per-profile allowed tools 和本次 requested tool scope 在真实 tool
   execution 前强制校验。
 - [x] tool input/output 都按 tool spec schema 校验。
@@ -238,7 +240,8 @@ backpressure API 是后续项。
 - [x] RuntimeOutput metadata 返回安全 tool call / tool result event 摘要。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
 - [x] 写入类工具仍只能走 Manager external-action apply/compensate。
-- [x] Runtime 只向 Hermes 暴露 read-only effective tool specs。
+- [x] Runtime 只向 Hermes 的 run、session message 和 profile step 路径暴露
+  read-only effective tool specs。
 - [x] Runtime adapter 提供直连场景可配置的 append-only JSONL audit sink。
 - [x] tool call 失败时追加安全 `runtime_tool_error` audit event。
 
@@ -274,6 +277,8 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_streams_safe_error_event`
 - [x] `hermes_runtime_rejects_unauthorized_profile_tool_call`
   覆盖未授权 raw tool name / raw call id 在 call/error audit 中脱敏。
+- [x] `hermes_runtime_execute_run_exposes_requested_profile_tools`
+- [x] `hermes_runtime_stream_session_with_tools_emits_tool_progress_events`
 - [x] `hermes_runtime_streams_safe_error_for_expired_profile_budget`
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 profile 回灌、executor metadata、raw string output summary 和 adapter

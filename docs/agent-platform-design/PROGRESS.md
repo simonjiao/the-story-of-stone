@@ -26,11 +26,12 @@
   `output_ref` 或 executor 侧 output contract 失败也会按 step `fallback_policy`
   降级或终止。
 - R4.5 Runtime Tool Execution Loop 已落地：Runtime 已有 tool call /
-  tool result / tool executor contract，Hermes profile step 可执行
-  OpenAI-compatible tool loop，并在真实 tool execution 前校验 requested tool
-  scope、per-profile tool permission、read-only capability、tool schema、
-  tool round、runtime budget 和 output ref/summary 约束；普通和 streaming
-  profile step 超出 runtime budget 都会返回安全错误；profile 回灌、
+  tool result / tool executor contract，Hermes run、session message 和
+  profile step 路径可执行 OpenAI-compatible tool loop，并在真实 tool
+  execution 前校验 requested tool scope、per-profile tool permission、
+  read-only capability、tool schema、tool round、runtime budget 和
+  output ref/summary 约束；普通和 streaming profile step 超出 runtime
+  budget 都会返回安全错误；profile 回灌、
   RuntimeOutput metadata 和 adapter audit 只保留安全 tool event 摘要、
   已校验的 output_schema contract 与 output_ref，required output_ref 缺失会
   失败并写安全错误事件；tool output summary 只暴露类型和长度/数量，不透传

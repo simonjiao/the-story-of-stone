@@ -285,8 +285,8 @@ RuntimeStreamEvent
 3. error event 不泄露 prompt、credential、connector payload 或内部栈。
 4. Runtime stream event 能携带 trace、run/session、profile 和 schema version；
    是否写入审计由调用方决定。
-5. tool loop streaming path 会发出 `tool_progress`；schema 校验通过后会发出
-   `schema_partial`。
+5. run、session message 和 profile step 的 tool loop streaming path 会发出
+   `tool_progress`；schema 校验通过后会发出 `schema_partial`。
 6. safe error event 有回归测试，确认不包含 prompt 或 upstream error body。
 7. 本轮不声明 Runtime 已提供下游 async stream/backpressure API。
 
@@ -450,7 +450,8 @@ runtime: add multi-profile step plan
 
 1. `agent-core`：定义 `RuntimeToolCall`、`RuntimeToolResult`、
    `RuntimeToolSpec` 和 `RuntimeToolExecutor`。
-2. `agent-runtime`：Hermes adapter 支持 OpenAI-compatible tool loop。
+2. `agent-runtime`：Hermes adapter 在 run、session message 和 profile step
+   路径支持 OpenAI-compatible tool loop。
 3. `agent-runtime`：执行前校验 tool policy、tool input schema 和预算。
 4. `agent-runtime`：执行后校验 tool output schema，并生成安全 metadata 摘要。
 5. `agent-runtime`：提供 `RuntimeAuditSink` 和 JSONL append-only sink，供
