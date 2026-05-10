@@ -153,7 +153,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 - [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
   trace/session 透传、SSE 转发、模型隐藏和响应封装。
-- [ ] Gateway 不直接执行 source snapshot、SQLite 或 FTS 查询。
+- [x] Gateway 不直接执行 source snapshot loader、KB SQLite/FTS 检索或 FTS 写入。
+- [ ] Gateway 不直接读取 KB/domain SQLite 表；当前 health、metrics 和 admin
+  仍读取 KB/runtime 计数。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。
@@ -162,7 +164,7 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 ### R5B Evidence Read-only Tools
 
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
+- [x] 从 `tonglingyu-gateway` 抽出 source snapshot loader。
 - [x] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
 - [x] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
 - [x] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
@@ -176,9 +178,12 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 ### R5B 当前实现校准
 
-当前代码已新增 `tonglingyu-runtime` crate，并把证据包 create/read/replay、
+当前代码已新增 `tonglingyu-runtime` crate，并把 source snapshot loader、
+KB schema、FTS 写入、别名种子、章节解析、证据包 create/read/replay、
 claim-to-evidence 映射、reviewer 规则、本地受控回答、SQLite/FTS 检索和
-evidence card 构建从 Gateway 函数体中迁出。Gateway 现在通过
+evidence card 构建从 Gateway 函数体中迁出。Gateway `build-kb` 现在只处理
+DB 文件生命周期、gateway session/workflow 清理和 Runtime rebuild 调用。
+Gateway 现在通过
 `tonglingyu-gateway::plan` 生成 search policy 和 Runtime step plan 快照，
 并调用 runtime API 执行本地领域流程。Evidence package、review record、
 claim link 和 audit event 的运行时表初始化已由
@@ -189,10 +194,11 @@ claim link 和 audit event 的运行时表初始化已由
 `tonglingyu-runtime` 也定义了四个 profile descriptor，Gateway Runtime step
 plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱节。
 
-这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite、初始化 schema、
-构建 source snapshot KB，并且尚未通过 `agent-runtime` 执行四 profile 或
-read-only tool contract。R5A/R5D 必须等 Runtime profile 执行面、tool
-contract dry run 和目标环境 Open WebUI 复测完成后再勾选。
+这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite，并且
+health、metrics、admin 查询仍直接读取 KB/runtime 计数；四 profile 尚未通过
+`agent-runtime` 执行，streaming 也还不是 Runtime event 转发。R5A/R5D
+必须等 Runtime profile 执行面、Gateway 观测口改为 Runtime/admin adapter、
+Runtime event streaming 和目标环境 Open WebUI 复测完成后再勾选。
 
 ### R5C 四 Profile 编排
 
@@ -218,7 +224,8 @@ contract dry run 和目标环境 Open WebUI 复测完成后再勾选。
 - [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。
-- [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
+- [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
+  回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`

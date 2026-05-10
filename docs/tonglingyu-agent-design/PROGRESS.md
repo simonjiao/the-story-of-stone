@@ -30,7 +30,7 @@
   M2，必须先提升为 M1 P0。
 - 当前 `python3 scripts/validate_source_snapshots.py` 已通过：5 个来源和
   19 个抽样点满足 M1 source snapshot 闸门。
-- Rust `tonglingyu-gateway` 已实现 M2-M6 最小工程闭环：
+- Rust `tonglingyu-gateway` + `tonglingyu-runtime` 已实现 M2-M6 最小工程闭环：
   source snapshot loader、SQLite/FTS、别名种子、证据卡片、证据包、
   reviewer、OpenAI-compatible `/v1/models` 和 `/v1/chat/completions`。
 - 通灵玉目标架构已调整为“薄 Gateway + Runtime Agent”；当前 Gateway 内部
@@ -107,9 +107,13 @@
 - Evidence package、review record、claim link 和 audit event 的运行时表
   初始化已迁入 `tonglingyu-runtime::init_runtime_schema`；Gateway 只初始化
   gateway session/message/workflow 表并调用 runtime schema 初始化。
+- Source snapshot loader、KB schema、FTS 写入、别名种子和章节解析已迁入
+  `tonglingyu-runtime::rebuild_knowledge_base_from_snapshots`；Gateway
+  `build-kb` 只保留 DB 文件生命周期、gateway session/workflow 清理和
+  Runtime rebuild 调用。
 - Gateway 单元测试已加入源码级回归断言，防止 `extract_terms`、
-  `query_blocks_like`、`evidence_card_from_block`、`review` 等 runtime
-  领域函数重新回流到 Gateway。
+  `query_blocks_like`、`evidence_card_from_block`、`review`、source snapshot
+  loader 和 FTS 写入等 runtime 领域函数重新回流到 Gateway。
 - Runtime 已定义 `tonglingyu.text.search`、`tonglingyu.commentary.search`、
   `tonglingyu.evidence.package.create/read/replay` 的 tool catalog 和结构化
   `TonglingyuToolCall` / `TonglingyuToolOutput`；Gateway 主路径已改为通过
@@ -123,16 +127,16 @@
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  source snapshot loader、SQLite 连接和 KB/schema 初始化，且 Runtime
+  SQLite 连接，health、metrics、admin 查询仍读取 KB/runtime 计数，且 Runtime
   profile/read-only tools 尚未接入 `agent-runtime` 执行面。
 
 ## 下一步
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway 内 source snapshot
-   loader、SQLite schema/open/init、运行时 profile 调用和 read-only tools
-   迁入 Runtime/tool 边界。
+2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Gateway health、metrics、
+   admin 计数读取、运行时 profile 调用和 read-only tools 迁入 Runtime/tool
+   边界。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前

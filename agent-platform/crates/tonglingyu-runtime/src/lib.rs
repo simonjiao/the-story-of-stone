@@ -1,9 +1,12 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    fs,
+    io::{BufRead, BufReader},
     path::Path,
 };
 use time::OffsetDateTime;
@@ -54,6 +57,7 @@ pub struct EvidencePackage {
 
 pub const TOOL_CATALOG_VERSION: &str = "tonglingyu-readonly-tools-v1";
 pub const PROFILE_CONTRACT_VERSION: &str = "tonglingyu-runtime-profiles-v1";
+pub const KNOWLEDGE_BASE_SCHEMA_VERSION: &str = "tonglingyu-v1-sqlite-fts";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -74,6 +78,67 @@ pub struct ProfileDescriptor {
     pub input_contract: Value,
     pub output_contract: Value,
     pub safety_contract: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeBaseBuildReport {
+    pub source_root: String,
+    pub source_count: i64,
+    pub block_count: i64,
+    pub schema_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceMetadata {
+    source_id: String,
+    source_category: String,
+    format: Option<String>,
+    title: Option<String>,
+    work: Option<String>,
+    edition: Option<String>,
+    language: Option<String>,
+    api_url: Option<String>,
+    fetched_at: Option<String>,
+    notes: Option<String>,
+    #[serde(default)]
+    snapshot_contract: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractionReport {
+    documents: i64,
+    blocks: i64,
+    rare_char_annotations: Option<i64>,
+    missing: i64,
+    raw_html_files: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentRecord {
+    source_id: String,
+    section_id: String,
+    section_index: Option<i64>,
+    title: Option<String>,
+    display_title: Option<String>,
+    fullurl: Option<String>,
+    pageid: Option<i64>,
+    revision_id: Option<i64>,
+    revision_timestamp: Option<String>,
+    wikitext_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BlockRecord {
+    block_id: String,
+    block_index: i64,
+    kind: String,
+    revision_id: Option<i64>,
+    section_id: String,
+    source_id: String,
+    source_title: String,
+    source_url: String,
+    tag: Option<String>,
+    text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,6 +457,585 @@ pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-runtime-schema-v1", now_rfc3339()],
     )?;
+    Ok(())
+}
+
+pub fn has_knowledge_base(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let conn =
+        Connection::open(path).with_context(|| format!("open sqlite db {}", path.display()))?;
+    let count: Option<i64> = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if count.unwrap_or_default() == 0 {
+        return Ok(false);
+    }
+    let sources: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+        .unwrap_or_default();
+    Ok(sources > 0)
+}
+
+pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS sources (
+            source_id TEXT PRIMARY KEY,
+            source_category TEXT NOT NULL,
+            format TEXT,
+            title TEXT,
+            work TEXT,
+            edition TEXT,
+            language TEXT,
+            api_url TEXT,
+            fetched_at TEXT,
+            notes TEXT,
+            snapshot_contract_json TEXT NOT NULL,
+            source_hash TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS source_documents (
+            section_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            section_index INTEGER,
+            title TEXT,
+            display_title TEXT,
+            fullurl TEXT,
+            pageid INTEGER,
+            revision_id INTEGER,
+            revision_timestamp TEXT,
+            wikitext_sha256 TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS editions (
+            edition_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            edition_label TEXT NOT NULL,
+            version_system TEXT NOT NULL,
+            usage_limit TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chapters (
+            chapter_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            chapter_no INTEGER,
+            title TEXT NOT NULL,
+            version_range TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS blocks (
+            block_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            section_id TEXT NOT NULL,
+            source_title TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            revision_id INTEGER,
+            block_index INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            tag TEXT,
+            text TEXT NOT NULL,
+            normalized_text TEXT NOT NULL,
+            evidence_type TEXT NOT NULL,
+            chapter_no INTEGER
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+            block_id UNINDEXED,
+            source_id UNINDEXED,
+            source_title,
+            text,
+            normalized_text,
+            tokenize = 'unicode61'
+        );
+
+        CREATE TABLE IF NOT EXISTS rare_char_annotations (
+            annotation_id TEXT PRIMARY KEY,
+            block_id TEXT NOT NULL REFERENCES blocks(block_id),
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            character TEXT NOT NULL,
+            reading TEXT,
+            note TEXT,
+            provenance TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS commentaries (
+            commentary_id TEXT PRIMARY KEY,
+            block_id TEXT NOT NULL REFERENCES blocks(block_id),
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            commentary_text TEXT NOT NULL,
+            commentary_type TEXT NOT NULL,
+            version_label TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS version_notes (
+            version_note_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL REFERENCES sources(source_id),
+            note TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            usage_limit TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS version_differences (
+            difference_id TEXT PRIMARY KEY,
+            left_block_id TEXT,
+            right_block_id TEXT,
+            scope TEXT NOT NULL,
+            evidence_level TEXT NOT NULL,
+            note TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS people (
+            person_id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL,
+            description TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS aliases (
+            alias TEXT PRIMARY KEY,
+            person_id TEXT NOT NULL REFERENCES people(person_id),
+            scope TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS relationships (
+            relationship_id TEXT PRIMARY KEY,
+            subject_person_id TEXT NOT NULL,
+            object_person_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            evidence_block_id TEXT,
+            evidence_level TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            event_id TEXT PRIMARY KEY,
+            event_name TEXT NOT NULL,
+            chapter_no INTEGER,
+            evidence_block_id TEXT,
+            theme_tags TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS poems (
+            poem_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            source_block_id TEXT NOT NULL,
+            topic TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS kb_version (
+            version_id TEXT PRIMARY KEY,
+            source_root TEXT NOT NULL,
+            source_count INTEGER NOT NULL,
+            block_count INTEGER NOT NULL,
+            schema_version TEXT NOT NULL,
+            built_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
+        CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
+        CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
+        CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
+        "#,
+    )?;
+    Ok(())
+}
+
+pub fn rebuild_knowledge_base_from_snapshots(
+    conn: &Connection,
+    source_root: &Path,
+) -> Result<KnowledgeBaseBuildReport> {
+    init_runtime_schema(conn)?;
+    init_knowledge_base_schema(conn)?;
+    let source_dirs = list_source_dirs(source_root)?;
+    if source_dirs.is_empty() {
+        return Err(anyhow!(
+            "no source snapshots found under {}",
+            source_root.display()
+        ));
+    }
+    clear_knowledge_base_rows(conn)?;
+    seed_aliases(conn)?;
+    for source_dir in source_dirs {
+        load_source_snapshot(conn, &source_dir)?;
+    }
+    write_kb_version(conn, source_root)
+}
+
+fn clear_knowledge_base_rows(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        DELETE FROM evidence_claim_links;
+        DELETE FROM audit_events;
+        DELETE FROM review_records;
+        DELETE FROM evidence_cards;
+        DELETE FROM evidence_packages;
+        DELETE FROM poems;
+        DELETE FROM events;
+        DELETE FROM relationships;
+        DELETE FROM aliases;
+        DELETE FROM people;
+        DELETE FROM version_differences;
+        DELETE FROM version_notes;
+        DELETE FROM commentaries;
+        DELETE FROM rare_char_annotations;
+        DELETE FROM blocks_fts;
+        DELETE FROM blocks;
+        DELETE FROM chapters;
+        DELETE FROM editions;
+        DELETE FROM source_documents;
+        DELETE FROM sources;
+        DELETE FROM kb_version;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn list_source_dirs(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let path = entry?.path();
+        if path.is_dir() && path.join("metadata/source.json").is_file() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
+    let source_path = source_dir.join("metadata/source.json");
+    let report_path = source_dir.join("metadata/extraction_report.json");
+    let documents_path = source_dir.join("documents/documents.jsonl");
+    let blocks_path = source_dir.join("documents/blocks.jsonl");
+
+    let source: SourceMetadata = read_json(&source_path)?;
+    let report: ExtractionReport = read_json(&report_path)?;
+    if report.missing != 0 {
+        return Err(anyhow!("{} has missing pages", source.source_id));
+    }
+    if report.raw_html_files.unwrap_or_default() != 0 {
+        return Err(anyhow!(
+            "{} contains raw_html files in current M1 contract",
+            source.source_id
+        ));
+    }
+    let source_hash = hash_files([&source_path, &report_path, &documents_path, &blocks_path])?;
+    conn.execute(
+        r#"
+        INSERT INTO sources (
+            source_id, source_category, format, title, work, edition, language,
+            api_url, fetched_at, notes, snapshot_contract_json, source_hash
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        "#,
+        params![
+            source.source_id,
+            source.source_category,
+            source.format,
+            source.title,
+            source.work,
+            source.edition,
+            source.language,
+            source.api_url,
+            source.fetched_at,
+            source.notes,
+            serde_json::to_string(&source.snapshot_contract)?,
+            source_hash
+        ],
+    )?;
+
+    conn.execute(
+        "INSERT INTO editions (edition_id, source_id, edition_label, version_system, usage_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            format!("edition:{}", source.source_id),
+            source.source_id,
+            source.edition.unwrap_or_else(|| "未标注版本".to_string()),
+            version_system(&source.source_id),
+            usage_limit(&source.source_category),
+        ],
+    )?;
+    conn.execute(
+        "INSERT INTO version_notes (version_note_id, source_id, note, source_status, usage_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            format!("version-note:{}", source.source_id),
+            source.source_id,
+            source.notes.unwrap_or_else(|| "第一批 Wikisource source snapshot".to_string()),
+            "source_snapshot_ready",
+            usage_limit(&source.source_category),
+        ],
+    )?;
+
+    let mut document_count = 0_i64;
+    for document in read_jsonl::<DocumentRecord>(&documents_path)? {
+        document_count += 1;
+        conn.execute(
+            r#"
+            INSERT INTO source_documents (
+                section_id, source_id, section_index, title, display_title, fullurl,
+                pageid, revision_id, revision_timestamp, wikitext_sha256
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                document.section_id,
+                document.source_id,
+                document.section_index,
+                document.title,
+                document.display_title,
+                document.fullurl,
+                document.pageid,
+                document.revision_id,
+                document.revision_timestamp,
+                document.wikitext_sha256,
+            ],
+        )?;
+    }
+    if document_count != report.documents {
+        return Err(anyhow!(
+            "{} document count mismatch: report={} loaded={}",
+            source.source_id,
+            report.documents,
+            document_count
+        ));
+    }
+
+    let mut block_count = 0_i64;
+    let mut seen_chapters = HashSet::new();
+    let mut commentary_count = 0_i64;
+    for block in read_jsonl::<BlockRecord>(&blocks_path)? {
+        block_count += 1;
+        let normalized_text = normalize_text(&block.text);
+        let evidence_type = evidence_type(&source.source_category, &source.source_id, &block);
+        let chapter_no = extract_chapter_no(&block.source_title);
+        if let Some(no) = chapter_no {
+            let chapter_id = format!("{}:chapter:{no:03}", source.source_id);
+            if seen_chapters.insert(chapter_id.clone()) {
+                conn.execute(
+                    "INSERT OR IGNORE INTO chapters (chapter_id, source_id, chapter_no, title, version_range) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![chapter_id, source.source_id, no, block.source_title, version_range(no)],
+                )?;
+            }
+        }
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, source_url, revision_id,
+                block_index, kind, tag, text, normalized_text, evidence_type, chapter_no
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                block.block_id,
+                block.source_id,
+                block.section_id,
+                block.source_title,
+                block.source_url,
+                block.revision_id,
+                block.block_index,
+                block.kind,
+                block.tag,
+                block.text,
+                normalized_text,
+                evidence_type,
+                chapter_no,
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO blocks_fts (block_id, source_id, source_title, text, normalized_text) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![block.block_id, block.source_id, block.source_title, block.text, normalized_text],
+        )?;
+        if evidence_type == "commentary" && useful_text(&block.text) {
+            commentary_count += 1;
+            conn.execute(
+                "INSERT INTO commentaries (commentary_id, block_id, source_id, commentary_text, commentary_type, version_label) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    format!("commentary:{}:{commentary_count}", source.source_id),
+                    block.block_id,
+                    block.source_id,
+                    block.text,
+                    commentary_type(&block.text),
+                    version_system(&source.source_id),
+                ],
+            )?;
+        }
+    }
+    if block_count != report.blocks {
+        return Err(anyhow!(
+            "{} block count mismatch: report={} loaded={}",
+            source.source_id,
+            report.blocks,
+            block_count
+        ));
+    }
+    let _rare_count = report.rare_char_annotations.unwrap_or_default();
+    Ok(())
+}
+
+fn write_kb_version(conn: &Connection, source_root: &Path) -> Result<KnowledgeBaseBuildReport> {
+    let source_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
+    let block_count: i64 = conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
+    conn.execute(
+        "INSERT INTO kb_version (version_id, source_root, source_count, block_count, schema_version, built_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            format!("kb-{}", uuid::Uuid::now_v7().simple()),
+            source_root.display().to_string(),
+            source_count,
+            block_count,
+            KNOWLEDGE_BASE_SCHEMA_VERSION,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(KnowledgeBaseBuildReport {
+        source_root: source_root.display().to_string(),
+        source_count,
+        block_count,
+        schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+    })
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
+}
+
+fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
+    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut records = Vec::new();
+    for (line_no, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str(&line)
+            .with_context(|| format!("parse {}:{}", path.display(), line_no + 1))?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn hash_files<'a>(paths: impl IntoIterator<Item = &'a std::path::PathBuf>) -> Result<String> {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.display().to_string().as_bytes());
+        hasher.update(fs::read(path).with_context(|| format!("hash {}", path.display()))?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn seed_aliases(conn: &Connection) -> Result<()> {
+    let people = [
+        (
+            "person:baoyu",
+            "贾宝玉",
+            "核心人物，通灵玉持有者。",
+            &["宝玉", "寶玉", "宝二爷", "寳玉"][..],
+        ),
+        (
+            "person:daiyu",
+            "林黛玉",
+            "核心人物，金陵十二钗之一。",
+            &["黛玉", "林姑娘", "颦儿", "顰兒"][..],
+        ),
+        (
+            "person:baochai",
+            "薛宝钗",
+            "核心人物，金陵十二钗之一。",
+            &["宝钗", "寶釵", "宝姐姐", "薛姑娘"][..],
+        ),
+        (
+            "person:wangxifeng",
+            "王熙凤",
+            "贾府管家人物。",
+            &["凤姐", "鳳姐", "凤姐儿", "璉二奶奶"][..],
+        ),
+        (
+            "person:jiazheng",
+            "贾政",
+            "贾宝玉之父。",
+            &["贾政", "賈政"][..],
+        ),
+        (
+            "person:jiamu",
+            "贾母",
+            "贾府长辈。",
+            &["贾母", "賈母", "老太太"][..],
+        ),
+        (
+            "person:wangfuren",
+            "王夫人",
+            "贾宝玉之母。",
+            &["王夫人", "太太"][..],
+        ),
+        (
+            "person:xiren",
+            "袭人",
+            "贾宝玉身边丫鬟。",
+            &["袭人", "襲人"][..],
+        ),
+        ("person:qingwen", "晴雯", "贾宝玉身边丫鬟。", &["晴雯"][..]),
+        (
+            "person:xiangyun",
+            "史湘云",
+            "金陵十二钗之一。",
+            &["湘云", "湘雲", "云妹妹"][..],
+        ),
+        (
+            "person:tanchun",
+            "贾探春",
+            "金陵十二钗之一。",
+            &["探春", "三姑娘"][..],
+        ),
+        (
+            "person:yuanchun",
+            "贾元春",
+            "金陵十二钗之一。",
+            &["元春", "元妃"][..],
+        ),
+        (
+            "person:yingchun",
+            "贾迎春",
+            "金陵十二钗之一。",
+            &["迎春", "二姑娘"][..],
+        ),
+        (
+            "person:xichun",
+            "贾惜春",
+            "金陵十二钗之一。",
+            &["惜春", "四姑娘"][..],
+        ),
+        (
+            "person:qiaojie",
+            "巧姐",
+            "金陵十二钗之一。",
+            &["巧姐", "巧姐儿"][..],
+        ),
+        (
+            "person:liwan",
+            "李纨",
+            "金陵十二钗之一。",
+            &["李纨", "李紈", "宫裁", "宮裁"][..],
+        ),
+        ("person:miaoyu", "妙玉", "金陵十二钗之一。", &["妙玉"][..]),
+        (
+            "person:keqing",
+            "秦可卿",
+            "金陵十二钗之一。",
+            &["秦可卿", "可卿"][..],
+        ),
+    ];
+    for (person_id, name, description, aliases) in people {
+        conn.execute(
+            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
+            params![person_id, name, description],
+        )?;
+        for alias in aliases {
+            conn.execute(
+                "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
+                params![alias, person_id, "v1_seed_alias"],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1226,6 +1870,23 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
     score
 }
 
+fn evidence_type(source_category: &str, source_id: &str, block: &BlockRecord) -> &'static str {
+    if source_category == "commentary_material"
+        || source_id.contains("zhiyanzhai")
+        || source_id.contains("jiaxu")
+    {
+        "commentary"
+    } else if block.text.contains("程甲")
+        || block.text.contains("程乙")
+        || block.text.contains("脂評")
+        || block.text.contains("版本")
+    {
+        "version_note"
+    } else {
+        "base_text"
+    }
+}
+
 fn normalize_text(input: &str) -> String {
     let replacements = [
         ("紅", "红"),
@@ -1288,6 +1949,112 @@ fn normalize_text(input: &str) -> String {
         output = output.replace(from, to);
     }
     output
+}
+
+fn useful_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && trimmed != "----" && !trimmed.starts_with("[[../")
+}
+
+fn version_system(source_id: &str) -> &'static str {
+    if source_id.contains("chengjia") {
+        "程甲本"
+    } else if source_id.contains("chengyi") {
+        "程乙本"
+    } else if source_id.contains("jiaxu") {
+        "甲戌本脂评"
+    } else if source_id.contains("zhiyanzhai") {
+        "脂砚斋重评整理资料"
+    } else {
+        "Wikisource 120回汇校本"
+    }
+}
+
+fn usage_limit(source_category: &str) -> &'static str {
+    if source_category == "commentary_material" {
+        "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。"
+    } else {
+        "可作为正文或版本对照证据候选；不声明完成学术校勘。"
+    }
+}
+
+fn version_range(chapter_no: i64) -> &'static str {
+    if chapter_no <= 80 {
+        "前八十回"
+    } else {
+        "后四十回"
+    }
+}
+
+fn commentary_type(text: &str) -> &'static str {
+    if text.contains("{{~|") || text.contains("[") {
+        "inline_commentary"
+    } else {
+        "commentary_text"
+    }
+}
+
+fn extract_chapter_no(title: &str) -> Option<i64> {
+    let after_di = title.split('第').nth(1)?;
+    let value = after_di.split('回').next()?;
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.parse().ok();
+    }
+    chinese_number(value)
+}
+
+fn chinese_number(value: &str) -> Option<i64> {
+    let value = value.replace('零', "");
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((hundred, rest)) = value.split_once('百') {
+        let hundreds = if hundred.is_empty() {
+            1
+        } else {
+            chinese_digit(hundred.chars().next()?)?
+        };
+        return Some(hundreds * 100 + chinese_under_100(rest).unwrap_or(0));
+    }
+    chinese_under_100(&value)
+}
+
+fn chinese_under_100(value: &str) -> Option<i64> {
+    if value.is_empty() {
+        return Some(0);
+    }
+    if let Some((tens, ones)) = value.split_once('十') {
+        let ten_value = if tens.is_empty() {
+            1
+        } else {
+            chinese_digit(tens.chars().next()?)?
+        };
+        let one_value = if ones.is_empty() {
+            0
+        } else {
+            chinese_digit(ones.chars().next()?)?
+        };
+        return Some(ten_value * 10 + one_value);
+    }
+    chinese_digit(value.chars().next()?)
+}
+
+fn chinese_digit(ch: char) -> Option<i64> {
+    match ch {
+        '一' => Some(1),
+        '二' | '兩' | '两' => Some(2),
+        '三' => Some(3),
+        '四' => Some(4),
+        '五' => Some(5),
+        '六' => Some(6),
+        '七' => Some(7),
+        '八' => Some(8),
+        '九' => Some(9),
+        _ => None,
+    }
 }
 
 fn cjk_tokens(input: &str) -> Vec<String> {
@@ -1448,6 +2215,16 @@ mod tests {
             confidence: "medium".to_string(),
             verification_status: "test".to_string(),
         }
+    }
+
+    #[test]
+    fn parses_chapter_numbers() {
+        assert_eq!(extract_chapter_no("紅樓夢/第015回"), Some(15));
+        assert_eq!(extract_chapter_no("脂硯齋重評石頭記/第一回"), Some(1));
+        assert_eq!(
+            extract_chapter_no("紅樓夢_程乙本_第一百十一回_至第一百二十回"),
+            Some(111)
+        );
     }
 
     #[test]
