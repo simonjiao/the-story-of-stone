@@ -147,6 +147,10 @@
   `agent_runtime_profile_step_executed` audit event；该 metadata 明确标记
   `content_source=tonglingyu-deterministic-workflow`、
   `content_used_for_final_answer=false`。
+- `tonglingyu-runtime` 已新增 store-backed `TonglingyuRuntimeToolExecutor`，
+  实现 `agent_core::RuntimeToolExecutor`，可把 agent-runtime/Hermes tool call
+  转成 `TonglingyuToolCall` 并调用本地 SQLite evidence/package 工具；单测覆盖
+  text search、package create/read。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。

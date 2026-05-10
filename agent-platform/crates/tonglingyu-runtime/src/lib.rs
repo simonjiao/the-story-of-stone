@@ -1,11 +1,13 @@
 use agent_core::{
-    ProfileContract as AgentProfileContract, RuntimeClient, RuntimeProfileInput,
-    RuntimeProfileMessage, RuntimeStep as AgentRuntimeStep,
+    AgentCoreError, CoreResult, ErrorCode, ProfileContract as AgentProfileContract, RuntimeClient,
+    RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep as AgentRuntimeStep,
     RuntimeStepPlan as AgentRuntimeStepPlan, RuntimeStepPlanInput as AgentRuntimeStepPlanInput,
-    RuntimeStepPlanOwner, RuntimeToolPolicy, RuntimeToolSpec,
+    RuntimeStepPlanOwner, RuntimeToolCall, RuntimeToolExecutor, RuntimeToolPolicy,
+    RuntimeToolResult, RuntimeToolSpec,
 };
 use agent_runtime::MinimalRuntimeClient;
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -263,6 +265,53 @@ impl TonglingyuRuntimeStore {
     pub fn prune_data(&self, retention_days: u32, dry_run: bool) -> Result<Value> {
         let conn = self.open_connection()?;
         prune_runtime_data(&conn, retention_days, dry_run)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TonglingyuRuntimeToolExecutor {
+    store: TonglingyuRuntimeStore,
+}
+
+impl TonglingyuRuntimeToolExecutor {
+    pub fn new(store: TonglingyuRuntimeStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl RuntimeToolExecutor for TonglingyuRuntimeToolExecutor {
+    async fn execute_tool(
+        &self,
+        call: RuntimeToolCall,
+        _spec: RuntimeToolSpec,
+    ) -> CoreResult<RuntimeToolResult> {
+        let tool_call = tonglingyu_tool_call_from_runtime(&call)?;
+        let tool_output = self.store.execute_tool(tool_call).map_err(|_| {
+            AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "Tonglingyu runtime tool execution failed",
+            )
+        })?;
+        let output_ref = runtime_tool_output_ref(&call, &tool_output);
+        let output = serde_json::to_value(&tool_output).map_err(|_| {
+            AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "Tonglingyu runtime tool output was not serializable",
+            )
+        })?;
+        Ok(RuntimeToolResult {
+            call_id: call.call_id,
+            profile_id: call.profile_id,
+            tool_name: call.tool_name,
+            output_ref: Some(output_ref),
+            output,
+            metadata: json!({
+                "runtime_tool_executor": "tonglingyu-runtime-store",
+                "tool_version": TOOL_CATALOG_VERSION,
+                "trace_id": call.trace_id,
+            }),
+        })
     }
 }
 
@@ -545,6 +594,125 @@ pub enum TonglingyuToolOutput {
         replay: Option<Value>,
         tool_version: String,
     },
+}
+
+fn tonglingyu_tool_call_from_runtime(call: &RuntimeToolCall) -> CoreResult<TonglingyuToolCall> {
+    match call.tool_name.as_str() {
+        "tonglingyu.text.search" => Ok(TonglingyuToolCall::TextSearch {
+            question: runtime_tool_string_arg(&call.arguments, "question")?,
+            limit: runtime_tool_usize_arg(&call.arguments, "limit")?,
+            required_evidence_types: runtime_tool_string_vec_arg(
+                &call.arguments,
+                "required_evidence_types",
+            )?,
+        }),
+        "tonglingyu.commentary.search" => Ok(TonglingyuToolCall::CommentarySearch {
+            question: runtime_tool_string_arg(&call.arguments, "question")?,
+            limit: runtime_tool_usize_arg(&call.arguments, "limit")?,
+        }),
+        "tonglingyu.evidence.package.create" => Ok(TonglingyuToolCall::EvidencePackageCreate {
+            trace_id: runtime_tool_string_arg(&call.arguments, "trace_id")?,
+            question: runtime_tool_string_arg(&call.arguments, "question")?,
+            cards: runtime_tool_cards_arg(&call.arguments, "cards")?,
+        }),
+        "tonglingyu.evidence.package.read" => Ok(TonglingyuToolCall::EvidencePackageRead {
+            package_id: runtime_tool_string_arg(&call.arguments, "package_id")?,
+        }),
+        "tonglingyu.evidence.package.replay" => Ok(TonglingyuToolCall::EvidencePackageReplay {
+            package_id: runtime_tool_string_arg(&call.arguments, "package_id")?,
+        }),
+        _ => Err(AgentCoreError::coded(
+            ErrorCode::NotFound,
+            "Tonglingyu runtime tool was not registered",
+        )),
+    }
+}
+
+fn runtime_tool_string_arg(arguments: &Value, field: &str) -> CoreResult<String> {
+    arguments
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| runtime_tool_arg_error("missing or invalid string argument"))
+}
+
+fn runtime_tool_usize_arg(arguments: &Value, field: &str) -> CoreResult<usize> {
+    let value = arguments
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| runtime_tool_arg_error("missing or invalid integer argument"))?;
+    usize::try_from(value).map_err(|_| runtime_tool_arg_error("integer argument is too large"))
+}
+
+fn runtime_tool_string_vec_arg(arguments: &Value, field: &str) -> CoreResult<Vec<String>> {
+    arguments
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| runtime_tool_arg_error("missing or invalid string array argument"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| runtime_tool_arg_error("invalid string array item"))
+        })
+        .collect()
+}
+
+fn runtime_tool_cards_arg(arguments: &Value, field: &str) -> CoreResult<Vec<EvidenceCard>> {
+    let value = arguments
+        .get(field)
+        .cloned()
+        .ok_or_else(|| runtime_tool_arg_error("missing evidence cards argument"))?;
+    serde_json::from_value(value)
+        .map_err(|_| runtime_tool_arg_error("invalid evidence cards argument"))
+}
+
+fn runtime_tool_arg_error(message: &'static str) -> AgentCoreError {
+    AgentCoreError::coded(ErrorCode::Conflict, message)
+}
+
+fn runtime_tool_output_ref(call: &RuntimeToolCall, output: &TonglingyuToolOutput) -> String {
+    match output {
+        TonglingyuToolOutput::EvidencePackage { package, .. } => {
+            format!(
+                "runtime://tonglingyu/{}/packages/{}",
+                call.trace_id, package.package_id
+            )
+        }
+        TonglingyuToolOutput::EvidencePackageRead {
+            package: Some(package),
+            ..
+        } => {
+            format!(
+                "runtime://tonglingyu/{}/packages/{}",
+                call.trace_id, package.package_id
+            )
+        }
+        TonglingyuToolOutput::EvidencePackageReplay {
+            replay: Some(replay),
+            ..
+        } => replay
+            .get("package")
+            .and_then(|package| package.get("package_id"))
+            .and_then(Value::as_str)
+            .map(|package_id| {
+                format!(
+                    "runtime://tonglingyu/{}/packages/{package_id}",
+                    call.trace_id
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "runtime://tonglingyu/{}/tools/{}",
+                    call.trace_id, call.call_id
+                )
+            }),
+        _ => format!(
+            "runtime://tonglingyu/{}/tools/{}",
+            call.trace_id, call.call_id
+        ),
+    }
 }
 
 pub fn tool_catalog() -> Vec<ToolDescriptor> {
@@ -3696,6 +3864,92 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(count, workflow.steps.len() as i64);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn runtime_tool_executor_runs_store_backed_tools() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-tool-executor-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let executor = TonglingyuRuntimeToolExecutor::new(store);
+        let search = executor
+            .execute_tool(
+                RuntimeToolCall::new(
+                    "honglou-text",
+                    "tonglingyu.text.search",
+                    json!({
+                        "question": "通灵玉是什么？",
+                        "limit": 2,
+                        "required_evidence_types": ["base_text"],
+                    }),
+                    "trace-runtime-tool-executor-test",
+                ),
+                RuntimeToolSpec::read_only("tonglingyu.text.search"),
+            )
+            .await
+            .expect("text search tool executes");
+        assert_eq!(search.tool_name, "tonglingyu.text.search");
+        assert!(search.output_ref.as_deref().is_some_and(|value| {
+            value.starts_with("runtime://tonglingyu/trace-runtime-tool-executor-test/tools/")
+        }));
+        assert_eq!(search.output["object"], "evidence_cards");
+        assert_eq!(
+            search.metadata["runtime_tool_executor"],
+            "tonglingyu-runtime-store"
+        );
+
+        let package = executor
+            .execute_tool(
+                RuntimeToolCall::new(
+                    "honglou-main",
+                    "tonglingyu.evidence.package.create",
+                    json!({
+                        "trace_id": "trace-runtime-tool-executor-test",
+                        "question": "脂批如何评价通灵玉？",
+                        "cards": [sample_card("base_text")],
+                    }),
+                    "trace-runtime-tool-executor-test",
+                ),
+                RuntimeToolSpec::read_only("tonglingyu.evidence.package.create"),
+            )
+            .await
+            .expect("package create tool executes");
+        let package_id = package.output["package"]["package_id"]
+            .as_str()
+            .expect("package id")
+            .to_string();
+        assert!(package.output_ref.as_deref().is_some_and(|value| {
+            value
+                == format!(
+                    "runtime://tonglingyu/trace-runtime-tool-executor-test/packages/{package_id}"
+                )
+        }));
+
+        let read = executor
+            .execute_tool(
+                RuntimeToolCall::new(
+                    "honglou-main",
+                    "tonglingyu.evidence.package.read",
+                    json!({"package_id": package_id}),
+                    "trace-runtime-tool-executor-test",
+                ),
+                RuntimeToolSpec::read_only("tonglingyu.evidence.package.read"),
+            )
+            .await
+            .expect("package read tool executes");
+        assert_eq!(
+            read.output["package"]["package_id"],
+            package.output["package"]["package_id"]
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

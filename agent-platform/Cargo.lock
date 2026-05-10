@@ -2693,6 +2693,7 @@ dependencies = [
  "agent-core",
  "agent-runtime",
  "anyhow",
+ "async-trait",
  "rusqlite",
  "serde",
  "serde_json",
