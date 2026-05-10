@@ -22,9 +22,10 @@ use std::{
 };
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
-    EvidenceCard, EvidencePackage, RuntimeWorkflowInput, RuntimeWorkflowProfiles,
-    RuntimeWorkflowStreamEvent, TonglingyuToolCall, TonglingyuToolOutput, execute_runtime_workflow,
-    execute_tool, package_json, replay_answer,
+    AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuToolCall, TonglingyuToolOutput,
+    execute_agent_runtime_plan_gate, execute_runtime_workflow, execute_tool, package_json,
+    replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -568,7 +569,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::RuntimeDryRun(args) => {
-            let report = runtime_dry_run(&args)?;
+            let report = runtime_dry_run(&args).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -1044,7 +1045,7 @@ fn hash_value(value: &Value) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
+async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     if args.limit == 0 {
         return Err(anyhow!("--limit must be greater than 0"));
     }
@@ -1060,6 +1061,13 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     let mut policy = search_policy(&args.question);
     policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
+    let agent_runtime_plan_gate = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+        trace_id: trace_id.clone(),
+        question: args.question.clone(),
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&profiles),
+    })
+    .await?;
     let workflow = execute_runtime_workflow(
         &conn,
         RuntimeWorkflowInput {
@@ -1080,6 +1088,7 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "question": &args.question,
         "policy": policy,
         "runtime_step_plan": runtime_step_plan,
+        "agent_runtime_plan_gate": agent_runtime_plan_gate,
         "runtime_step_outputs": workflow.steps,
         "runtime_stream_events": workflow.stream_events,
         "package_id": &package.package_id,
@@ -1091,6 +1100,7 @@ fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             "card_count": package.cards.len(),
             "claim_count": package.claims.len(),
             "reviewer_enforced": true,
+            "agent_runtime_plan_gate": "passed",
             "profile_step_count": workflow.steps.len(),
             "runtime_stream_event_count": workflow.stream_events.len(),
             "runtime_tools_used": [
@@ -2323,6 +2333,33 @@ async fn chat_completions(
     let mut policy = search_policy(&question);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
+    let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+        trace_id: trace_id.clone(),
+        question: question.clone(),
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&state.profiles),
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&session_id),
+                None,
+                "Failed with Controlled Response",
+                "agent_runtime_plan_gate_failed",
+                &json!({"error": error.to_string()}),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "agent_runtime_plan_gate_failed",
+                "agent runtime plan gate failed",
+                Some(&trace_id),
+            );
+        }
+    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -2333,6 +2370,7 @@ async fn chat_completions(
         &json!({
             "policy": &policy,
             "runtime_step_plan": &runtime_step_plan,
+            "agent_runtime_plan_gate": &agent_runtime_plan_gate,
         }),
     );
     let _ = insert_audit_event(
@@ -2346,6 +2384,20 @@ async fn chat_completions(
             "planned_profiles": &policy.planned_profiles,
             "blocked_controls": &policy.blocked_controls,
             "runtime_step_plan": &runtime_step_plan,
+            "agent_runtime_plan_gate": &agent_runtime_plan_gate,
+        }),
+    );
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "agent_runtime_plan_gate_completed",
+        &json!({
+            "session_id": &session_id,
+            "agent_runtime_client": &agent_runtime_plan_gate.agent_runtime_client,
+            "profile_contract_version": &agent_runtime_plan_gate.profile_contract_version,
+            "profile_contract_count": agent_runtime_plan_gate.profile_contract_count,
+            "runtime_step_count": agent_runtime_plan_gate.runtime_step_count,
+            "runtime_step_outputs": &agent_runtime_plan_gate.runtime_step_outputs,
         }),
     );
     let workflow = match execute_runtime_workflow(

@@ -297,6 +297,9 @@ assert dry_run["object"] == "tonglingyu.runtime_dry_run", dry_run
 assert dry_run["status"] == "passed", dry_run
 assert dry_run["package_id"] in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
+assert dry_run["agent_runtime_plan_gate"]["status"] == "passed", dry_run
+assert dry_run["agent_runtime_plan_gate"]["runtime_step_outputs"], dry_run
+assert dry_run["agent_runtime_plan_gate"]["runtime_step_plan"]["owner"] == "domain_gateway", dry_run
 assert dry_run["runtime_step_outputs"], dry_run
 assert dry_run["runtime_stream_events"], dry_run
 assert all("output_ref" in step for step in dry_run["runtime_step_outputs"]), dry_run

@@ -1,3 +1,10 @@
+use agent_core::{
+    ProfileContract as AgentProfileContract, RuntimeClient, RuntimeProfileMessage,
+    RuntimeStep as AgentRuntimeStep, RuntimeStepPlan as AgentRuntimeStepPlan,
+    RuntimeStepPlanInput as AgentRuntimeStepPlanInput, RuntimeStepPlanOwner, RuntimeToolPolicy,
+    RuntimeToolSpec,
+};
+use agent_runtime::MinimalRuntimeClient;
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -128,6 +135,30 @@ pub struct RuntimeWorkflowInput {
     #[serde(default)]
     pub required_evidence_types: Vec<String>,
     pub profiles: RuntimeWorkflowProfiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimePlanGateInput {
+    pub trace_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub required_evidence_types: Vec<String>,
+    pub profiles: RuntimeWorkflowProfiles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimePlanGateReport {
+    pub status: String,
+    pub trace_id: String,
+    pub agent_runtime_client: String,
+    pub profile_contract_version: String,
+    pub profile_contract_count: usize,
+    pub runtime_step_count: usize,
+    pub requested_tools_by_profile: BTreeMap<String, Vec<String>>,
+    pub runtime_step_plan: Value,
+    pub runtime_step_outputs: Value,
+    pub agent_runtime_output_ref: Option<String>,
+    pub effective_tool_set: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +460,270 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
             }),
         },
     ]
+}
+
+pub fn agent_runtime_profile_contracts(
+    profiles: &RuntimeWorkflowProfiles,
+) -> Vec<AgentProfileContract> {
+    runtime_profile_descriptors(profiles)
+        .into_iter()
+        .map(|descriptor| {
+            let mut contract =
+                AgentProfileContract::new(descriptor.profile.clone(), descriptor.version.clone());
+            contract.input_schema = agent_runtime_profile_input_schema();
+            contract.output_schema = agent_runtime_output_schema();
+            contract.tool_policy = agent_runtime_tool_policy(descriptor.allowed_tools.clone());
+            contract.max_context_messages = Some(16);
+            contract.max_runtime_seconds = Some(5);
+            contract.safety_policy = json!({
+                "deny_message_roles": ["tool"],
+                "max_message_bytes": 8192
+            });
+            contract
+        })
+        .collect()
+}
+
+pub fn agent_runtime_step_plan(input: &AgentRuntimePlanGateInput) -> AgentRuntimeStepPlan {
+    let descriptors = runtime_profile_descriptors(&input.profiles)
+        .into_iter()
+        .map(|descriptor| (descriptor.profile.clone(), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let mut steps = Vec::new();
+    let mut evidence_dependencies = Vec::new();
+
+    let text_step = agent_runtime_step(
+        steps.len() + 1,
+        "evidence-text-search",
+        &input.profiles.text,
+        vec!["tonglingyu.text.search".to_string()],
+        Vec::new(),
+        descriptors.get(&input.profiles.text),
+    );
+    evidence_dependencies.push(text_step.step_id.clone());
+    steps.push(text_step);
+
+    if input
+        .required_evidence_types
+        .iter()
+        .any(|kind| kind == "commentary")
+    {
+        let commentary_step = agent_runtime_step(
+            steps.len() + 1,
+            "evidence-commentary-search",
+            &input.profiles.commentary,
+            vec!["tonglingyu.commentary.search".to_string()],
+            Vec::new(),
+            descriptors.get(&input.profiles.commentary),
+        );
+        evidence_dependencies.push(commentary_step.step_id.clone());
+        steps.push(commentary_step);
+    }
+
+    let package_step = agent_runtime_step(
+        steps.len() + 1,
+        "evidence-package-create",
+        &input.profiles.main,
+        vec!["tonglingyu.evidence.package.create".to_string()],
+        evidence_dependencies,
+        descriptors.get(&input.profiles.main),
+    );
+    let package_step_id = package_step.step_id.clone();
+    steps.push(package_step);
+
+    let draft_step = agent_runtime_step(
+        steps.len() + 1,
+        "draft-answer",
+        &input.profiles.main,
+        vec!["tonglingyu.evidence.package.read".to_string()],
+        vec![package_step_id.clone()],
+        descriptors.get(&input.profiles.main),
+    );
+    let draft_step_id = draft_step.step_id.clone();
+    steps.push(draft_step);
+
+    steps.push(agent_runtime_step(
+        steps.len() + 1,
+        "review-answer",
+        &input.profiles.reviewer,
+        vec!["tonglingyu.evidence.package.read".to_string()],
+        vec![package_step_id, draft_step_id],
+        descriptors.get(&input.profiles.reviewer),
+    ));
+
+    let mut plan = AgentRuntimeStepPlan::new(input.trace_id.clone(), steps);
+    plan.owner = RuntimeStepPlanOwner::DomainGateway;
+    plan.metadata = json!({
+        "runtime": "tonglingyu",
+        "profile_contract_version": PROFILE_CONTRACT_VERSION,
+        "question_chars": input.question.chars().count(),
+        "question_sha256": hash_text(&input.question),
+        "required_evidence_types": &input.required_evidence_types,
+        "plan_gate": "agent-runtime-minimal",
+    });
+    plan
+}
+
+pub async fn execute_agent_runtime_plan_gate(
+    input: AgentRuntimePlanGateInput,
+) -> Result<AgentRuntimePlanGateReport> {
+    let contracts = agent_runtime_profile_contracts(&input.profiles);
+    let requested_tools_by_profile = contracts
+        .iter()
+        .map(|contract| {
+            (
+                contract.profile_id.clone(),
+                contract.tool_policy.allowed_tools.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let plan = agent_runtime_step_plan(&input);
+    let runtime_step_count = plan.steps.len();
+    let runtime = MinimalRuntimeClient::default();
+    let output = runtime
+        .execute_profile_step_plan(AgentRuntimeStepPlanInput {
+            plan,
+            messages: vec![RuntimeProfileMessage::new(
+                "user",
+                "tonglingyu runtime plan gate",
+            )],
+            metadata: json!({
+                "runtime": "tonglingyu",
+                "plan_gate": "agent-runtime-minimal",
+                "question_chars": input.question.chars().count(),
+                "question_sha256": hash_text(&input.question),
+                "required_evidence_types": &input.required_evidence_types,
+            }),
+            profile_contracts: contracts.clone(),
+            requested_tools_by_profile: requested_tools_by_profile.clone(),
+            trace_id: input.trace_id.clone(),
+        })
+        .await?;
+    Ok(AgentRuntimePlanGateReport {
+        status: "passed".to_string(),
+        trace_id: input.trace_id,
+        agent_runtime_client: "minimal".to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        profile_contract_count: contracts.len(),
+        runtime_step_count,
+        requested_tools_by_profile,
+        runtime_step_plan: output
+            .metadata
+            .get("runtime_step_plan")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        runtime_step_outputs: output
+            .metadata
+            .get("runtime_step_outputs")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        agent_runtime_output_ref: output.result_ref,
+        effective_tool_set: output
+            .metadata
+            .get("effective_tool_set")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    })
+}
+
+fn runtime_profile_descriptors(profiles: &RuntimeWorkflowProfiles) -> Vec<ProfileDescriptor> {
+    profile_catalog()
+        .into_iter()
+        .map(|mut descriptor| {
+            descriptor.profile = match descriptor.profile.as_str() {
+                "honglou-text" => profiles.text.clone(),
+                "honglou-commentary" => profiles.commentary.clone(),
+                "honglou-main" => profiles.main.clone(),
+                "honglou-reviewer" => profiles.reviewer.clone(),
+                _ => descriptor.profile,
+            };
+            descriptor
+        })
+        .collect()
+}
+
+fn agent_runtime_step(
+    index: usize,
+    operation: &str,
+    profile: &str,
+    allowed_tools: Vec<String>,
+    depends_on: Vec<String>,
+    descriptor: Option<&ProfileDescriptor>,
+) -> AgentRuntimeStep {
+    let mut step = AgentRuntimeStep::new(
+        profile.to_string(),
+        PROFILE_CONTRACT_VERSION,
+        json!({
+            "runtime": "tonglingyu",
+            "operation": operation,
+            "domain_input_contract": descriptor.map(|item| item.input_contract.clone()),
+            "domain_output_contract": descriptor.map(|item| item.output_contract.clone()),
+            "domain_safety_contract": descriptor.map(|item| item.safety_contract.clone()),
+        }),
+    );
+    step.step_id = format!("tonglingyu-{index:02}-{operation}");
+    step.depends_on = depends_on;
+    step.tool_policy = agent_runtime_tool_policy(allowed_tools);
+    step.output_contract = agent_runtime_output_schema();
+    step
+}
+
+fn agent_runtime_tool_policy(allowed_tools: Vec<String>) -> RuntimeToolPolicy {
+    let descriptors = tool_catalog()
+        .into_iter()
+        .map(|descriptor| (descriptor.name.clone(), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let mut policy = RuntimeToolPolicy::read_only(allowed_tools);
+    policy.tool_specs = policy
+        .allowed_tools
+        .iter()
+        .map(|tool| {
+            descriptors
+                .get(tool)
+                .map(agent_runtime_tool_spec)
+                .unwrap_or_else(|| RuntimeToolSpec::read_only(tool.clone()))
+        })
+        .collect();
+    policy
+}
+
+fn agent_runtime_tool_spec(descriptor: &ToolDescriptor) -> RuntimeToolSpec {
+    let mut spec = RuntimeToolSpec::read_only(descriptor.name.clone());
+    spec.description = format!(
+        "Tonglingyu Runtime read-only tool {} ({})",
+        descriptor.name, descriptor.effect_scope
+    );
+    spec.input_schema = descriptor.input_contract.clone();
+    spec.output_schema = descriptor.output_contract.clone();
+    spec.output_ref_required = true;
+    spec
+}
+
+fn agent_runtime_profile_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["kind", "profile_id", "messages", "metadata", "runtime_step", "requested_tools", "trace_id"],
+        "properties": {
+            "kind": {"enum": ["profile_step"]},
+            "profile_id": {"type": "string"},
+            "messages": {"type": "array", "minItems": 1},
+            "metadata": {"type": "object"},
+            "runtime_step": {"type": "object"},
+            "requested_tools": {"type": "array"},
+            "trace_id": {"type": "string"}
+        }
+    })
+}
+
+fn agent_runtime_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["result_summary", "result_ref", "metadata"],
+        "properties": {
+            "result_summary": {"type": "string"},
+            "metadata": {"type": "object"}
+        }
+    })
 }
 
 pub fn execute_tool(conn: &Connection, call: TonglingyuToolCall) -> Result<TonglingyuToolOutput> {
@@ -1457,6 +1752,12 @@ fn hash_files<'a>(paths: impl IntoIterator<Item = &'a std::path::PathBuf>) -> Re
         hasher.update(fs::read(path).with_context(|| format!("hash {}", path.display()))?);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_text(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
@@ -2978,5 +3279,44 @@ mod tests {
                 .contains(&"tonglingyu.evidence.package.read".to_string())
         );
         assert!(reviewer.safety_contract["cannot_be_disabled_by_user"] == true);
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_plan_gate_executes_profile_contracts() {
+        let report = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+            trace_id: "trace-agent-runtime-gate-test".to_string(),
+            question: "脂批如何评价通灵玉？".to_string(),
+            required_evidence_types: vec!["base_text".to_string(), "commentary".to_string()],
+            profiles: RuntimeWorkflowProfiles::default(),
+        })
+        .await
+        .expect("agent-runtime plan gate executes");
+
+        assert_eq!(report.status, "passed");
+        assert_eq!(report.agent_runtime_client, "minimal");
+        assert_eq!(report.profile_contract_count, 4);
+        assert_eq!(report.runtime_step_count, 5);
+        assert_eq!(
+            report.runtime_step_plan["owner"].as_str(),
+            Some("domain_gateway")
+        );
+        assert!(
+            report
+                .runtime_step_outputs
+                .as_array()
+                .is_some_and(|outputs| {
+                    outputs
+                        .iter()
+                        .any(|output| output["profile_id"] == "honglou-reviewer")
+                })
+        );
+        assert!(
+            report.requested_tools_by_profile["honglou-main"]
+                .contains(&"tonglingyu.evidence.package.create".to_string())
+        );
+        assert!(
+            report.requested_tools_by_profile["honglou-reviewer"]
+                .contains(&"tonglingyu.evidence.package.read".to_string())
+        );
     }
 }

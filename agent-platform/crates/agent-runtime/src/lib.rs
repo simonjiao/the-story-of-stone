@@ -3023,10 +3023,7 @@ fn process_sse_lines(
     unexpected_tool_calls: &mut Vec<HermesStreamToolCall>,
     flush: bool,
 ) -> CoreResult<()> {
-    loop {
-        let Some(index) = pending.find('\n') else {
-            break;
-        };
+    while let Some(index) = pending.find('\n') {
         let line = pending.drain(..=index).collect::<String>();
         process_sse_line(
             line.trim(),
