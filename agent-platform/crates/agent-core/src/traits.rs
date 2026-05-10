@@ -624,6 +624,13 @@ pub fn validate_json_schema_value(schema: &Value, value: &Value) -> CoreResult<(
     validate_json_schema_at(schema, value, "$")
 }
 
+fn schema_validation_error(reason: &'static str) -> AgentCoreError {
+    AgentCoreError::coded(
+        ErrorCode::Conflict,
+        format!("schema validation failed: {reason}"),
+    )
+}
+
 fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreResult<()> {
     let Some(schema_object) = schema.as_object() else {
         return Ok(());
@@ -644,35 +651,23 @@ fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreRes
             _ => true,
         };
         if !matches {
-            return Err(AgentCoreError::coded(
-                ErrorCode::Conflict,
-                format!("schema validation failed at {path}: expected {expected}"),
-            ));
+            return Err(schema_validation_error("type mismatch"));
         }
     }
 
     if let Some(values) = schema_object.get("enum").and_then(Value::as_array)
         && !values.iter().any(|item| item == value)
     {
-        return Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            format!("schema validation failed at {path}: enum mismatch"),
-        ));
+        return Err(schema_validation_error("enum mismatch"));
     }
 
     if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
-        let object = value.as_object().ok_or_else(|| {
-            AgentCoreError::coded(
-                ErrorCode::Conflict,
-                format!("schema validation failed at {path}: expected object"),
-            )
-        })?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| schema_validation_error("type mismatch"))?;
         for field in required.iter().filter_map(Value::as_str) {
             if !object.contains_key(field) {
-                return Err(AgentCoreError::coded(
-                    ErrorCode::Conflict,
-                    format!("schema validation failed at {path}: missing {field}"),
-                ));
+                return Err(schema_validation_error("missing required field"));
             }
         }
     }
@@ -693,10 +688,7 @@ fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreRes
         {
             for field in object.keys() {
                 if !properties.contains_key(field) {
-                    return Err(AgentCoreError::coded(
-                        ErrorCode::Conflict,
-                        format!("schema validation failed at {path}: unexpected property"),
-                    ));
+                    return Err(schema_validation_error("unexpected property"));
                 }
             }
         }
@@ -715,10 +707,7 @@ fn validate_json_schema_at(schema: &Value, value: &Value, path: &str) -> CoreRes
             .unwrap_or_default()
             < min_items as usize
     {
-        return Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            format!("schema validation failed at {path}: minItems"),
-        ));
+        return Err(schema_validation_error("minItems"));
     }
 
     Ok(())
@@ -729,7 +718,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_validation_error_omits_unexpected_property_name() {
+    fn schema_validation_error_omits_controlled_field_names_and_values() {
         let error = validate_json_schema_value(
             &json!({
                 "type": "object",
@@ -744,6 +733,23 @@ mod tests {
         assert!(encoded.contains("unexpected property"));
         assert!(!encoded.contains("SECRET_UNEXPECTED_FIELD"));
         assert!(!encoded.contains("SECRET_UNEXPECTED_VALUE"));
+
+        let error = validate_json_schema_value(
+            &json!({
+                "type": "object",
+                "required": ["SECRET_REQUIRED_FIELD"],
+                "properties": {
+                    "SECRET_PATH": {"type": "string"}
+                }
+            }),
+            &json!({"SECRET_PATH": 42}),
+        )
+        .unwrap_err();
+
+        let encoded = error.to_string();
+        assert!(!encoded.contains("SECRET_REQUIRED_FIELD"));
+        assert!(!encoded.contains("SECRET_PATH"));
+        assert!(!encoded.contains("42"));
     }
 }
 

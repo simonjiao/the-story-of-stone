@@ -13,8 +13,9 @@
   per-profile tool permission、multi-profile step plan 和 read-only tool loop
   已落地；`max_context_messages` 会作为 Runtime 输入预算约束执行，
   确定性 `safety_policy` 子集会在进入模型前执行，streaming 失败会返回
-  安全 `error` event；schema validation 的 unexpected property 错误不回显
-  输入侧未知字段名或值，未知 `safety_policy` 字段也不会回显字段名或值。
+  安全 `error` event；schema validation 错误不回显输入侧未知字段名/值、
+  schema required 字段名、schema property path 或 raw value，未知
+  `safety_policy` 字段也不会回显字段名或值。
   当前 streaming 完成口径是有序 event 序列和 Hermes 上游 SSE 解析，不声明
   调用方可边读边转发的 async stream/backpressure API。
 - R4 Multi-profile Step Plan 已补齐完整 step contract：`RuntimeStep` 携带
