@@ -138,6 +138,12 @@
   build/prune 管理路径已改为通过 runtime store handle 按 DB path 访问 runtime，
   不再把 Gateway `Connection` 直接传入 Runtime workflow/tool/schema/prune/rebuild
   API。
+- Gateway 新请求和 `runtime-dry-run` 已让每个确定性 profile step 经过
+  `agent-runtime` `MinimalRuntimeClient::execute_profile_step` envelope，并把
+  `agent_runtime` metadata 写入 step report、stream event metadata 和
+  `agent_runtime_profile_step_executed` audit event；该 metadata 明确标记
+  `content_source=tonglingyu-deterministic-workflow`、
+  `content_used_for_final_answer=false`。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
@@ -154,9 +160,10 @@
   `_runtime_stream_events` / `_stream_source`，smoke 已断言公开 completion 不暴露
   runtime step plan、agent runtime plan gate、planned profiles 或内部 stream
   event 列表。
-- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 还是
-  `tonglingyu-runtime` 确定性执行，`agent-runtime` 只承担 plan gate，尚未承担
-  profile content/tool execution；目标 Open WebUI 页面复测仍未完成。
+- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
+  工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
+  目前承担 plan gate 和 profile step execution envelope，尚未承担 profile
+  content/tool execution；目标 Open WebUI 页面复测仍未完成。
 
 ## 下一步
 

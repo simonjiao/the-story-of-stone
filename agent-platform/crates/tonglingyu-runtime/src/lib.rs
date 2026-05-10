@@ -1,8 +1,8 @@
 use agent_core::{
-    ProfileContract as AgentProfileContract, RuntimeClient, RuntimeProfileMessage,
-    RuntimeStep as AgentRuntimeStep, RuntimeStepPlan as AgentRuntimeStepPlan,
-    RuntimeStepPlanInput as AgentRuntimeStepPlanInput, RuntimeStepPlanOwner, RuntimeToolPolicy,
-    RuntimeToolSpec,
+    ProfileContract as AgentProfileContract, RuntimeClient, RuntimeProfileInput,
+    RuntimeProfileMessage, RuntimeStep as AgentRuntimeStep,
+    RuntimeStepPlan as AgentRuntimeStepPlan, RuntimeStepPlanInput as AgentRuntimeStepPlanInput,
+    RuntimeStepPlanOwner, RuntimeToolPolicy, RuntimeToolSpec,
 };
 use agent_runtime::MinimalRuntimeClient;
 use anyhow::{Context, Result, anyhow};
@@ -138,6 +138,41 @@ impl TonglingyuRuntimeStore {
     pub fn execute_workflow(&self, input: RuntimeWorkflowInput) -> Result<RuntimeWorkflowOutput> {
         let conn = self.open_connection()?;
         execute_runtime_workflow(&conn, input)
+    }
+
+    pub async fn execute_workflow_with_agent_runtime_steps(
+        &self,
+        input: RuntimeWorkflowInput,
+    ) -> Result<RuntimeWorkflowOutput> {
+        let mut workflow = {
+            let conn = self.open_connection()?;
+            execute_runtime_workflow(&conn, input.clone())?
+        };
+        attach_agent_runtime_step_execution(&mut workflow, &input.profiles).await?;
+        workflow.stream_events = workflow_stream_events(
+            &workflow.trace_id,
+            &input.profiles.main,
+            &workflow.package.package_id,
+            &workflow.final_answer,
+            &workflow.steps,
+        );
+        let conn = self.open_connection()?;
+        for step in &workflow.steps {
+            if let Some(agent_runtime) = &step.agent_runtime {
+                append_runtime_audit_event(
+                    &conn,
+                    &workflow.trace_id,
+                    "agent_runtime_profile_step_executed",
+                    &json!({
+                        "step_id": &step.step_id,
+                        "profile": &step.profile,
+                        "operation": &step.operation,
+                        "agent_runtime": agent_runtime,
+                    }),
+                )?;
+            }
+        }
+        Ok(workflow)
     }
 
     pub fn execute_tool(&self, call: TonglingyuToolCall) -> Result<TonglingyuToolOutput> {
@@ -297,6 +332,8 @@ pub struct RuntimeWorkflowStepReport {
     pub duration_ms: u128,
     pub trace_id: String,
     pub output: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_runtime: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,6 +1120,90 @@ pub fn execute_runtime_workflow(
     })
 }
 
+async fn attach_agent_runtime_step_execution(
+    workflow: &mut RuntimeWorkflowOutput,
+    profiles: &RuntimeWorkflowProfiles,
+) -> Result<()> {
+    let contracts = agent_runtime_profile_contracts(profiles)
+        .into_iter()
+        .map(|contract| (contract.profile_id.clone(), contract))
+        .collect::<BTreeMap<_, _>>();
+    let runtime = MinimalRuntimeClient::default();
+    for step in &mut workflow.steps {
+        let contract = contracts
+            .get(&step.profile)
+            .cloned()
+            .ok_or_else(|| anyhow!("runtime profile contract missing for {}", step.profile))?;
+        let runtime_step = agent_runtime_step_from_workflow_step(step);
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: step.profile.clone(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "tonglingyu profile step execution envelope",
+                )],
+                metadata: json!({
+                    "runtime": "tonglingyu",
+                    "workflow_step_id": &step.step_id,
+                    "operation": &step.operation,
+                    "question_chars": workflow.question.chars().count(),
+                    "question_sha256": hash_text(&workflow.question),
+                    "content_source": "tonglingyu-deterministic-workflow",
+                }),
+                profile_contract: Some(contract),
+                runtime_step: Some(runtime_step),
+                requested_tools: step.allowed_tools.clone(),
+                trace_id: workflow.trace_id.clone(),
+            })
+            .await?;
+        step.agent_runtime = Some(json!({
+            "client": "minimal",
+            "status": "executed",
+            "content_source": "tonglingyu-deterministic-workflow",
+            "content_used_for_final_answer": false,
+            "result_ref": output.result_ref,
+            "result_summary": output.result_summary,
+            "schema_version": output
+                .metadata
+                .get("schema_version")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "effective_tool_set": output
+                .metadata
+                .get("effective_tool_set")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+            "runtime_step": output
+                .metadata
+                .get("runtime_step")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        }));
+    }
+    Ok(())
+}
+
+fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> AgentRuntimeStep {
+    let mut runtime_step = AgentRuntimeStep::new(
+        step.profile.clone(),
+        PROFILE_CONTRACT_VERSION,
+        json!({
+            "runtime": "tonglingyu",
+            "workflow_step_id": &step.step_id,
+            "operation": &step.operation,
+            "input_ref": &step.input_ref,
+            "output_ref": &step.output_ref,
+            "content_source": "tonglingyu-deterministic-workflow",
+        }),
+    );
+    runtime_step.step_id = format!("agent-runtime-{}", step.step_id);
+    runtime_step.input_ref = step.input_ref.clone();
+    runtime_step.output_ref = Some(step.output_ref.clone());
+    runtime_step.tool_policy = agent_runtime_tool_policy(step.allowed_tools.clone());
+    runtime_step.output_contract = agent_runtime_output_schema();
+    runtime_step
+}
+
 struct WorkflowStepReportInput<'a> {
     trace_id: &'a str,
     step_id: &'a str,
@@ -1114,6 +1235,7 @@ fn workflow_step_report(
         duration_ms: input.duration_ms,
         trace_id: input.trace_id.to_string(),
         output: input.output,
+        agent_runtime: None,
     };
     append_runtime_audit_event(
         conn,
@@ -1204,6 +1326,15 @@ fn workflow_stream_events(
                 "operation": &step.operation,
                 "duration_ms": step.duration_ms,
                 "allowed_tools": &step.allowed_tools,
+                "agent_runtime": step.agent_runtime.as_ref().map(|value| json!({
+                    "client": value.get("client").cloned().unwrap_or(Value::Null),
+                    "status": value.get("status").cloned().unwrap_or(Value::Null),
+                    "content_source": value.get("content_source").cloned().unwrap_or(Value::Null),
+                    "content_used_for_final_answer": value
+                        .get("content_used_for_final_answer")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                })),
             }),
         });
     }
@@ -3400,6 +3531,58 @@ mod tests {
                 .contains(&"tonglingyu.evidence.package.read".to_string())
         );
         assert!(reviewer.safety_contract["cannot_be_disabled_by_user"] == true);
+    }
+
+    #[tokio::test]
+    async fn runtime_store_executes_workflow_step_envelopes_through_agent_runtime() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-agent-step-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let workflow = store
+            .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
+                trace_id: "trace-agent-runtime-step-test".to_string(),
+                question: "量子红学理论如何解释通灵玉？".to_string(),
+                limit: 3,
+                required_evidence_types: vec!["base_text".to_string()],
+                profiles: RuntimeWorkflowProfiles::default(),
+            })
+            .await
+            .expect("workflow executes");
+
+        assert!(
+            workflow
+                .steps
+                .iter()
+                .all(|step| step.agent_runtime.is_some())
+        );
+        assert!(workflow.steps.iter().any(|step| {
+            step.agent_runtime.as_ref().is_some_and(|value| {
+                value["content_source"] == "tonglingyu-deterministic-workflow"
+                    && value["content_used_for_final_answer"] == json!(false)
+            })
+        }));
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["agent_runtime"]["status"] == "executed"
+        }));
+        let conn = store.open_connection().expect("runtime conn");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'agent_runtime_profile_step_executed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert_eq!(count, workflow.steps.len() as i64);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
     #[tokio::test]

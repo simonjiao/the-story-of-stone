@@ -998,13 +998,15 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         profiles: runtime_workflow_profiles(&profiles),
     })
     .await?;
-    let workflow = runtime_store.execute_workflow(RuntimeWorkflowInput {
-        trace_id: trace_id.clone(),
-        question: args.question.clone(),
-        limit: args.limit,
-        required_evidence_types: policy.required_evidence_types.clone(),
-        profiles: runtime_workflow_profiles(&profiles),
-    })?;
+    let workflow = runtime_store
+        .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: args.question.clone(),
+            limit: args.limit,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&profiles),
+        })
+        .await?;
     let package = workflow.package;
     let replay = runtime_store
         .replay_package(&package.package_id)?
@@ -2329,13 +2331,17 @@ async fn chat_completions(
             "runtime_step_outputs": &agent_runtime_plan_gate.runtime_step_outputs,
         }),
     );
-    let workflow = match state.runtime_store.execute_workflow(RuntimeWorkflowInput {
-        trace_id: trace_id.clone(),
-        question: question.clone(),
-        limit: state.max_evidence,
-        required_evidence_types: policy.required_evidence_types.clone(),
-        profiles: runtime_workflow_profiles(&state.profiles),
-    }) {
+    let workflow = match state
+        .runtime_store
+        .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: question.clone(),
+            limit: state.max_evidence,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&state.profiles),
+        })
+        .await
+    {
         Ok(workflow) => workflow,
         Err(error) => {
             let _ = record_workflow_state(

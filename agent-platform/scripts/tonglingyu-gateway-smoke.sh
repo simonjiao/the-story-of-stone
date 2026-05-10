@@ -298,6 +298,7 @@ for event_type in [
     "retrieval_plan_created",
     "agent_invocation_completed",
     "runtime_profile_step_completed",
+    "agent_runtime_profile_step_executed",
     "evidence_package_created",
     "review_completed",
     "response_finalized",
@@ -335,6 +336,14 @@ assert dry_run["agent_runtime_plan_gate"]["runtime_step_plan"]["owner"] == "doma
 assert dry_run["runtime_step_outputs"], dry_run
 assert dry_run["runtime_stream_events"], dry_run
 assert all("output_ref" in step for step in dry_run["runtime_step_outputs"]), dry_run
+assert all(
+    step.get("agent_runtime", {}).get("status") == "executed"
+    for step in dry_run["runtime_step_outputs"]
+), dry_run
+assert all(
+    step.get("agent_runtime", {}).get("content_used_for_final_answer") is False
+    for step in dry_run["runtime_step_outputs"]
+), dry_run
 assert any(event["event_type"] == "content_delta" for event in dry_run["runtime_stream_events"]), dry_run
 assert any(
     "tonglingyu.text.search" in step["allowed_tools"]
