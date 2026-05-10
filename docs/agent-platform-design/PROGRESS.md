@@ -26,13 +26,14 @@
   scope、per-profile tool permission、read-only capability、tool schema、
   tool round、runtime budget 和 output ref/summary 约束；普通和 streaming
   profile step 超出 runtime budget 都会返回安全错误；RuntimeOutput metadata
-  和 adapter audit 只保留安全 tool event 摘要，不透传 tool executor
-  metadata payload，且不会让 executor 覆盖已授权 tool call 身份；tool call
+  和 adapter audit 只保留安全 tool event 摘要，tool output summary 只暴露
+  类型和长度/数量，不透传 tool executor metadata payload、raw string output
+  或 object key 名，且不会让 executor 覆盖已授权 tool call 身份；tool call
   失败会写安全
   `runtime_tool_error` adapter audit event；Runtime adapter 也提供直连场景
   可配置的 append-only JSONL audit sink。
-- Runtime 完整完成口径已关闭在 repo/local 范围内；完整 JSON Schema 和
-  领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
+- Runtime repo/local checklist 当前已关闭；完成口径限定为 Agent Runtime 本体，
+  完整 JSON Schema 和领域 Gateway 接入复测不属于 Agent Runtime 本体完成条件。
 - 领域 Gateway 接入不再作为 Agent Runtime 专项完成条件；通灵玉 Runtime
   接入设计和复测口径迁入 `docs/tonglingyu-agent-design/`。
 

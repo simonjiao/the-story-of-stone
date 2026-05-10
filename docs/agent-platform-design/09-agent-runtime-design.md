@@ -428,7 +428,8 @@ runtime: add multi-profile step plan
 3. 每个 tool call 在执行前校验 tool name、input schema 和 profile tool policy。
 4. 每个 tool result 在回灌给 profile 前校验 output schema。
 5. 大 tool output 不进入 final `RuntimeOutput.metadata`；metadata 只保留
-   output_ref、summary、schema、tool name、call id 和 trace 信息。
+   output_ref、类型/长度/数量摘要、schema、tool name、call id 和 trace 信息。
+   摘要不得包含 raw string、object key 名或 executor metadata payload。
 6. profile step 必须受最大 tool round 和 `max_runtime_seconds` 预算约束。
 7. RuntimeOutput metadata 中必须返回安全 tool event 摘要；Runtime adapter
    直连场景必须配置等价 append-only audit sink。
@@ -455,13 +456,15 @@ runtime: add multi-profile step plan
    step output。
 4. final metadata 不包含大 payload，只包含 ref 和摘要。
 5. tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
-6. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
-7. 超出 tool round 或 runtime budget 时返回安全错误。
-8. streaming profile step 超出 runtime budget 时返回安全 `error` event。
-9. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
+6. tool output summary 不泄漏 raw string、object key 名或 executor metadata
+   payload。
+7. tool executor 返回的 call/profile/tool 身份不能覆盖 Runtime 已授权 tool call。
+8. 超出 tool round 或 runtime budget 时返回安全错误。
+9. streaming profile step 超出 runtime budget 时返回安全 `error` event。
+10. RuntimeOutput metadata 或 Runtime adapter audit sink 可以看到 runtime
    tool call / result / error event。
-10. Runtime adapter 直连 JSONL audit sink 有单独验证。
-11. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
+11. Runtime adapter 直连 JSONL audit sink 有单独验证。
+12. 未授权 tool call 的失败 audit 有回归验证，且不包含 tool arguments。
 
 测试：
 

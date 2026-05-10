@@ -2704,14 +2704,12 @@ fn process_sse_line(
 
 fn summarize_json(value: &Value) -> String {
     match value {
-        Value::Object(map) => format!(
-            "object_keys:{}",
-            map.keys().cloned().collect::<Vec<_>>().join(",")
-        ),
+        Value::Object(map) => format!("object_keys_len:{}", map.len()),
         Value::Array(items) => format!("array_len:{}", items.len()),
-        Value::String(value) => value.chars().take(120).collect(),
+        Value::String(value) => format!("string_len:{}", value.chars().count()),
         Value::Null => "null".to_string(),
-        other => other.to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Number(_) => "number".to_string(),
     }
 }
 
@@ -2982,6 +2980,20 @@ mod tests {
 
     type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
 
+    #[test]
+    fn summarize_json_omits_values_and_object_keys() {
+        assert_eq!(
+            summarize_json(&json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"})),
+            "object_keys_len:1"
+        );
+        assert_eq!(
+            summarize_json(&json!("SECRET_TOOL_OUTPUT")),
+            "string_len:18"
+        );
+        assert_eq!(summarize_json(&json!(42)), "number");
+        assert_eq!(summarize_json(&json!(true)), "bool");
+    }
+
     #[derive(Debug, Default)]
     struct RawProfileRuntimeClient;
 
@@ -3035,7 +3047,7 @@ mod tests {
                 profile_id: "spoofed-profile".to_string(),
                 tool_name: "spoofed-tool".to_string(),
                 output_ref: Some("runtime://tool-results/leaky".to_string()),
-                output: json!({"ok": true}),
+                output: json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"}),
                 metadata: json!({
                     "trace_id": call.trace_id,
                     "secret": "SECRET_TOOL_METADATA",
@@ -4310,9 +4322,15 @@ mod tests {
         let encoded_metadata = serde_json::to_string(&output.metadata).unwrap();
         assert!(!encoded_metadata.contains("SECRET_TOOL_METADATA"));
         assert!(!encoded_metadata.contains("SECRET_TOOL_PAYLOAD"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_VALUE"));
         assert_eq!(
             output.metadata["tool_results"][0]["output_ref"],
             "runtime://tool-results/leaky"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_summary"],
+            "object_keys_len:1"
         );
         assert_eq!(
             output.metadata["tool_results"][0]["call_id"],
@@ -4339,6 +4357,8 @@ mod tests {
         assert!(!log.contains("spoofed-tool"));
         assert!(!log.contains("SECRET_TOOL_METADATA"));
         assert!(!log.contains("SECRET_TOOL_PAYLOAD"));
+        assert!(!log.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!log.contains("SECRET_TOOL_VALUE"));
         let _ = tokio::fs::remove_file(audit_path).await;
     }
 
