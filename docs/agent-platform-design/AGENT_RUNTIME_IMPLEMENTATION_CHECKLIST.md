@@ -221,6 +221,8 @@ backpressure API 是后续项。
 - [x] tool input/output 都按 tool spec schema 校验。
 - [x] tool output 通过 `output_ref` 和安全摘要传递；大 payload 不进入
   final `RuntimeOutput.metadata`，摘要只暴露类型和长度/数量。
+- [x] `RuntimeToolSpec.output_ref_required=true` 时，缺失 `output_ref` 会失败，
+  不会被 Runtime 自动补全成 successful tool result。
 - [x] profile step 受最大 tool round 和 `max_runtime_seconds` 预算约束。
 - [x] RuntimeOutput metadata 返回安全 tool call / tool result event 摘要。
 - [x] 越权 tool、写入类 tool 或未知 tool 返回安全错误。
@@ -242,6 +244,8 @@ backpressure API 是后续项。
 - [x] tool executor 返回的 metadata payload 不进入 final metadata 或 adapter audit。
 - [x] tool output summary 不包含 raw string、object key 名或 executor metadata
   payload。
+- [x] required `output_ref` 缺失时返回安全错误，并写 `runtime_tool_error`
+  audit event。
 - [x] tool executor 返回的 call/profile/tool 身份不会覆盖 Runtime 已授权 tool call。
 - [x] 超出 tool round 或 runtime budget 时返回安全错误。
 - [x] streaming profile step 超出 runtime budget 时返回安全 `error` event。
@@ -260,6 +264,7 @@ backpressure API 是后续项。
 - [x] `hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit`
   覆盖 executor metadata、raw string output summary 和 adapter audit 不泄漏。
 - [x] tool result metadata / adapter audit 覆盖已校验 output_schema contract。
+- [x] `hermes_runtime_rejects_required_tool_output_ref_missing`
 
 ### R4.5 提交
 

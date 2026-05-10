@@ -700,14 +700,14 @@ impl HermesRuntimeClient {
             result.metadata = json!({});
         }
         result.metadata["trace_id"] = json!(trace_id);
-        if result.output_ref.is_none() {
-            result.output_ref = Some(format!("runtime://tool-results/{}", result.call_id));
-        }
         if spec.output_ref_required && result.output_ref.is_none() {
             return Err(AgentCoreError::coded(
                 ErrorCode::Conflict,
                 "runtime tool result did not include output_ref",
             ));
+        }
+        if result.output_ref.is_none() {
+            result.output_ref = Some(format!("runtime://tool-results/{}", result.call_id));
         }
         validate_json_schema_value(&spec.output_schema, &result.output)?;
         Ok((result, spec.output_schema))
@@ -3058,6 +3058,27 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct MissingOutputRefToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for MissingOutputRefToolExecutor {
+        async fn execute_tool(
+            &self,
+            call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Ok(RuntimeToolResult {
+                call_id: call.call_id,
+                profile_id: call.profile_id,
+                tool_name: call.tool_name,
+                output_ref: None,
+                output: json!({"ok": true}),
+                metadata: json!({"trace_id": call.trace_id}),
+            })
+        }
+    }
+
     fn hermes_run_input(trace_id: String) -> RuntimeRunInput {
         RuntimeRunInput {
             trace_id: trace_id.clone(),
@@ -4370,6 +4391,73 @@ mod tests {
         assert!(!log.contains("SECRET_TOOL_PAYLOAD"));
         assert!(!log.contains("SECRET_TOOL_OUTPUT"));
         assert!(!log.contains("SECRET_TOOL_VALUE"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_required_tool_output_ref_missing() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|_body: Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-missing-ref",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.missing_ref",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("missing-ref-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.missing_ref".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(MissingOutputRefToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "missing-ref-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use missing ref tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.missing_ref".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("call-missing-ref"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("\"ok\""));
         let _ = tokio::fs::remove_file(audit_path).await;
     }
 
