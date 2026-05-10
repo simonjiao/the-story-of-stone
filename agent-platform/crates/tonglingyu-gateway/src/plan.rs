@@ -2,6 +2,7 @@ use crate::InternalProfiles;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+use tonglingyu_runtime::PROFILE_CONTRACT_VERSION;
 
 pub(crate) const PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
 pub(crate) const PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
@@ -28,6 +29,7 @@ pub(crate) struct RuntimeStepPlan {
 pub(crate) struct RuntimePlanStep {
     pub(crate) step_id: String,
     pub(crate) profile: String,
+    pub(crate) profile_contract_version: String,
     pub(crate) operation: String,
     pub(crate) required: bool,
     pub(crate) allowed_tools: Vec<String>,
@@ -38,6 +40,7 @@ impl RuntimeStepPlan {
         let mut steps = vec![RuntimePlanStep {
             step_id: "step-01-text-search".to_string(),
             profile: profiles.text.clone(),
+            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
             operation: "text_evidence_search".to_string(),
             required: true,
             allowed_tools: vec!["tonglingyu.text.search".to_string()],
@@ -50,6 +53,7 @@ impl RuntimeStepPlan {
             steps.push(RuntimePlanStep {
                 step_id: "step-02-commentary-search".to_string(),
                 profile: profiles.commentary.clone(),
+                profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
                 operation: "commentary_evidence_search".to_string(),
                 required: true,
                 allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
@@ -58,6 +62,7 @@ impl RuntimeStepPlan {
         steps.push(RuntimePlanStep {
             step_id: step_id(steps.len() + 1, "package-create"),
             profile: profiles.main.clone(),
+            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
             operation: "evidence_package_create".to_string(),
             required: true,
             allowed_tools: vec!["tonglingyu.evidence.package.create".to_string()],
@@ -65,6 +70,7 @@ impl RuntimeStepPlan {
         steps.push(RuntimePlanStep {
             step_id: step_id(steps.len() + 1, "draft-answer"),
             profile: profiles.main.clone(),
+            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
             operation: "draft_answer".to_string(),
             required: true,
             allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
@@ -72,6 +78,7 @@ impl RuntimeStepPlan {
         steps.push(RuntimePlanStep {
             step_id: step_id(steps.len() + 1, "review-answer"),
             profile: profiles.reviewer.clone(),
+            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
             operation: "review_answer".to_string(),
             required: true,
             allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
@@ -247,6 +254,10 @@ mod tests {
         let policy = search_policy("脂批如何评价通灵玉？");
         let plan = RuntimeStepPlan::from_policy(&profiles(), &policy);
         assert_eq!(plan.schema_version, PLAN_SCHEMA_VERSION);
+        assert!(
+            plan.steps.iter().all(|step| step.profile_contract_version
+                == tonglingyu_runtime::PROFILE_CONTRACT_VERSION)
+        );
         assert!(
             plan.steps
                 .iter()

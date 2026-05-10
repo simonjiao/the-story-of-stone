@@ -186,18 +186,20 @@ claim link 和 audit event 的运行时表初始化已由
 源码级回归断言，防止 runtime 领域函数重新回流到 Gateway。Runtime 已定义
 `TonglingyuToolCall` / `TonglingyuToolOutput` / `tool_catalog`，Gateway 主路径
 通过 `execute_tool` 调用 text search、package create/read/replay。
+`tonglingyu-runtime` 也定义了四个 profile descriptor，Gateway Runtime step
+plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱节。
 
 这些改动仍不能勾选 R5A 完成：Gateway 仍负责打开 SQLite、初始化 schema、
 构建 source snapshot KB，并且尚未通过 `agent-runtime` 执行四 profile 或
-read-only tool contract。R5A/R5C/R5D 必须等 Runtime profile、tool contract
-和目标环境 Open WebUI 复测完成后再勾选。
+read-only tool contract。R5A/R5D 必须等 Runtime profile 执行面、tool
+contract dry run 和目标环境 Open WebUI 复测完成后再勾选。
 
 ### R5C 四 Profile 编排
 
-- [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
-- [ ] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
+- [x] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
+- [x] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
+- [x] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
+- [x] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
 - [ ] `honglou-text` 通过 `tonglingyu.text.search` 生成正文 evidence analysis。
 - [ ] `honglou-commentary` 通过 `tonglingyu.commentary.search` 生成脂批
   evidence analysis。

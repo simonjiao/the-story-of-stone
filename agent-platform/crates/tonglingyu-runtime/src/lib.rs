@@ -53,6 +53,7 @@ pub struct EvidencePackage {
 }
 
 pub const TOOL_CATALOG_VERSION: &str = "tonglingyu-readonly-tools-v1";
+pub const PROFILE_CONTRACT_VERSION: &str = "tonglingyu-runtime-profiles-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -62,6 +63,17 @@ pub struct ToolDescriptor {
     pub effect_scope: String,
     pub input_contract: Value,
     pub output_contract: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileDescriptor {
+    pub profile: String,
+    pub version: String,
+    pub role: String,
+    pub allowed_tools: Vec<String>,
+    pub input_contract: Value,
+    pub output_contract: Value,
+    pub safety_contract: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +194,90 @@ pub fn tool_catalog() -> Vec<ToolDescriptor> {
             effect_scope: "read_only_runtime_evidence_store".to_string(),
             input_contract: json!({"required": ["package_id"]}),
             output_contract: json!({"object": "tonglingyu.evidence_package_replay"}),
+        },
+    ]
+}
+
+pub fn profile_catalog() -> Vec<ProfileDescriptor> {
+    vec![
+        ProfileDescriptor {
+            profile: "honglou-text".to_string(),
+            version: PROFILE_CONTRACT_VERSION.to_string(),
+            role: "正文、版本、人物和 source snapshot 证据检索 profile。".to_string(),
+            allowed_tools: vec!["tonglingyu.text.search".to_string()],
+            input_contract: json!({
+                "required": ["question", "required_evidence_types", "trace_id"],
+                "forbidden": ["system_prompt", "profile_override", "write_tools"]
+            }),
+            output_contract: json!({
+                "required": ["evidence_refs", "evidence_analysis", "unsupported_scope"],
+                "must_preserve": ["original_text", "source_id", "revision_id", "block_id"]
+            }),
+            safety_contract: json!({
+                "no_final_answer": true,
+                "no_secret_access": true,
+                "no_write_tools": true
+            }),
+        },
+        ProfileDescriptor {
+            profile: "honglou-commentary".to_string(),
+            version: PROFILE_CONTRACT_VERSION.to_string(),
+            role: "脂批、评语和版本线索证据检索 profile。".to_string(),
+            allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
+            input_contract: json!({
+                "required": ["question", "trace_id"],
+                "forbidden": ["system_prompt", "profile_override", "write_tools"]
+            }),
+            output_contract: json!({
+                "required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
+                "must_label": ["commentary", "version_note"]
+            }),
+            safety_contract: json!({
+                "cannot_prove_base_text_fact_alone": true,
+                "no_secret_access": true,
+                "no_write_tools": true
+            }),
+        },
+        ProfileDescriptor {
+            profile: "honglou-main".to_string(),
+            version: PROFILE_CONTRACT_VERSION.to_string(),
+            role: "基于证据包组织受限回答的主 profile。".to_string(),
+            allowed_tools: vec![
+                "tonglingyu.evidence.package.create".to_string(),
+                "tonglingyu.evidence.package.read".to_string(),
+            ],
+            input_contract: json!({
+                "required": ["question", "trace_id", "evidence_refs"],
+                "forbidden": ["skip_reviewer", "disable_reviewer", "system_prompt"]
+            }),
+            output_contract: json!({
+                "required": ["draft_answer", "package_id", "claim_statements"],
+                "must_include": ["support_scope", "unsupported_scope"]
+            }),
+            safety_contract: json!({
+                "must_use_package_ref": true,
+                "cannot_finalize_without_reviewer": true,
+                "no_secret_access": true
+            }),
+        },
+        ProfileDescriptor {
+            profile: "honglou-reviewer".to_string(),
+            version: PROFILE_CONTRACT_VERSION.to_string(),
+            role: "审校草稿、claim 和证据包边界的 reviewer profile。".to_string(),
+            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+            input_contract: json!({
+                "required": ["draft_answer", "package_id", "claim_statements", "trace_id"],
+                "forbidden": ["disable_reviewer", "profile_override", "system_prompt"]
+            }),
+            output_contract: json!({
+                "required": ["review_status", "issues", "severity", "required_revisions"],
+                "review_status": ["passed", "needs_revision"]
+            }),
+            safety_contract: json!({
+                "cannot_be_disabled_by_user": true,
+                "must_downgrade_unsupported_claims": true,
+                "no_secret_access": true
+            }),
         },
     ]
 }
@@ -1419,5 +1515,37 @@ mod tests {
                 .filter(|tool| tool.name.ends_with(".search"))
                 .all(|tool| tool.effect_scope == "read_only_kb")
         );
+    }
+
+    #[test]
+    fn profile_catalog_defines_four_runtime_profiles() {
+        let catalog = profile_catalog();
+        let profiles = catalog
+            .iter()
+            .map(|profile| profile.profile.as_str())
+            .collect::<BTreeSet<_>>();
+        for expected in [
+            "honglou-text",
+            "honglou-commentary",
+            "honglou-main",
+            "honglou-reviewer",
+        ] {
+            assert!(profiles.contains(expected), "missing profile {expected}");
+        }
+        assert!(
+            catalog
+                .iter()
+                .all(|profile| profile.version == PROFILE_CONTRACT_VERSION)
+        );
+        let reviewer = catalog
+            .iter()
+            .find(|profile| profile.profile == "honglou-reviewer")
+            .expect("reviewer profile exists");
+        assert!(
+            reviewer
+                .allowed_tools
+                .contains(&"tonglingyu.evidence.package.read".to_string())
+        );
+        assert!(reviewer.safety_contract["cannot_be_disabled_by_user"] == true);
     }
 }
