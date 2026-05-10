@@ -76,6 +76,8 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 | [06-negative-list.md](06-negative-list.md) | 明确禁止、不建议、延期实现和延期原因 |
 | [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md) | 场景覆盖、决策清单和验收标准 |
 | [08-implementation-roadmap.md](08-implementation-roadmap.md) | P0/P1/P2 阶段边界、交付顺序和验收 |
+| [09-agent-runtime-design.md](09-agent-runtime-design.md) | Agent Runtime 专项设计和待实现项 |
+| [AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md](AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md) | Agent Runtime 专项实施 checklist、验收和待确认项 |
 | [PROGRESS.md](PROGRESS.md) | Agent Platform 当前进展入口 |
 | [P2_IMPLEMENTATION_CHECKLIST.md](P2_IMPLEMENTATION_CHECKLIST.md) | P2 仓库侧实现、前提复盘、明确接入位置和 smoke 验证 |
 | [BRIDGE_HARDENING_CHECKLIST.md](BRIDGE_HARDENING_CHECKLIST.md) | Agent Identity Bridge hardening 执行记录和完成口径 |
@@ -101,3 +103,5 @@ v1 必须包含一个只读 `observer_agent`。它持续监控和评测系统运
 6. 不做什么读 [06-negative-list.md](06-negative-list.md)。
 7. 覆盖检查读 [07-scenarios-decisions-acceptance.md](07-scenarios-decisions-acceptance.md)。
 8. 实施拆分读 [08-implementation-roadmap.md](08-implementation-roadmap.md)。
+9. Runtime 专项完善读 [09-agent-runtime-design.md](09-agent-runtime-design.md)。
+10. Runtime 执行跟踪读 [AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md](AGENT_RUNTIME_IMPLEMENTATION_CHECKLIST.md)。
