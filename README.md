@@ -11,12 +11,14 @@
 
 ## 项目入口
 
+<!-- markdownlint-disable MD013 -->
 | 项目 | 代码入口 | 文档入口 | 进展 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 通灵玉 | `agent-platform/crates/tonglingyu-gateway/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
 | Global Router | `agent-platform/crates/global-router/` | `docs/global-router-design/` | `docs/global-router-design/PROGRESS.md` |
 | Agent Platform | `agent-platform/` | `docs/agent-platform-design/` | `docs/agent-platform-design/PROGRESS.md` |
 | Deployment | `deploy/` | `deploy/README.md` | `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md` |
+<!-- markdownlint-enable MD013 -->
 
 ## 当前边界
 
@@ -98,6 +100,17 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
   --db data/tonglingyu/tonglingyu.db \
   --model-id tonglingyu \
   --model-name 通灵玉
+```
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  eval \
+  --db data/tonglingyu/tonglingyu.db \
+  --report data/tonglingyu/reports/eval-smoke.json
+```
+
+```bash
+agent-platform/scripts/tonglingyu-gateway-smoke.sh
 ```
 
 ## Global Router 常用命令

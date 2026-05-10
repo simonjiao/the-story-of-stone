@@ -70,7 +70,7 @@ impl RuntimeClient for MinimalRuntimeClient {
         let snapshot_summary = input
             .snapshot
             .as_ref()
-            .map(|snapshot| summarize_json(snapshot))
+            .map(summarize_json)
             .unwrap_or_else(|| "no snapshot".to_string());
         let result_summary = format!(
             "Minimal Runtime profile={} executed run {} for {} with {} recent messages; snapshot={}.",
@@ -1451,6 +1451,8 @@ mod tests {
     };
     use tokio::net::TcpListener;
 
+    type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
+
     fn hermes_run_input(trace_id: String) -> RuntimeRunInput {
         RuntimeRunInput {
             trace_id: trace_id.clone(),
@@ -1795,10 +1797,7 @@ mod tests {
             .route(
                 "/action-executions/execute",
                 post(
-                    |State((seen_provider_ref, seen_payload)): State<(
-                        Arc<Mutex<Option<String>>>,
-                        Arc<Mutex<Option<Value>>>,
-                    )>,
+                    |State((seen_provider_ref, seen_payload)): State<SeenWriteConnectorInput>,
                      Json(input): Json<WriteConnectorExecuteInput>| async move {
                         *seen_provider_ref.lock().unwrap() = input.credential_provider_ref.clone();
                         *seen_payload.lock().unwrap() = Some(input.payload.clone());

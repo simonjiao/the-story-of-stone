@@ -1,6 +1,7 @@
 # 运行手册
 
-本手册只放当前可执行命令。知识库、Gateway、reviewer 和 Open WebUI “通灵玉”入口尚未实现。
+本手册只放当前可执行命令。通灵玉当前 Rust 入口是
+`agent-platform/crates/tonglingyu-gateway/`。
 
 ## 环境
 
@@ -11,11 +12,15 @@
 
 ## 视频转录
 
-默认输出到 `resources/styles/buhongjushi/`。`transcripts/` 和 `metadata/` 可提交；音频、视频和缓存不提交。
+默认输出到 `resources/styles/buhongjushi/`。`transcripts/` 和 `metadata/`
+可提交；音频、视频和缓存不提交。
 
 ```bash
 .venv/bin/python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --offset 3 --limit 3 --asr-model base
+.venv/bin/python scripts/bilibili_hlm_pipeline.py \
+  --offset 3 \
+  --limit 3 \
+  --asr-model base
 ```
 
 带术语词表重转录：
@@ -81,6 +86,61 @@ git diff --check
 
 转录校订和三文件一致性规则见 [转录校订流程](VERIFICATION_WORKFLOW.md)。
 
-## 尚未实现
+## 通灵玉知识库
 
-`tonglingyu-kb-build`、`tonglingyu-kb-query`、`tonglingyu-kb-serve`、Gateway、reviewer 和 Open WebUI 模型注册还没有可执行入口。实施方向见 [当前差距与实施方向](tonglingyu-agent-design/16_现有架构差距与实施方向.md)。
+建库：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  build-kb \
+  --source-root resources/sources/wiki \
+  --db data/tonglingyu/tonglingyu.db \
+  --rebuild
+```
+
+查询并生成证据包：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  query \
+  --db data/tonglingyu/tonglingyu.db \
+  "通灵玉上的字是什么？" \
+  --limit 8
+```
+
+回放已生成的证据包：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  replay-package \
+  --db data/tonglingyu/tonglingyu.db \
+  pkg-example
+```
+
+运行内置评测样例：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  eval \
+  --db data/tonglingyu/tonglingyu.db \
+  --report data/tonglingyu/reports/eval-smoke.json
+```
+
+## 通灵玉 Gateway
+
+本地启动 OpenAI-compatible Gateway：
+
+```bash
+cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
+  serve \
+  --bind 127.0.0.1:8090 \
+  --db data/tonglingyu/tonglingyu.db \
+  --model-id tonglingyu \
+  --model-name 通灵玉
+```
+
+验证本地公开入口、证据包回放和内置评测：
+
+```bash
+agent-platform/scripts/tonglingyu-gateway-smoke.sh
+```

@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -300,11 +299,9 @@ async fn forward_chat(
         .cloned()
         .unwrap_or_else(|| header::HeaderValue::from_static("application/json"));
 
-    let stream = upstream.bytes_stream().map(|chunk| {
-        chunk
-            .map(Bytes::from)
-            .map_err(|error| std::io::Error::other(error.to_string()))
-    });
+    let stream = upstream
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(|error| std::io::Error::other(error.to_string())));
     let mut response = Body::from_stream(stream).into_response();
     *response.status_mut() = status;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
