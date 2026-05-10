@@ -167,6 +167,8 @@ backpressure API 是后续项。
 
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `runtime_tool_policy_rejects_non_read_only_tool_call` 覆盖
+  non-read-only tool scope 和 tool call 两层拒绝。
 
 ### R3 提交
 

@@ -1858,6 +1858,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_tool_policy_rejects_non_read_only_tool_call() {
+        let mut policy = RuntimeToolPolicy {
+            allowed_tools: vec!["tool.write".to_string()],
+            denied_tools: Vec::new(),
+            tool_specs: vec![RuntimeToolSpec::write("tool.write")],
+        };
+        let requested_tools = vec!["tool.write".to_string()];
+
+        let scope_error = policy
+            .validate_requested_tools(&requested_tools)
+            .unwrap_err();
+        assert_eq!(scope_error.code(), crate::ErrorCode::Forbidden);
+
+        let call_error = policy
+            .validate_tool_call("tool.write", &requested_tools)
+            .unwrap_err();
+        assert_eq!(call_error.code(), crate::ErrorCode::Forbidden);
+        assert!(call_error.to_string().contains("non-read-only tool"));
+        assert!(policy.effective_tools().is_empty());
+        assert!(
+            policy
+                .effective_tool_specs_for_request(&requested_tools)
+                .is_empty()
+        );
+
+        policy.denied_tools.push("tool.write".to_string());
+        let denied_error = policy
+            .validate_tool_call("tool.write", &requested_tools)
+            .unwrap_err();
+        assert_eq!(denied_error.code(), crate::ErrorCode::Forbidden);
+    }
+
+    #[test]
     fn observer_assessment_flags_runtime_quality_signals() {
         let snapshot = ObserverSnapshot {
             collected_at: OffsetDateTime::now_utc(),
