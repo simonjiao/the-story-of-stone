@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     io::{BufRead, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
     time::Instant,
 };
 use time::OffsetDateTime;
@@ -106,6 +106,111 @@ pub struct RuntimeStoreStats {
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TonglingyuRuntimeStore {
+    db_path: PathBuf,
+}
+
+impl TonglingyuRuntimeStore {
+    pub fn new(db_path: impl Into<PathBuf>) -> Self {
+        Self {
+            db_path: db_path.into(),
+        }
+    }
+
+    pub fn open_connection(&self) -> Result<Connection> {
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("open runtime sqlite db {}", self.db_path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        init_runtime_schema(&conn)?;
+        Ok(conn)
+    }
+
+    pub fn has_knowledge_base(&self) -> Result<bool> {
+        has_knowledge_base(&self.db_path)
+    }
+
+    pub fn execute_workflow(&self, input: RuntimeWorkflowInput) -> Result<RuntimeWorkflowOutput> {
+        let conn = self.open_connection()?;
+        execute_runtime_workflow(&conn, input)
+    }
+
+    pub fn execute_tool(&self, call: TonglingyuToolCall) -> Result<TonglingyuToolOutput> {
+        let conn = self.open_connection()?;
+        execute_tool(&conn, call)
+    }
+
+    pub fn search_cards(
+        &self,
+        question: &str,
+        limit: usize,
+        required_evidence_types: &[String],
+    ) -> Result<Vec<EvidenceCard>> {
+        match self.execute_tool(TonglingyuToolCall::TextSearch {
+            question: question.to_string(),
+            limit,
+            required_evidence_types: required_evidence_types.to_vec(),
+        })? {
+            TonglingyuToolOutput::EvidenceCards { cards, .. } => Ok(cards),
+            other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        }
+    }
+
+    pub fn create_package(
+        &self,
+        trace_id: &str,
+        question: &str,
+        cards: Vec<EvidenceCard>,
+    ) -> Result<EvidencePackage> {
+        match self.execute_tool(TonglingyuToolCall::EvidencePackageCreate {
+            trace_id: trace_id.to_string(),
+            question: question.to_string(),
+            cards,
+        })? {
+            TonglingyuToolOutput::EvidencePackage { package, .. } => Ok(*package),
+            other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        }
+    }
+
+    pub fn read_package(&self, package_id: &str) -> Result<Option<EvidencePackage>> {
+        match self.execute_tool(TonglingyuToolCall::EvidencePackageRead {
+            package_id: package_id.to_string(),
+        })? {
+            TonglingyuToolOutput::EvidencePackageRead { package, .. } => {
+                Ok(package.map(|package| *package))
+            }
+            other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        }
+    }
+
+    pub fn replay_package(&self, package_id: &str) -> Result<Option<Value>> {
+        match self.execute_tool(TonglingyuToolCall::EvidencePackageReplay {
+            package_id: package_id.to_string(),
+        })? {
+            TonglingyuToolOutput::EvidencePackageReplay { replay, .. } => Ok(replay),
+            other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+        }
+    }
+
+    pub fn store_stats(&self) -> Result<RuntimeStoreStats> {
+        let conn = self.open_connection()?;
+        runtime_store_stats(&conn)
+    }
+
+    pub fn package_ids_for_trace(&self, trace_id: &str) -> Result<Vec<String>> {
+        let conn = self.open_connection()?;
+        runtime_package_ids_for_trace(&conn, trace_id)
+    }
+
+    pub fn audit_events_for_trace(&self, trace_id: &str) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        runtime_audit_events_for_trace(&conn, trace_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

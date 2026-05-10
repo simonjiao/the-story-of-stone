@@ -133,6 +133,10 @@
   Gateway 新请求和 `runtime-dry-run` 会先执行 `agent-runtime`
   `MinimalRuntimeClient` plan gate，校验 step dependency、requested tool scope、
   output_ref 和 Runtime step metadata。
+- `tonglingyu-runtime` 已新增 `TonglingyuRuntimeStore`；Gateway 请求路径、
+  `runtime-dry-run`、health、search、metrics 和 admin package/trace 读取已改为
+  通过 runtime store handle 按 DB path 访问 runtime，不再把这些路径的 Gateway
+  `Connection` 直接传入 Runtime workflow/tool API。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
@@ -150,7 +154,7 @@
   runtime step plan、agent runtime plan gate、planned profiles 或内部 stream
   event 列表。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：Gateway 仍直接负责
-  SQLite 连接并把连接传给本地 Runtime API；profile workflow 还是
+  build/prune 等管理路径的 SQLite 连接/事务边界；profile workflow 还是
   `tonglingyu-runtime` 确定性执行，`agent-runtime` 只承担 plan gate，尚未承担
   profile content/tool execution；目标 Open WebUI 页面复测仍未完成。
 

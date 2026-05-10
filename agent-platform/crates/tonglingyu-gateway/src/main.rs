@@ -23,9 +23,8 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuToolCall, TonglingyuToolOutput,
-    execute_agent_runtime_plan_gate, execute_runtime_workflow, execute_tool, package_json,
-    replay_answer,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuRuntimeStore,
+    execute_agent_runtime_plan_gate, package_json, replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -231,6 +230,7 @@ struct ServeArgs {
 #[derive(Clone)]
 struct AppState {
     db: PathBuf,
+    runtime_store: TonglingyuRuntimeStore,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -554,16 +554,17 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Query(args) => {
-            let conn = open_db(&args.db)?;
-            let (cards, _policy) = search_evidence_with_policy(&conn, &args.question, args.limit)?;
+            let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+            let (cards, _policy) =
+                search_evidence_with_policy(&runtime_store, &args.question, args.limit)?;
             let trace_id = new_trace_id();
-            let package = runtime_create_package(&conn, &trace_id, &args.question, cards)?;
+            let package = runtime_store.create_package(&trace_id, &args.question, cards)?;
             println!("{}", serde_json::to_string_pretty(&package)?);
             Ok(())
         }
         Command::ReplayPackage(args) => {
-            let conn = open_db(&args.db)?;
-            let replay = runtime_replay_package(&conn, &args.package_id)?
+            let replay = TonglingyuRuntimeStore::new(args.db.clone())
+                .replay_package(&args.package_id)?
                 .ok_or_else(|| anyhow!("evidence package not found: {}", args.package_id))?;
             println!("{}", serde_json::to_string_pretty(&replay)?);
             Ok(())
@@ -596,7 +597,7 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    if args.auto_build_kb && !tonglingyu_runtime::has_knowledge_base(&args.db)? {
+    if args.auto_build_kb && !TonglingyuRuntimeStore::new(args.db.clone()).has_knowledge_base()? {
         let build = BuildKbArgs {
             source_root: args.source_root.clone(),
             db: args.db.clone(),
@@ -611,6 +612,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     }
     let state = Arc::new(AppState {
         db: args.db.clone(),
+        runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -839,79 +841,13 @@ fn init_gateway_schema(conn: &Connection) -> Result<()> {
 }
 
 fn search_evidence_with_policy(
-    conn: &Connection,
+    runtime_store: &TonglingyuRuntimeStore,
     question: &str,
     limit: usize,
 ) -> Result<(Vec<EvidenceCard>, SearchPolicy)> {
     let policy = search_policy(question);
-    let cards = runtime_search_cards(conn, question, limit, &policy.required_evidence_types)?;
+    let cards = runtime_store.search_cards(question, limit, &policy.required_evidence_types)?;
     Ok((cards, policy))
-}
-
-fn runtime_search_cards(
-    conn: &Connection,
-    question: &str,
-    limit: usize,
-    required_evidence_types: &[String],
-) -> Result<Vec<EvidenceCard>> {
-    match execute_tool(
-        conn,
-        TonglingyuToolCall::TextSearch {
-            question: question.to_string(),
-            limit,
-            required_evidence_types: required_evidence_types.to_vec(),
-        },
-    )? {
-        TonglingyuToolOutput::EvidenceCards { cards, .. } => Ok(cards),
-        other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-    }
-}
-
-fn runtime_create_package(
-    conn: &Connection,
-    trace_id: &str,
-    question: &str,
-    cards: Vec<EvidenceCard>,
-) -> Result<EvidencePackage> {
-    match execute_tool(
-        conn,
-        TonglingyuToolCall::EvidencePackageCreate {
-            trace_id: trace_id.to_string(),
-            question: question.to_string(),
-            cards,
-        },
-    )? {
-        TonglingyuToolOutput::EvidencePackage { package, .. } => Ok(*package),
-        other => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-    }
-}
-
-fn runtime_read_package(conn: &Connection, package_id: &str) -> Result<Option<EvidencePackage>> {
-    match execute_tool(
-        conn,
-        TonglingyuToolCall::EvidencePackageRead {
-            package_id: package_id.to_string(),
-        },
-    ) {
-        Ok(TonglingyuToolOutput::EvidencePackageRead { package, .. }) => {
-            Ok(package.map(|package| *package))
-        }
-        Ok(other) => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-        Err(error) => Err(error),
-    }
-}
-
-fn runtime_replay_package(conn: &Connection, package_id: &str) -> Result<Option<Value>> {
-    match execute_tool(
-        conn,
-        TonglingyuToolCall::EvidencePackageReplay {
-            package_id: package_id.to_string(),
-        },
-    ) {
-        Ok(TonglingyuToolOutput::EvidencePackageReplay { replay, .. }) => Ok(replay),
-        Ok(other) => Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-        Err(error) => Err(error),
-    }
 }
 
 fn insert_audit_event(
@@ -1050,7 +986,7 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         return Err(anyhow!("--limit must be greater than 0"));
     }
     let started = Instant::now();
-    let conn = open_db(&args.db)?;
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
     let trace_id = format!("dryrun-{}", new_trace_id());
     let profiles = InternalProfiles {
         main: "honglou-main".to_string(),
@@ -1068,18 +1004,16 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         profiles: runtime_workflow_profiles(&profiles),
     })
     .await?;
-    let workflow = execute_runtime_workflow(
-        &conn,
-        RuntimeWorkflowInput {
-            trace_id: trace_id.clone(),
-            question: args.question.clone(),
-            limit: args.limit,
-            required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: runtime_workflow_profiles(&profiles),
-        },
-    )?;
+    let workflow = runtime_store.execute_workflow(RuntimeWorkflowInput {
+        trace_id: trace_id.clone(),
+        question: args.question.clone(),
+        limit: args.limit,
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&profiles),
+    })?;
     let package = workflow.package;
-    let replay = runtime_replay_package(&conn, &package.package_id)?
+    let replay = runtime_store
+        .replay_package(&package.package_id)?
         .ok_or_else(|| anyhow!("runtime dry run package replay missing"))?;
     Ok(json!({
         "object": "tonglingyu.runtime_dry_run",
@@ -1129,16 +1063,19 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     if args.limit == 0 {
         return Err(anyhow!("--limit must be greater than 0"));
     }
-    let conn = open_db(&args.db)?;
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
     let cases = builtin_eval_cases();
     let total = cases.len();
     let mut passed = 0_usize;
     let mut case_results = Vec::new();
     for case in cases {
         let trace_id = format!("eval-{}", new_trace_id());
-        let (cards, _policy) =
-            search_evidence_with_policy(&conn, case.question, case.limit.unwrap_or(args.limit))?;
-        let package = runtime_create_package(&conn, &trace_id, case.question, cards)?;
+        let (cards, _policy) = search_evidence_with_policy(
+            &runtime_store,
+            case.question,
+            case.limit.unwrap_or(args.limit),
+        )?;
+        let package = runtime_store.create_package(&trace_id, case.question, cards)?;
         let replay = replay_answer(&package);
         let mut failures = Vec::new();
         if package.review.status != case.expected_review_status {
@@ -1878,7 +1815,7 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
-    match open_db(&state.db).and_then(|conn| tonglingyu_runtime::runtime_store_stats(&conn)) {
+    match state.runtime_store.store_stats() {
         Ok(stats) => Json(json!({
             "status": "ok",
             "model": state.model_id,
@@ -1923,9 +1860,7 @@ async fn search_endpoint(
     if let Err(response) = gateway_auth_subject(&state, &headers) {
         return *response;
     }
-    match open_db(&state.db)
-        .and_then(|conn| search_evidence_with_policy(&conn, &params.q, params.limit.unwrap_or(8)))
-    {
+    match search_evidence_with_policy(&state.runtime_store, &params.q, params.limit.unwrap_or(8)) {
         Ok((cards, policy)) => Json(json!({
             "object": "list",
             "data": cards,
@@ -2400,16 +2335,13 @@ async fn chat_completions(
             "runtime_step_outputs": &agent_runtime_plan_gate.runtime_step_outputs,
         }),
     );
-    let workflow = match execute_runtime_workflow(
-        &conn,
-        RuntimeWorkflowInput {
-            trace_id: trace_id.clone(),
-            question: question.clone(),
-            limit: state.max_evidence,
-            required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: runtime_workflow_profiles(&state.profiles),
-        },
-    ) {
+    let workflow = match state.runtime_store.execute_workflow(RuntimeWorkflowInput {
+        trace_id: trace_id.clone(),
+        question: question.clone(),
+        limit: state.max_evidence,
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&state.profiles),
+    }) {
         Ok(workflow) => workflow,
         Err(error) => {
             let _ = record_workflow_state(
@@ -2869,7 +2801,7 @@ fn load_evidence_package_for_subject(
     if !package_owned_by_subject(&conn, package_id, access)? {
         return Ok(None);
     }
-    runtime_read_package(&conn, package_id)
+    TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)
 }
 
 fn load_package_replay_for_subject(
@@ -2881,7 +2813,7 @@ fn load_package_replay_for_subject(
     if !package_owned_by_subject(&conn, package_id, access)? {
         return Ok(None);
     }
-    runtime_replay_package(&conn, package_id)
+    TonglingyuRuntimeStore::new(db.to_path_buf()).replay_package(package_id)
 }
 
 fn package_owned_by_subject(
@@ -2905,13 +2837,14 @@ fn package_owned_by_subject(
 
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
-    let package_ids = tonglingyu_runtime::runtime_package_ids_for_trace(&conn, trace_id)?;
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    let package_ids = runtime_store.package_ids_for_trace(trace_id)?;
     let workflow_states = load_rows_json(
         &conn,
         "SELECT state_id, session_id, package_id, state, status, detail_json, created_at FROM workflow_states WHERE trace_id = ?1 ORDER BY created_at, state_id",
         trace_id,
     )?;
-    let audit_events = tonglingyu_runtime::runtime_audit_events_for_trace(&conn, trace_id)?;
+    let audit_events = runtime_store.audit_events_for_trace(trace_id)?;
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -2926,7 +2859,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     }
     let mut packages = Vec::new();
     for package_id in package_ids {
-        if let Some(package) = runtime_read_package(&conn, &package_id)? {
+        if let Some(package) = runtime_store.read_package(&package_id)? {
             packages.push(package_json(&package));
         }
     }
@@ -2941,8 +2874,8 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
 }
 
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
-    let conn = open_db(db)?;
-    let Some(package) = runtime_read_package(&conn, package_id)? else {
+    let Some(package) = TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)?
+    else {
         return Ok(None);
     };
     let trace = load_trace(db, &package.trace_id)?;
@@ -3001,7 +2934,7 @@ fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
 
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
-    let runtime_stats = tonglingyu_runtime::runtime_store_stats(&conn)?;
+    let runtime_stats = state.runtime_store.store_stats()?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -3045,7 +2978,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
 
 fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
-    let runtime_stats = tonglingyu_runtime::runtime_store_stats(&conn)?;
+    let runtime_stats = state.runtime_store.store_stats()?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
