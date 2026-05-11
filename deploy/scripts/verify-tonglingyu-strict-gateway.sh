@@ -13,6 +13,7 @@ PROMETHEUS_TXT="${TONGLINGYU_GATEWAY_VERIFY_PROMETHEUS_TXT:-${WORK_DIR}/metrics.
 CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
 STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
+STREAM_TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-${WORK_DIR}/stream-trace.json}"
 
 cd "${DEPLOY_DIR}"
 
@@ -91,12 +92,47 @@ curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0
 ' >"${TRACE_JSON}"
 fi
 
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-}" ]]; then
+  STREAM_TRACE_ID="$(python3 - "${STREAM_TXT}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        value = json.loads(payload)
+        trace_id = value.get("trace_id")
+        if trace_id:
+            print(trace_id)
+            raise SystemExit(0)
+raise SystemExit("stream response missing trace_id")
+PY
+)"
+  docker compose exec -T tonglingyu-gateway sh -lc '
+test -n "${TONGLINGYU_ADMIN_API_KEY}"
+curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0.1:8090/v1/admin/traces/'"${STREAM_TRACE_ID}"'"
+' >"${STREAM_TRACE_JSON}"
+fi
+
 python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
-  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" <<'PY'
+  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" <<'PY'
 import json
 import sys
 
-health_path, models_path, metrics_path, prometheus_path, chat_path, stream_path, trace_path = sys.argv[1:8]
+(
+    health_path,
+    models_path,
+    metrics_path,
+    prometheus_path,
+    chat_path,
+    stream_path,
+    trace_path,
+    stream_trace_path,
+) = sys.argv[1:9]
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
 with open(models_path, "r", encoding="utf-8") as handle:
@@ -111,6 +147,8 @@ with open(stream_path, "r", encoding="utf-8") as handle:
     stream = handle.read()
 with open(trace_path, "r", encoding="utf-8") as handle:
     trace = json.load(handle)
+with open(stream_trace_path, "r", encoding="utf-8") as handle:
+    stream_trace = json.load(handle)
 
 errors = []
 forbidden_public_chat_keys = {
@@ -168,6 +206,127 @@ def parse_stream_events(stream_text):
                 f"stream line {line_number} data must be JSON or [DONE]: {exc.msg}"
             )
     return events, done_seen
+
+
+def unique_event_values(events, key):
+    return {
+        event.get(key)
+        for event in events
+        if isinstance(event, dict) and event.get(key)
+    }
+
+
+def validate_trace_summary_surface(trace_value, expected_trace_id, expected_package_id, label):
+    if trace_value.get("trace_id") != expected_trace_id:
+        errors.append(f"{label} trace_id must match response trace_id")
+    event_types = {
+        item.get("event_type")
+        for item in trace_value.get("audit_events") or []
+        if isinstance(item, dict)
+    }
+    for event_type in [
+        "agent_runtime_profile_step_executed",
+        "agent_runtime_profile_evidence_observed",
+        "agent_runtime_profile_package_observed",
+        "agent_runtime_profile_review_observed",
+    ]:
+        if event_type not in event_types:
+            errors.append(f"{label} must include {event_type}")
+    runtime_step_events = [
+        item
+        for item in trace_value.get("audit_events") or []
+        if item.get("event_type") == "agent_runtime_profile_step_executed"
+    ]
+    runtime_summary_events = [
+        item
+        for item in trace_value.get("audit_events") or []
+        if item.get("event_type") == "agent_runtime_profile_execution_summarized"
+    ]
+    if not runtime_summary_events:
+        errors.append(f"{label} must include agent_runtime_profile_execution_summarized")
+        return
+    runtime_summary = runtime_summary_events[-1].get("payload") or {}
+    if trace_value.get("agent_runtime_summary") != runtime_summary:
+        errors.append(f"{label} agent_runtime_summary must match latest summary event")
+    if runtime_summary.get("mode") != "hermes":
+        errors.append(f"{label} runtime summary mode must be hermes")
+    if (
+        runtime_summary.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(
+            f"{label} runtime summary profile_execution_status must be "
+            "hermes_profile_observed_with_local_governance"
+        )
+    if runtime_summary.get("hermes_content_execution_complete") is not True:
+        errors.append(f"{label} runtime summary hermes_content_execution_complete must be true")
+    if runtime_summary.get("local_governance_enforced") is not True:
+        errors.append(f"{label} runtime summary local_governance_enforced must be true")
+    if int(runtime_summary.get("tool_result_count") or 0) <= 0:
+        errors.append(f"{label} runtime summary tool_result_count must be positive")
+    if int(runtime_summary.get("tool_audit_event_count") or 0) <= 0:
+        errors.append(f"{label} runtime summary tool_audit_event_count must be positive")
+    if int(runtime_summary.get("tool_audit_event_count") or 0) < int(runtime_summary.get("tool_result_count") or 0):
+        errors.append(f"{label} runtime summary tool_audit_event_count must cover runtime tool results")
+    operations = {
+        ((item.get("payload") or {}).get("operation"))
+        for item in runtime_step_events
+    }
+    for operation in [
+        "text_evidence_search",
+        "evidence_package_create",
+        "draft_answer",
+        "review_answer",
+    ]:
+        if operation not in operations:
+            errors.append(f"{label} must include runtime operation {operation}")
+    for item in runtime_step_events:
+        payload = item.get("payload") or {}
+        agent_runtime = payload.get("agent_runtime") or {}
+        operation = payload.get("operation")
+        if agent_runtime.get("client") != "hermes":
+            errors.append(f"{label} runtime step {operation} must use hermes client")
+        if agent_runtime.get("status") != "executed":
+            errors.append(f"{label} runtime step {operation} must be executed")
+        if int(agent_runtime.get("tool_result_count") or 0) <= 0:
+            errors.append(f"{label} runtime step {operation} must include tool results")
+        if int(agent_runtime.get("tool_audit_event_count") or 0) <= 0:
+            errors.append(f"{label} runtime step {operation} must include tool audit events")
+        tool_results = agent_runtime.get("tool_results") or []
+        tool_audit_events = agent_runtime.get("tool_audit_events") or []
+        if len(tool_audit_events) < len(tool_results):
+            errors.append(f"{label} runtime step {operation} tool audit events must cover tool results")
+        for result in tool_results:
+            if not isinstance(result, dict):
+                errors.append(f"{label} runtime step {operation} tool result must be an object")
+                continue
+            tool_name = result.get("tool_name")
+            output_ref = result.get("output_ref")
+            matching_result_audit = any(
+                isinstance(event, dict)
+                and event.get("event") == "runtime_tool_result"
+                and event.get("tool_name") == tool_name
+                and event.get("output_ref") == output_ref
+                for event in tool_audit_events
+            )
+            if not matching_result_audit:
+                errors.append(
+                    f"{label} runtime step {operation} tool {tool_name} result must have matching audit event"
+                )
+            if not output_ref:
+                errors.append(f"{label} runtime step {operation} tool {tool_name} must include output_ref")
+                continue
+            if expected_trace_id and not str(output_ref).startswith(f"runtime://tonglingyu/{expected_trace_id}/"):
+                errors.append(f"{label} runtime step {operation} tool {tool_name} output_ref must bind to trace")
+            if tool_name in {
+                "tonglingyu.evidence.package.create",
+                "tonglingyu.evidence.package.read",
+                "tonglingyu.evidence.package.replay",
+            } and expected_trace_id and expected_package_id:
+                expected_ref = f"runtime://tonglingyu/{expected_trace_id}/packages/{expected_package_id}"
+                if output_ref != expected_ref:
+                    errors.append(f"{label} runtime step {operation} tool {tool_name} output_ref must bind to package")
+
 
 if health.get("status") != "ok":
     errors.append("health.status must be ok")
@@ -228,6 +387,17 @@ if not stream_done_seen:
     errors.append("stream response must include data: [DONE]")
 if not stream_events:
     errors.append("stream response must include JSON data chunks")
+stream_trace_ids = unique_event_values(stream_events, "trace_id")
+stream_package_ids = unique_event_values(stream_events, "evidence_package_id")
+stream_session_ids = unique_event_values(stream_events, "session_id")
+stream_trace_id = next(iter(stream_trace_ids), None)
+stream_package_id = next(iter(stream_package_ids), None)
+if len(stream_trace_ids) != 1:
+    errors.append("stream response must carry exactly one trace_id across chunks")
+if len(stream_package_ids) != 1:
+    errors.append("stream response must carry exactly one evidence_package_id across chunks")
+if len(stream_session_ids) > 1:
+    errors.append("stream response must not mix session_id values across chunks")
 if not any(
     isinstance(event, dict) and event.get("evidence_package_id")
     for event in stream_events
@@ -245,6 +415,13 @@ if not any(
 for index, stream_event in enumerate(stream_events):
     for forbidden_stream_path in forbidden_public_chat_paths(stream_event, f"$[{index}]"):
         errors.append(f"stream response must not expose {forbidden_stream_path}")
+if stream_trace_id and stream_package_id:
+    validate_trace_summary_surface(
+        stream_trace,
+        stream_trace_id,
+        stream_package_id,
+        "stream admin trace",
+    )
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
 event_types = {
@@ -420,12 +597,15 @@ print(json.dumps(
             "open-webui->tonglingyu-gateway:/v1/chat/completions",
             "open-webui->tonglingyu-gateway:/v1/chat/completions stream",
             "tonglingyu-gateway:/v1/admin/traces/{trace_id}",
+            "tonglingyu-gateway:/v1/admin/traces/{stream_trace_id}",
         ],
         "model_ids": model_ids,
         "agent_runtime_mode": "hermes",
         "admin_key_isolated": True,
         "trace_id": chat_trace_id,
         "evidence_package_id": chat_package_id,
+        "stream_trace_id": stream_trace_id,
+        "stream_evidence_package_id": stream_package_id,
     },
     ensure_ascii=True,
     sort_keys=True,

@@ -217,7 +217,8 @@ visible `tonglingyu` model, hidden `honglou-*` profiles, positive KB counts,
 active rate limiting, isolated admin credentials, public chat responses that do
 not expose internal runtime/admin trace fields at any nesting level, streaming
 responses with `[DONE]`, package metadata, and Runtime workflow source markers,
-and Hermes runtime profile steps with non-empty tool results bound to
+the streaming response's own admin trace with Hermes Runtime summary/audit
+coverage, and Hermes runtime profile steps with non-empty tool results bound to
 `runtime://tonglingyu/{trace_id}/...` output refs in the trace.
 Evidence search tool refs must use the
 `runtime://tonglingyu/{trace_id}/evidence/{digest}` namespace, while package

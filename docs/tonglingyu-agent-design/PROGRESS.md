@@ -208,6 +208,8 @@
 - strict Gateway live gate 已增加 streaming chat completion 验证，要求 `[DONE]`、
   package metadata、Runtime workflow source marker，并按 SSE JSON chunk 递归复用
   内部字段泄露检查。
+- strict Gateway live gate 会从 streaming SSE chunk 解析 `trace_id` 并读取对应
+  admin trace，确认 streaming 请求也有 Hermes Runtime summary/audit 闭环。
 - Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果
