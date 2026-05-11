@@ -298,6 +298,13 @@
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，把 Open WebUI 页面侧普通
   用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核变成
   带证据引用的显式发布前置，而不是报告里的被动备注。
+- `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
+  readiness contract smoke，覆盖 override guard、默认非 live 不 ready、
+  summary-only optional failure、mock live 条件满足但不 production ready、live
+  必过 gate 失败等路径；聚合脚本只允许显式
+  `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
+  override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
+  标为 `passed_with_gate_command_overrides`。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。

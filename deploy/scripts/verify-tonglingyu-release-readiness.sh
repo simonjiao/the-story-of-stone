@@ -7,6 +7,15 @@ WORK_DIR="$(mktemp -d)"
 RESULTS_JSONL="${WORK_DIR}/results.jsonl"
 READY_STATUS="${WORK_DIR}/production-ready.status"
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
+GATE_CMD_OVERRIDES_USED="false"
+if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]]; then
+  GATE_CMD_OVERRIDES_USED="true"
+fi
+RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
+STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
+OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DIR}/verify-openwebui-function.sh}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 cd "${DEPLOY_DIR}"
@@ -17,6 +26,17 @@ is_true() {
     *) return 1 ;;
   esac
 }
+
+if [[ "${GATE_CMD_OVERRIDES_USED}" == "true" ]] \
+  && ! is_true "${TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE:-false}"; then
+  cat >&2 <<'EOF'
+release readiness gate command overrides require
+TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true and are for local contract tests
+only. Production release readiness cannot be proven with overridden gate
+commands.
+EOF
+  exit 2
+fi
 
 append_result() {
   local name="$1"
@@ -82,7 +102,7 @@ skip_gate() {
 }
 
 failed=0
-run_gate "runtime_config" "true" "${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh" || failed=1
+run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
 
 require_live="false"
 if is_true "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}"; then
@@ -101,7 +121,7 @@ fi
 
 if [[ "${verify_strict_gateway}" == "true" ]]; then
   run_gate "strict_gateway" "true" \
-    "${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh" || failed=1
+    "${STRICT_GATEWAY_CMD}" || failed=1
 else
   skip_gate "strict_gateway" "false" \
     "set TONGLINGYU_RELEASE_VERIFY_STRICT_GATEWAY=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
@@ -114,7 +134,7 @@ fi
 
 if [[ "${verify_openwebui_function}" == "true" ]]; then
   run_gate "openwebui_function" "true" \
-    "${SCRIPT_DIR}/verify-openwebui-function.sh" || failed=1
+    "${OPENWEBUI_FUNCTION_CMD}" || failed=1
 else
   skip_gate "openwebui_function" "false" \
     "set TONGLINGYU_RELEASE_VERIFY_OPENWEBUI_FUNCTION=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
@@ -140,7 +160,7 @@ else
     "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" "${GATE_CMD_OVERRIDES_USED}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -152,10 +172,12 @@ from datetime import datetime, timezone
     require_live_raw,
     summary_only_raw,
     browser_review_ref,
-) = sys.argv[1:7]
+    gate_cmd_overrides_raw,
+) = sys.argv[1:8]
 require_live = require_live_raw == "true"
 summary_only = summary_only_raw == "true"
 browser_review_ref = browser_review_ref.strip()
+gate_cmd_overrides_used = gate_cmd_overrides_raw == "true"
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
@@ -187,6 +209,8 @@ if status == "passed" and optional_failures:
     status = "passed_with_failed_optional_gates"
 elif status == "passed" and skipped:
     status = "passed_with_skipped_gates"
+elif status == "passed" and gate_cmd_overrides_used:
+    status = "passed_with_gate_command_overrides"
 browser_review_acknowledged = any(
     gate["name"] == "openwebui_browser_review" and gate["status"] == "passed"
     for gate in gates
@@ -209,19 +233,24 @@ for name in failed_live_gates:
         release_blockers.append(f"live gate failed: {name}")
 if not browser_review_acknowledged:
     release_blockers.append("Open WebUI browser-side review was not acknowledged")
-production_release_ready = (
+release_conditions_met = (
     require_live
     and not required_failures
     and not skipped_live_gates
     and browser_review_acknowledged
 )
+if gate_cmd_overrides_used:
+    release_blockers.append("gate command overrides were used")
+production_release_ready = release_conditions_met and not gate_cmd_overrides_used
 
 report = {
     "status": status,
     "production_release_ready": production_release_ready,
+    "release_conditions_met": release_conditions_met,
     "require_live": require_live,
     "summary_only": summary_only,
     "exit_policy": "summary_only" if summary_only else "production_release_ready",
+    "gate_command_overrides_used": gate_cmd_overrides_used,
     "browser_review_acknowledged": browser_review_acknowledged,
     "browser_review_ref": browser_review_ref,
     "generated_at": datetime.now(timezone.utc).isoformat(),

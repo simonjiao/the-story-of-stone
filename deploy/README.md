@@ -252,6 +252,18 @@ release pass. Optional failed gates are reflected in `status` as
 `production_release_ready=true`; set
 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` only when intentionally generating a
 non-release summary report.
+The aggregate gate can be contract-tested without a live deployment:
+
+```bash
+./scripts/test-tonglingyu-release-readiness-contract.sh
+```
+
+That test uses explicit mock gate command overrides. The production aggregate
+script rejects overrides unless `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true`
+is set, and any report generated with overrides keeps
+`production_release_ready=false` with `status=passed_with_gate_command_overrides`
+when the mocked release conditions otherwise pass; use the reported
+`release_conditions_met` field only to verify local aggregation semantics.
 When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
 `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` and a non-empty
 `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF` after a human has checked
