@@ -236,6 +236,9 @@ envelope 而无法理解当前通灵玉步骤。
 Runtime 单测已覆盖完整 store workflow：注入 fake Hermes runtime client，验证
 Hermes draft 候选会写入草稿、reviewer 降级时不会进入 final answer，并写入
 `agent_runtime_profile_draft_consumed` audit event。
+Gateway health、JSON metrics、Prometheus info 和 `runtime-dry-run` 已暴露
+`TONGLINGYU_AGENT_RUNTIME_MODE` 的有效模式，smoke 会断言默认 `minimal`，避免
+生产排障时误判当前使用的 Runtime client。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -284,6 +287,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   本地 reviewer enforcement 后才生成最终回答。
 - [x] profile step 输入携带 operation、output_ref、allowed tools 和 step output
   context，Hermes 不再只收到空泛 envelope。
+- [x] health、metrics、Prometheus info 和 dry-run 暴露 agent runtime mode，
+  smoke 覆盖默认 `minimal` 模式。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`

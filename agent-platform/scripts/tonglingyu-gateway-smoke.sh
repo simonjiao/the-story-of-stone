@@ -181,6 +181,7 @@ curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/packages/${PACKAGE_ID}" >"${A
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics/prometheus" >"${PROMETHEUS_TXT}"
 grep -q 'tonglingyu_evidence_packages_total' "${PROMETHEUS_TXT}"
+grep -q 'agent_runtime_mode="minimal"' "${PROMETHEUS_TXT}"
 
 "${GATEWAY_BIN}" eval --db "${DB_PATH}" --report "${REPORT_PATH}" >/dev/null
 
@@ -226,6 +227,7 @@ import sys
 ) = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
 
 assert health["status"] == "ok", health
+assert health["agent_runtime"]["mode"] == "minimal", health
 assert health["sources"] >= 5, health
 assert health["blocks"] >= 10000, health
 assert models_unauth["error"]["code"] == "gateway_unauthorized", models_unauth
@@ -321,6 +323,7 @@ assert admin_package["trace"]["trace_id"] == chat["trace_id"], admin_package
 assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
 assert metrics["counts"]["evidence_packages"] >= 1, metrics
 assert metrics["dependencies"]["sqlite"] == "ok", metrics
+assert metrics["dependencies"]["agent_runtime"]["mode"] == "minimal", metrics
 
 assert report["status"] == "passed", report
 assert report["summary"]["total"] >= 20, report
@@ -331,6 +334,7 @@ assert dry_run["status"] == "passed", dry_run
 assert dry_run["package_id"] in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
 assert dry_run["agent_runtime_plan_gate"]["status"] == "passed", dry_run
+assert dry_run["agent_runtime"]["mode"] == "minimal", dry_run
 assert dry_run["agent_runtime_plan_gate"]["runtime_step_outputs"], dry_run
 assert dry_run["agent_runtime_plan_gate"]["runtime_step_plan"]["owner"] == "domain_gateway", dry_run
 assert dry_run["runtime_step_outputs"], dry_run

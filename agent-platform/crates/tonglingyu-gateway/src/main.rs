@@ -23,8 +23,8 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuRuntimeStore,
-    execute_agent_runtime_plan_gate, package_json, replay_answer,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json, replay_answer,
 };
 use tower_http::trace::TraceLayer;
 
@@ -981,6 +981,7 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     }
     let started = Instant::now();
     let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
     let trace_id = format!("dryrun-{}", new_trace_id());
     let profiles = InternalProfiles {
         main: "honglou-main".to_string(),
@@ -1019,6 +1020,10 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "policy": policy,
         "runtime_step_plan": runtime_step_plan,
         "agent_runtime_plan_gate": agent_runtime_plan_gate,
+        "agent_runtime": {
+            "mode": agent_runtime_mode.as_str(),
+            "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+        },
         "runtime_step_outputs": workflow.steps,
         "runtime_stream_events": workflow.stream_events,
         "package_id": &package.package_id,
@@ -1811,10 +1816,28 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
+    let agent_runtime_mode = match TonglingyuAgentRuntimeMode::from_env() {
+        Ok(mode) => mode,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "degraded",
+                    "error": "agent_runtime_mode_invalid",
+                    "detail": safe_error_detail(&error),
+                })),
+            )
+                .into_response();
+        }
+    };
     match state.runtime_store.store_stats() {
         Ok(stats) => Json(json!({
             "status": "ok",
             "model": state.model_id,
+            "agent_runtime": {
+                "mode": agent_runtime_mode.as_str(),
+                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
             "sources": stats.sources,
             "blocks": stats.blocks
         }))
@@ -2935,6 +2958,7 @@ fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -2950,6 +2974,10 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "upstream_model": &state.upstream_model,
             "upstream_api_key_configured": state.upstream_api_key.is_some(),
             "upstream_timeout_secs": state.upstream_timeout_secs,
+            "agent_runtime": {
+                "mode": agent_runtime_mode.as_str(),
+                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
         },
         "security": {
             "gateway_key_count": state.gateway_api_keys.len(),
@@ -2979,14 +3007,16 @@ fn load_metrics(state: &AppState) -> Result<Value> {
 fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\"}} 1",
+        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\"}} 1",
         escape_metric_label(&state.model_id),
         escape_metric_label(&state.profiles.main),
-        escape_metric_label(&state.profiles.reviewer)
+        escape_metric_label(&state.profiles.reviewer),
+        escape_metric_label(agent_runtime_mode.as_str())
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
