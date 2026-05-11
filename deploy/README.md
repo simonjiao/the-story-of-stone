@@ -215,6 +215,19 @@ Prometheus metrics. It requires `agent_runtime_mode=hermes`, a single visible
 `tonglingyu` model, hidden `honglou-*` profiles, positive KB counts, active
 rate limiting, and isolated admin credentials.
 
+For a release-readiness summary, run the aggregate gate:
+
+```bash
+TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
+  TONGLINGYU_RELEASE_REPORT_PATH=./tonglingyu-release-readiness.json \
+  ./scripts/verify-tonglingyu-release-readiness.sh
+```
+
+Without `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate runs the
+compose-rendered config check and records live Gateway/Open WebUI Function
+checks as skipped. This makes partial local verification explicit instead of
+silently treating it as a production release pass.
+
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and
 has its own lifecycle, data directory, and schema ownership.

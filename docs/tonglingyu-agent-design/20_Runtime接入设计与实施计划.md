@@ -350,6 +350,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] 增加 `deploy/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
   Gateway health/models/admin metrics/Prometheus，确认 `hermes` runtime、单可见
   模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
+  生成 JSON 报告并显式区分必过、失败、skipped live gate 和人工页面复核项。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
   回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`

@@ -224,6 +224,10 @@
   从正式 Docker 网络检查 `/healthz`、`/v1/models`、admin metrics 和 Prometheus，
   要求 Gateway 实际报告 `hermes` runtime、只暴露 `tonglingyu` 模型、隐藏
   `honglou-*` profile、KB 非空、rate limit 开启且 admin key 已隔离。
+- `deploy/scripts/verify-tonglingyu-release-readiness.sh` 已补聚合发布 gate：
+  默认运行 compose 渲染配置检查，`TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时把
+  strict Gateway 和 Open WebUI Function 检查作为必过 gate；报告会显式记录
+  skipped live gates 和仍需人工页面复核的项目，避免把局部验证当作生产完成。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
   工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
   目前承担 plan gate 和 profile step execution envelope，尚未承担 profile
