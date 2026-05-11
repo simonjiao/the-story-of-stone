@@ -392,10 +392,13 @@ WebUI:
 This writes the Function into the mounted Open WebUI `webui.db`, stores valves
 there, and restarts only the formal `open-webui` service.
 
-The verify script checks Function type, active/global flags, bridge content, and
-valve key presence. When `OPEN_WEBUI_ADMIN_TOKEN` is unavailable, run it from the
-compose deploy directory and it verifies the mounted `webui.db` inside the formal
-Open WebUI container. It reports valve key names only, never secret values.
+The verify script checks Function type, active/global flags, bridge content,
+non-empty required valves, and target model valves. When
+`OPEN_WEBUI_ADMIN_TOKEN` is unavailable, run it from the compose deploy
+directory and it verifies the mounted `webui.db` inside the formal Open WebUI
+container. It reports valve key names only, never secret values. For local/CI
+contract checks, set `OPEN_WEBUI_FUNCTION_VERIFY_JSON` to a fixture file and the
+script validates the fixture without connecting to Open WebUI.
 
 Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`, or
 `AGENT_JWT_SECRET`. Before editing `deploy/.env`, run:

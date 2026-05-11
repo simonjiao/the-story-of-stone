@@ -301,6 +301,9 @@
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
+- Open WebUI Function gate 已增加 `OPEN_WEBUI_FUNCTION_VERIFY_JSON` fixture
+  模式，CI/本地可以不依赖真实 Open WebUI DB/API 直接覆盖 empty/missing valves
+  等负向路径。
 - 当前不能宣布生产完成：Hermes profile content/tool execution 已通过
   `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但事实源、
   证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束，目标
