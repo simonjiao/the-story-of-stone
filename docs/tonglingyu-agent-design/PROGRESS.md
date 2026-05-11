@@ -314,6 +314,9 @@
   runtime config、model upstream、strict Gateway、Open WebUI Function 和
   Gateway Admin Action 的 passed gate stdout JSON；contract 覆盖 live gate
   stdout 被删除后仍试图保持 ready 的篡改路径。
+- Saved release report validator 新增 `generated_at` 时区和新鲜度校验；
+  production-ready 报告默认 24 小时后过期，contract 覆盖缺失 generated_at 和
+  过期 ready artifact，避免复用旧报告宣称当前生产就绪。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

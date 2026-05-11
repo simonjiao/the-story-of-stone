@@ -5,12 +5,18 @@ REPORT_PATH="${1:-${TONGLINGYU_RELEASE_REPORT_PATH:-}}"
 
 python3 - "${REPORT_PATH}" <<'PY'
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 report_path = sys.argv[1].strip()
 errors = []
 report = {}
+report_max_age_hours_raw = os.environ.get(
+    "TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS",
+    "24",
+).strip()
 live_gate_names = [
     "model_upstream_network",
     "strict_gateway",
@@ -110,6 +116,21 @@ def add_mismatch(field, expected, actual):
 
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def success_json_from_gate_stdout(gate, expected_object=None):
@@ -265,6 +286,20 @@ summary_only = report.get("summary_only") is True
 browser_review_ref = report.get("browser_review_ref")
 browser_review_evidence = report.get("browser_review_evidence")
 browser_review_validation = report.get("browser_review_validation")
+generated_at = report.get("generated_at")
+
+generated_at_dt = None
+if not nonempty(generated_at):
+    errors.append("generated_at_missing")
+else:
+    generated_at_dt = parse_timestamp(generated_at)
+    if generated_at_dt is None:
+        errors.append("generated_at_must_be_iso8601_with_timezone")
+    else:
+        now = datetime.now(timezone.utc)
+        future_skew_seconds = (generated_at_dt - now).total_seconds()
+        if future_skew_seconds > 300:
+            errors.append("generated_at_must_not_be_in_future")
 
 computed_required_failures = [
     gate["name"]
@@ -379,6 +414,17 @@ add_if(
 )
 add_if(production_ready and not require_live, "production_ready_requires_live")
 add_if(production_ready and summary_only, "production_ready_forbids_summary_only")
+if production_ready:
+    try:
+        report_max_age_hours = float(report_max_age_hours_raw)
+    except ValueError:
+        report_max_age_hours = -1.0
+    if report_max_age_hours <= 0:
+        errors.append("release_report_max_age_hours_must_be_positive")
+    elif generated_at_dt is not None:
+        age_seconds = (datetime.now(timezone.utc) - generated_at_dt).total_seconds()
+        if age_seconds > report_max_age_hours * 3600:
+            errors.append("production_ready_report_too_old")
 add_if(
     production_ready and report.get("status") != "passed",
     "production_ready_requires_passed_status",

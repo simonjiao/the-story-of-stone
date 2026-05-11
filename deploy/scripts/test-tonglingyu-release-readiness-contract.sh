@@ -15,7 +15,9 @@ STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
+TAMPERED_MISSING_GENERATED_REPORT="${WORK_DIR}/tampered-missing-generated-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
+TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
@@ -308,6 +310,26 @@ assert_report "${tampered_derived_stdout}" \
 assert_report "${tampered_derived_stdout}" \
   '"release_blockers_mismatch" in report["errors"]'
 
+python3 - "${default_report}" "${TAMPERED_MISSING_GENERATED_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report.pop("generated_at", None)
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_missing_generated_stdout="${WORK_DIR}/tampered-missing-generated.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_MISSING_GENERATED_REPORT}" >"${tampered_missing_generated_stdout}"; then
+  echo "saved release reports must include generated_at" >&2
+  exit 1
+fi
+assert_report "${tampered_missing_generated_stdout}" \
+  '"generated_at_missing" in report["errors"]'
+
 optional_report="${WORK_DIR}/summary-optional-failure.json"
 env "${common_env[@]}" \
   TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
@@ -449,6 +471,26 @@ with open(target, "w", encoding="utf-8") as handle:
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_STALE_READY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["generated_at"] = "2000-01-01T00:00:00Z"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_stale_ready_stdout="${WORK_DIR}/tampered-stale-ready.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_STALE_READY_REPORT}" >"${tampered_stale_ready_stdout}"; then
+  echo "production-ready release reports must be recent" >&2
+  exit 1
+fi
+assert_report "${tampered_stale_ready_stdout}" \
+  '"production_ready_report_too_old" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
 import json

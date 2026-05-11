@@ -345,6 +345,9 @@ model-upstream, strict Gateway, Open WebUI Function, and Gateway Admin Action
 gates must also include the expected successful JSON in their own `stdout_tail`;
 this prevents editing a gate `status` to `passed` without preserving the gate
 verifier output.
+Saved reports must include a timezone-aware `generated_at`; production-ready
+reports are rejected when older than `TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS`
+(default `24`) or when generated more than five minutes in the future.
 
 The aggregate gate can be contract-tested without a live deployment:
 
