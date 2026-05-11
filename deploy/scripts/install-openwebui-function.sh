@@ -97,6 +97,7 @@ request(
         "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
         "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
         "TARGET_MODEL": target_model,
+        "TARGET_MODELS": target_model,
     },
 )
 

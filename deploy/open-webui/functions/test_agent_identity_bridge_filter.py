@@ -48,6 +48,44 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         self.assertEqual(context["chat_id"], "chat-1")
         self.assertTrue(context["signature"])
 
+    def test_inlet_accepts_target_models_list(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "legacy-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent,tonglingyu"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "message-1",
+                },
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["model"], "tonglingyu")
+        self.assertEqual(context["subject"], "openwebui:user-1")
+
+    def test_inlet_skips_non_target_model(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "hermes-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={"chat_id": "chat-1"},
+            )
+        )
+
+        self.assertNotIn("agent_bridge_context", result)
+
     def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"

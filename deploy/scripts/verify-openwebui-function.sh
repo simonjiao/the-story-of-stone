@@ -40,8 +40,13 @@ valve_keys = sorted(str(key) for key in valves.keys())
 content = row["content"] or ""
 missing = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL"]
+    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
     if key not in valves
+]
+empty = [
+    key
+    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    if key in valves and not str(valves.get(key) or "").strip()
 ]
 errors = []
 if row["type"] != "filter":
@@ -52,8 +57,12 @@ if not bool(row["is_global"]):
     errors.append("is_global=false")
 if "class Filter" not in content or "agent_bridge_context" not in content:
     errors.append("content_missing_bridge_filter")
+if "TARGET_MODELS" not in content:
+    errors.append("content_missing_target_models")
 if missing:
     errors.append("missing_valves=" + ",".join(missing))
+if empty:
+    errors.append("empty_valves=" + ",".join(empty))
 
 print(
     json.dumps(
@@ -127,8 +136,13 @@ valve_keys = sorted(str(key) for key in valves.keys())
 
 missing = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL"]
+    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
     if key not in valves
+]
+empty = [
+    key
+    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    if key in valves and not str(valves.get(key) or "").strip()
 ]
 errors = []
 if function_type != "filter":
@@ -139,8 +153,12 @@ if not is_global:
     errors.append("is_global=false")
 if "class Filter" not in content or "agent_bridge_context" not in content:
     errors.append("content_missing_bridge_filter")
+if "TARGET_MODELS" not in content:
+    errors.append("content_missing_target_models")
 if missing:
     errors.append("missing_valves=" + ",".join(missing))
+if empty:
+    errors.append("empty_valves=" + ",".join(empty))
 
 print(
     json.dumps(

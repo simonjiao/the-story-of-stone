@@ -295,6 +295,9 @@
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
   普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核
   变成显式发布前置，而不是报告里的被动备注。
+- Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
+  valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
+  但实际不注入 signed context 仍被 release gate 误判为通过。
 - 当前不能宣布生产完成：Hermes profile content/tool execution 已通过
   `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但事实源、
   证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束，目标
