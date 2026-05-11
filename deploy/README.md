@@ -380,6 +380,10 @@ The verifier also rejects stale browser evidence older than
 `TONGLINGYU_BROWSER_REVIEW_MAX_AGE_HOURS` (default `24`) and rejects evidence
 whose `public_webui_url` does not match `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL`
 when that release URL is set.
+The verifier prints the evidence JSON SHA-256 and SHA-256 digests for local
+file refs; the aggregate release report copies this under
+`browser_review_validation` so a release record can identify the exact reviewed
+evidence files instead of only storing mutable paths.
 
 If writing the JSON manually, use this shape:
 

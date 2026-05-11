@@ -12,6 +12,7 @@ EXPECTED_REVIEW_REF="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
 
 python3 - "${EVIDENCE_PATH}" "${EXPECTED_REVIEW_REF}" <<'PY'
 import json
+import hashlib
 import os
 import re
 import sys
@@ -67,6 +68,8 @@ check_allowed_ref_kinds = {
 trace_ref_re = re.compile(r"^trace:tly-[A-Za-z0-9_-]+$")
 errors = []
 evidence = {}
+evidence_sha256 = ""
+validated_evidence_refs = []
 
 
 def report(status):
@@ -76,10 +79,12 @@ def report(status):
                 "object": "tonglingyu.openwebui_browser_review_gate",
                 "status": status,
                 "evidence_path": evidence_path,
+                "evidence_sha256": evidence_sha256,
                 "review_ref": evidence.get("review_ref", "") if isinstance(evidence, dict) else "",
                 "expected_review_ref_bound": bool(expected_review_ref),
                 "expected_public_url_bound": bool(expected_public_url),
                 "checked_items": required_checks,
+                "validated_evidence_refs": validated_evidence_refs,
                 "errors": errors,
                 "secret_values_printed": False,
             },
@@ -159,6 +164,25 @@ def secret_value_paths(value, prefix="$"):
     return paths
 
 
+def file_sha256(file_path):
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_ref(check_name, kind, ref, sha256=""):
+    record = {
+        "check": check_name,
+        "kind": kind,
+        "ref": ref,
+    }
+    if sha256:
+        record["sha256"] = sha256
+    validated_evidence_refs.append(record)
+
+
 def safe_relative_path(value):
     candidate = Path(value)
     if candidate.is_absolute():
@@ -172,11 +196,15 @@ def validate_local_ref(check_name, ref_path):
     relative = safe_relative_path(ref_path)
     if relative is None:
         errors.append(f"{check_name}_evidence_ref_file_path_must_be_relative")
+        record_ref(check_name, "local_file", ref_path)
         return "local_file"
     base = Path(evidence_root) if evidence_root else path.parent
     resolved = base / relative
     if not resolved.is_file():
         errors.append(f"{check_name}_evidence_ref_file_not_found")
+        record_ref(check_name, "local_file", ref_path)
+    else:
+        record_ref(check_name, "local_file", ref_path, file_sha256(resolved))
     return "local_file"
 
 
@@ -195,14 +223,17 @@ def validate_evidence_ref(check_name, value):
         if parsed.scheme != "https" or not parsed.netloc:
             errors.append(f"{check_name}_evidence_ref_url_must_be_https")
         kind = "url"
+        record_ref(check_name, kind, ref)
     elif parsed.scheme == "trace":
         if not trace_ref_re.match(ref):
             errors.append(f"{check_name}_evidence_ref_trace_invalid")
         kind = "trace"
+        record_ref(check_name, kind, ref)
     elif parsed.scheme == "runbook":
         if not (parsed.netloc or parsed.path):
             errors.append(f"{check_name}_evidence_ref_runbook_empty")
         kind = "runbook"
+        record_ref(check_name, kind, ref)
     elif parsed.scheme == "file":
         if parsed.netloc:
             errors.append(f"{check_name}_evidence_ref_file_must_be_relative")
@@ -230,9 +261,15 @@ if not path.is_file():
     raise SystemExit(1)
 
 try:
-    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence_bytes = path.read_bytes()
+    evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+    evidence = json.loads(evidence_bytes.decode("utf-8"))
 except json.JSONDecodeError as exc:
     errors.append(f"evidence_json_invalid={exc.msg}")
+    report("failed")
+    raise SystemExit(1)
+except UnicodeDecodeError:
+    errors.append("evidence_json_encoding_must_be_utf8")
     report("failed")
     raise SystemExit(1)
 

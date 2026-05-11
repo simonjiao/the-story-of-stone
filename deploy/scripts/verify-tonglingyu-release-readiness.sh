@@ -227,6 +227,20 @@ with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
 gates_by_name = {gate["name"]: gate for gate in gates}
+browser_review_validation = None
+browser_review_gate = gates_by_name.get("openwebui_browser_review") or {}
+for line in reversed(browser_review_gate.get("stdout_tail") or []):
+    try:
+        candidate = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if (
+        candidate.get("object") == "tonglingyu.openwebui_browser_review_gate"
+        and candidate.get("status") == "ok"
+    ):
+        browser_review_validation = candidate
+        break
+
 live_gate_names = [
     "model_upstream_network",
     "strict_gateway",
@@ -261,9 +275,12 @@ elif status == "passed" and skipped:
     status = "passed_with_skipped_gates"
 elif status == "passed" and gate_cmd_overrides_used:
     status = "passed_with_gate_command_overrides"
-browser_review_acknowledged = any(
-    gate["name"] == "openwebui_browser_review" and gate["status"] == "passed"
-    for gate in gates
+browser_review_gate_passed = (
+    browser_review_gate.get("name") == "openwebui_browser_review"
+    and browser_review_gate.get("status") == "passed"
+)
+browser_review_acknowledged = browser_review_gate_passed and (
+    browser_review_validation is not None or gate_cmd_overrides_used
 )
 manual_checks = [] if browser_review_acknowledged else [
     "Open WebUI browser-side ordinary-user model visibility",
@@ -304,6 +321,7 @@ report = {
     "browser_review_acknowledged": browser_review_acknowledged,
     "browser_review_ref": browser_review_ref,
     "browser_review_evidence": browser_review_evidence,
+    "browser_review_validation": browser_review_validation,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,

@@ -110,6 +110,16 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "ok":
     raise SystemExit(report)
+if len(report.get("evidence_sha256", "")) != 64:
+    raise SystemExit(report)
+local_refs = [
+    item for item in report.get("validated_evidence_refs", [])
+    if item.get("kind") == "local_file"
+]
+if len(local_refs) != 2:
+    raise SystemExit(report)
+if any(len(item.get("sha256", "")) != 64 for item in local_refs):
+    raise SystemExit(report)
 if report["secret_values_printed"] is not False:
     raise SystemExit(report)
 PY
@@ -276,6 +286,8 @@ assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_comm
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'
 assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-browser-review"'
 assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
+assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
+assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
