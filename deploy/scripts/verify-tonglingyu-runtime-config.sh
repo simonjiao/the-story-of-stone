@@ -82,6 +82,17 @@ def require_false(env, key, service_name):
         errors.append(f"{service_name}.{key} must be false/0/no/off for production verification")
 
 
+def require_positive_int(env, key, service_name):
+    actual = value(env, key)
+    try:
+        parsed = int(actual)
+    except ValueError:
+        errors.append(f"{service_name}.{key} must be a positive integer")
+        return
+    if parsed <= 0:
+        errors.append(f"{service_name}.{key} must be a positive integer")
+
+
 gateway_env = env_map("tonglingyu-gateway")
 open_webui_env = env_map("open-webui")
 hermes_env = env_map("hermes")
@@ -134,6 +145,11 @@ if value(gateway_env, "AGENT_RUNTIME_HERMES_MODEL") != value(gateway_env, "TONGL
     errors.append("tonglingyu-gateway.AGENT_RUNTIME_HERMES_MODEL must match TONGLINGYU_UPSTREAM_MODEL")
 if hermes_api_key and value(gateway_env, "AGENT_RUNTIME_HERMES_API_KEY") != hermes_api_key:
     errors.append("tonglingyu-gateway.AGENT_RUNTIME_HERMES_API_KEY must match hermes.API_SERVER_KEY")
+require_positive_int(
+    gateway_env,
+    "TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS",
+    "tonglingyu-gateway",
+)
 
 if value(worker_env, "AGENT_RUNTIME_MODE") != "hermes":
     errors.append("agent-worker.AGENT_RUNTIME_MODE must be hermes")
@@ -175,6 +191,7 @@ print(json.dumps(
             "OPENAI_API_BASE_URLS",
             "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY",
             "TONGLINGYU_AGENT_RUNTIME_MODE",
+            "TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS",
             "AGENT_RUNTIME_MODE",
         ],
     },

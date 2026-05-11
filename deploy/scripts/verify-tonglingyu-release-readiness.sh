@@ -14,12 +14,14 @@ load_optional_deploy_env_file
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-}" ]]; then
   GATE_CMD_OVERRIDES_USED="true"
 fi
 RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
+MODEL_UPSTREAM_CMD="${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-${SCRIPT_DIR}/verify-model-upstream-network.sh}"
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
 OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DIR}/verify-openwebui-function.sh}"
 OPENWEBUI_ADMIN_ACTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh}"
@@ -126,6 +128,19 @@ if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_STR
   verify_strict_gateway="true"
 fi
 
+verify_model_upstream="false"
+if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_MODEL_UPSTREAM:-false}"; then
+  verify_model_upstream="true"
+fi
+
+if [[ "${verify_model_upstream}" == "true" ]]; then
+  run_gate "model_upstream_network" "true" \
+    "${MODEL_UPSTREAM_CMD}" || failed=1
+else
+  skip_gate "model_upstream_network" "false" \
+    "set TONGLINGYU_RELEASE_VERIFY_MODEL_UPSTREAM=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
+fi
+
 if [[ "${verify_strict_gateway}" == "true" ]]; then
   run_gate "strict_gateway" "true" \
     "${STRICT_GATEWAY_CMD}" || failed=1
@@ -202,7 +217,12 @@ with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
 gates_by_name = {gate["name"]: gate for gate in gates}
-live_gate_names = ["strict_gateway", "openwebui_function", "openwebui_admin_action"]
+live_gate_names = [
+    "model_upstream_network",
+    "strict_gateway",
+    "openwebui_function",
+    "openwebui_admin_action",
+]
 required_failures = [
     gate["name"]
     for gate in gates

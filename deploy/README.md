@@ -99,6 +99,10 @@ Required changes:
   Tonglingyu Gateway and Agent Worker. The Gateway container receives the same
   Hermes key as its upstream generation key, but it still keeps separate
   Gateway/admin inbound credentials.
+- `TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS`: per-profile Runtime Agent
+  budget for Tonglingyu Gateway. Default is `30`; keep it high enough for the
+  live Hermes/sub2api tool-call loop and low enough to fail closed before
+  operator-facing requests hang.
 - `TONGLINGYU_RETENTION_DAYS`: runtime audit/session/package retention window.
   Default is `90`; set `0` only when automatic pruning must be disabled.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
@@ -261,6 +265,20 @@ TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
   TONGLINGYU_RELEASE_REPORT_PATH=./tonglingyu-release-readiness.json \
   ./scripts/verify-tonglingyu-release-readiness.sh
 ```
+
+In live release mode the aggregate gate also runs the model-upstream network
+probe before the strict Gateway request path:
+
+```bash
+./scripts/verify-model-upstream-network.sh
+```
+
+The probe runs from the deployed model-provider container when possible
+(`sub2api`, then `hermes-agent`) and reports only host names, DNS classes,
+HTTP/TLS status, and curl error summaries. It is intended to catch fake-IP DNS
+or TLS reset issues before they collapse into a generic Gateway `500`.
+Override `MODEL_UPSTREAM_PROBE_URLS` if the target model provider is not the
+default ChatGPT/OpenAI-compatible upstream.
 
 When running a gate from a separate implementation worktree, point it at the
 target deployment environment without copying secrets into that worktree:

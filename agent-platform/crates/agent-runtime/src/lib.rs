@@ -644,6 +644,7 @@ impl HermesRuntimeClient {
                 "agent_platform_phase": "p1",
                 "read_only": true,
             }),
+            tool_choice: tool_choice_for_tools(&tools),
             tools,
         };
         let url = chat_url(&self.config.base_url)?;
@@ -911,6 +912,7 @@ impl HermesRuntimeClient {
                 "agent_platform_phase": "runtime-streaming",
                 "read_only": true,
             }),
+            tool_choice: None,
             tools: Vec::new(),
         };
         let url = chat_url(&self.config.base_url)?;
@@ -3225,6 +3227,8 @@ struct HermesChatCompletionRequest {
     messages: Vec<HermesChatMessage>,
     stream: bool,
     metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tools: Vec<HermesToolDefinition>,
 }
@@ -3319,6 +3323,19 @@ struct HermesToolFunctionDefinition {
     name: String,
     description: String,
     parameters: Value,
+}
+
+fn tool_choice_for_tools(tools: &[HermesToolDefinition]) -> Option<Value> {
+    match tools {
+        [] => None,
+        [tool] => Some(json!({
+            "type": "function",
+            "function": {
+                "name": &tool.function.name,
+            },
+        })),
+        _ => Some(json!("required")),
+    }
 }
 
 fn run_messages(input: &RuntimeRunInput, runtime_profile: &str) -> Vec<HermesChatMessage> {
@@ -4529,6 +4546,11 @@ mod tests {
                                 body["tools"][0]["function"]["name"],
                                 "tonglingyu.text.search"
                             );
+                            assert_eq!(body["tool_choice"]["type"], "function");
+                            assert_eq!(
+                                body["tool_choice"]["function"]["name"],
+                                "tonglingyu.text.search"
+                            );
                             Json(json!({
                                 "choices": [
                                     {
@@ -4660,6 +4682,8 @@ mod tests {
                             let tools = body["tools"].as_array().unwrap();
                             assert_eq!(tools.len(), 1);
                             assert_eq!(tools[0]["function"]["name"], "tool.read");
+                            assert_eq!(body["tool_choice"]["type"], "function");
+                            assert_eq!(body["tool_choice"]["function"]["name"], "tool.read");
                             Json(json!({
                                 "choices": [
                                     {

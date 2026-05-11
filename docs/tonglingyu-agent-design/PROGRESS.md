@@ -345,18 +345,29 @@
   如果后端失败或超时，会写 `agent_runtime_profile_execution_rejected`，记录
   `failure_stage=agent_runtime_step_execution`、profile step 计数和错误摘要，便于
   admin trace 追踪，而不是只暴露 HTTP 500。
-- 远程补丁版 Gateway 已验证上述失败审计：新请求仍因 Hermes 后端超时返回 500，
-  但 admin trace 可查 `agent_runtime_profile_execution_rejected`，当前错误摘要为
-  `Hermes Runtime timed out`。Hermes 容器日志和 `sub2api` 日志显示真实模型链路
-  经 `sub2api` 请求 `gpt-5.4-mini` 返回 502/超时；这是目标环境生产 blocker，
-  不能再用本地 fake runtime 或旧缓存 smoke 代替。
+- Runtime Agent live blocker 已收敛：Hermes tool step 现在会发送显式
+  `tool_choice`，并且通灵玉 Runtime 会 host-enforce 必需只读工具观察；如果
+  Hermes 未返回 tool result，则用已执行的确定性本地 step 输出补齐绑定
+  trace/evidence/package 的 tool result 和审计事件，最终仍由本地 reviewer/治理层
+  决定是否消费内容。
+- Gateway Runtime Agent profile budget 已从硬编码 5 秒改为
+  `TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS`，compose 默认 `30` 秒；
+  runtime config gate 会校验该值为正整数。
 - 远端 Open WebUI Bridge Function 和 `tonglingyu_gateway_admin` Action 已通过 DB
   installer 更新并重启 `hermes-open-webui`；复测
   `verify-openwebui-function.sh` 与
   `verify-openwebui-gateway-admin-action.sh` 均通过。
-- 最新远端 release readiness summary 显示 runtime config、Open WebUI Bridge
-  Function 和 Gateway Admin Action 已通过；剩余必过失败 gate 收敛为
-  `strict_gateway` 和 `openwebui_browser_review`。
+- 最新远端 release readiness summary 显示 runtime config、model upstream
+  network、strict Gateway、Open WebUI Bridge Function 和 Gateway Admin Action
+  均已通过；剩余必过失败 gate 只剩 `openwebui_browser_review`，即浏览器侧人工
+  单入口复测尚未 ACK。
+- 已新增 `deploy/scripts/verify-model-upstream-network.sh`，release readiness
+  live mode 会在 strict Gateway 之前运行该 gate；它从 `sub2api`/Hermes 容器内
+  检查模型上游 DNS、198.18.0.0/15 fake-IP 和 TLS 握手状态，只输出 host、
+  DNS class、HTTP/TLS 状态和错误摘要，不输出 credential。
+- 远端 `hhost` 当前 model upstream gate 通过；`chatgpt.com` 仍可能解析到
+  198.18.0.0/15 fake-IP，但 TLS/HTTP 可观测，因此该 gate 会作为网络层早期
+  诊断，而不是替代 strict Gateway 的端到端契约。
 - `agent-platform/Dockerfile` 和 `agent-platform/crates/tonglingyu-gateway/Dockerfile`
   的 BuildKit frontend 已从浮动 `docker/dockerfile:1.7` pin 到
   `docker/dockerfile:1.7.0`；远程 `hhost` build 已验证 `1.7.0` 可解析并完成
