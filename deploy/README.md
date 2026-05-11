@@ -346,12 +346,14 @@ model-upstream, strict Gateway, Open WebUI Function, and Gateway Admin Action
 gates must also include the expected successful JSON in their own `stdout_tail`;
 this prevents editing a gate `status` to `passed` without preserving the gate
 verifier output.
-The saved-report verifier also requires the canonical release gate set:
+The saved-report verifier also requires the exact canonical release gate set:
 `runtime_config`, `model_upstream_network`, `strict_gateway`,
 `openwebui_function`, `openwebui_admin_action`, and
 `openwebui_browser_review`. Missing gate entries fail validation even when the
 report is not production-ready, so a partial artifact cannot hide a skipped or
-failed live/browser check.
+failed live/browser check. Unknown gate entries also fail validation, so a
+report cannot imply that undefined release checks were part of the accepted
+contract.
 Saved reports must include a timezone-aware `generated_at`; production-ready
 reports are rejected when older than `TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS`
 (default `24`) or when generated more than five minutes in the future.

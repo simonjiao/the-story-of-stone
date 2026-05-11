@@ -314,11 +314,12 @@
   runtime config、model upstream、strict Gateway、Open WebUI Function 和
   Gateway Admin Action 的 passed gate stdout JSON；contract 覆盖 live gate
   stdout 被删除后仍试图保持 ready 的篡改路径。
-- Saved release report validator 现在要求每份报告都包含 canonical release
+- Saved release report validator 现在要求每份报告都包含 exact canonical release
   gate set：`runtime_config`、`model_upstream_network`、`strict_gateway`、
   `openwebui_function`、`openwebui_admin_action` 和
   `openwebui_browser_review`；缺 gate 即使不是 production-ready report 也会失败，
-  避免报告漏掉 live/browser gate 后仍被当作完整发布证据。
+  未知 gate 也会失败，避免报告漏掉 live/browser gate 或塞入未定义 passed gate 后
+  仍被当作完整发布证据。
 - Saved release report validator 新增 `generated_at` 时区和新鲜度校验；
   production-ready 报告默认 24 小时后过期，contract 覆盖缺失 generated_at 和
   过期 ready artifact，避免复用旧报告宣称当前生产就绪。

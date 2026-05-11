@@ -28,6 +28,7 @@ required_gate_names = [
     *live_gate_names,
     "openwebui_browser_review",
 ]
+allowed_gate_names = set(required_gate_names)
 manual_browser_checks = [
     "Open WebUI browser-side ordinary-user model visibility",
     "Open WebUI browser-side admin audit entry visibility",
@@ -326,6 +327,8 @@ for index, gate in enumerate(gates):
         errors.append(f"duplicate_gate_name={name}")
     else:
         seen_gate_names.add(name)
+    if nonempty(name) and name not in allowed_gate_names:
+        errors.append(f"unexpected_gate_name={name}")
     add_if(gate.get("status") not in allowed_gate_statuses, f"gate_{index}_status_invalid")
     add_if(not isinstance(gate.get("required"), bool), f"gate_{index}_required_must_be_bool")
     if nonempty(name):

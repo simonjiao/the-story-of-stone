@@ -19,6 +19,7 @@ TAMPERED_EXIT_POLICY_REPORT="${WORK_DIR}/tampered-exit-policy-report.json"
 TAMPERED_TAIL_SHAPE_REPORT="${WORK_DIR}/tampered-tail-shape-report.json"
 TAMPERED_MISSING_GENERATED_REPORT="${WORK_DIR}/tampered-missing-generated-report.json"
 TAMPERED_MISSING_GATE_REPORT="${WORK_DIR}/tampered-missing-gate-report.json"
+TAMPERED_EXTRA_GATE_REPORT="${WORK_DIR}/tampered-extra-gate-report.json"
 TAMPERED_SECRET_REPORT="${WORK_DIR}/tampered-secret-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
@@ -402,6 +403,33 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_missing_gate_stdout}" \
   '"missing_gate=openwebui_browser_review" in report["errors"]'
+
+python3 - "${default_report}" "${TAMPERED_EXTRA_GATE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["gates"].append({
+    "name": "security_audit",
+    "status": "passed",
+    "required": True,
+    "reason": "",
+    "stdout_tail": [],
+    "stderr_tail": [],
+})
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_extra_gate_stdout="${WORK_DIR}/tampered-extra-gate.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_EXTRA_GATE_REPORT}" >"${tampered_extra_gate_stdout}"; then
+  echo "saved release reports must reject non-canonical release gates" >&2
+  exit 1
+fi
+assert_report "${tampered_extra_gate_stdout}" \
+  '"unexpected_gate_name=security_audit" in report["errors"]'
 
 python3 - "${default_report}" "${TAMPERED_SECRET_REPORT}" <<'PY'
 import json
