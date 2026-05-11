@@ -328,6 +328,11 @@ Saved reports can be checked for schema and production-ready invariants:
   ./tonglingyu-release-readiness.json
 ```
 
+The saved-report verifier also checks that a `production_release_ready=true`
+report was not generated in summary-only mode and that
+`browser_review_validation` is the successful browser evidence verifier output
+for the same review ref, evidence path, checked items, and evidence SHA-256.
+
 The aggregate gate can be contract-tested without a live deployment:
 
 ```bash

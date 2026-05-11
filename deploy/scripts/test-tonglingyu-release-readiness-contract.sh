@@ -14,6 +14,8 @@ MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-revie
 STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
+SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
+TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 mkdir -p "${WORK_DIR}/screenshots"
@@ -361,6 +363,57 @@ assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith
 assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
 assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
+
+python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["production_release_ready"] = True
+report["gate_command_overrides_used"] = False
+report["summary_only"] = False
+report["exit_policy"] = "production_release_ready"
+report["status"] = "passed"
+report["release_blockers"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+"${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_VALIDATION_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["browser_review_validation"] = {
+    "object": "tonglingyu.openwebui_browser_review_gate",
+    "status": "ok",
+    "evidence_path": report["browser_review_evidence"],
+    "evidence_sha256": "",
+    "review_ref": "other-review",
+    "checked_items": [],
+    "validated_evidence_refs": [],
+    "errors": [],
+    "secret_values_printed": False,
+}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_validation_stdout="${WORK_DIR}/tampered-browser-validation.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_VALIDATION_REPORT}" >"${tampered_browser_validation_stdout}"; then
+  echo "production-ready reports must validate browser review verifier metadata" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_review_ref_mismatch" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_evidence_sha256_invalid" in report["errors"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \

@@ -300,6 +300,9 @@
   readiness report。它会检查 schema、production-ready invariants、browser
   validation、live gate 状态、override、blocker 和人工检查项，避免报告文件被
   手动篡改成 `production_release_ready=true` 后仍被后续流程采信。
+- Saved release report 校验继续收紧：summary-only 报告不能被标记为生产 ready；
+  `browser_review_validation` 必须是同一 release review ref/evidence path 的
+  成功 verifier 输出，并携带 checked items、空 errors 和 evidence SHA-256。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

@@ -288,6 +288,8 @@ elif status == "passed" and skipped:
     status = "passed_with_skipped_gates"
 elif status == "passed" and gate_cmd_overrides_used:
     status = "passed_with_gate_command_overrides"
+elif status == "passed" and summary_only:
+    status = "passed_in_summary_only_mode"
 browser_review_acknowledged = (
     browser_review_gate_passed and browser_review_validation is not None
 )
@@ -311,6 +313,8 @@ if browser_review_validation_missing:
     release_blockers.append("Open WebUI browser-side review validation summary was missing")
 if not browser_review_acknowledged:
     release_blockers.append("Open WebUI browser-side review was not acknowledged")
+if summary_only:
+    release_blockers.append("summary-only mode was used")
 release_conditions_met = (
     require_live
     and not required_failures
@@ -319,7 +323,9 @@ release_conditions_met = (
 )
 if gate_cmd_overrides_used:
     release_blockers.append("gate command overrides were used")
-production_release_ready = release_conditions_met and not gate_cmd_overrides_used
+production_release_ready = (
+    release_conditions_met and not gate_cmd_overrides_used and not summary_only
+)
 
 report = {
     "object": "tonglingyu.release_readiness_report",
