@@ -3913,22 +3913,83 @@ mod tests {
     }
 
     #[test]
-    fn hermes_mode_applies_runtime_draft_with_local_review() {
-        let package = EvidencePackage {
-            package_id: "pkg-runtime-draft-test".to_string(),
-            trace_id: "trace-runtime-draft-test".to_string(),
-            question: "通灵玉是什么？".to_string(),
-            cards: vec![sample_card("base_text")],
-            claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
-            claim_evidence_map: vec![],
-            review: ReviewRecord {
+    fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
                 issues: vec![],
                 summary: "reviewer passed".to_string(),
             },
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("runtime draft consumed");
+        assert!(application.content_used_for_final_answer);
+        assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
+        assert_eq!(workflow.final_answer, workflow.draft_answer);
+        assert_eq!(
+            workflow.answer_source,
+            "agent_runtime_hermes_profile_with_local_review"
+        );
+        assert_eq!(
+            workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.steps[1].output["draft_source"],
+            "agent_runtime_hermes_profile"
+        );
+    }
+
+    #[test]
+    fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
+        let mut workflow = runtime_draft_workflow(
+            Vec::new(),
+            ReviewRecord {
+                status: "needs_revision".to_string(),
+                severity: "high".to_string(),
+                issues: vec!["当前没有可追溯证据。".to_string()],
+                summary: "reviewer requires downgrade".to_string(),
+            },
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("runtime draft consumed");
+        assert!(!application.content_used_for_final_answer);
+        assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
+        assert!(!workflow.final_answer.contains("Hermes profile 草稿"));
+        assert_eq!(
+            workflow.answer_source,
+            "agent_runtime_hermes_profile_rejected_by_local_review"
+        );
+        assert_eq!(
+            workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
+            json!(false)
+        );
+        assert_eq!(
+            workflow.steps[1].output["final_answer_source"],
+            "agent_runtime_hermes_profile_rejected_by_local_review"
+        );
+    }
+
+    fn runtime_draft_workflow(
+        cards: Vec<EvidenceCard>,
+        review: ReviewRecord,
+    ) -> RuntimeWorkflowOutput {
+        let package = EvidencePackage {
+            package_id: "pkg-runtime-draft-test".to_string(),
+            trace_id: "trace-runtime-draft-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards,
+            claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
+            claim_evidence_map: vec![],
+            review,
         };
-        let mut workflow = RuntimeWorkflowOutput {
+        RuntimeWorkflowOutput {
             trace_id: package.trace_id.clone(),
             question: package.question.clone(),
             package,
@@ -3987,26 +4048,7 @@ mod tests {
                 },
             ],
             stream_events: Vec::new(),
-        };
-
-        let application =
-            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
-                .expect("runtime draft consumed");
-        assert!(application.content_used_for_final_answer);
-        assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
-        assert_eq!(workflow.final_answer, workflow.draft_answer);
-        assert_eq!(
-            workflow.answer_source,
-            "agent_runtime_hermes_profile_with_local_review"
-        );
-        assert_eq!(
-            workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
-            json!(true)
-        );
-        assert_eq!(
-            workflow.steps[1].output["draft_source"],
-            "agent_runtime_hermes_profile"
-        );
+        }
     }
 
     #[test]
