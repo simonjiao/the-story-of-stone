@@ -17,6 +17,7 @@ TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
+TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -406,11 +407,70 @@ report["summary_only"] = False
 report["exit_policy"] = "production_release_ready"
 report["status"] = "passed"
 report["release_blockers"] = []
+gate_stdout = {
+    "runtime_config": {
+        "checked_policy_fields": ["TONGLINGYU_AGENT_RUNTIME_MODE"],
+        "checked_secret_fields": ["TONGLINGYU_GATEWAY_API_KEY(S)"],
+        "checked_services": ["tonglingyu-gateway"],
+        "status": "ok",
+    },
+    "model_upstream_network": {
+        "errors": [],
+        "object": "tonglingyu.model_upstream_network_gate",
+        "probe_count": 1,
+        "probes": [],
+        "secret_values_printed": False,
+        "status": "ok",
+    },
+    "strict_gateway": {
+        "agent_runtime_mode": "hermes",
+        "checked_surfaces": ["tonglingyu-gateway:/healthz"],
+        "model_ids": ["tonglingyu"],
+        "status": "ok",
+        "stream_trace_id": "tly-stream",
+        "trace_id": "tly-chat",
+    },
+    "openwebui_function": {
+        "function_id": "agent_identity_bridge",
+        "status": "ok",
+        "type": "filter",
+    },
+    "openwebui_admin_action": {
+        "function_id": "tonglingyu_gateway_admin",
+        "status": "ok",
+        "type": "action",
+    },
+}
+for gate in report["gates"]:
+    if gate.get("name") in gate_stdout:
+        gate["stdout_tail"] = [json.dumps(gate_stdout[gate["name"]], sort_keys=True)]
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "strict_gateway":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_live_gate_stdout="${WORK_DIR}/tampered-live-gate-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" >"${tampered_live_gate_stdout}"; then
+  echo "production-ready reports must bind live gate status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_live_gate_stdout}" \
+  '"strict_gateway_stdout_success_json_missing" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRODUCTION_FLAG_REPORT}" <<'PY'
 import json

@@ -340,6 +340,11 @@ It also requires the top-level `browser_review_validation` to match the
 successful verifier JSON emitted by the `openwebui_browser_review` gate
 `stdout_tail`, so a saved report cannot inject browser evidence that the gate
 did not actually run.
+For non-overridden and production-ready reports, passed runtime config,
+model-upstream, strict Gateway, Open WebUI Function, and Gateway Admin Action
+gates must also include the expected successful JSON in their own `stdout_tail`;
+this prevents editing a gate `status` to `passed` without preserving the gate
+verifier output.
 
 The aggregate gate can be contract-tested without a live deployment:
 

@@ -38,6 +38,45 @@ allowed_report_statuses = {
     "passed_in_summary_only_mode",
 }
 allowed_gate_statuses = {"passed", "failed", "skipped"}
+gate_stdout_requirements = {
+    "runtime_config": {
+        "required_fields": [
+            "checked_policy_fields",
+            "checked_secret_fields",
+            "checked_services",
+        ],
+    },
+    "model_upstream_network": {
+        "object": "tonglingyu.model_upstream_network_gate",
+        "required_fields": [
+            "probe_count",
+            "probes",
+        ],
+    },
+    "strict_gateway": {
+        "exact": {
+            "agent_runtime_mode": "hermes",
+        },
+        "required_fields": [
+            "checked_surfaces",
+            "model_ids",
+            "stream_trace_id",
+            "trace_id",
+        ],
+    },
+    "openwebui_function": {
+        "exact": {
+            "function_id": "agent_identity_bridge",
+            "type": "filter",
+        },
+    },
+    "openwebui_admin_action": {
+        "exact": {
+            "function_id": "tonglingyu_gateway_admin",
+            "type": "action",
+        },
+    },
+}
 hex_digits = set("0123456789abcdef")
 
 
@@ -73,7 +112,7 @@ def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def browser_validation_from_gate(gate):
+def success_json_from_gate_stdout(gate, expected_object=None):
     if not isinstance(gate, dict):
         return None
     stdout_tail = gate.get("stdout_tail")
@@ -86,13 +125,54 @@ def browser_validation_from_gate(gate):
             candidate = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if (
-            isinstance(candidate, dict)
-            and candidate.get("object") == "tonglingyu.openwebui_browser_review_gate"
-            and candidate.get("status") == "ok"
-        ):
-            return candidate
+        if not isinstance(candidate, dict) or candidate.get("status") != "ok":
+            continue
+        if expected_object and candidate.get("object") != expected_object:
+            continue
+        return candidate
     return None
+
+
+def browser_validation_from_gate(gate):
+    return success_json_from_gate_stdout(
+        gate,
+        "tonglingyu.openwebui_browser_review_gate",
+    )
+
+
+def validate_gate_stdout(name, gate, requirement):
+    if not isinstance(gate, dict) or gate.get("status") != "passed":
+        return
+    gate_json = success_json_from_gate_stdout(gate, requirement.get("object"))
+    if gate_json is None:
+        errors.append(f"{name}_stdout_success_json_missing")
+        return
+    for key, expected in (requirement.get("exact") or {}).items():
+        if gate_json.get(key) != expected:
+            errors.append(f"{name}_stdout_{key}_mismatch")
+    for field in requirement.get("required_fields") or []:
+        if field not in gate_json:
+            errors.append(f"{name}_stdout_{field}_missing")
+    if gate_json.get("secret_values_printed") is True:
+        errors.append(f"{name}_stdout_secret_values_printed_must_not_be_true")
+
+
+def validate_non_override_gate_stdout():
+    if gate_overrides_used:
+        return
+    for name, requirement in gate_stdout_requirements.items():
+        validate_gate_stdout(name, gates_by_name.get(name), requirement)
+
+
+def validate_production_gate_stdout():
+    if not production_ready:
+        return
+    for name, requirement in gate_stdout_requirements.items():
+        gate = gates_by_name.get(name)
+        if isinstance(gate, dict) and gate.get("status") == "passed":
+            validate_gate_stdout(name, gate, requirement)
+        else:
+            errors.append(f"production_ready_requires_{name}_stdout_success_json")
 
 
 if not report_path:
@@ -290,6 +370,8 @@ add_mismatch(
     release_conditions_met,
 )
 add_mismatch("production_release_ready", computed_production_ready, production_ready)
+validate_non_override_gate_stdout()
+validate_production_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

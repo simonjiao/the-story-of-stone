@@ -310,6 +310,10 @@
 - Saved release report validator 进一步要求顶层 `browser_review_validation`
   与 `openwebui_browser_review` gate `stdout_tail` 中实际输出的成功 verifier
   JSON 一致；contract 覆盖删除 stdout validation 和顶层 validation 篡改。
+- Saved release report validator 还会校验非 override / production-ready 报告中
+  runtime config、model upstream、strict Gateway、Open WebUI Function 和
+  Gateway Admin Action 的 passed gate stdout JSON；contract 覆盖 live gate
+  stdout 被删除后仍试图保持 ready 的篡改路径。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增
