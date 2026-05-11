@@ -190,6 +190,7 @@ report = {
     "status": status,
     "production_release_ready": production_release_ready,
     "require_live": require_live,
+    "browser_review_acknowledged": browser_review_acknowledged,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,
