@@ -373,6 +373,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   `agent-runtime-hermes-*` content source，避免继续显示成纯确定性 workflow。
 - [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
   生成 JSON 报告并显式区分必过、失败、skipped live gate 和人工页面复核项。
+- [x] release gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时要求显式
+  `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，避免自动 gate 通过
+  但 Open WebUI 页面侧未复测时仍显示生产发布通过。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
   回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`

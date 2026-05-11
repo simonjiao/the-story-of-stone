@@ -245,6 +245,10 @@
   默认运行 compose 渲染配置检查，`TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时把
   strict Gateway 和 Open WebUI Function 检查作为必过 gate；报告会显式记录
   skipped live gates 和仍需人工页面复核的项目，避免把局部验证当作生产完成。
+- release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
+  `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
+  普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核
+  变成显式发布前置，而不是报告里的被动备注。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
   工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
   目前承担 plan gate 和 profile step execution envelope，尚未承担 profile

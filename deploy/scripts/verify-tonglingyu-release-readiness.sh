@@ -114,6 +114,18 @@ else
     "set TONGLINGYU_RELEASE_VERIFY_OPENWEBUI_FUNCTION=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
 fi
 
+if is_true "${TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW:-false}"; then
+  append_result "openwebui_browser_review" "passed" "${require_live}" \
+    "browser-side Open WebUI review was acknowledged by environment"
+elif [[ "${require_live}" == "true" ]]; then
+  append_result "openwebui_browser_review" "failed" "true" \
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
+  failed=1
+else
+  skip_gate "openwebui_browser_review" "false" \
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
+fi
+
 python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" <<'PY'
 import json
 import sys
@@ -132,18 +144,23 @@ skipped = [gate["name"] for gate in gates if gate["status"] == "skipped"]
 status = "failed" if required_failures else "passed"
 if status == "passed" and skipped:
     status = "passed_with_skipped_gates"
+browser_review_acknowledged = any(
+    gate["name"] == "openwebui_browser_review" and gate["status"] == "passed"
+    for gate in gates
+)
+manual_checks = [] if browser_review_acknowledged else [
+    "Open WebUI browser-side ordinary-user model visibility",
+    "Open WebUI browser-side admin audit entry visibility",
+    "Open WebUI streaming chat UX against the live public endpoint",
+    "Human confirmation that existing Open WebUI webui.db persisted settings match env-rendered provider settings",
+]
 
 report = {
     "status": status,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,
-    "remaining_manual_checks": [
-        "Open WebUI browser-side ordinary-user model visibility",
-        "Open WebUI browser-side admin audit entry visibility",
-        "Open WebUI streaming chat UX against the live public endpoint",
-        "Human confirmation that existing Open WebUI webui.db persisted settings match env-rendered provider settings",
-    ],
+    "remaining_manual_checks": manual_checks,
 }
 encoded = json.dumps(report, ensure_ascii=True, sort_keys=True)
 print(encoded)

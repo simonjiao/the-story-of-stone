@@ -234,6 +234,10 @@ Without `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate runs the
 compose-rendered config check and records live Gateway/Open WebUI Function
 checks as skipped. This makes partial local verification explicit instead of
 silently treating it as a production release pass.
+When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
+`TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` after a human has checked
+ordinary-user model visibility, streaming chat UX, admin audit visibility, and
+that persisted Open WebUI provider settings match the rendered environment.
 
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and
