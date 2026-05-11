@@ -190,6 +190,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway smoke 和 strict Gateway live gate 会要求 streaming 响应包含
   Runtime `content_delta` chunk，避免普通 cached completion stream 或空 Runtime
   source marker 被误判为 Runtime event replay。
+- [x] Gateway smoke 会从 streaming 与去重 replay SSE 中解析唯一 trace/package/session，
+  读取 stream trace 的 admin 入口，并校验 stream 请求自身的 Runtime summary、
+  audit event 与消息归属，避免本地回归测试只覆盖非 streaming trace。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

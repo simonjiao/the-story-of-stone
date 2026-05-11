@@ -213,6 +213,9 @@
 - Gateway smoke 和 strict Gateway live gate 已要求 streaming 响应包含 Runtime
   `content_delta` chunk，防止普通 cached completion stream 或空 marker 被误判为
   Runtime event replay。
+- Gateway smoke 已补 streaming trace 级 admin 校验：从 streaming 与 replay SSE
+  解析唯一 trace/package/session，读取 stream trace 并校验 Runtime summary、
+  audit event 与消息归属。
 - Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果

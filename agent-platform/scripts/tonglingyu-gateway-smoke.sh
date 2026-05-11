@@ -60,6 +60,64 @@ print(value)
 ' "$path"
 }
 
+stream_pair_metadata() {
+  local stream_path="$1"
+  local duplicate_stream_path="$2"
+  python3 - "${stream_path}" "${duplicate_stream_path}" <<'PY'
+import json
+import sys
+
+stream_path, duplicate_stream_path = sys.argv[1:3]
+
+
+def parse_events(path):
+    events = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            events.append(json.loads(payload))
+    if not events:
+        raise SystemExit(f"{path} did not contain JSON SSE chunks")
+    return events
+
+
+def unique_value(events, key):
+    values = {
+        event.get(key)
+        for event in events
+        if isinstance(event, dict) and event.get(key)
+    }
+    if len(values) != 1:
+        raise SystemExit(f"expected exactly one {key}, got {sorted(values)}")
+    return next(iter(values))
+
+
+stream = parse_events(stream_path)
+duplicate = parse_events(duplicate_stream_path)
+metadata = {
+    "trace_id": unique_value(stream, "trace_id"),
+    "evidence_package_id": unique_value(stream, "evidence_package_id"),
+    "session_id": unique_value(stream, "session_id"),
+    "duplicate_trace_id": unique_value(duplicate, "trace_id"),
+    "duplicate_evidence_package_id": unique_value(duplicate, "evidence_package_id"),
+    "duplicate_session_id": unique_value(duplicate, "session_id"),
+}
+for key, duplicate_key in [
+    ("trace_id", "duplicate_trace_id"),
+    ("evidence_package_id", "duplicate_evidence_package_id"),
+    ("session_id", "duplicate_session_id"),
+]:
+    if metadata[key] != metadata[duplicate_key]:
+        raise SystemExit(f"stream replay changed {key}: {metadata}")
+print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
+PY
+}
+
 expect_status() {
   local expected="$1"
   local output="$2"
@@ -218,12 +276,14 @@ CHAT_JSON="${SMOKE_DIR}/chat.json"
 DUP_CHAT_JSON="${SMOKE_DIR}/chat-duplicate.json"
 STREAM_TXT="${SMOKE_DIR}/chat-stream.txt"
 DUP_STREAM_TXT="${SMOKE_DIR}/chat-stream-duplicate.txt"
+STREAM_META_JSON="${SMOKE_DIR}/chat-stream-meta.json"
 FORBIDDEN_JSON="${SMOKE_DIR}/forbidden.json"
 MODEL_REJECT_JSON="${SMOKE_DIR}/model-reject.json"
 PACKAGE_FORBIDDEN_JSON="${SMOKE_DIR}/package-forbidden.json"
 PACKAGE_JSON="${SMOKE_DIR}/package.json"
 REPLAY_JSON="${SMOKE_DIR}/replay.json"
 TRACE_JSON="${SMOKE_DIR}/trace.json"
+STREAM_TRACE_JSON="${SMOKE_DIR}/stream-trace.json"
 SESSION_JSON="${SMOKE_DIR}/session.json"
 ADMIN_PACKAGE_JSON="${SMOKE_DIR}/admin-package.json"
 METRICS_JSON="${SMOKE_DIR}/metrics.json"
@@ -272,9 +332,11 @@ grep -q 'evidence_package_id' "${DUP_STREAM_TXT}"
 grep -q 'runtime_workflow' "${DUP_STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
 assert_stream_contract "${DUP_STREAM_TXT}"
+stream_pair_metadata "${STREAM_TXT}" "${DUP_STREAM_TXT}" >"${STREAM_META_JSON}"
 
 PACKAGE_ID="$(cat "${CHAT_JSON}" | json_get "evidence_package_id")"
 TRACE_ID="$(cat "${CHAT_JSON}" | json_get "trace_id")"
+STREAM_TRACE_ID="$(cat "${STREAM_META_JSON}" | json_get "trace_id")"
 SESSION_ID="$(cat "${CHAT_JSON}" | json_get "session_id")"
 expect_status 404 "${PACKAGE_FORBIDDEN_JSON}" "${auth[@]}" \
   -H "x-tonglingyu-user-id: other-user" \
@@ -282,6 +344,7 @@ expect_status 404 "${PACKAGE_FORBIDDEN_JSON}" "${auth[@]}" \
 curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}" >"${PACKAGE_JSON}"
 curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}/replay" >"${REPLAY_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${TRACE_ID}" >"${TRACE_JSON}"
+curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${STREAM_TRACE_ID}" >"${STREAM_TRACE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/sessions/${SESSION_ID}" >"${SESSION_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/packages/${PACKAGE_ID}" >"${ADMIN_PACKAGE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
@@ -306,6 +369,8 @@ python3 - \
   "${PACKAGE_JSON}" \
   "${REPLAY_JSON}" \
   "${TRACE_JSON}" \
+  "${STREAM_META_JSON}" \
+  "${STREAM_TRACE_JSON}" \
   "${SESSION_JSON}" \
   "${ADMIN_PACKAGE_JSON}" \
   "${METRICS_JSON}" \
@@ -327,6 +392,8 @@ import sys
     package,
     replay,
     trace,
+    stream_meta,
+    stream_trace,
     session,
     admin_package,
     metrics,
@@ -418,6 +485,29 @@ for event_type in [
 ]:
     assert event_type in event_types, (event_type, event_types)
 assert trace["messages"][0]["package_id"] == package["package_id"], trace
+assert stream_trace["trace_id"] == stream_meta["trace_id"], (stream_trace, stream_meta)
+assert stream_meta["duplicate_trace_id"] == stream_meta["trace_id"], stream_meta
+assert stream_meta["duplicate_evidence_package_id"] == stream_meta["evidence_package_id"], stream_meta
+assert stream_meta["duplicate_session_id"] == stream_meta["session_id"], stream_meta
+stream_event_types = {
+    item["event_type"]
+    for item in stream_trace["audit_events"]
+}
+for event_type in [
+    "request_normalized",
+    "agent_runtime_profile_step_executed",
+    "agent_runtime_profile_execution_summarized",
+    "response_finalized",
+]:
+    assert event_type in stream_event_types, (event_type, stream_event_types)
+assert stream_trace["agent_runtime_summary"]["mode"] == "minimal", stream_trace
+assert stream_trace["agent_runtime_summary"]["profile_execution_status"] == "minimal_envelope_only", stream_trace
+assert any(
+    item["external_message_id"] == "smoke-message-stream"
+    and item["package_id"] == stream_meta["evidence_package_id"]
+    and item["trace_id"] == stream_meta["trace_id"]
+    for item in stream_trace["messages"]
+), (stream_trace, stream_meta)
 assert session["session"]["session_id"] == chat["session_id"], session
 assert len(session["messages"]) >= 2, session
 assert any(
