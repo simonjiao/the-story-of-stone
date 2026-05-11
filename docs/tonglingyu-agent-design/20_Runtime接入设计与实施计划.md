@@ -172,6 +172,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 公共入口会拒绝用户提交内部 runtime/admin trace 控制字段，
   包括 `agent_runtime_summary`、`runtime_step_plan`、`allowed_tools` 和
   `admin_trace` 等，避免 Open WebUI 请求伪造内部执行/审计状态。
+- [x] strict Gateway live gate 会拒绝公共 chat 响应泄露
+  `agent_runtime_summary`、`runtime_step_outputs`、`audit_events` 或
+  `_runtime_stream_events` 等内部 runtime/admin trace 字段。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

@@ -198,6 +198,9 @@
   后续新增的 Runtime/admin trace 字段，包括 `agent_runtime_summary`、
   `runtime_step_plan`、`allowed_tools` 和 `admin_trace`，防止普通 Open WebUI
   请求伪造内部执行、工具或审计状态。
+- strict Gateway live gate 已增加公共 chat 响应字段检查，拒绝
+  `agent_runtime_summary`、`runtime_step_outputs`、`audit_events`、
+  `_runtime_stream_events` 等内部 runtime/admin trace 字段泄露到普通响应。
 - Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果

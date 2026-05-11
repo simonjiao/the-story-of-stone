@@ -148,6 +148,20 @@ if not chat_trace_id:
     errors.append("chat response must include trace_id")
 if not chat_package_id:
     errors.append("chat response must include evidence_package_id")
+for forbidden_chat_key in [
+    "_runtime_stream_events",
+    "_stream_source",
+    "agent_runtime",
+    "agent_runtime_plan_gate",
+    "agent_runtime_summary",
+    "audit_events",
+    "internal_trace",
+    "runtime_step_outputs",
+    "runtime_step_plan",
+    "workflow_states",
+]:
+    if forbidden_chat_key in chat:
+        errors.append(f"chat response must not expose {forbidden_chat_key}")
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
 event_types = {
