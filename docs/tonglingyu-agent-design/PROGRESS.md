@@ -220,6 +220,10 @@
   `TONGLINGYU_AGENT_RUNTIME_MODE` 生产默认值设为 `hermes`，并显式注入
   `AGENT_RUNTIME_HERMES_*`；配置 gate 会拒绝 Gateway 自身仍落回 `minimal`
   runtime mode 的生产渲染结果。
+- `deploy/scripts/verify-tonglingyu-strict-gateway.sh` 已补运行态 Gateway gate：
+  从正式 Docker 网络检查 `/healthz`、`/v1/models`、admin metrics 和 Prometheus，
+  要求 Gateway 实际报告 `hermes` runtime、只暴露 `tonglingyu` 模型、隐藏
+  `honglou-*` profile、KB 非空、rate limit 开启且 admin key 已隔离。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
   工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
   目前承担 plan gate 和 profile step execution envelope，尚未承担 profile

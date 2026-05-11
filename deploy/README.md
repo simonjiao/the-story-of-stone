@@ -203,6 +203,18 @@ set isolation, and Open WebUI provider keys that do not contain admin
 credentials. It prints variable names and gate status only; it must not print
 secret values.
 
+After the stack is running, verify the live Gateway surface from inside the
+formal Docker network:
+
+```bash
+./scripts/verify-tonglingyu-strict-gateway.sh
+```
+
+This runtime gate checks `/healthz`, `/v1/models`, `/v1/admin/metrics`, and
+Prometheus metrics. It requires `agent_runtime_mode=hermes`, a single visible
+`tonglingyu` model, hidden `honglou-*` profiles, positive KB counts, active
+rate limiting, and isolated admin credentials.
+
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and
 has its own lifecycle, data directory, and schema ownership.

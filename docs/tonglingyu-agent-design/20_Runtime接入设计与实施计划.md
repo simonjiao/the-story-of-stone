@@ -347,6 +347,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] 生产 compose 显式设置 Gateway `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`
   并注入 `AGENT_RUNTIME_HERMES_*`；release gate 拒绝 Gateway runtime mode
   仍为 `minimal` 的渲染结果。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
+  Gateway health/models/admin metrics/Prometheus，确认 `hermes` runtime、单可见
+  模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
   回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
