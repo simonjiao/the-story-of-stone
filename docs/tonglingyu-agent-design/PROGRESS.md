@@ -314,6 +314,16 @@
   Admin Action contract smoke，覆盖 Action 编译和单测、verify fixture 正向、
   admin key 为空、缺少 admin role guard、缺少 admin action endpoint，以及
   verify 输出不泄露 fixture-secret 值。
+- release/readiness、runtime config、strict Gateway、Open WebUI Bridge Function
+  和 Gateway Admin Action 的 install/verify 脚本已支持
+  `TONGLINGYU_DEPLOY_ENV_FILE` / `DEPLOY_ENV_FILE`，实现分支可以复用目标部署
+  `.env` 做只读 gate，不需要把密钥文件复制进工作树；已补
+  `test-deploy-env-file-contract.sh` 验证显式 env-file、本地 `.env` fallback 和
+  缺失文件错误不泄露 env 值。
+- 使用主工作区目标 `.env` 做只读 runtime config gate 时，脚本已能读取 env-file，
+  但 compose config 在 `TONGLINGYU_GATEWAY_API_KEY` 缺失处失败，尚未进入 strict
+  Gateway/Open WebUI live gate；这属于目标环境配置 blocker，不能用本地 contract
+  smoke 代替。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。

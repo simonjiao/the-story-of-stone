@@ -7,6 +7,11 @@ if [[ -d "${SCRIPT_DIR}/../open-webui/functions" ]]; then
 else
   DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/deploy"
 fi
+
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 FUNCTION_NAME="${FUNCTION_NAME:-Agent Identity Bridge}"

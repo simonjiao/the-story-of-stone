@@ -6,6 +6,11 @@ DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 RESULTS_JSONL="${WORK_DIR}/results.jsonl"
 READY_STATUS="${WORK_DIR}/production-ready.status"
+
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \

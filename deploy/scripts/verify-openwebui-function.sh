@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"

@@ -6,6 +6,10 @@ DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 HEALTH_JSON="${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-${WORK_DIR}/health.json}"
 MODELS_JSON="${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-${WORK_DIR}/models.json}"
 METRICS_JSON="${TONGLINGYU_GATEWAY_VERIFY_METRICS_JSON:-${WORK_DIR}/metrics.json}"

@@ -12,14 +12,9 @@ COMPOSE_SERVICE="${OPEN_WEBUI_COMPOSE_SERVICE:-open-webui}"
 CONTAINER_PATH="/tmp/tonglingyu_gateway_admin_action.py"
 FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/tonglingyu_gateway_admin_action.py}"
 
-if [[ ! -f ".env" ]]; then
-  echo "run this script from the deploy directory that contains .env" >&2
-  exit 1
-fi
-
-set -a
-. ./.env
-set +a
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_deploy_env_file_or_local
 
 if [[ -z "${TONGLINGYU_ADMIN_API_KEY:-}" ]]; then
   echo "TONGLINGYU_ADMIN_API_KEY is required" >&2

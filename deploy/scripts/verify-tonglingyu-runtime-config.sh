@@ -6,6 +6,10 @@ DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_JSON="$(mktemp)"
 trap 'rm -f "${CONFIG_JSON}"' EXIT
 
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 cd "${DEPLOY_DIR}"
 
 if ! docker compose config --format json >"${CONFIG_JSON}"; then

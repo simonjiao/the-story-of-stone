@@ -81,6 +81,23 @@ assert_report "${optional_report}" 'report["status"] == "passed_with_failed_opti
 assert_report "${optional_report}" 'report["optional_failures"] == ["openwebui_browser_review"]'
 assert_report "${optional_report}" 'report["browser_review_acknowledged"] is False'
 
+env_file="${WORK_DIR}/release-readiness.env"
+env_file_report="${WORK_DIR}/env-file-report.json"
+cat >"${env_file}" <<EOF
+TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
+TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_SUMMARY_ONLY=true
+TONGLINGYU_RELEASE_REPORT_PATH=${env_file_report}
+EOF
+TONGLINGYU_DEPLOY_ENV_FILE="${env_file}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
+test -s "${env_file_report}"
+assert_report "${env_file_report}" 'report["summary_only"] is True'
+assert_report "${env_file_report}" 'report["gate_command_overrides_used"] is True'
+
 conditions_report="${WORK_DIR}/live-conditions-met.json"
 env "${common_env[@]}" \
   TONGLINGYU_RELEASE_REQUIRE_LIVE=true \

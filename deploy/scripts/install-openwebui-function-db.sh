@@ -12,14 +12,9 @@ COMPOSE_SERVICE="${OPEN_WEBUI_COMPOSE_SERVICE:-open-webui}"
 CONTAINER_PATH="/tmp/agent_identity_bridge_filter.py"
 FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
 
-if [[ ! -f ".env" ]]; then
-  echo "run this script from the deploy directory that contains .env" >&2
-  exit 1
-fi
-
-set -a
-. ./.env
-set +a
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_deploy_env_file_or_local
 
 if [[ -z "${AGENT_BRIDGE_SECRET:-}" ]]; then
   echo "AGENT_BRIDGE_SECRET is required" >&2

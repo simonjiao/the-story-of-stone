@@ -247,6 +247,23 @@ TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
   ./scripts/verify-tonglingyu-release-readiness.sh
 ```
 
+When running a gate from a separate implementation worktree, point it at the
+target deployment environment without copying secrets into that worktree:
+
+```bash
+TONGLINGYU_DEPLOY_ENV_FILE=/absolute/path/to/deploy/.env \
+  TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
+  ./scripts/verify-tonglingyu-release-readiness.sh
+```
+
+The gate scripts source the env file only into the process environment and keep
+reports limited to variable names, valve keys, and status fields. Run the helper
+contract before changing env-file loading:
+
+```bash
+./scripts/test-deploy-env-file-contract.sh
+```
+
 Without `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate runs the
 compose-rendered config check and records live Gateway/Open WebUI Function and
 Gateway Admin Action checks as skipped. The JSON report includes
