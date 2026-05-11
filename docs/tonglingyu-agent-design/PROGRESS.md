@@ -317,6 +317,9 @@
 - Saved release report validator 新增 `generated_at` 时区和新鲜度校验；
   production-ready 报告默认 24 小时后过期，contract 覆盖缺失 generated_at 和
   过期 ready artifact，避免复用旧报告宣称当前生产就绪。
+- Production-ready saved report 现在要求 browser review verifier 显式绑定
+  release review ref 和 Open WebUI 公网入口；contract 覆盖解除 ref/public URL
+  binding 后仍试图保持 ready 的篡改路径。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

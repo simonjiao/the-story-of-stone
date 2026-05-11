@@ -21,6 +21,7 @@ TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
+TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -401,6 +402,7 @@ env "${common_env[@]}" \
   TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
   TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
   TONGLINGYU_RELEASE_REPORT_PATH="${conditions_report}" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
@@ -412,6 +414,8 @@ assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_comm
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'
 assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-browser-review"'
 assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
+assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_review_ref_bound"] is True'
+assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_public_url_bound"] is True'
 assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
 assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
@@ -555,6 +559,34 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_browser_stdout_stdout}" \
   '"browser_review_validation_stdout_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_BINDING_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+validation = dict(report["browser_review_validation"])
+validation["expected_review_ref_bound"] = False
+validation["expected_public_url_bound"] = False
+report["browser_review_validation"] = validation
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_browser_review":
+        gate["stdout_tail"] = [json.dumps(validation, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_binding_stdout="${WORK_DIR}/tampered-browser-binding.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_BINDING_REPORT}" >"${tampered_browser_binding_stdout}"; then
+  echo "production-ready browser validation must bind release ref and public URL" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_binding_stdout}" \
+  '"production_ready_requires_browser_review_ref_bound" in report["errors"]'
+assert_report "${tampered_browser_binding_stdout}" \
+  '"production_ready_requires_browser_review_public_url_bound" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_VALIDATION_REPORT}" <<'PY'
 import json

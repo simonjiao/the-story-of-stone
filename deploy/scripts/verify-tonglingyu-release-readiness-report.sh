@@ -507,6 +507,16 @@ if isinstance(browser_review_validation, dict):
         "browser_review_validation_secret_values_printed_must_be_false",
     )
     add_if(
+        production_ready
+        and browser_review_validation.get("expected_review_ref_bound") is not True,
+        "production_ready_requires_browser_review_ref_bound",
+    )
+    add_if(
+        production_ready
+        and browser_review_validation.get("expected_public_url_bound") is not True,
+        "production_ready_requires_browser_review_public_url_bound",
+    )
+    add_if(
         nonempty(browser_review_ref)
         and browser_review_validation.get("review_ref") != browser_review_ref,
         "browser_review_validation_review_ref_mismatch",

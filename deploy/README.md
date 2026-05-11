@@ -348,6 +348,9 @@ verifier output.
 Saved reports must include a timezone-aware `generated_at`; production-ready
 reports are rejected when older than `TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS`
 (default `24`) or when generated more than five minutes in the future.
+For production-ready reports, browser review validation must also prove that
+the verifier was bound to both the release review ref and the expected public
+Open WebUI URL.
 
 The aggregate gate can be contract-tested without a live deployment:
 
