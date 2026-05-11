@@ -110,6 +110,16 @@ def forbidden_paths(value, prefix="$"):
     return paths
 
 
+def has_content_delta(event):
+    for choice in event.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        if isinstance(delta, dict) and delta.get("content"):
+            return True
+    return False
+
+
 events = []
 done_seen = False
 for line_number, raw_line in enumerate(stream.splitlines(), start=1):
@@ -145,6 +155,17 @@ if not any(
     for event in events
 ):
     errors.append("missing runtime_workflow source")
+content_delta_events = [
+    event
+    for event in events
+    if isinstance(event, dict)
+    and (event.get("runtime_event") or {}).get("event_type") == "content_delta"
+]
+if not content_delta_events:
+    errors.append("missing runtime content_delta chunks")
+for event in content_delta_events:
+    if not has_content_delta(event):
+        errors.append("runtime content_delta chunk must carry assistant content")
 
 for index, event in enumerate(events):
     for path in forbidden_paths(event, f"$[{index}]"):

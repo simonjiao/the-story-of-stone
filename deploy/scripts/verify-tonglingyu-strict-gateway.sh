@@ -216,6 +216,16 @@ def unique_event_values(events, key):
     }
 
 
+def stream_event_has_content_delta(event):
+    for choice in event.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        if isinstance(delta, dict) and delta.get("content"):
+            return True
+    return False
+
+
 def validate_trace_summary_surface(trace_value, expected_trace_id, expected_package_id, label):
     if trace_value.get("trace_id") != expected_trace_id:
         errors.append(f"{label} trace_id must match response trace_id")
@@ -412,6 +422,17 @@ if not any(
     for event in stream_events
 ):
     errors.append("stream response must identify runtime_workflow source")
+content_delta_events = [
+    event
+    for event in stream_events
+    if isinstance(event, dict)
+    and (event.get("runtime_event") or {}).get("event_type") == "content_delta"
+]
+if not content_delta_events:
+    errors.append("stream response must include runtime content_delta chunks")
+for content_event in content_delta_events:
+    if not stream_event_has_content_delta(content_event):
+        errors.append("stream runtime content_delta chunk must carry assistant content")
 for index, stream_event in enumerate(stream_events):
     for forbidden_stream_path in forbidden_public_chat_paths(stream_event, f"$[{index}]"):
         errors.append(f"stream response must not expose {forbidden_stream_path}")

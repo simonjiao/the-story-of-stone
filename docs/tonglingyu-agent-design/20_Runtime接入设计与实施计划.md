@@ -187,6 +187,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] strict Gateway live gate 会从 streaming SSE chunk 解析 `trace_id` 并读取
   对应 admin trace，校验 streaming 请求也进入 Hermes Runtime summary/audit
   闭环，避免只验证 stream 响应格式、不验证审计链。
+- [x] Gateway smoke 和 strict Gateway live gate 会要求 streaming 响应包含
+  Runtime `content_delta` chunk，避免普通 cached completion stream 或空 Runtime
+  source marker 被误判为 Runtime event replay。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。
