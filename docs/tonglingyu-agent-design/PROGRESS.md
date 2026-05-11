@@ -287,11 +287,12 @@
 - `deploy/scripts/verify-tonglingyu-release-readiness.sh` 已补聚合发布 gate：
   默认运行 compose 渲染配置检查，`TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时把
   strict Gateway 和 Open WebUI Function 检查作为必过 gate；报告会显式记录
-  `production_release_ready`、`browser_review_acknowledged`、skipped live gates、
-  release blockers 和仍需人工页面复核的项目；只有显式 live release mode、必过
-  gate 和页面 ACK 都满足时才会标记 production ready，避免把局部验证当作生产
-  完成；脚本默认退出码也跟随 `production_release_ready`，只有显式
-  `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
+  `production_release_ready`、`browser_review_acknowledged`、optional failures、
+  skipped live gates、release blockers 和仍需人工页面复核的项目；optional gate
+  失败会把 `status` 标为 `passed_with_failed_optional_gates`；只有显式 live
+  release mode、必过 gate 和页面 ACK 都满足时才会标记 production ready，避免
+  把局部验证当作生产完成；脚本默认退出码也跟随 `production_release_ready`，
+  只有显式 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，把 Open WebUI 页面侧普通

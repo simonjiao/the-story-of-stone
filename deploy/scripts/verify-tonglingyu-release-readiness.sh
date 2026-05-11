@@ -166,6 +166,11 @@ required_failures = [
     for gate in gates
     if gate["required"] and gate["status"] != "passed"
 ]
+optional_failures = [
+    gate["name"]
+    for gate in gates
+    if not gate["required"] and gate["status"] == "failed"
+]
 skipped = [gate["name"] for gate in gates if gate["status"] == "skipped"]
 skipped_live_gates = [
     name
@@ -178,7 +183,9 @@ failed_live_gates = [
     if (gates_by_name.get(name) or {}).get("status") == "failed"
 ]
 status = "failed" if required_failures else "passed"
-if status == "passed" and skipped:
+if status == "passed" and optional_failures:
+    status = "passed_with_failed_optional_gates"
+elif status == "passed" and skipped:
     status = "passed_with_skipped_gates"
 browser_review_acknowledged = any(
     gate["name"] == "openwebui_browser_review" and gate["status"] == "passed"
@@ -220,6 +227,7 @@ report = {
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,
+    "optional_failures": optional_failures,
     "skipped_live_gates": skipped_live_gates,
     "failed_live_gates": failed_live_gates,
     "release_blockers": release_blockers,
