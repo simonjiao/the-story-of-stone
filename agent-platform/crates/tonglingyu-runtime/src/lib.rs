@@ -300,6 +300,21 @@ impl TonglingyuRuntimeStore {
                 }),
             )?;
         }
+        if let Err(error) =
+            validate_agent_runtime_execution_summary(mode, &workflow.agent_runtime_summary)
+        {
+            append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_execution_rejected",
+                &json!({
+                    "runtime_mode": mode.as_str(),
+                    "summary": &workflow.agent_runtime_summary,
+                    "error": error.to_string(),
+                }),
+            )?;
+            return Err(error);
+        }
         Ok(workflow)
     }
 
@@ -2015,6 +2030,29 @@ fn agent_runtime_execution_summary(
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
     })
+}
+
+fn validate_agent_runtime_execution_summary(
+    mode: TonglingyuAgentRuntimeMode,
+    summary: &Value,
+) -> Result<()> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes {
+        return Ok(());
+    }
+    let complete = summary
+        .get("hermes_content_execution_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let status = summary
+        .get("profile_execution_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if complete && status == "hermes_profile_observed_with_local_governance" {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "Hermes runtime profile execution incomplete: {status}"
+    ))
 }
 
 fn apply_agent_runtime_evidence_outputs(
@@ -4853,6 +4891,9 @@ mod tests {
     struct BadOutputRefRuntimeClient;
 
     #[derive(Debug, Default)]
+    struct IncompleteHermesContentRuntimeClient;
+
+    #[derive(Debug, Default)]
     struct WrongEvidenceOutputRefRuntimeClient;
 
     #[async_trait]
@@ -5101,6 +5142,109 @@ mod tests {
                     "runtime_profile": input.profile_id,
                     "trace_id": input.trace_id,
                     "tool_rounds": 1,
+                    "tool_results": tool_results,
+                    "tool_audit_events": [],
+                }),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for IncompleteHermesContentRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "incomplete-hermes-content runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "incomplete-hermes-content runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let operation = input
+                .runtime_step
+                .as_ref()
+                .and_then(|step| step.metadata.get("operation"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let message = input
+                .messages
+                .first()
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            let package_id = package_id_from_step_message(&message);
+            let tool_results = Value::Array(
+                input
+                    .requested_tools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tool_name)| {
+                        let output_ref = if matches!(
+                            tool_name.as_str(),
+                            "tonglingyu.text.search" | "tonglingyu.commentary.search"
+                        ) {
+                            evidence_set_output_ref(
+                                &input.trace_id,
+                                &evidence_ids_from_step_message(&message),
+                            )
+                        } else if matches!(
+                            tool_name.as_str(),
+                            "tonglingyu.evidence.package.create"
+                                | "tonglingyu.evidence.package.read"
+                                | "tonglingyu.evidence.package.replay"
+                        ) {
+                            package_id
+                                .as_ref()
+                                .map(|package_id| {
+                                    format!(
+                                        "runtime://tonglingyu/{}/packages/{package_id}",
+                                        input.trace_id
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "runtime://tonglingyu/{}/tools/{operation}/{index}",
+                                        input.trace_id
+                                    )
+                                })
+                        } else {
+                            format!(
+                                "runtime://tonglingyu/{}/tools/{operation}/{index}",
+                                input.trace_id
+                            )
+                        };
+                        json!({
+                            "call_id": format!("call-incomplete-hermes-{operation}-{index}"),
+                            "profile_id": input.profile_id,
+                            "tool_name": tool_name,
+                            "output_ref": output_ref,
+                        })
+                    })
+                    .collect(),
+            );
+            Ok(RuntimeOutput {
+                result_summary: "{}".to_string(),
+                result_ref: Some(format!(
+                    "result://incomplete-hermes-content/{}",
+                    input.profile_id
+                )),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "operation": operation,
+                    "tool_rounds": if input.requested_tools.is_empty() { 0 } else { 1 },
                     "tool_results": tool_results,
                     "tool_audit_events": [],
                 }),
@@ -6136,6 +6280,61 @@ mod tests {
         assert!(message.contains("mismatched output_ref"));
         assert!(message.contains("text_evidence_search"));
         assert!(message.contains("tonglingyu.text.search"));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_rejects_incomplete_profile_content_execution() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-incomplete-content-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let trace_id = "trace-hermes-incomplete-content-test";
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: trace_id.to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(IncompleteHermesContentRuntimeClient),
+            )
+            .await
+            .expect_err(
+                "Hermes mode must fail closed when profile content execution is incomplete",
+            );
+
+        let message = error.to_string();
+        assert!(message.contains("Hermes runtime profile execution incomplete"));
+        assert!(message.contains("hermes_profile_incomplete_local_governance"));
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_summarized"
+                && event["payload"]["profile_execution_status"]
+                    == json!("hermes_profile_incomplete_local_governance")
+                && event["payload"]["hermes_content_execution_complete"] == json!(false)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
+                && event["payload"]["summary"]["profile_execution_status"]
+                    == json!("hermes_profile_incomplete_local_governance")
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_draft_rejected"
+                && event["payload"]["draft_consumed"] == json!(false)
+        }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

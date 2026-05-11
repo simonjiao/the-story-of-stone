@@ -376,6 +376,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   live gate 会要求 summary 显示 Hermes observation + local governance 闭环。
 - [x] admin trace 顶层透出最新 `agent_runtime_summary`；strict live gate 会校验
   summary 的 step/tool 计数与详细 runtime step audit event 一致。
+- [x] Hermes mode 下 profile content/tool execution 不完整时 Runtime fail-closed；
+  会写 `agent_runtime_profile_execution_rejected`，不再返回本地 deterministic
+  fallback 作为成功回答。
 - [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
   生成 JSON 报告并显式区分必过、失败、skipped live gate 和人工页面复核项。
 - [x] release gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时要求显式

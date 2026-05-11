@@ -194,6 +194,11 @@
   `minimal_envelope_only`、Hermes observation/local governance 和 incomplete
   fallback，避免只靠分散 step metadata 人工推断；strict gate 会同时校验 summary
   的 step/tool 计数与详细 runtime step audit event 一致。
+- Hermes mode 已把 incomplete profile content/tool execution 前移为 Runtime
+  fail-closed：如果 summary 未达到
+  `hermes_profile_observed_with_local_governance`，请求会写
+  `agent_runtime_profile_execution_rejected` audit event 并返回错误，不再用本地
+  deterministic fallback 伪装成成功回答。
 - Hermes `review_answer` 结构化 JSON 输出已进入 review observation；Runtime
   会记录 LLM reviewer status/severity/issues 与本地强制 reviewer 的一致性，
   不一致时标记 `local_reviewer_override=true`，最终裁决仍由本地 reviewer 决定。
