@@ -260,13 +260,16 @@ required_failures = [
     for gate in gates
     if gate["required"] and gate["status"] != "passed"
 ]
-if browser_review_validation_missing:
-    required_failures.append("openwebui_browser_review_validation")
 optional_failures = [
     gate["name"]
     for gate in gates
     if not gate["required"] and gate["status"] == "failed"
 ]
+if browser_review_validation_missing:
+    if browser_review_gate.get("required"):
+        required_failures.append("openwebui_browser_review_validation")
+    else:
+        optional_failures.append("openwebui_browser_review_validation")
 skipped = [gate["name"] for gate in gates if gate["status"] == "skipped"]
 skipped_live_gates = [
     name

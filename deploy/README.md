@@ -386,7 +386,8 @@ file refs; the aggregate release report copies this under
 evidence files instead of only storing mutable paths.
 If the browser review gate exits successfully but does not emit this validation
 object, release readiness records `openwebui_browser_review_validation` as a
-required failure.
+required failure in live release mode, and as an optional failure in non-live
+summary mode.
 
 If writing the JSON manually, use this shape:
 

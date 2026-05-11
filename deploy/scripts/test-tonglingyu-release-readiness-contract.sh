@@ -261,6 +261,24 @@ assert_report "${optional_report}" 'report["status"] == "passed_with_failed_opti
 assert_report "${optional_report}" 'report["optional_failures"] == ["openwebui_browser_review"]'
 assert_report "${optional_report}" 'report["browser_review_acknowledged"] is False'
 
+optional_missing_validation_report="${WORK_DIR}/browser-optional-missing-validation.json"
+env "${common_env[@]}" \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD="${BROWSER_NO_VALIDATION_CMD}" \
+  TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
+  TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
+  TONGLINGYU_RELEASE_REPORT_PATH="${optional_missing_validation_report}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
+assert_report "${optional_missing_validation_report}" \
+  'report["status"] == "passed_with_failed_optional_gates"'
+assert_report "${optional_missing_validation_report}" \
+  '"openwebui_browser_review_validation" in report["optional_failures"]'
+assert_report "${optional_missing_validation_report}" \
+  '"openwebui_browser_review_validation" not in report["required_failures"]'
+assert_report "${optional_missing_validation_report}" \
+  'report["browser_review_acknowledged"] is False'
+
 missing_validation_report="${WORK_DIR}/browser-missing-validation.json"
 if env "${common_env[@]}" \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD="${BROWSER_NO_VALIDATION_CMD}" \
