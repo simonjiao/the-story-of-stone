@@ -181,6 +181,8 @@ impl TonglingyuRuntimeStore {
         attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await?;
         let agent_runtime_content_application =
             apply_agent_runtime_content_outputs(&mut workflow, mode);
+        let agent_runtime_review_observation =
+            apply_agent_runtime_reviewer_output(&mut workflow, mode);
         workflow.stream_events = workflow_stream_events(
             &workflow.trace_id,
             &input.profiles.main,
@@ -225,6 +227,27 @@ impl TonglingyuRuntimeStore {
                     "rejected_reason": &application.rejected_reason,
                     "local_reviewer_enforced": true,
                     "content_used_for_final_answer": application.content_used_for_final_answer,
+                }),
+            )?;
+        }
+        if let Some(observation) = agent_runtime_review_observation {
+            append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_review_observed",
+                &json!({
+                    "package_id": &workflow.package.package_id,
+                    "runtime_mode": mode.as_str(),
+                    "result_format": &observation.result_format,
+                    "review_status": &observation.review_status,
+                    "local_review_status": &workflow.package.review.status,
+                    "severity": &observation.severity,
+                    "issue_count": observation.issue_count,
+                    "required_revision_count": observation.required_revision_count,
+                    "agrees_with_local_reviewer": observation.agrees_with_local_reviewer,
+                    "local_reviewer_override": observation.local_reviewer_override,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_reviewer_enforced": true,
                 }),
             )?;
         }
@@ -1600,6 +1623,18 @@ struct AgentRuntimeDraftExtraction {
     rejected_reason: Option<&'static str>,
 }
 
+#[derive(Debug, Clone)]
+struct AgentRuntimeReviewObservation {
+    result_format: &'static str,
+    review_status: Option<String>,
+    severity: Option<String>,
+    issue_count: Option<usize>,
+    required_revision_count: Option<usize>,
+    agrees_with_local_reviewer: bool,
+    local_reviewer_override: bool,
+    rejected_reason: Option<&'static str>,
+}
+
 fn apply_agent_runtime_content_outputs(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
@@ -1806,6 +1841,150 @@ fn extract_agent_runtime_draft(
     }
 }
 
+fn apply_agent_runtime_reviewer_output(
+    workflow: &mut RuntimeWorkflowOutput,
+    mode: TonglingyuAgentRuntimeMode,
+) -> Option<AgentRuntimeReviewObservation> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes {
+        return None;
+    }
+    let (review_step_index, summary) =
+        workflow
+            .steps
+            .iter()
+            .enumerate()
+            .find_map(|(index, step)| {
+                if step.operation != "review_answer" {
+                    return None;
+                }
+                let summary = step
+                    .agent_runtime
+                    .as_ref()
+                    .and_then(|value| value.get("result_summary"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                Some((index, summary.to_string()))
+            })?;
+    let observation = extract_agent_runtime_review_observation(
+        &summary,
+        &workflow.package.review.status,
+        &workflow.package.review.severity,
+    );
+    if let Some(step) = workflow.steps.get_mut(review_step_index) {
+        step.output["agent_runtime_review_observed"] = json!(true);
+        step.output["agent_runtime_review_result_format"] = json!(observation.result_format);
+        step.output["agent_runtime_review_status"] = json!(observation.review_status);
+        step.output["agent_runtime_review_severity"] = json!(observation.severity);
+        step.output["agent_runtime_review_issue_count"] = json!(observation.issue_count);
+        step.output["agent_runtime_required_revision_count"] =
+            json!(observation.required_revision_count);
+        step.output["agent_runtime_review_agrees_with_local"] =
+            json!(observation.agrees_with_local_reviewer);
+        step.output["agent_runtime_local_reviewer_override"] =
+            json!(observation.local_reviewer_override);
+        step.output["agent_runtime_review_rejected_reason"] = json!(observation.rejected_reason);
+        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "review_observation".to_string(),
+                json!({
+                    "result_format": observation.result_format,
+                    "review_status": &observation.review_status,
+                    "local_review_status": &workflow.package.review.status,
+                    "severity": &observation.severity,
+                    "issue_count": observation.issue_count,
+                    "required_revision_count": observation.required_revision_count,
+                    "agrees_with_local_reviewer": observation.agrees_with_local_reviewer,
+                    "local_reviewer_override": observation.local_reviewer_override,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_reviewer_enforced": true,
+                }),
+            );
+        }
+    }
+    Some(observation)
+}
+
+fn extract_agent_runtime_review_observation(
+    result_summary: &str,
+    local_review_status: &str,
+    local_review_severity: &str,
+) -> AgentRuntimeReviewObservation {
+    let trimmed = result_summary.trim();
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return rejected_review_observation("text", Some("unsupported_text_review"));
+    };
+    let Some(object) = value.as_object() else {
+        return rejected_review_observation("json", Some("unsupported_json_review"));
+    };
+    let review_status = object
+        .get("review_status")
+        .or_else(|| object.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if !matches!(review_status.as_deref(), Some("passed" | "needs_revision")) {
+        return AgentRuntimeReviewObservation {
+            result_format: "json",
+            review_status,
+            severity: object
+                .get("severity")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            issue_count: object.get("issues").and_then(Value::as_array).map(Vec::len),
+            required_revision_count: object
+                .get("required_revisions")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            agrees_with_local_reviewer: false,
+            local_reviewer_override: false,
+            rejected_reason: Some("invalid_review_status"),
+        };
+    }
+    let severity = object
+        .get("severity")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let issue_count = object.get("issues").and_then(Value::as_array).map(Vec::len);
+    let required_revision_count = object
+        .get("required_revisions")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    let agrees_with_local_reviewer = review_status.as_deref() == Some(local_review_status)
+        && severity
+            .as_deref()
+            .is_none_or(|value| value == local_review_severity);
+    AgentRuntimeReviewObservation {
+        result_format: "json",
+        review_status,
+        severity,
+        issue_count,
+        required_revision_count,
+        agrees_with_local_reviewer,
+        local_reviewer_override: !agrees_with_local_reviewer,
+        rejected_reason: None,
+    }
+}
+
+fn rejected_review_observation(
+    result_format: &'static str,
+    rejected_reason: Option<&'static str>,
+) -> AgentRuntimeReviewObservation {
+    AgentRuntimeReviewObservation {
+        result_format,
+        review_status: None,
+        severity: None,
+        issue_count: None,
+        required_revision_count: None,
+        agrees_with_local_reviewer: false,
+        local_reviewer_override: false,
+        rejected_reason,
+    }
+}
+
 fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> AgentRuntimeStep {
     let mut runtime_step = AgentRuntimeStep::new(
         step.profile.clone(),
@@ -1974,6 +2153,10 @@ fn workflow_stream_events(
                         .unwrap_or(Value::Null),
                     "tool_audit_event_count": value
                         .get("tool_audit_event_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "review_observation": value
+                        .get("review_observation")
                         .cloned()
                         .unwrap_or(Value::Null),
                 })),
@@ -4057,10 +4240,18 @@ mod tests {
                 json!([])
             };
             Ok(RuntimeOutput {
-                result_summary: if operation == "draft_answer" {
-                    format!("Hermes full workflow draft from {operation}. context={message}")
-                } else {
-                    format!("Hermes full workflow step {operation}. context={message}")
+                result_summary: match operation {
+                    "draft_answer" => {
+                        format!("Hermes full workflow draft from {operation}. context={message}")
+                    }
+                    "review_answer" => serde_json::to_string(&json!({
+                        "review_status": "passed",
+                        "severity": "none",
+                        "issues": [],
+                        "required_revisions": [],
+                    }))
+                    .expect("review output serializes"),
+                    _ => format!("Hermes full workflow step {operation}. context={message}"),
                 },
                 result_ref: Some(format!(
                     "result://draft-runtime/{}/{}",
@@ -4375,6 +4566,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hermes_mode_observes_structured_reviewer_agreement() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        workflow.steps[1].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "review_status": "passed",
+                "severity": "none",
+                "issues": [],
+                "required_revisions": [],
+            }))
+            .expect("structured review serializes")
+        );
+
+        let observation =
+            apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("reviewer observation is recorded");
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.review_status.as_deref(), Some("passed"));
+        assert!(observation.agrees_with_local_reviewer);
+        assert!(!observation.local_reviewer_override);
+        assert_eq!(
+            workflow.steps[1].output["agent_runtime_review_agrees_with_local"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.steps[1].agent_runtime.as_ref().unwrap()["review_observation"]["local_reviewer_enforced"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn hermes_mode_marks_reviewer_disagreement_as_local_override() {
+        let mut workflow = runtime_draft_workflow(
+            Vec::new(),
+            ReviewRecord {
+                status: "needs_revision".to_string(),
+                severity: "high".to_string(),
+                issues: vec!["当前没有可追溯证据。".to_string()],
+                summary: "reviewer requires downgrade".to_string(),
+            },
+        );
+        workflow.steps[1].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "review_status": "passed",
+                "severity": "none",
+                "issues": [],
+                "required_revisions": [],
+            }))
+            .expect("structured review serializes")
+        );
+
+        let observation =
+            apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("reviewer observation is recorded");
+
+        assert_eq!(observation.review_status.as_deref(), Some("passed"));
+        assert!(!observation.agrees_with_local_reviewer);
+        assert!(observation.local_reviewer_override);
+        assert_eq!(workflow.package.review.status, "needs_revision");
+        assert_eq!(
+            workflow.steps[1].output["agent_runtime_local_reviewer_override"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.steps[1].agent_runtime.as_ref().unwrap()["review_observation"]["local_review_status"],
+            "needs_revision"
+        );
+    }
+
     fn runtime_draft_workflow(
         cards: Vec<EvidenceCard>,
         review: ReviewRecord,
@@ -4627,9 +4896,23 @@ mod tests {
             draft_agent_runtime["tool_results"][0]["tool_name"],
             "tonglingyu.evidence.package.read"
         );
+        let review_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "review_answer")
+            .expect("review step");
+        assert_eq!(
+            review_step.agent_runtime.as_ref().unwrap()["review_observation"]["local_reviewer_override"],
+            json!(true)
+        );
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
                 && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["agent_runtime"]["review_observation"]["local_reviewer_override"]
+                    == json!(true)
         }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "content_delta"
@@ -4648,6 +4931,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_step_executed"
                 && event["payload"]["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_review_observed"
+                && event["payload"]["local_reviewer_override"] == json!(true)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
