@@ -179,6 +179,8 @@ impl TonglingyuRuntimeStore {
             execute_runtime_workflow(&conn, input.clone())?
         };
         attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await?;
+        let agent_runtime_evidence_observations =
+            apply_agent_runtime_evidence_outputs(&mut workflow, mode);
         let agent_runtime_package_observation =
             apply_agent_runtime_package_output(&mut workflow, mode);
         let agent_runtime_content_application =
@@ -229,6 +231,24 @@ impl TonglingyuRuntimeStore {
                     "rejected_reason": &application.rejected_reason,
                     "local_reviewer_enforced": true,
                     "content_used_for_final_answer": application.content_used_for_final_answer,
+                }),
+            )?;
+        }
+        for observation in agent_runtime_evidence_observations {
+            append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_evidence_observed",
+                &json!({
+                    "operation": &observation.operation,
+                    "profile": &observation.profile,
+                    "runtime_mode": mode.as_str(),
+                    "result_format": &observation.result_format,
+                    "evidence_ref_count": observation.evidence_ref_count,
+                    "unknown_evidence_refs": &observation.unknown_evidence_refs,
+                    "matches_runtime_evidence": observation.matches_runtime_evidence,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_evidence_enforced": true,
                 }),
             )?;
         }
@@ -1642,10 +1662,10 @@ fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'
             "Return result_summary as a JSON object string with keys review_status, severity, issues, and required_revisions. This is observation only; local reviewer enforcement remains authoritative."
         }
         "text_evidence_search" => {
-            "Return result_summary as a concise evidence-analysis note; do not write a final answer."
+            "Return result_summary as a JSON object string with keys evidence_refs, evidence_analysis, and unsupported_scope. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer."
         }
         "commentary_evidence_search" => {
-            "Return result_summary as a concise commentary-analysis note and label commentary limits; do not prove base-text facts from commentary alone."
+            "Return result_summary as a JSON object string with keys commentary_refs, commentary_analysis, and base_text_limits. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone."
         }
         "evidence_package_create" => {
             "Return result_summary as a concise package summary using the package_id from step_output_json; do not invent package ids."
@@ -1674,6 +1694,17 @@ struct AgentRuntimeDraftExtraction {
 }
 
 #[derive(Debug, Clone)]
+struct AgentRuntimeEvidenceObservation {
+    operation: String,
+    profile: String,
+    result_format: &'static str,
+    evidence_ref_count: usize,
+    unknown_evidence_refs: Vec<String>,
+    matches_runtime_evidence: bool,
+    rejected_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
 struct AgentRuntimePackageObservation {
     result_format: &'static str,
     package_id: Option<String>,
@@ -1691,6 +1722,159 @@ struct AgentRuntimeReviewObservation {
     agrees_with_local_reviewer: bool,
     local_reviewer_override: bool,
     rejected_reason: Option<&'static str>,
+}
+
+fn apply_agent_runtime_evidence_outputs(
+    workflow: &mut RuntimeWorkflowOutput,
+    mode: TonglingyuAgentRuntimeMode,
+) -> Vec<AgentRuntimeEvidenceObservation> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes {
+        return Vec::new();
+    }
+    let mut observations = Vec::new();
+    for step in &mut workflow.steps {
+        if !matches!(
+            step.operation.as_str(),
+            "text_evidence_search" | "commentary_evidence_search"
+        ) {
+            continue;
+        }
+        let Some(summary) = step
+            .agent_runtime
+            .as_ref()
+            .and_then(|value| value.get("result_summary"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let expected_evidence_ids = step
+            .output
+            .get("evidence_ids")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let observation = extract_agent_runtime_evidence_observation(
+            summary,
+            &step.operation,
+            &step.profile,
+            &expected_evidence_ids,
+        );
+        step.output["agent_runtime_evidence_observed"] = json!(true);
+        step.output["agent_runtime_evidence_result_format"] = json!(observation.result_format);
+        step.output["agent_runtime_evidence_ref_count"] = json!(observation.evidence_ref_count);
+        step.output["agent_runtime_unknown_evidence_refs"] =
+            json!(&observation.unknown_evidence_refs);
+        step.output["agent_runtime_evidence_matches_local"] =
+            json!(observation.matches_runtime_evidence);
+        step.output["agent_runtime_evidence_rejected_reason"] = json!(observation.rejected_reason);
+        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "evidence_observation".to_string(),
+                json!({
+                    "result_format": observation.result_format,
+                    "evidence_ref_count": observation.evidence_ref_count,
+                    "unknown_evidence_refs": &observation.unknown_evidence_refs,
+                    "matches_runtime_evidence": observation.matches_runtime_evidence,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_evidence_enforced": true,
+                }),
+            );
+        }
+        observations.push(observation);
+    }
+    observations
+}
+
+fn extract_agent_runtime_evidence_observation(
+    result_summary: &str,
+    operation: &str,
+    profile: &str,
+    expected_evidence_ids: &[String],
+) -> AgentRuntimeEvidenceObservation {
+    let trimmed = result_summary.trim();
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return rejected_evidence_observation(
+            operation,
+            profile,
+            "text",
+            Some("unsupported_text_evidence"),
+        );
+    };
+    let Some(object) = value.as_object() else {
+        return rejected_evidence_observation(
+            operation,
+            profile,
+            "json",
+            Some("unsupported_json_evidence"),
+        );
+    };
+    let refs_key = if operation == "commentary_evidence_search" {
+        "commentary_refs"
+    } else {
+        "evidence_refs"
+    };
+    let Some(refs) = object.get(refs_key).and_then(Value::as_array) else {
+        return rejected_evidence_observation(
+            operation,
+            profile,
+            "json",
+            Some("evidence_refs_missing"),
+        );
+    };
+    let evidence_refs = refs
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let expected = expected_evidence_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let unknown_evidence_refs = evidence_refs
+        .iter()
+        .filter(|value| !expected.contains(value.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    AgentRuntimeEvidenceObservation {
+        operation: operation.to_string(),
+        profile: profile.to_string(),
+        result_format: "json",
+        evidence_ref_count: evidence_refs.len(),
+        matches_runtime_evidence: unknown_evidence_refs.is_empty(),
+        rejected_reason: if unknown_evidence_refs.is_empty() {
+            None
+        } else {
+            Some("unknown_evidence_ref")
+        },
+        unknown_evidence_refs,
+    }
+}
+
+fn rejected_evidence_observation(
+    operation: &str,
+    profile: &str,
+    result_format: &'static str,
+    rejected_reason: Option<&'static str>,
+) -> AgentRuntimeEvidenceObservation {
+    AgentRuntimeEvidenceObservation {
+        operation: operation.to_string(),
+        profile: profile.to_string(),
+        result_format,
+        evidence_ref_count: 0,
+        unknown_evidence_refs: Vec::new(),
+        matches_runtime_evidence: false,
+        rejected_reason,
+    }
 }
 
 fn apply_agent_runtime_package_output(
@@ -2302,6 +2486,10 @@ fn workflow_stream_events(
                         .unwrap_or(Value::Null),
                     "tool_audit_event_count": value
                         .get("tool_audit_event_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "evidence_observation": value
+                        .get("evidence_observation")
                         .cloned()
                         .unwrap_or(Value::Null),
                     "package_observation": value
@@ -4394,6 +4582,18 @@ mod tests {
             };
             Ok(RuntimeOutput {
                 result_summary: match operation {
+                    "text_evidence_search" => serde_json::to_string(&json!({
+                        "evidence_refs": evidence_ids_from_step_message(&message),
+                        "evidence_analysis": "Hermes observed text evidence refs",
+                        "unsupported_scope": "observation only; local runtime evidence is enforced",
+                    }))
+                    .expect("text evidence output serializes"),
+                    "commentary_evidence_search" => serde_json::to_string(&json!({
+                        "commentary_refs": evidence_ids_from_step_message(&message),
+                        "commentary_analysis": "Hermes observed commentary evidence refs",
+                        "base_text_limits": "commentary cannot prove base-text facts alone",
+                    }))
+                    .expect("commentary evidence output serializes"),
                     "draft_answer" => {
                         format!("Hermes full workflow draft from {operation}. context={message}")
                     }
@@ -4429,15 +4629,34 @@ mod tests {
         }
     }
 
-    fn package_id_from_step_message(message: &str) -> Option<String> {
+    fn step_output_from_message(message: &str) -> Option<Value> {
         message.lines().find_map(|line| {
             let value = line.strip_prefix("step_output_json: ")?;
-            serde_json::from_str::<Value>(value)
-                .ok()?
-                .get("package_id")?
-                .as_str()
-                .map(ToOwned::to_owned)
+            serde_json::from_str::<Value>(value).ok()
         })
+    }
+
+    fn package_id_from_step_message(message: &str) -> Option<String> {
+        step_output_from_message(message)?
+            .get("package_id")?
+            .as_str()
+            .map(ToOwned::to_owned)
+    }
+
+    fn evidence_ids_from_step_message(message: &str) -> Vec<String> {
+        step_output_from_message(message)
+            .and_then(|value| {
+                value
+                    .get("evidence_ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default()
     }
 
     fn sample_card(evidence_type: &str) -> EvidenceCard {
@@ -4827,6 +5046,25 @@ mod tests {
         assert_eq!(observation.rejected_reason, Some("package_id_mismatch"));
     }
 
+    #[test]
+    fn evidence_observation_rejects_unknown_refs() {
+        let observation = extract_agent_runtime_evidence_observation(
+            r#"{"evidence_refs":["ev-known","ev-unknown"],"evidence_analysis":"test","unsupported_scope":"test"}"#,
+            "text_evidence_search",
+            "honglou-text",
+            &["ev-known".to_string()],
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.evidence_ref_count, 2);
+        assert_eq!(
+            observation.unknown_evidence_refs,
+            vec!["ev-unknown".to_string()]
+        );
+        assert!(!observation.matches_runtime_evidence);
+        assert_eq!(observation.rejected_reason, Some("unknown_evidence_ref"));
+    }
+
     fn runtime_draft_workflow(
         cards: Vec<EvidenceCard>,
         review: ReviewRecord,
@@ -5095,6 +5333,15 @@ mod tests {
             draft_agent_runtime["tool_results"][0]["tool_name"],
             "tonglingyu.evidence.package.read"
         );
+        let text_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "text_evidence_search")
+            .expect("text evidence step");
+        assert_eq!(
+            text_step.agent_runtime.as_ref().unwrap()["evidence_observation"]["matches_runtime_evidence"],
+            json!(true)
+        );
         let package_step = workflow
             .steps
             .iter()
@@ -5116,6 +5363,12 @@ mod tests {
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
                 && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["agent_runtime"]["evidence_observation"]
+                    ["matches_runtime_evidence"]
+                    == json!(true)
         }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
@@ -5144,6 +5397,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_step_executed"
                 && event["payload"]["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_evidence_observed"
+                && event["payload"]["matches_runtime_evidence"] == json!(true)
         }));
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_package_observed"

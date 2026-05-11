@@ -179,6 +179,9 @@
 - Profile step message 和 metadata 已携带 operation-specific
   `result_summary_contract`，明确 `draft_answer` 与 `review_answer` 的结构化
   JSON 输出要求，避免 Hermes 只收到泛化 step context。
+- `text_evidence_search` 与 `commentary_evidence_search` 结构化输出已进入
+  evidence observation；Runtime 校验 Hermes evidence refs 是否来自本地
+  runtime step `evidence_ids`，未知 ref 只写 rejected reason。
 - Hermes `evidence_package_create` 结构化输出已进入 package observation；
   Runtime 校验 observation `package_id` 是否匹配本地 evidence package，不匹配
   只写 rejected reason，不允许改写本地证据包。
