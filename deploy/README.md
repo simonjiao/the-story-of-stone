@@ -203,6 +203,21 @@ the production stack:
 ./scripts/verify-tonglingyu-runtime-config.sh
 ```
 
+If the gate reports missing Tonglingyu Gateway service/admin credentials, patch
+the target `.env` through the guarded helper instead of editing secret values in
+chat or shell history:
+
+```bash
+./scripts/env-backup.sh backup
+./scripts/ensure-tonglingyu-gateway-env.sh --apply
+./scripts/test-tonglingyu-gateway-env-contract.sh
+```
+
+The helper generates missing `TONGLINGYU_GATEWAY_API_KEY` and
+`TONGLINGYU_ADMIN_API_KEY`, sets `TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY=false`,
+and ensures the first Open WebUI provider key entry is the Gateway service key.
+It prints changed variable names and status only, never generated values.
+
 This gate checks the compose-rendered service environment for strict
 Tonglingyu/Hermes runtime wiring, `DEFAULT_MODELS=tonglingyu`, Gateway/admin key
 set isolation, and Open WebUI provider keys that do not contain admin

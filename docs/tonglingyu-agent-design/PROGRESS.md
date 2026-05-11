@@ -324,6 +324,11 @@
   但 compose config 在 `TONGLINGYU_GATEWAY_API_KEY` 缺失处失败，尚未进入 strict
   Gateway/Open WebUI live gate；这属于目标环境配置 blocker，不能用本地 contract
   smoke 代替。
+- 已补 `deploy/scripts/ensure-tonglingyu-gateway-env.sh`，用于在备份后生成缺失的
+  `TONGLINGYU_GATEWAY_API_KEY` / `TONGLINGYU_ADMIN_API_KEY`、关闭 Gateway key
+  admin fallback，并把 Open WebUI provider key 第一项收敛为 Gateway service key；
+  输出只包含变量名和状态。`test-tonglingyu-gateway-env-contract.sh` 覆盖
+  check/apply/idempotent/重叠 key 拒绝和输出不泄露生成值。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
