@@ -222,6 +222,28 @@ for item in runtime_step_events:
             expected_ref = f"runtime://tonglingyu/{chat_trace_id}/packages/{chat_package_id}"
             if output_ref != expected_ref:
                 errors.append(f"runtime step {operation} tool {tool_name} output_ref must bind to package")
+    if operation in {"text_evidence_search", "commentary_evidence_search"}:
+        evidence_observation = agent_runtime.get("evidence_observation") or {}
+        if evidence_observation.get("matches_runtime_evidence") is not True:
+            errors.append(f"runtime step {operation} evidence observation must match local evidence")
+        if evidence_observation.get("local_evidence_enforced") is not True:
+            errors.append(f"runtime step {operation} must enforce local evidence")
+    if operation == "evidence_package_create":
+        package_observation = agent_runtime.get("package_observation") or {}
+        if package_observation.get("matches_runtime_package") is not True:
+            errors.append(f"runtime step {operation} package observation must match local package")
+        if package_observation.get("local_package_enforced") is not True:
+            errors.append(f"runtime step {operation} must enforce local package")
+    if operation == "draft_answer":
+        content_application = agent_runtime.get("content_application") or {}
+        if content_application.get("draft_consumed") is not True:
+            errors.append(f"runtime step {operation} must consume Hermes draft output")
+        if content_application.get("local_reviewer_enforced") is not True:
+            errors.append(f"runtime step {operation} must enforce local reviewer")
+    if operation == "review_answer":
+        review_observation = agent_runtime.get("review_observation") or {}
+        if review_observation.get("local_reviewer_enforced") is not True:
+            errors.append(f"runtime step {operation} must enforce local reviewer")
 
 if errors:
     for error in errors:

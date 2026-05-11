@@ -365,6 +365,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
 - [x] strict Gateway gate 已增加 live chat completion 和 admin trace 校验，
   要求 Hermes profile step audit 中出现非空 runtime tool result。
+- [x] strict Gateway gate 已要求 live admin trace 中 evidence/package/reviewer
+  observation 均显示本地 Runtime enforcement，且 `draft_answer` Hermes draft
+  observation 被消费，避免把工具链路存在误判为内容执行闭环。
 - [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
   生成 JSON 报告并显式区分必过、失败、skipped live gate 和人工页面复核项。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的

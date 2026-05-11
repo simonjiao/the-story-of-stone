@@ -218,7 +218,9 @@ isolated admin credentials, and Hermes runtime profile steps with non-empty
 tool results bound to `runtime://tonglingyu/{trace_id}/...` output refs in the
 trace. Evidence search tool refs must use the
 `runtime://tonglingyu/{trace_id}/evidence/{digest}` namespace, while package
-tool refs must match the current evidence package id.
+tool refs must match the current evidence package id. The same trace must also
+show local evidence/package/reviewer enforcement and a consumed Hermes draft
+observation, so the gate does not pass on tool-result plumbing alone.
 
 For a release-readiness summary, run the aggregate gate:
 
