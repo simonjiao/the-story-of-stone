@@ -225,9 +225,11 @@
   `AGENT_RUNTIME_HERMES_*`；配置 gate 会拒绝 Gateway 自身仍落回 `minimal`
   runtime mode 的生产渲染结果。
 - `deploy/scripts/verify-tonglingyu-strict-gateway.sh` 已补运行态 Gateway gate：
-  从正式 Docker 网络检查 `/healthz`、`/v1/models`、admin metrics 和 Prometheus，
-  要求 Gateway 实际报告 `hermes` runtime、只暴露 `tonglingyu` 模型、隐藏
-  `honglou-*` profile、KB 非空、rate limit 开启且 admin key 已隔离。
+  从正式 Docker 网络检查 `/healthz`、`/v1/models`、admin metrics、Prometheus、
+  live chat completion 和对应 admin trace，要求 Gateway 实际报告 `hermes`
+  runtime、只暴露 `tonglingyu` 模型、隐藏 `honglou-*` profile、KB 非空、
+  rate limit 开启、admin key 已隔离，并且 trace 中 Hermes profile step 有
+  runtime tool result。
 - `deploy/scripts/verify-tonglingyu-release-readiness.sh` 已补聚合发布 gate：
   默认运行 compose 渲染配置检查，`TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时把
   strict Gateway 和 Open WebUI Function 检查作为必过 gate；报告会显式记录

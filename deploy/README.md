@@ -210,10 +210,12 @@ formal Docker network:
 ./scripts/verify-tonglingyu-strict-gateway.sh
 ```
 
-This runtime gate checks `/healthz`, `/v1/models`, `/v1/admin/metrics`, and
-Prometheus metrics. It requires `agent_runtime_mode=hermes`, a single visible
-`tonglingyu` model, hidden `honglou-*` profiles, positive KB counts, active
-rate limiting, and isolated admin credentials.
+This runtime gate checks `/healthz`, `/v1/models`, `/v1/admin/metrics`,
+Prometheus metrics, a minimal live chat completion, and the resulting admin
+trace. It requires `agent_runtime_mode=hermes`, a single visible `tonglingyu`
+model, hidden `honglou-*` profiles, positive KB counts, active rate limiting,
+isolated admin credentials, and Hermes runtime profile steps with non-empty
+tool results in the trace.
 
 For a release-readiness summary, run the aggregate gate:
 
