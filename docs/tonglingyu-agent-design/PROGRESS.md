@@ -194,6 +194,10 @@
   `minimal_envelope_only`、Hermes observation/local governance 和 incomplete
   fallback，避免只靠分散 step metadata 人工推断；strict gate 会同时校验 summary
   的 step/tool 计数与详细 runtime step audit event 一致。
+- Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
+  Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
+  strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果
+  字段”误判为“工具执行已被审计”。
 - Hermes mode 已把 incomplete profile content/tool execution 前移为 Runtime
   fail-closed：如果 summary 未达到
   `hermes_profile_observed_with_local_governance`，请求会写

@@ -376,6 +376,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   live gate 会要求 summary 显示 Hermes observation + local governance 闭环。
 - [x] admin trace 顶层透出最新 `agent_runtime_summary`；strict live gate 会校验
   summary 的 step/tool 计数与详细 runtime step audit event 一致。
+- [x] Runtime summary 和 strict Gateway gate 已增加 `tool_audit_event_count`
+  交叉校验；Hermes mode 下 tool result 没有被 tool audit event 覆盖时会
+  fail-closed，避免只验证工具结果字段、不验证工具执行审计。
 - [x] Hermes mode 下 profile content/tool execution 不完整时 Runtime fail-closed；
   会写 `agent_runtime_profile_execution_rejected`，不再返回本地 deterministic
   fallback 作为成功回答。

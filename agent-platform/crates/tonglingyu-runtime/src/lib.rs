@@ -1913,6 +1913,7 @@ fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
         "profile_step_count": profile_step_count,
         "executed_profile_step_count": 0,
         "tool_result_count": 0,
+        "tool_audit_event_count": 0,
         "hermes_content_execution_complete": false,
         "local_governance_enforced": true,
     })
@@ -1940,6 +1941,16 @@ fn agent_runtime_execution_summary(
             step.agent_runtime
                 .as_ref()
                 .and_then(|value| value.get("tool_result_count"))
+                .and_then(Value::as_u64)
+        })
+        .sum::<u64>();
+    let tool_audit_event_count = workflow
+        .steps
+        .iter()
+        .filter_map(|step| {
+            step.agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("tool_audit_event_count"))
                 .and_then(Value::as_u64)
         })
         .sum::<u64>();
@@ -2020,6 +2031,7 @@ fn agent_runtime_execution_summary(
         "profile_step_count": profile_step_count,
         "executed_profile_step_count": executed_profile_step_count,
         "tool_result_count": tool_result_count,
+        "tool_audit_event_count": tool_audit_event_count,
         "evidence_observation_count": evidence_observation_count,
         "evidence_matches_local": evidence_matches_local,
         "package_matches_local": package_matches_local,
@@ -2047,7 +2059,20 @@ fn validate_agent_runtime_execution_summary(
         .get("profile_execution_status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let tool_result_count = summary
+        .get("tool_result_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let tool_audit_event_count = summary
+        .get("tool_audit_event_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     if complete && status == "hermes_profile_observed_with_local_governance" {
+        if tool_result_count > 0 && tool_audit_event_count < tool_result_count {
+            return Err(anyhow!(
+                "Hermes runtime profile execution missing tool audit events: {tool_audit_event_count}/{tool_result_count}"
+            ));
+        }
         return Ok(());
     }
     Err(anyhow!(
@@ -4894,6 +4919,9 @@ mod tests {
     struct IncompleteHermesContentRuntimeClient;
 
     #[derive(Debug, Default)]
+    struct MissingToolAuditRuntimeClient;
+
+    #[derive(Debug, Default)]
     struct WrongEvidenceOutputRefRuntimeClient;
 
     #[async_trait]
@@ -5249,6 +5277,29 @@ mod tests {
                     "tool_audit_events": [],
                 }),
             })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for MissingToolAuditRuntimeClient {
+        async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            DraftRuntimeClient.execute_run(input).await
+        }
+
+        async fn send_session_message(
+            &self,
+            input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            DraftRuntimeClient.send_session_message(input).await
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let mut output = DraftRuntimeClient.execute_profile_step(input).await?;
+            output.metadata["tool_audit_events"] = json!([]);
+            Ok(output)
         }
     }
 
@@ -6145,6 +6196,10 @@ mod tests {
             workflow.agent_runtime_summary["tool_result_count"],
             json!(4)
         );
+        assert_eq!(
+            workflow.agent_runtime_summary["tool_audit_event_count"],
+            json!(4)
+        );
         let events = store
             .audit_events_for_trace(&workflow.trace_id)
             .expect("audit events");
@@ -6173,6 +6228,8 @@ mod tests {
                 && event["payload"]["profile_execution_status"]
                     == json!("hermes_profile_observed_with_local_governance")
                 && event["payload"]["hermes_content_execution_complete"] == json!(true)
+                && event["payload"]["tool_result_count"] == json!(4)
+                && event["payload"]["tool_audit_event_count"] == json!(4)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -6334,6 +6391,57 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_draft_rejected"
                 && event["payload"]["draft_consumed"] == json!(false)
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_rejects_missing_tool_audit_events() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-missing-tool-audit-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let trace_id = "trace-hermes-missing-tool-audit-test";
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: trace_id.to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(MissingToolAuditRuntimeClient),
+            )
+            .await
+            .expect_err("Hermes mode must fail closed when tool results are not audited");
+
+        let message = error.to_string();
+        assert!(message.contains("missing tool audit events"));
+        assert!(message.contains("0/4"));
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_summarized"
+                && event["payload"]["profile_execution_status"]
+                    == json!("hermes_profile_observed_with_local_governance")
+                && event["payload"]["hermes_content_execution_complete"] == json!(true)
+                && event["payload"]["tool_result_count"] == json!(4)
+                && event["payload"]["tool_audit_event_count"] == json!(0)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
+                && event["payload"]["error"]
+                    == json!("Hermes runtime profile execution missing tool audit events: 0/4")
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
