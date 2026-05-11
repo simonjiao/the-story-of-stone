@@ -320,15 +320,47 @@
   `.env` 做只读 gate，不需要把密钥文件复制进工作树；已补
   `test-deploy-env-file-contract.sh` 验证显式 env-file、本地 `.env` fallback 和
   缺失文件错误不泄露 env 值。
-- 使用主工作区目标 `.env` 做只读 runtime config gate 时，脚本已能读取 env-file，
-  但 compose config 在 `TONGLINGYU_GATEWAY_API_KEY` 缺失处失败，尚未进入 strict
-  Gateway/Open WebUI live gate；这属于目标环境配置 blocker，不能用本地 contract
-  smoke 代替。
 - 已补 `deploy/scripts/ensure-tonglingyu-gateway-env.sh`，用于在备份后生成缺失的
   `TONGLINGYU_GATEWAY_API_KEY` / `TONGLINGYU_ADMIN_API_KEY`、关闭 Gateway key
   admin fallback，并把 Open WebUI provider key 第一项收敛为 Gateway service key；
   输出只包含变量名和状态。`test-tonglingyu-gateway-env-contract.sh` 覆盖
-  check/apply/idempotent/重叠 key 拒绝和输出不泄露生成值。
+  check/apply/idempotent/重叠 key 拒绝、provider key 边界残留引号清理和输出不泄露
+  生成值。
+- 2026-05-11 已用目标 `.env` 先执行 `deploy/scripts/env-backup.sh backup`，
+  再用 `ensure-tonglingyu-gateway-env.sh --apply` 补齐 Gateway service/admin
+  credential、关闭 Gateway key admin fallback，并收敛 Open WebUI provider key；
+  helper 输出未打印 secret value。
+- 2026-05-11 已改用远程 `hhost` Docker 做 live gate：同步当前 compose、部署脚本
+  和 `agent-platform` 源码到 `/home/simon/hermes-home-deploy`，不覆盖远端
+  `.env`；远端 env guard `--check` 通过，`verify-tonglingyu-runtime-config.sh`
+  通过，`tonglingyu-gateway` 重建后 `/healthz` 和 metrics 均显示
+  `agent_runtime.mode=hermes`。
+- 远端 `.env` 的 `OPEN_WEBUI_OPENAI_API_KEYS` 曾残留尾部双引号，导致 Open WebUI
+  DB installer 无法 source env；已在运行 `env-backup.sh backup` 后用 env guard
+  修复，并补 contract 防止再次残留边界引号。
+- strict Gateway gate 曾因固定 `x-tonglingyu-message-id` 命中旧部署 dedupe 缓存；
+  已改为每次 gate 生成唯一 chat/message id，避免把旧缓存误判为当前 Runtime
+  live 结果。
+- `tonglingyu-runtime` 已补 profile backend 失败审计：Hermes profile step 执行阶段
+  如果后端失败或超时，会写 `agent_runtime_profile_execution_rejected`，记录
+  `failure_stage=agent_runtime_step_execution`、profile step 计数和错误摘要，便于
+  admin trace 追踪，而不是只暴露 HTTP 500。
+- 远程补丁版 Gateway 已验证上述失败审计：新请求仍因 Hermes 后端超时返回 500，
+  但 admin trace 可查 `agent_runtime_profile_execution_rejected`，当前错误摘要为
+  `Hermes Runtime timed out`。Hermes 容器日志和 `sub2api` 日志显示真实模型链路
+  经 `sub2api` 请求 `gpt-5.4-mini` 返回 502/超时；这是目标环境生产 blocker，
+  不能再用本地 fake runtime 或旧缓存 smoke 代替。
+- 远端 Open WebUI Bridge Function 和 `tonglingyu_gateway_admin` Action 已通过 DB
+  installer 更新并重启 `hermes-open-webui`；复测
+  `verify-openwebui-function.sh` 与
+  `verify-openwebui-gateway-admin-action.sh` 均通过。
+- 最新远端 release readiness summary 显示 runtime config、Open WebUI Bridge
+  Function 和 Gateway Admin Action 已通过；剩余必过失败 gate 收敛为
+  `strict_gateway` 和 `openwebui_browser_review`。
+- `agent-platform/Dockerfile` 和 `agent-platform/crates/tonglingyu-gateway/Dockerfile`
+  的 BuildKit frontend 已从浮动 `docker/dockerfile:1.7` pin 到
+  `docker/dockerfile:1.7.0`；远程 `hhost` build 已验证 `1.7.0` 可解析并完成
+  `tonglingyu-gateway:formal` 构建。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
@@ -338,17 +370,21 @@
 - Open WebUI Function API/DB 安装脚本已支持 `AGENT_BRIDGE_TARGET_MODELS`，
   避免 Filter 和 verify gate 已支持多 target model，但安装脚本仍覆盖成单值。
 - 当前不能宣布生产完成：Hermes profile content/tool execution 已通过
-  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但事实源、
-  证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束，目标
-  Open WebUI live gate 和页面侧复测仍未完成。
+  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但目标
+  `hhost` 的 Hermes -> `sub2api` -> 模型链路仍返回 502/超时，strict live gate
+  不能通过；事实源、证据包和最终 reviewer 裁决也仍由 `tonglingyu-runtime`
+  本地治理强制约束，目标 Open WebUI live gate 和页面侧复测仍未完成。
 
 ## 下一步
 
-1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
+1. 先修复目标 `hhost` 的 Hermes -> `sub2api` -> 模型后端 502/超时问题。
+2. 在目标环境重新运行 strict Gateway live gate，确认新请求不再返回 500，且
+   admin trace 出现完整 Hermes Runtime summary/audit 闭环。
+3. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 在目标环境运行 release readiness live gate，确认 Hermes Runtime、
+4. 在目标环境运行 release readiness live gate，确认 Hermes Runtime、
    strict Gateway、Open WebUI Function、Gateway Admin Action 和页面侧复核均
    通过。
-3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-4. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+6. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。

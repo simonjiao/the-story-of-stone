@@ -18,6 +18,7 @@ CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
 STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
 STREAM_TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-${WORK_DIR}/stream-trace.json}"
+VERIFY_RUN_ID="${TONGLINGYU_GATEWAY_VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 cd "${DEPLOY_DIR}"
 
@@ -56,8 +57,8 @@ curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
   -H "x-tonglingyu-user-id: release-gate" \
-  -H "x-tonglingyu-chat-id: strict-gateway" \
-  -H "x-tonglingyu-message-id: strict-gateway-runtime-tool-smoke" \
+  -H "x-tonglingyu-chat-id: strict-gateway-${VERIFY_RUN_ID}" \
+  -H "x-tonglingyu-message-id: strict-gateway-runtime-tool-smoke-${VERIFY_RUN_ID}" \
   --data "{\"model\":\"tonglingyu\",\"messages\":[{\"role\":\"user\",\"content\":\"通灵玉是什么？\"}]}" \
   http://tonglingyu-gateway:8090/v1/chat/completions
 ' >"${CHAT_JSON}"
@@ -71,8 +72,8 @@ curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
   -H "x-tonglingyu-user-id: release-gate" \
-  -H "x-tonglingyu-chat-id: strict-gateway" \
-  -H "x-tonglingyu-message-id: strict-gateway-runtime-stream-smoke" \
+  -H "x-tonglingyu-chat-id: strict-gateway-${VERIFY_RUN_ID}" \
+  -H "x-tonglingyu-message-id: strict-gateway-runtime-stream-smoke-${VERIFY_RUN_ID}" \
   --data "{\"model\":\"tonglingyu\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"通灵玉是什么？\"}]}" \
   http://tonglingyu-gateway:8090/v1/chat/completions
 ' >"${STREAM_TXT}"

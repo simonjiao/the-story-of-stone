@@ -178,7 +178,17 @@ impl TonglingyuRuntimeStore {
             let conn = self.open_connection()?;
             execute_runtime_workflow(&conn, input.clone())?
         };
-        attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await?;
+        if let Err(error) =
+            attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await
+        {
+            self.record_agent_runtime_rejection(
+                &workflow,
+                mode,
+                "agent_runtime_step_execution",
+                &error,
+            );
+            return Err(error);
+        }
         let agent_runtime_evidence_observations =
             apply_agent_runtime_evidence_outputs(&mut workflow, mode);
         let agent_runtime_package_observation =
@@ -316,6 +326,35 @@ impl TonglingyuRuntimeStore {
             return Err(error);
         }
         Ok(workflow)
+    }
+
+    fn record_agent_runtime_rejection(
+        &self,
+        workflow: &RuntimeWorkflowOutput,
+        mode: TonglingyuAgentRuntimeMode,
+        failure_stage: &str,
+        error: &anyhow::Error,
+    ) {
+        if let Ok(conn) = self.open_connection() {
+            let executed_profile_step_count = workflow
+                .steps
+                .iter()
+                .filter(|step| step.agent_runtime.is_some())
+                .count();
+            let _ = append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_execution_rejected",
+                &json!({
+                    "runtime_mode": mode.as_str(),
+                    "failure_stage": failure_stage,
+                    "profile_step_count": workflow.steps.len(),
+                    "executed_profile_step_count": executed_profile_step_count,
+                    "error": error.to_string(),
+                    "local_governance_enforced": true,
+                }),
+            );
+        }
     }
 
     pub fn execute_tool(&self, call: TonglingyuToolCall) -> Result<TonglingyuToolOutput> {
@@ -4924,6 +4963,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct WrongEvidenceOutputRefRuntimeClient;
 
+    #[derive(Debug, Default)]
+    struct FailingProfileRuntimeClient;
+
     #[async_trait]
     impl RuntimeClient for DraftRuntimeClient {
         async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -5364,6 +5406,36 @@ mod tests {
                     "tool_audit_events": [],
                 }),
             })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for FailingProfileRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "failing-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "failing-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                format!("profile {} backend unavailable", input.profile_id),
+            ))
         }
     }
 
@@ -6391,6 +6463,49 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_draft_rejected"
                 && event["payload"]["draft_consumed"] == json!(false)
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_audits_profile_backend_failure() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-profile-failure-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let trace_id = "trace-hermes-profile-failure-test";
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: trace_id.to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(FailingProfileRuntimeClient),
+            )
+            .await
+            .expect_err("Hermes mode must fail closed when a profile backend fails");
+
+        assert!(error.to_string().contains("backend unavailable"));
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
+                && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
+                && event["payload"]["runtime_mode"] == json!("hermes")
+                && event["payload"]["profile_step_count"].as_u64().unwrap_or(0) > 0
+                && event["payload"]["executed_profile_step_count"] == json!(0)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

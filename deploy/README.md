@@ -271,6 +271,15 @@ TONGLINGYU_DEPLOY_ENV_FILE=/absolute/path/to/deploy/.env \
   ./scripts/verify-tonglingyu-release-readiness.sh
 ```
 
+For the live `hhost` deployment, run Docker-backed gates against the remote
+daemon so the checks inspect the deployed containers instead of local Docker:
+
+```bash
+DOCKER_HOST=ssh://hhost \
+  TONGLINGYU_DEPLOY_ENV_FILE=/absolute/path/to/deploy/.env \
+  ./scripts/verify-tonglingyu-strict-gateway.sh
+```
+
 The gate scripts source the env file only into the process environment and keep
 reports limited to variable names, valve keys, and status fields. Run the helper
 contract before changing env-file loading:

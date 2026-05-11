@@ -53,8 +53,13 @@ for index, line in enumerate(lines):
 
 def clean(value: str) -> str:
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        return value[1:-1]
+    for quote in ("'", '"'):
+        if len(value) >= 2 and value[0] == quote and value[-1] == quote:
+            return value[1:-1]
+        if value.startswith(quote):
+            return value[1:]
+        if value.endswith(quote):
+            return value[:-1]
     return value
 
 
@@ -96,7 +101,8 @@ if allow_admin.lower() not in {"false", "0", "no", "off"}:
     planned_changes.append("TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY")
 
 base_urls = split_base_urls(values.get("OPEN_WEBUI_OPENAI_API_BASE_URLS", ""))
-provider_keys = split_provider_keys(values.get("OPEN_WEBUI_OPENAI_API_KEYS", ""))
+raw_provider_value = values.get("OPEN_WEBUI_OPENAI_API_KEYS", "")
+provider_keys = split_provider_keys(raw_provider_value)
 entry_count = max(len(base_urls), len(provider_keys), 1)
 provider_keys.extend([""] * (entry_count - len(provider_keys)))
 if admin_key in {item for item in provider_keys if item}:
@@ -105,6 +111,8 @@ if not provider_keys or provider_keys[0] != gateway_key:
     planned_changes.append("OPEN_WEBUI_OPENAI_API_KEYS")
 provider_keys[0] = gateway_key
 provider_value = ";".join(provider_keys[:entry_count])
+if raw_provider_value.strip() != provider_value:
+    planned_changes.append("OPEN_WEBUI_OPENAI_API_KEYS")
 
 status = "needs_update" if planned_changes else "ok"
 backup_path = ""

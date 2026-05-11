@@ -10,6 +10,10 @@ CHECK_REPORT="${WORK_DIR}/check.json"
 APPLY_REPORT="${WORK_DIR}/apply.json"
 SECOND_APPLY_REPORT="${WORK_DIR}/second-apply.json"
 BAD_ENV_FILE="${WORK_DIR}/bad.env"
+QUOTED_ENV_FILE="${WORK_DIR}/quoted.env"
+QUOTED_REPORT="${WORK_DIR}/quoted-apply.json"
+QUOTE_ONLY_ENV_FILE="${WORK_DIR}/quote-only.env"
+QUOTE_ONLY_REPORT="${WORK_DIR}/quote-only-apply.json"
 
 cat >"${ENV_FILE}" <<'EOF'
 HERMES_API_KEY=hermes-fixture-key
@@ -71,6 +75,61 @@ report = json.load(open(sys.argv[1], encoding="utf-8"))
 assert report["status"] == "ok", report
 assert report["changed_keys"] == [], report
 assert report["backup_created"] is False, report
+PY
+
+cat >"${QUOTED_ENV_FILE}" <<'EOF'
+HERMES_API_KEY=hermes-fixture-key
+OPEN_WEBUI_OPENAI_API_BASE_URLS="http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1"
+OPEN_WEBUI_OPENAI_API_KEYS=legacy-gateway-key;agent-orchestrator-key"
+TONGLINGYU_GATEWAY_API_KEY=tlyg_fixture_gateway
+TONGLINGYU_ADMIN_API_KEY=tlya_fixture_admin
+TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY=true
+EOF
+TONGLINGYU_DEPLOY_ENV_FILE="${QUOTED_ENV_FILE}" \
+  "${SCRIPT_DIR}/ensure-tonglingyu-gateway-env.sh" --apply >"${QUOTED_REPORT}"
+python3 - "${QUOTED_ENV_FILE}" "${QUOTED_REPORT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+env_path, report_path = sys.argv[1:3]
+report = json.load(open(report_path, encoding="utf-8"))
+assert report["status"] == "updated", report
+data = {}
+for line in Path(env_path).read_text(encoding="utf-8").splitlines():
+    if "=" in line and not line.lstrip().startswith("#"):
+        key, value = line.split("=", 1)
+        data[key] = value
+provider_keys = data["OPEN_WEBUI_OPENAI_API_KEYS"].split(";")
+assert provider_keys[0] == "tlyg_fixture_gateway", data
+assert not data["OPEN_WEBUI_OPENAI_API_KEYS"].startswith('"'), data
+assert not data["OPEN_WEBUI_OPENAI_API_KEYS"].endswith('"'), data
+assert data["TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY"] == "false", data
+PY
+
+cat >"${QUOTE_ONLY_ENV_FILE}" <<'EOF'
+HERMES_API_KEY=hermes-fixture-key
+OPEN_WEBUI_OPENAI_API_BASE_URLS=http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1
+OPEN_WEBUI_OPENAI_API_KEYS=tlyg_fixture_gateway;agent-orchestrator-key"
+TONGLINGYU_GATEWAY_API_KEY=tlyg_fixture_gateway
+TONGLINGYU_ADMIN_API_KEY=tlya_fixture_admin
+TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY=false
+EOF
+TONGLINGYU_DEPLOY_ENV_FILE="${QUOTE_ONLY_ENV_FILE}" \
+  "${SCRIPT_DIR}/ensure-tonglingyu-gateway-env.sh" --apply >"${QUOTE_ONLY_REPORT}"
+python3 - "${QUOTE_ONLY_ENV_FILE}" "${QUOTE_ONLY_REPORT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+env_path, report_path = sys.argv[1:3]
+report = json.load(open(report_path, encoding="utf-8"))
+assert report["status"] == "updated", report
+line = next(
+    line for line in Path(env_path).read_text(encoding="utf-8").splitlines()
+    if line.startswith("OPEN_WEBUI_OPENAI_API_KEYS=")
+)
+assert not line.endswith('"'), line
 PY
 
 cat >"${BAD_ENV_FILE}" <<'EOF'
