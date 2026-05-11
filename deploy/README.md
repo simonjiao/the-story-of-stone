@@ -377,8 +377,10 @@ AGENT_BRIDGE_SECRET
 AGENT_BRIDGE_ISSUER
 ```
 
-`AGENT_BRIDGE_TARGET_MODEL` defaults to `hermes-agent`. Keep that default unless
-the Orchestrator model id changes.
+`AGENT_BRIDGE_TARGET_MODEL` and `AGENT_BRIDGE_TARGET_MODELS` default to
+`hermes-agent`. Keep that default unless the Orchestrator model id changes or a
+reviewed deployment intentionally maps multiple Open WebUI model ids into the
+Bridge.
 
 If the available Open WebUI account is not an admin and the Function API returns
 401, use the formal container/DB installer instead of creating a temporary Open

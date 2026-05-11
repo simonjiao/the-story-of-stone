@@ -31,6 +31,7 @@ docker compose exec -T \
   -e AGENT_BRIDGE_SECRET \
   -e AGENT_BRIDGE_ISSUER \
   -e AGENT_BRIDGE_TARGET_MODEL \
+  -e AGENT_BRIDGE_TARGET_MODELS \
   "${COMPOSE_SERVICE}" \
   python3 - <<'PY'
 from pathlib import Path
@@ -59,7 +60,10 @@ valves = json.dumps(
         "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
         "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
         "TARGET_MODEL": os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "hermes-agent"),
-        "TARGET_MODELS": os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "hermes-agent"),
+        "TARGET_MODELS": os.environ.get(
+            "AGENT_BRIDGE_TARGET_MODELS",
+            os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "hermes-agent"),
+        ),
     },
     ensure_ascii=False,
 )

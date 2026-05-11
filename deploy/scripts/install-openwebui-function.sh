@@ -11,6 +11,7 @@ FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identit
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 FUNCTION_NAME="${FUNCTION_NAME:-Agent Identity Bridge}"
 TARGET_MODEL="${AGENT_BRIDGE_TARGET_MODEL:-hermes-agent}"
+TARGET_MODELS="${AGENT_BRIDGE_TARGET_MODELS:-${TARGET_MODEL}}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"
 
@@ -29,14 +30,14 @@ if [[ -z "${AGENT_BRIDGE_SECRET:-}" ]]; then
   exit 1
 fi
 
-python3 - "$BASE_URL" "$ADMIN_TOKEN" "$FUNCTION_FILE" "$FUNCTION_ID" "$FUNCTION_NAME" "$TARGET_MODEL" <<'PY'
+python3 - "$BASE_URL" "$ADMIN_TOKEN" "$FUNCTION_FILE" "$FUNCTION_ID" "$FUNCTION_NAME" "$TARGET_MODEL" "$TARGET_MODELS" <<'PY'
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 
-base_url, token, function_file, function_id, function_name, target_model = sys.argv[1:7]
+base_url, token, function_file, function_id, function_name, target_model, target_models = sys.argv[1:8]
 base_url = base_url.rstrip("/")
 with open(function_file, "r", encoding="utf-8") as handle:
     content = handle.read()
@@ -97,9 +98,16 @@ request(
         "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
         "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
         "TARGET_MODEL": target_model,
-        "TARGET_MODELS": target_model,
+        "TARGET_MODELS": target_models,
     },
 )
 
-print(json.dumps({"function_id": function_id, "action": action, "target_model": target_model}))
+print(json.dumps(
+    {
+        "function_id": function_id,
+        "action": action,
+        "target_model": target_model,
+        "target_models": target_models,
+    }
+))
 PY
