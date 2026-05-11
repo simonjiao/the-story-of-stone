@@ -43,6 +43,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD=${PASS_CMD}"
 )
 
 override_guard_stderr="${WORK_DIR}/override-guard.stderr"
@@ -68,6 +69,7 @@ assert_report "${default_report}" 'report["production_release_ready"] is False'
 assert_report "${default_report}" 'report["status"] == "passed_with_skipped_gates"'
 assert_report "${default_report}" 'report["exit_policy"] == "production_release_ready"'
 assert_report "${default_report}" 'report["gate_command_overrides_used"] is True'
+assert_report "${default_report}" '"openwebui_admin_action" in report["skipped_live_gates"]'
 
 optional_report="${WORK_DIR}/summary-optional-failure.json"
 env "${common_env[@]}" \
@@ -100,6 +102,7 @@ if env \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD=${PASS_CMD}" \
   TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
   TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \

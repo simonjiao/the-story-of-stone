@@ -10,12 +10,14 @@ REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
-  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]]; then
+  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-}" ]]; then
   GATE_CMD_OVERRIDES_USED="true"
 fi
 RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
 OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DIR}/verify-openwebui-function.sh}"
+OPENWEBUI_ADMIN_ACTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 cd "${DEPLOY_DIR}"
@@ -140,6 +142,19 @@ else
     "set TONGLINGYU_RELEASE_VERIFY_OPENWEBUI_FUNCTION=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
 fi
 
+verify_openwebui_admin_action="false"
+if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_OPENWEBUI_ADMIN_ACTION:-false}"; then
+  verify_openwebui_admin_action="true"
+fi
+
+if [[ "${verify_openwebui_admin_action}" == "true" ]]; then
+  run_gate "openwebui_admin_action" "true" \
+    "${OPENWEBUI_ADMIN_ACTION_CMD}" || failed=1
+else
+  skip_gate "openwebui_admin_action" "false" \
+    "set TONGLINGYU_RELEASE_VERIFY_OPENWEBUI_ADMIN_ACTION=true or TONGLINGYU_RELEASE_REQUIRE_LIVE=true"
+fi
+
 if is_true "${TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW:-false}"; then
   if [[ -z "${browser_review_ref//[[:space:]]/}" ]]; then
     append_result "openwebui_browser_review" "failed" "${require_live}" \
@@ -182,7 +197,7 @@ with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
 gates_by_name = {gate["name"]: gate for gate in gates}
-live_gate_names = ["strict_gateway", "openwebui_function"]
+live_gate_names = ["strict_gateway", "openwebui_function", "openwebui_admin_action"]
 required_failures = [
     gate["name"]
     for gate in gates

@@ -305,6 +305,11 @@
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
   标为 `passed_with_gate_command_overrides`。
+- Open WebUI 已补 `tonglingyu_gateway_admin` Action Function：只读查询 Gateway
+  metrics、trace、evidence package audit 和 session，Function 内强制
+  `__user__.role == "admin"` 后才调用 `/v1/admin/*`；普通用户不会触发 Gateway
+  admin 请求。已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入
+  release readiness live gate。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
@@ -323,8 +328,8 @@
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
 2. 在目标环境运行 release readiness live gate，确认 Hermes Runtime、
-   strict Gateway、Open WebUI Function 和页面侧复核均通过。
-3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
-4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+   strict Gateway、Open WebUI Function、Gateway Admin Action 和页面侧复核均
+   通过。
+3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+4. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。

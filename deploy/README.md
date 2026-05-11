@@ -84,6 +84,12 @@ Required changes:
   outside local development so admin endpoints cannot be opened with the normal
   Open WebUI provider key. Production verification rejects enabling this flag
   when admin keys are configured.
+- `TONGLINGYU_GATEWAY_ADMIN_BASE_URL`: internal Gateway origin used by the
+  Open WebUI `tonglingyu_gateway_admin` Action. Default is
+  `http://tonglingyu-gateway:8090`.
+- `TONGLINGYU_GATEWAY_ADMIN_ACTION_TARGET_MODEL` and
+  `TONGLINGYU_GATEWAY_ADMIN_ACTION_TARGET_MODELS`: Open WebUI model ids where
+  the admin Action is allowed to run. Defaults to `TONGLINGYU_MODEL_ID`.
 - `TONGLINGYU_AGENT_RUNTIME_MODE`: Tonglingyu Gateway profile execution client.
   The production compose default is `hermes`; use `minimal` only for local
   smoke or deterministic development runs.
@@ -242,12 +248,13 @@ TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
 ```
 
 Without `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate runs the
-compose-rendered config check and records live Gateway/Open WebUI Function
-checks as skipped. The JSON report includes `production_release_ready=false`,
-`browser_review_acknowledged`, `optional_failures`, `skipped_live_gates`, and
-`release_blockers` whenever live mode, live gates, or browser review are
-missing, so partial local verification cannot be mistaken for a production
-release pass. Optional failed gates are reflected in `status` as
+compose-rendered config check and records live Gateway/Open WebUI Function and
+Gateway Admin Action checks as skipped. The JSON report includes
+`production_release_ready=false`, `browser_review_acknowledged`,
+`optional_failures`, `skipped_live_gates`, and `release_blockers` whenever live
+mode, live gates, or browser review are missing, so partial local verification
+cannot be mistaken for a production release pass. Optional failed gates are
+reflected in `status` as
 `passed_with_failed_optional_gates`. By default the script exits non-zero unless
 `production_release_ready=true`; set
 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` only when intentionally generating a
@@ -356,6 +363,9 @@ Operational constraints:
   Agent Platform chat through `hermes-agent`.
 - Keep the `agent_identity_bridge` Function target on `hermes-agent`; do not
   inject Agent Platform identity context into `tonglingyu` evidence chat.
+- Keep the `tonglingyu_gateway_admin` Action target on `tonglingyu`; it is a
+  read-only admin surface for Gateway audit and metrics, not an Agent Platform
+  identity bridge.
 - For a live Open WebUI with an existing `webui.db`, admin Settings →
   Connections may already persist provider settings. Verify the UI or admin API
   after changing env values.
@@ -414,8 +424,47 @@ container. It reports valve key names only, never secret values. For local/CI
 contract checks, set `OPEN_WEBUI_FUNCTION_VERIFY_JSON` to a fixture file and the
 script validates the fixture without connecting to Open WebUI.
 
-Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`, or
-`AGENT_JWT_SECRET`. Before editing `deploy/.env`, run:
+## Open WebUI Gateway Admin Action
+
+Install or update the read-only Gateway admin Action against the formal Open
+WebUI only:
+
+```bash
+./scripts/install-openwebui-gateway-admin-action.sh
+./scripts/verify-openwebui-gateway-admin-action.sh
+```
+
+The Action exposes Gateway metrics, trace, package audit, and session lookup
+from Open WebUI while enforcing `__user__.role == "admin"` inside the Function
+before it calls `/v1/admin/*`. The admin key is stored only in Function valves;
+ordinary users receive a denial before any Gateway request is made.
+
+The API installer requires these environment variables to be present in the
+shell or `.env`-sourced environment:
+
+```text
+OPEN_WEBUI_BASE_URL or PUBLIC_WEBUI_URL
+OPEN_WEBUI_ADMIN_TOKEN
+TONGLINGYU_ADMIN_API_KEY
+```
+
+If the available Open WebUI account is not an admin and the Function API returns
+401, use the formal container/DB installer:
+
+```bash
+./scripts/install-openwebui-gateway-admin-action-db.sh
+./scripts/verify-openwebui-gateway-admin-action.sh
+```
+
+The verify script checks Function type, active/global flags, admin role guard,
+Gateway admin endpoint coverage, and non-empty required valves. It reports valve
+key names only, never secret values. For local/CI contract checks, set
+`OPEN_WEBUI_GATEWAY_ADMIN_ACTION_VERIFY_JSON` to a fixture file and the script
+validates the fixture without connecting to Open WebUI.
+
+Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`,
+`AGENT_JWT_SECRET`, or `TONGLINGYU_ADMIN_API_KEY`. Before editing `deploy/.env`,
+run:
 
 ```bash
 ./scripts/env-backup.sh backup
