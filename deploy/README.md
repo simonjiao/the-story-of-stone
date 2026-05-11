@@ -215,7 +215,8 @@ Prometheus metrics, a minimal live chat completion, and the resulting admin
 trace. It requires `agent_runtime_mode=hermes`, a single visible `tonglingyu`
 model, hidden `honglou-*` profiles, positive KB counts, active rate limiting,
 isolated admin credentials, and Hermes runtime profile steps with non-empty
-tool results in the trace.
+tool results bound to `runtime://tonglingyu/{trace_id}/...` output refs in the
+trace.
 
 For a release-readiness summary, run the aggregate gate:
 

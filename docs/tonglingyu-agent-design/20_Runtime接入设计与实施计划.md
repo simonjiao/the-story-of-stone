@@ -255,6 +255,9 @@ report/audit payload 中，stream 只暴露计数级摘要。
 Hermes mode 下，required profile step 如果声明了 allowed tools，就必须产生
 匹配的 `tool_results`；缺少必需工具结果时 Runtime workflow fail-closed，避免
 把未实际调用工具的 profile 文本误判为 content/tool execution。
+这些 `tool_results` 还必须携带 `runtime://tonglingyu/{trace_id}/...` output_ref；
+package create/read/replay 类工具必须绑定当前 evidence package id，避免
+Hermes 返回无法追溯到本地 Runtime store 的伪工具结果。
 Hermes `draft_answer` profile output 已支持结构化 JSON 候选；JSON 候选必须带
 当前 evidence package 的 `package_id` 和非空 `draft_answer`，package 不匹配或
 缺少草稿时只写 rejected audit，不进入本地草稿或最终回答。纯文本
@@ -328,6 +331,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   观测信息，避免生产排障时看不到 profile 是否实际调用工具。
 - [x] Hermes mode 下 required profile step 必须产生匹配 allowed tools 的
   runtime tool result；缺少必需工具结果时 workflow fail-closed。
+- [x] Hermes mode 下 runtime tool result 必须携带 Tonglingyu runtime output_ref；
+  package tool 的 output_ref 必须绑定当前 evidence package。
 - [x] Hermes `draft_answer` 结构化 JSON 候选必须校验 `package_id`，
   错误 package 或缺少草稿时拒绝消费并写入 rejected audit。
 - [x] Hermes `review_answer` 结构化 JSON 输出进入 review observation，

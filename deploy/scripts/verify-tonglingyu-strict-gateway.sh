@@ -194,6 +194,25 @@ for item in runtime_step_events:
     tool_results = agent_runtime.get("tool_results") or []
     if not any(isinstance(result, dict) and result.get("tool_name") for result in tool_results):
         errors.append(f"runtime step {operation} must include tool_name in tool results")
+    for result in tool_results:
+        if not isinstance(result, dict):
+            errors.append(f"runtime step {operation} tool result must be an object")
+            continue
+        tool_name = result.get("tool_name")
+        output_ref = result.get("output_ref")
+        if not output_ref:
+            errors.append(f"runtime step {operation} tool {tool_name} must include output_ref")
+            continue
+        if chat_trace_id and not str(output_ref).startswith(f"runtime://tonglingyu/{chat_trace_id}/"):
+            errors.append(f"runtime step {operation} tool {tool_name} output_ref must bind to trace")
+        if tool_name in {
+            "tonglingyu.evidence.package.create",
+            "tonglingyu.evidence.package.read",
+            "tonglingyu.evidence.package.replay",
+        } and chat_trace_id and chat_package_id:
+            expected_ref = f"runtime://tonglingyu/{chat_trace_id}/packages/{chat_package_id}"
+            if output_ref != expected_ref:
+                errors.append(f"runtime step {operation} tool {tool_name} output_ref must bind to package")
 
 if errors:
     for error in errors:
