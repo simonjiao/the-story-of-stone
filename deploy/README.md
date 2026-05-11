@@ -220,7 +220,9 @@ trace. Evidence search tool refs must use the
 `runtime://tonglingyu/{trace_id}/evidence/{digest}` namespace, while package
 tool refs must match the current evidence package id. The same trace must also
 show local evidence/package/reviewer enforcement and a consumed Hermes draft
-observation, so the gate does not pass on tool-result plumbing alone.
+observation, plus an `agent_runtime_profile_execution_summarized` event whose
+summary reports `hermes_profile_observed_with_local_governance`, so the gate
+does not pass on tool-result plumbing alone.
 
 For a release-readiness summary, run the aggregate gate:
 

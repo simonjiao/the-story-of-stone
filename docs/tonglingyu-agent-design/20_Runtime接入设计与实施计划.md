@@ -371,6 +371,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] Hermes mode 的 step audit/streaming metadata 按
   evidence/package/reviewer observation 和 draft application 写入真实
   `agent-runtime-hermes-*` content source，避免继续显示成纯确定性 workflow。
+- [x] Runtime output、dry-run、workflow state 和 runtime audit 已增加
+  `agent_runtime_summary` / `agent_runtime_profile_execution_summarized`，strict
+  live gate 会要求 summary 显示 Hermes observation + local governance 闭环。
 - [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
   生成 JSON 报告并显式区分必过、失败、skipped live gate 和人工页面复核项。
 - [x] release gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时要求显式

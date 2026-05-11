@@ -169,6 +169,31 @@ runtime_step_events = [
     for item in trace.get("audit_events") or []
     if item.get("event_type") == "agent_runtime_profile_step_executed"
 ]
+runtime_summary_events = [
+    item
+    for item in trace.get("audit_events") or []
+    if item.get("event_type") == "agent_runtime_profile_execution_summarized"
+]
+if not runtime_summary_events:
+    errors.append("admin trace must include agent_runtime_profile_execution_summarized")
+else:
+    runtime_summary = runtime_summary_events[-1].get("payload") or {}
+    if runtime_summary.get("mode") != "hermes":
+        errors.append("runtime summary mode must be hermes")
+    if (
+        runtime_summary.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(
+            "runtime summary profile_execution_status must be "
+            "hermes_profile_observed_with_local_governance"
+        )
+    if runtime_summary.get("hermes_content_execution_complete") is not True:
+        errors.append("runtime summary hermes_content_execution_complete must be true")
+    if runtime_summary.get("local_governance_enforced") is not True:
+        errors.append("runtime summary local_governance_enforced must be true")
+    if int(runtime_summary.get("tool_result_count") or 0) <= 0:
+        errors.append("runtime summary tool_result_count must be positive")
 operations = {
     ((item.get("payload") or {}).get("operation"))
     for item in runtime_step_events

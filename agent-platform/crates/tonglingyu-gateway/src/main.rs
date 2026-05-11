@@ -1195,6 +1195,7 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "agent_runtime": {
             "mode": agent_runtime_mode.as_str(),
             "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            "summary": &workflow.agent_runtime_summary,
         },
         "runtime_step_outputs": workflow.steps,
         "runtime_stream_events": workflow.stream_events,
@@ -1208,6 +1209,10 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             "claim_count": package.claims.len(),
             "reviewer_enforced": true,
             "agent_runtime_plan_gate": "passed",
+            "agent_runtime_profile_execution_status": workflow.agent_runtime_summary
+                .get("profile_execution_status")
+                .cloned()
+                .unwrap_or(Value::Null),
             "profile_step_count": workflow.steps.len(),
             "runtime_stream_event_count": workflow.stream_events.len(),
             "runtime_tools_used": [
@@ -2574,6 +2579,7 @@ async fn chat_completions(
             );
         }
     };
+    let agent_runtime_summary = workflow.agent_runtime_summary.clone();
     let package = workflow.package;
     let _ = record_workflow_state(
         &conn,
@@ -2585,6 +2591,7 @@ async fn chat_completions(
         &json!({
             "runtime_step_outputs": &workflow.steps,
             "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = record_workflow_state(
@@ -2611,6 +2618,7 @@ async fn chat_completions(
             "card_count": package.cards.len(),
             "evidence_types": package.cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
             "runtime_step_outputs": &workflow.steps,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = record_workflow_state(
@@ -2636,6 +2644,7 @@ async fn chat_completions(
         "ok",
         &json!({
             "answer_source": &workflow.answer_source,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = insert_audit_event(
@@ -2648,6 +2657,7 @@ async fn chat_completions(
             "profile": "honglou-main",
             "operation": "draft_answer",
             "answer_source": &workflow.answer_source,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let final_answer = workflow.final_answer;
@@ -2718,6 +2728,7 @@ async fn chat_completions(
         &json!({
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = insert_audit_event(
@@ -2729,6 +2740,7 @@ async fn chat_completions(
             "package_id": &package.package_id,
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     if request.stream.unwrap_or(false) {

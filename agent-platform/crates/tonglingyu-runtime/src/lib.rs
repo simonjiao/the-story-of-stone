@@ -187,6 +187,11 @@ impl TonglingyuRuntimeStore {
             apply_agent_runtime_content_outputs(&mut workflow, mode);
         let agent_runtime_review_observation =
             apply_agent_runtime_reviewer_output(&mut workflow, mode);
+        workflow.agent_runtime_summary = agent_runtime_execution_summary(
+            mode,
+            &workflow,
+            agent_runtime_content_application.as_ref(),
+        );
         workflow.stream_events = workflow_stream_events(
             &workflow.trace_id,
             &input.profiles.main,
@@ -210,6 +215,12 @@ impl TonglingyuRuntimeStore {
                 )?;
             }
         }
+        append_runtime_audit_event(
+            &conn,
+            &workflow.trace_id,
+            "agent_runtime_profile_execution_summarized",
+            &workflow.agent_runtime_summary,
+        )?;
         if let Some(application) = agent_runtime_content_application {
             let event_type = if application.draft_consumed {
                 "agent_runtime_profile_draft_consumed"
@@ -635,6 +646,8 @@ pub struct RuntimeWorkflowOutput {
     pub draft_answer: String,
     pub final_answer: String,
     pub answer_source: String,
+    #[serde(default = "default_agent_runtime_summary")]
+    pub agent_runtime_summary: Value,
     pub steps: Vec<RuntimeWorkflowStepReport>,
     pub stream_events: Vec<RuntimeWorkflowStreamEvent>,
 }
@@ -1503,6 +1516,7 @@ pub fn execute_runtime_workflow(
         draft_answer,
         final_answer,
         answer_source: "runtime_local_profile".to_string(),
+        agent_runtime_summary: deterministic_agent_runtime_summary(steps.len()),
         steps,
         stream_events,
     })
@@ -1871,6 +1885,136 @@ struct AgentRuntimeReviewObservation {
     agrees_with_local_reviewer: bool,
     local_reviewer_override: bool,
     rejected_reason: Option<&'static str>,
+}
+
+fn default_agent_runtime_summary() -> Value {
+    deterministic_agent_runtime_summary(0)
+}
+
+fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
+    json!({
+        "mode": "not_attached",
+        "profile_execution_status": "deterministic_workflow_only",
+        "profile_step_count": profile_step_count,
+        "executed_profile_step_count": 0,
+        "tool_result_count": 0,
+        "hermes_content_execution_complete": false,
+        "local_governance_enforced": true,
+    })
+}
+
+fn agent_runtime_execution_summary(
+    mode: TonglingyuAgentRuntimeMode,
+    workflow: &RuntimeWorkflowOutput,
+    application: Option<&AgentRuntimeContentApplication>,
+) -> Value {
+    let profile_step_count = workflow.steps.len();
+    let executed_profile_step_count = workflow
+        .steps
+        .iter()
+        .filter(|step| {
+            step.agent_runtime
+                .as_ref()
+                .is_some_and(|value| value.get("status") == Some(&json!("executed")))
+        })
+        .count();
+    let tool_result_count = workflow
+        .steps
+        .iter()
+        .filter_map(|step| {
+            step.agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("tool_result_count"))
+                .and_then(Value::as_u64)
+        })
+        .sum::<u64>();
+
+    let evidence_steps = workflow
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.operation.as_str(),
+                "text_evidence_search" | "commentary_evidence_search"
+            )
+        })
+        .collect::<Vec<_>>();
+    let evidence_observation_count = evidence_steps
+        .iter()
+        .filter(|step| {
+            step.agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("evidence_observation"))
+                .is_some()
+        })
+        .count();
+    let evidence_matches_local = !evidence_steps.is_empty()
+        && evidence_steps.iter().all(|step| {
+            let observation = step
+                .agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("evidence_observation"));
+            observation.and_then(|value| value.get("matches_runtime_evidence"))
+                == Some(&json!(true))
+                && observation.and_then(|value| value.get("local_evidence_enforced"))
+                    == Some(&json!(true))
+        });
+    let package_matches_local = workflow.steps.iter().any(|step| {
+        step.operation == "evidence_package_create"
+            && step
+                .agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("package_observation"))
+                .is_some_and(|observation| {
+                    observation.get("matches_runtime_package") == Some(&json!(true))
+                        && observation.get("local_package_enforced") == Some(&json!(true))
+                })
+    });
+    let review_local_enforced = workflow.steps.iter().any(|step| {
+        step.operation == "review_answer"
+            && step
+                .agent_runtime
+                .as_ref()
+                .and_then(|value| value.get("review_observation"))
+                .is_some_and(|observation| {
+                    observation.get("local_reviewer_enforced") == Some(&json!(true))
+                })
+    });
+    let draft_consumed = application.is_some_and(|value| value.draft_consumed);
+    let content_used_for_final_answer =
+        application.is_some_and(|value| value.content_used_for_final_answer);
+    let hermes_content_execution_complete = mode == TonglingyuAgentRuntimeMode::Hermes
+        && evidence_matches_local
+        && package_matches_local
+        && draft_consumed
+        && review_local_enforced;
+    let profile_execution_status = match mode {
+        TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
+        TonglingyuAgentRuntimeMode::Hermes if hermes_content_execution_complete => {
+            "hermes_profile_observed_with_local_governance"
+        }
+        TonglingyuAgentRuntimeMode::Hermes if draft_consumed => {
+            "hermes_profile_partial_with_local_governance"
+        }
+        TonglingyuAgentRuntimeMode::Hermes => "hermes_profile_incomplete_local_governance",
+    };
+
+    json!({
+        "mode": mode.as_str(),
+        "profile_execution_status": profile_execution_status,
+        "profile_step_count": profile_step_count,
+        "executed_profile_step_count": executed_profile_step_count,
+        "tool_result_count": tool_result_count,
+        "evidence_observation_count": evidence_observation_count,
+        "evidence_matches_local": evidence_matches_local,
+        "package_matches_local": package_matches_local,
+        "draft_consumed": draft_consumed,
+        "content_used_for_final_answer": content_used_for_final_answer,
+        "review_local_enforced": review_local_enforced,
+        "hermes_content_execution_complete": hermes_content_execution_complete,
+        "local_governance_enforced": true,
+        "answer_source": &workflow.answer_source,
+    })
 }
 
 fn apply_agent_runtime_evidence_outputs(
@@ -5144,6 +5288,14 @@ mod tests {
         assert_eq!(workflow.steps.len(), 4);
         assert_eq!(workflow.package.review.status, "needs_revision");
         assert!(workflow.final_answer.contains(&workflow.package.package_id));
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_execution_status"],
+            "deterministic_workflow_only"
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_step_count"],
+            json!(workflow.steps.len())
+        );
         let plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
             question_type: "runtime_workflow".to_string(),
             required_evidence_types: vec!["base_text".to_string()],
@@ -5484,6 +5636,7 @@ mod tests {
             draft_answer: "本地草稿".to_string(),
             final_answer: "本地最终回答".to_string(),
             answer_source: "runtime_local_profile".to_string(),
+            agent_runtime_summary: default_agent_runtime_summary(),
             steps: vec![
                 RuntimeWorkflowStepReport {
                     step_id: "step-01-draft-answer".to_string(),
@@ -5667,6 +5820,18 @@ mod tests {
             event.event_type == "step_completed"
                 && event.metadata["agent_runtime"]["status"] == "executed"
         }));
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_execution_status"],
+            "minimal_envelope_only"
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["executed_profile_step_count"],
+            json!(workflow.steps.len())
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["hermes_content_execution_complete"],
+            json!(false)
+        );
         let conn = store.open_connection().expect("runtime conn");
         let count: i64 = conn
             .query_row(
@@ -5676,6 +5841,14 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(count, workflow.steps.len() as i64);
+        let summary_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'agent_runtime_profile_execution_summarized'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("summary audit count");
+        assert_eq!(summary_count, 1);
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -5808,6 +5981,26 @@ mod tests {
                     .as_deref()
                     .is_some_and(|chunk| chunk.contains("证据不足"))
         }));
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_execution_status"],
+            "hermes_profile_observed_with_local_governance"
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["hermes_content_execution_complete"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["draft_consumed"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["content_used_for_final_answer"],
+            json!(false)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["tool_result_count"],
+            json!(4)
+        );
         let events = store
             .audit_events_for_trace(&workflow.trace_id)
             .expect("audit events");
@@ -5830,6 +6023,12 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_review_observed"
                 && event["payload"]["local_reviewer_override"] == json!(true)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_summarized"
+                && event["payload"]["profile_execution_status"]
+                    == json!("hermes_profile_observed_with_local_governance")
+                && event["payload"]["hermes_content_execution_complete"] == json!(true)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
