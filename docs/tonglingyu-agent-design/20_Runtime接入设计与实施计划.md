@@ -156,7 +156,7 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 不直接执行 source snapshot loader、KB SQLite/FTS 检索或 FTS 写入。
 - [x] Gateway 不直接读取 KB/domain SQLite 表；health、metrics、admin trace 和
   prune 通过 Runtime stats/audit/prune API 访问 runtime store。
-- [x] Gateway 请求路径、dry-run、health、search、metrics、admin trace/package
+- [x] Gateway 请求路径、dry-run、eval、health、search、metrics、admin trace/package
   读取和 build/prune 管理路径通过 `TonglingyuRuntimeStore` 访问 runtime store，
   不复用 Gateway `Connection`。
 - [x] Gateway 不构建证据卡片或证据包。

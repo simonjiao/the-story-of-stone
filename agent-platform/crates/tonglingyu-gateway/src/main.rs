@@ -24,7 +24,7 @@ use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
     RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json, replay_answer,
+    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -1077,7 +1077,15 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             case.limit.unwrap_or(args.limit),
         )?;
         let package = runtime_store.create_package(&trace_id, case.question, cards)?;
-        let replay = replay_answer(&package);
+        let replay = runtime_store
+            .replay_package(&package.package_id)?
+            .and_then(|value| {
+                value
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .ok_or_else(|| anyhow!("runtime replay missing answer for {}", package.package_id))?;
         let mut failures = Vec::new();
         if package.review.status != case.expected_review_status {
             failures.push(format!(
@@ -3146,62 +3154,6 @@ fn new_trace_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample_card(evidence_type: &str) -> EvidenceCard {
-        EvidenceCard {
-            evidence_id: format!("ev-test-{evidence_type}"),
-            evidence_type: evidence_type.to_string(),
-            source_id: "test-source".to_string(),
-            source_title: "test-title".to_string(),
-            source_url: "https://example.test/source".to_string(),
-            revision_id: Some(1),
-            block_id: format!("block-test-{evidence_type}"),
-            text: "脂批：测试证据".to_string(),
-            support_scope: "测试支持范围".to_string(),
-            unsupported_scope: "测试不支持范围".to_string(),
-            evidence_level: "测试层级".to_string(),
-            confidence: "medium".to_string(),
-            verification_status: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn reviewer_blocks_no_evidence() {
-        let review = tonglingyu_runtime::review("黛玉结局是什么", &[], &[]);
-        assert_eq!(review.status, "needs_revision");
-        assert_eq!(review.severity, "high");
-    }
-
-    #[test]
-    fn reviewer_blocks_commentary_only_body_claim() {
-        let cards = vec![sample_card("commentary")];
-        let claims = tonglingyu_runtime::claims_from_cards("脂批原文如何评价石头？", &cards);
-        let review = tonglingyu_runtime::review("脂批原文如何评价石头？", &cards, &claims);
-        assert_eq!(review.status, "needs_revision");
-        assert_eq!(review.severity, "medium");
-        assert!(
-            review
-                .issues
-                .iter()
-                .any(|issue| issue.contains("当前证据全为脂批"))
-        );
-    }
-
-    #[test]
-    fn replay_keeps_package_id_and_review_downgrade() {
-        let package = EvidencePackage {
-            package_id: "pkg-test".to_string(),
-            trace_id: "trace-test".to_string(),
-            question: "量子计算机是什么？".to_string(),
-            cards: vec![],
-            claims: vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()],
-            claim_evidence_map: vec![],
-            review: tonglingyu_runtime::review("量子计算机是什么？", &[], &[]),
-        };
-        let answer = replay_answer(&package);
-        assert!(answer.contains("pkg-test"));
-        assert!(answer.contains("证据不足"));
-    }
 
     #[test]
     fn public_completion_strips_cached_runtime_stream_events() {

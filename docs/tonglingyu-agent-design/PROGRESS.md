@@ -173,6 +173,8 @@
 - Hermes `draft_answer` 结构化 JSON 候选必须匹配当前 evidence package
   `package_id` 且提供非空 `draft_answer`；错误 package 或缺少草稿时只写
   rejected audit，不进入本地草稿或最终回答。
+- Gateway eval/replay 检查已改为通过 `TonglingyuRuntimeStore` 调 runtime replay；
+  gateway crate 不再直接调用 runtime reviewer 或 `replay_answer` 领域函数。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
