@@ -44,6 +44,21 @@ allowed_report_statuses = {
     "passed_in_summary_only_mode",
 }
 allowed_gate_statuses = {"passed", "failed", "skipped"}
+secret_value_needles = [
+    "api-key=",
+    "api_key=",
+    "apikey=",
+    "authorization:",
+    "bearer ",
+    "ghp_",
+    "github_pat_",
+    "password=",
+    "secret=",
+    "sk-",
+    "token=",
+    "x-api-key:",
+    "xoxb-",
+]
 gate_stdout_requirements = {
     "runtime_config": {
         "required_fields": [
@@ -116,6 +131,21 @@ def add_mismatch(field, expected, actual):
 
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def secret_value_paths(value, prefix="$"):
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(secret_value_paths(child, f"{prefix}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(secret_value_paths(child, f"{prefix}[{index}]"))
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(needle in lowered for needle in secret_value_needles):
+            paths.append(prefix)
+    return paths
 
 
 def parse_timestamp(value):
@@ -235,6 +265,13 @@ add_if(
     not isinstance(report.get("browser_review_acknowledged"), bool),
     "browser_review_acknowledged_must_be_bool",
 )
+add_if(
+    report.get("secret_values_printed") is not False,
+    "secret_values_printed_must_be_false",
+)
+secret_value_hits = secret_value_paths(report)
+if secret_value_hits:
+    errors.append("secret_like_values_present=" + ",".join(secret_value_hits[:8]))
 
 required_lists = [
     "gates",

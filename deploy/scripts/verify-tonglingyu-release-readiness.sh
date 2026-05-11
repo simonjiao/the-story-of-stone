@@ -342,6 +342,7 @@ report = {
     "browser_review_evidence": browser_review_evidence,
     "browser_review_validation": browser_review_validation,
     "generated_at": datetime.now(timezone.utc).isoformat(),
+    "secret_values_printed": False,
     "gates": gates,
     "required_failures": required_failures,
     "optional_failures": optional_failures,

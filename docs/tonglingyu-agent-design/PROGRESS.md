@@ -320,6 +320,9 @@
 - Production-ready saved report 现在要求 browser review verifier 显式绑定
   release review ref 和 Open WebUI 公网入口；contract 覆盖解除 ref/public URL
   binding 后仍试图保持 ready 的篡改路径。
+- Release report 现在带 `secret_values_printed=false`，saved report validator
+  会递归扫描 secret-like 值并只报告 JSON path；contract 覆盖 gate tail 泄露
+  `authorization` / `sk-` 风格值时报告校验失败。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

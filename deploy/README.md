@@ -351,6 +351,10 @@ reports are rejected when older than `TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS`
 For production-ready reports, browser review validation must also prove that
 the verifier was bound to both the release review ref and the expected public
 Open WebUI URL.
+Saved reports include `secret_values_printed=false`; the saved-report verifier
+also scans report values for secret-like strings such as authorization headers,
+bearer tokens, API-key assignments, and `sk-` style keys. It reports only JSON
+paths for suspected leaks, not the matched values.
 
 The aggregate gate can be contract-tested without a live deployment:
 

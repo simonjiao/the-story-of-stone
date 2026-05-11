@@ -16,6 +16,7 @@ GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.j
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
 TAMPERED_MISSING_GENERATED_REPORT="${WORK_DIR}/tampered-missing-generated-report.json"
+TAMPERED_SECRET_REPORT="${WORK_DIR}/tampered-secret-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
@@ -261,6 +262,7 @@ assert_report "${default_report}" 'report["schema_version"] == 1'
 assert_report "${default_report}" 'report["status"] == "passed_with_skipped_gates"'
 assert_report "${default_report}" 'report["exit_policy"] == "production_release_ready"'
 assert_report "${default_report}" 'report["gate_command_overrides_used"] is True'
+assert_report "${default_report}" 'report["secret_values_printed"] is False'
 assert_report "${default_report}" '"openwebui_admin_action" in report["skipped_live_gates"]'
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" "${default_report}" >/dev/null
 
@@ -330,6 +332,26 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_missing_generated_stdout}" \
   '"generated_at_missing" in report["errors"]'
+
+python3 - "${default_report}" "${TAMPERED_SECRET_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["gates"][0]["stdout_tail"].append("authorization: Bearer sk-release-leak")
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_secret_stdout="${WORK_DIR}/tampered-secret-validation.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECRET_REPORT}" >"${tampered_secret_stdout}"; then
+  echo "saved release reports must reject secret-like leaked values" >&2
+  exit 1
+fi
+assert_report "${tampered_secret_stdout}" \
+  'any(error.startswith("secret_like_values_present=") for error in report["errors"])'
 
 optional_report="${WORK_DIR}/summary-optional-failure.json"
 env "${common_env[@]}" \
