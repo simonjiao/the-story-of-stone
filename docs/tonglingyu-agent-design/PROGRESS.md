@@ -306,10 +306,16 @@
   env 填入 reviewer、公网 URL、四项 evidence ref 和 provider 设置匹配确认，
   由脚本生成 evidence JSON 并立即运行 verifier；脚本要求显式 ACK 且默认不
   覆盖已有证据文件，减少手写 JSON 造成的发布误判。
+- browser review evidence verifier 已继续收紧 evidence ref：截图/本地文件
+  ref 必须能在证据目录或
+  `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` 下找到，admin audit ref 需绑定
+  `trace:tly-...`、文件或 HTTPS 链接，provider 设置复核需绑定 `runbook:...`、
+  文件或 HTTPS 链接。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
-  readiness contract smoke，覆盖 browser review recorder 正负路径、override
-  guard、默认非 live 不 ready、summary-only optional failure、mock live 条件
-  满足但不 production ready、live 必过 gate 失败等路径；聚合脚本只允许显式
+  readiness contract smoke，覆盖 browser review recorder 正负路径、
+  browser evidence ref 文件存在性、override guard、默认非 live 不 ready、
+  summary-only optional failure、mock live 条件满足但不 production ready、live
+  必过 gate 失败等路径；聚合脚本只允许显式
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
   标为 `passed_with_gate_command_overrides`。

@@ -12,6 +12,8 @@ EXPECTED_REVIEW_REF="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
 
 python3 - "${EVIDENCE_PATH}" "${EXPECTED_REVIEW_REF}" <<'PY'
 import json
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ from urllib.parse import urlparse
 
 evidence_path = sys.argv[1].strip()
 expected_review_ref = sys.argv[2].strip()
+evidence_root = os.environ.get("TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT", "").strip()
 required_checks = [
     "ordinary_user_model_visibility",
     "streaming_chat_ux",
@@ -49,6 +52,13 @@ secret_value_needles = [
     "token=",
     "xoxb-",
 ]
+check_allowed_ref_kinds = {
+    "ordinary_user_model_visibility": {"local_file", "url"},
+    "streaming_chat_ux": {"local_file", "url"},
+    "admin_audit_visibility": {"trace", "local_file", "url"},
+    "persisted_provider_settings": {"runbook", "local_file", "url"},
+}
+trace_ref_re = re.compile(r"^trace:tly-[A-Za-z0-9_-]+$")
 errors = []
 evidence = {}
 
@@ -121,6 +131,65 @@ def secret_value_paths(value, prefix="$"):
     return paths
 
 
+def safe_relative_path(value):
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return None
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        return None
+    return candidate
+
+
+def validate_local_ref(check_name, ref_path):
+    relative = safe_relative_path(ref_path)
+    if relative is None:
+        errors.append(f"{check_name}_evidence_ref_file_path_must_be_relative")
+        return "local_file"
+    base = Path(evidence_root) if evidence_root else path.parent
+    resolved = base / relative
+    if not resolved.is_file():
+        errors.append(f"{check_name}_evidence_ref_file_not_found")
+    return "local_file"
+
+
+def validate_evidence_ref(check_name, value):
+    ref = value.strip()
+    if len(ref) > 512:
+        errors.append(f"{check_name}_evidence_ref_too_long")
+        return "invalid"
+    if any(char in ref for char in "\r\n\t"):
+        errors.append(f"{check_name}_evidence_ref_contains_control_char")
+        return "invalid"
+
+    parsed = urlparse(ref)
+    kind = "invalid"
+    if parsed.scheme in {"http", "https"}:
+        if parsed.scheme != "https" or not parsed.netloc:
+            errors.append(f"{check_name}_evidence_ref_url_must_be_https")
+        kind = "url"
+    elif parsed.scheme == "trace":
+        if not trace_ref_re.match(ref):
+            errors.append(f"{check_name}_evidence_ref_trace_invalid")
+        kind = "trace"
+    elif parsed.scheme == "runbook":
+        if not (parsed.netloc or parsed.path):
+            errors.append(f"{check_name}_evidence_ref_runbook_empty")
+        kind = "runbook"
+    elif parsed.scheme == "file":
+        if parsed.netloc:
+            errors.append(f"{check_name}_evidence_ref_file_must_be_relative")
+        kind = validate_local_ref(check_name, parsed.path)
+    elif parsed.scheme:
+        errors.append(f"{check_name}_evidence_ref_scheme_unsupported")
+    else:
+        kind = validate_local_ref(check_name, ref)
+
+    allowed = check_allowed_ref_kinds[check_name]
+    if kind not in allowed:
+        errors.append(f"{check_name}_evidence_ref_kind_invalid")
+    return kind
+
+
 if not evidence_path:
     errors.append("evidence_path_missing")
     report("failed")
@@ -188,8 +257,11 @@ for check_name in required_checks:
         continue
     if check.get("status") != "passed":
         errors.append(f"{check_name}_status_must_be_passed")
-    if not nonempty(check.get("evidence_ref")):
+    evidence_ref = check.get("evidence_ref")
+    if not nonempty(evidence_ref):
         errors.append(f"{check_name}_evidence_ref_missing")
+    else:
+        validate_evidence_ref(check_name, evidence_ref)
 
 provider_check = checks.get("persisted_provider_settings")
 if isinstance(provider_check, dict):

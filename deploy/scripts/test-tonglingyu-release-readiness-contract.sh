@@ -8,7 +8,12 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
+MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
+
+mkdir -p "${WORK_DIR}/screenshots"
+: >"${WORK_DIR}/screenshots/models.png"
+: >"${WORK_DIR}/screenshots/streaming.png"
 
 cat >"${PASS_CMD}" <<'SH'
 #!/usr/bin/env bash
@@ -36,19 +41,19 @@ cat >"${BROWSER_EVIDENCE_JSON}" <<'JSON'
   "checks": {
     "ordinary_user_model_visibility": {
       "status": "passed",
-      "evidence_ref": "browser://ordinary-user-models"
+      "evidence_ref": "screenshots/models.png"
     },
     "streaming_chat_ux": {
       "status": "passed",
-      "evidence_ref": "browser://streaming-chat"
+      "evidence_ref": "screenshots/streaming.png"
     },
     "admin_audit_visibility": {
       "status": "passed",
-      "evidence_ref": "browser://admin-audit"
+      "evidence_ref": "trace:tly-123"
     },
     "persisted_provider_settings": {
       "status": "passed",
-      "evidence_ref": "browser://provider-settings",
+      "evidence_ref": "runbook:provider-settings",
       "matched_rendered_env": true
     }
   }
@@ -124,6 +129,26 @@ if report["status"] != "failed":
 if "review_ref_mismatch" not in report["errors"]:
     raise SystemExit(report)
 PY
+
+python3 - "${BROWSER_EVIDENCE_JSON}" "${MISSING_ARTIFACT_EVIDENCE_JSON}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["checks"]["ordinary_user_model_visibility"]["evidence_ref"] = "screenshots/missing.png"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+browser_evidence_missing_artifact_stdout="${WORK_DIR}/browser-evidence-missing-artifact.stdout"
+if "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${MISSING_ARTIFACT_EVIDENCE_JSON}" >"${browser_evidence_missing_artifact_stdout}"; then
+  echo "browser review screenshot evidence refs must point to existing artifacts" >&2
+  exit 1
+fi
+assert_report "${browser_evidence_missing_artifact_stdout}" \
+  '"ordinary_user_model_visibility_evidence_ref_file_not_found" in report["errors"]'
 
 browser_record_missing_ack_stdout="${WORK_DIR}/browser-record-missing-ack.stdout"
 if env \

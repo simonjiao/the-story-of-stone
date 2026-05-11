@@ -372,6 +372,10 @@ refuses to overwrite an existing file unless
 trace links, or runbook paths in `evidence_ref`; do not include token, key,
 password, authorization header, or secret values. `reviewed_at` must include a
 timezone and `public_webui_url` must be the HTTPS public endpoint.
+Screenshot or local-file refs must be relative paths under the evidence JSON
+directory. Set `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` when the artifacts live
+in a separate directory. Admin audit refs should use `trace:tly-...`, and
+provider-setting refs should use `runbook:...` or a checked file/link.
 
 If writing the JSON manually, use this shape:
 
