@@ -322,6 +322,8 @@ if gate_cmd_overrides_used:
 production_release_ready = release_conditions_met and not gate_cmd_overrides_used
 
 report = {
+    "object": "tonglingyu.release_readiness_report",
+    "schema_version": 1,
     "status": status,
     "production_release_ready": production_release_ready,
     "release_conditions_met": release_conditions_met,

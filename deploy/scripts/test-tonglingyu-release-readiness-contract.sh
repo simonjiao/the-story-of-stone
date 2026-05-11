@@ -246,6 +246,8 @@ if env "${common_env[@]}" \
   exit 1
 fi
 assert_report "${default_report}" 'report["production_release_ready"] is False'
+assert_report "${default_report}" 'report["object"] == "tonglingyu.release_readiness_report"'
+assert_report "${default_report}" 'report["schema_version"] == 1'
 assert_report "${default_report}" 'report["status"] == "passed_with_skipped_gates"'
 assert_report "${default_report}" 'report["exit_policy"] == "production_release_ready"'
 assert_report "${default_report}" 'report["gate_command_overrides_used"] is True'
@@ -292,6 +294,8 @@ if env "${common_env[@]}" \
   exit 1
 fi
 assert_report "${missing_validation_report}" 'report["status"] == "failed"'
+assert_report "${missing_validation_report}" 'report["object"] == "tonglingyu.release_readiness_report"'
+assert_report "${missing_validation_report}" 'report["schema_version"] == 1'
 assert_report "${missing_validation_report}" '"openwebui_browser_review_validation" in report["required_failures"]'
 assert_report "${missing_validation_report}" 'report["browser_review_acknowledged"] is False'
 assert_report "${missing_validation_report}" '"Open WebUI browser-side review validation summary was missing" in report["release_blockers"]'
@@ -324,6 +328,8 @@ env "${common_env[@]}" \
   TONGLINGYU_RELEASE_REPORT_PATH="${conditions_report}" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
 assert_report "${conditions_report}" 'report["release_conditions_met"] is True'
+assert_report "${conditions_report}" 'report["object"] == "tonglingyu.release_readiness_report"'
+assert_report "${conditions_report}" 'report["schema_version"] == 1'
 assert_report "${conditions_report}" 'report["production_release_ready"] is False'
 assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_command_overrides"'
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'

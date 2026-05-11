@@ -318,6 +318,9 @@ reflected in `status` as
 `production_release_ready=true`; set
 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` only when intentionally generating a
 non-release summary report.
+The report object is `tonglingyu.release_readiness_report` with
+`schema_version=1`; release automation should reject unknown object names or
+schema versions instead of guessing field semantics.
 The aggregate gate can be contract-tested without a live deployment:
 
 ```bash

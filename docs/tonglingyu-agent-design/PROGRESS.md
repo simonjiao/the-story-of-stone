@@ -293,6 +293,9 @@
   release mode、必过 gate 和页面 ACK 都满足时才会标记 production ready，避免
   把局部验证当作生产完成；脚本默认退出码也跟随 `production_release_ready`，
   只有显式 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
+- release readiness 报告已固定 `object=tonglingyu.release_readiness_report`
+  和 `schema_version=1`；本地 contract smoke 会断言报告对象和 schema，避免
+  后续自动化或人工复核靠字段猜测报告版本。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增
