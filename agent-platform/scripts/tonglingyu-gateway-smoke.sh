@@ -74,6 +74,22 @@ expect_status() {
   fi
 }
 
+assert_stream_hides_internal_fields() {
+  local stream_path="$1"
+  for forbidden in \
+    "_runtime_stream_events" \
+    "_stream_source" \
+    "agent_runtime_summary" \
+    "audit_events" \
+    "runtime_step_outputs" \
+    "runtime_step_plan"; do
+    if grep -q "${forbidden}" "${stream_path}"; then
+      echo "stream response leaked internal field ${forbidden}: ${stream_path}" >&2
+      return 1
+    fi
+  done
+}
+
 auth=(-H "authorization: Bearer ${SMOKE_TOKEN}")
 admin_auth=(-H "authorization: Bearer ${ADMIN_TOKEN}")
 json_headers=(-H "content-type: application/json")
@@ -158,6 +174,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
 grep -q 'evidence_package_id' "${STREAM_TXT}"
 grep -q 'runtime_workflow' "${STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${STREAM_TXT}"
+assert_stream_hides_internal_fields "${STREAM_TXT}"
 curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -H "x-tonglingyu-message-id: smoke-message-stream" \
   -X POST \
@@ -166,6 +183,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
 grep -q 'evidence_package_id' "${DUP_STREAM_TXT}"
 grep -q 'runtime_workflow' "${DUP_STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
+assert_stream_hides_internal_fields "${DUP_STREAM_TXT}"
 
 PACKAGE_ID="$(cat "${CHAT_JSON}" | json_get "evidence_package_id")"
 TRACE_ID="$(cat "${CHAT_JSON}" | json_get "trace_id")"

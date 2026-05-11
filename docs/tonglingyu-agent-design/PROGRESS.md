@@ -202,6 +202,8 @@
 - strict Gateway live gate 已增加公共 chat 响应字段检查，拒绝
   `agent_runtime_summary`、`runtime_step_outputs`、`audit_events`、
   `_runtime_stream_events` 等内部 runtime/admin trace 字段泄露到普通响应。
+- Gateway smoke 已对新 streaming 和去重 replay streaming 响应增加同类内部字段
+  负向检查，避免 SSE 路径只验证可用性、不验证信息边界。
 - Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果
