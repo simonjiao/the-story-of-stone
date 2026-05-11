@@ -321,6 +321,13 @@ non-release summary report.
 The report object is `tonglingyu.release_readiness_report` with
 `schema_version=1`; release automation should reject unknown object names or
 schema versions instead of guessing field semantics.
+Saved reports can be checked for schema and production-ready invariants:
+
+```bash
+./scripts/verify-tonglingyu-release-readiness-report.sh \
+  ./tonglingyu-release-readiness.json
+```
+
 The aggregate gate can be contract-tested without a live deployment:
 
 ```bash

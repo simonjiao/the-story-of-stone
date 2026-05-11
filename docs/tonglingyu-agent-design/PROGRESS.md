@@ -296,6 +296,10 @@
 - release readiness 报告已固定 `object=tonglingyu.release_readiness_report`
   和 `schema_version=1`；本地 contract smoke 会断言报告对象和 schema，避免
   后续自动化或人工复核靠字段猜测报告版本。
+- 已新增 `verify-tonglingyu-release-readiness-report.sh` 校验保存后的 release
+  readiness report。它会检查 schema、production-ready invariants、browser
+  validation、live gate 状态、override、blocker 和人工检查项，避免报告文件被
+  手动篡改成 `production_release_ready=true` 后仍被后续流程采信。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增
@@ -335,7 +339,8 @@
   必过 gate 失败等路径；聚合脚本只允许显式
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
-  标为 `passed_with_gate_command_overrides`。
+  标为 `passed_with_gate_command_overrides`；报告 validator 也覆盖篡改 ready
+  状态的负向路径。
 - Open WebUI 已补 `tonglingyu_gateway_admin` Action Function：只读查询 Gateway
   metrics、trace、evidence package audit 和 session，Function 内强制
   `__user__.role == "admin"` 后才调用 `/v1/admin/*`；普通用户不会触发 Gateway

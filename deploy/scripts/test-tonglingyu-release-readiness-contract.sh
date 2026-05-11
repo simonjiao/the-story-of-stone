@@ -13,6 +13,7 @@ MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evid
 MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
 STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
+TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 mkdir -p "${WORK_DIR}/screenshots"
@@ -252,6 +253,28 @@ assert_report "${default_report}" 'report["status"] == "passed_with_skipped_gate
 assert_report "${default_report}" 'report["exit_policy"] == "production_release_ready"'
 assert_report "${default_report}" 'report["gate_command_overrides_used"] is True'
 assert_report "${default_report}" '"openwebui_admin_action" in report["skipped_live_gates"]'
+"${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" "${default_report}" >/dev/null
+
+python3 - "${default_report}" "${TAMPERED_READY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["production_release_ready"] = True
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_validation_stdout="${WORK_DIR}/tampered-ready-validation.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_READY_REPORT}" >"${tampered_validation_stdout}"; then
+  echo "tampered production-ready reports must fail validation" >&2
+  exit 1
+fi
+assert_report "${tampered_validation_stdout}" 'report["status"] == "failed"'
+assert_report "${tampered_validation_stdout}" \
+  '"production_ready_requires_release_conditions_met" in report["errors"]'
 
 optional_report="${WORK_DIR}/summary-optional-failure.json"
 env "${common_env[@]}" \
