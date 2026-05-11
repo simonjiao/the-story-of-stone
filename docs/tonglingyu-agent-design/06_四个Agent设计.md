@@ -11,6 +11,11 @@
 | `honglou-commentary` | 脂批与版本证据 | 否 | 否 |
 | `honglou-reviewer` | 审校与质量闸门 | 否 | 否 |
 
+目标 Runtime 接入后，四个内部 Agent 都是受 profile contract 约束的 Runtime
+profile。`honglou-text` 和 `honglou-commentary` 也走 LLM profile，通过
+read-only tools 获取证据，而不是 Gateway 内的确定性检索 step。完整接入计划见
+`20_Runtime接入设计与实施计划.md`。
+
 ## `honglou-main`
 
 ### 职责
@@ -166,8 +171,21 @@
 | Agent | 与 RAG 的关系 |
 |---|---|
 | main | 生成检索计划，接收证据包，组织分层回答 |
-| text | 调用原文、诗词判词、人物别名和事件证据能力 |
-| commentary | 调用脂批、版本和对应正文能力 |
+| text | 通过 `tonglingyu.text.search` 调用原文、诗词判词、人物别名和事件证据能力 |
+| commentary | 通过 `tonglingyu.commentary.search` 调用脂批、版本和对应正文能力 |
 | reviewer | 检查证据卡片是否支持草稿结论，尤其检查不支持范围 |
 
 `honglou-text` 返回的结果必须是正文证据卡片，不得混入脂批解释。`honglou-commentary` 返回的结果必须明确批语版本和对应正文，不得把脂批当作正文事实。`honglou-reviewer` 必须检查主控 Agent 是否违反证据的不支持范围。
+
+## Runtime Profile Contract 摘要
+
+完整字段以 `20_Runtime接入设计与实施计划.md` 为准。这里保留职责摘要：
+
+1. `honglou-text`：输入用户问题、检索意图、版本/回目/人物条件和 top_k；
+   输出正文证据分析、支持范围、不支持范围和 evidence refs。
+2. `honglou-commentary`：输入用户问题、脂批/版本问题、版本条件和对应正文
+   需求；输出脂批证据分析、对应正文、支持范围、不支持范围和 evidence refs。
+3. `honglou-main`：输入用户问题、text/commentary 输出、证据包 ref 和回答
+   策略；输出草稿回答、claim statements 和证据引用关系。
+4. `honglou-reviewer`：输入用户问题、草稿、证据包 ref、claim statements 和
+   负面清单；输出 review status、issues、severity 和 required revisions。

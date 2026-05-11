@@ -1,0 +1,223 @@
+# 20 Runtime 接入设计与实施计划
+
+## 文档定位
+
+本文定义“通灵玉”接入 Agent Runtime 的目标架构、职责边界和实施 checklist。
+它属于通灵玉领域设计，不属于 Agent Runtime 本体设计。
+
+本文引用并整合以下现有文档：
+
+1. `05_总体架构.md`：Open WebUI 单入口、Gateway、四 Agent 和 RAG 分层。
+2. `06_四个Agent设计.md`：`honglou-main`、`honglou-text`、
+   `honglou-commentary`、`honglou-reviewer` 的职责边界。
+3. `07_Gateway设计.md`：通灵玉 Gateway 的入口、安全和编排边界。
+4. `08_知识库与RAG设计.md`：正文、脂批、版本、人物和证据包语义。
+5. `10_内部接口契约.md`：Gateway、Runtime profile、知识服务和审计协作。
+6. `11_权限审计与安全治理.md`：内部 profile 不暴露、reviewer 不可关闭。
+7. `12_验证方案与验收标准.md`：证据、审校、Gateway 和上线验证。
+8. `18_第一版实施细化计划.md`：第一版工程阶段和本地/目标环境验证顺序。
+9. `../agent-platform-design/09-agent-runtime-design.md`：通用 Runtime 能力基线。
+
+## 目标
+
+把通灵玉从“Gateway 内部执行领域流程”调整为“薄 Gateway + Runtime Agent”：
+
+```text
+Open WebUI
+  -> tonglingyu-gateway
+      -> protocol / auth / routing / trace / SSE / model hiding
+      -> Runtime step plan
+          -> honglou-text LLM profile
+              -> read-only tool: tonglingyu.text.search
+          -> honglou-commentary LLM profile
+              -> read-only tool: tonglingyu.commentary.search
+          -> read-only tool: tonglingyu.evidence.package.create/read/replay
+          -> honglou-main LLM profile
+          -> honglou-reviewer LLM profile
+      -> OpenAI-compatible final response
+```
+
+Open WebUI 仍只看到一个 `tonglingyu` 模型；`honglou-*` profile、工具列表、
+reviewer 开关、证据包内部字段和 admin trace 字段都不能由普通用户控制。
+
+## 当前基线与目标差距
+
+当前 Rust `tonglingyu-gateway` 已具备可运行的产品闭环：source snapshot、
+SQLite/FTS、证据卡片、证据包、reviewer、replay、admin trace、SSE 和
+OpenAI-compatible 入口都已在 Gateway 内实现。
+
+这可以作为运行基线和回归基线，但不是目标架构的最终形态。目标架构下：
+
+1. Gateway 请求路径不直接查询 source snapshot、SQLite 或 FTS。
+2. Gateway 不直接构建证据卡片、证据包或 replay 结果。
+3. Gateway 不直接执行 reviewer 或本地审校规则。
+4. `honglou-text` 和 `honglou-commentary` 都是 LLM profile，不是确定性
+   Gateway 检索 step。
+5. 证据检索、证据包、reviewer 和 replay 进入 Runtime profile 与
+   read-only tools。
+
+## Gateway 边界
+
+Gateway 只负责：
+
+1. OpenAI-compatible 单入口。
+2. 鉴权、限流、路由、trace/session 透传、SSE 转发和响应封装。
+3. 只暴露 `tonglingyu`，不暴露 `honglou-*` 内部 profile。
+4. 防止用户指定内部 profile、工具权限或关闭 reviewer。
+5. 创建或提交受控 Runtime step plan。
+6. 透传或代理 Runtime 返回的 trace id、package ref、session id 和安全错误。
+7. 保存必要的会话映射、请求状态和审计索引。
+
+Gateway 不负责：
+
+1. 不直接执行 source snapshot、SQLite 或 FTS 查询。
+2. 不构建证据卡片或证据包。
+3. 不执行 reviewer 或本地审校规则。
+4. 不维护证据包 replay 的领域逻辑。
+5. 不把通灵玉领域数据写入 Agent Platform core contract。
+6. 不把内部 profile、prompt、tool payload 或 admin 字段暴露给普通用户。
+
+## Runtime Agent 边界
+
+Runtime Agent 负责：
+
+1. 执行 `honglou-main`、`honglou-text`、`honglou-commentary`、
+   `honglou-reviewer` 四个 profile。
+2. 校验每个 profile 的 typed input/output。
+3. 执行受 per-profile tool policy 约束的 read-only tool call。
+4. 记录 profile、step、model、schema version、tool set、duration、
+   trace_id 和 evidence/package ref。
+5. 返回受约束的结构化结果、流式事件或安全错误。
+
+Runtime Agent 不负责：
+
+1. 不决定普通用户是否有权访问通灵玉入口。
+2. 不暴露内部 profile 为 Open WebUI 可见模型。
+3. 不执行写入类外部动作；写工具仍只能走 Agent Platform Manager 的
+   external-action apply/compensate。
+4. 不绕过 Gateway 的单入口、模型隐藏、reviewer 强制和审计要求。
+
+## 领域 Read-only Tools
+
+目标工具矩阵如下：
+
+<!-- markdownlint-disable MD013 -->
+| Tool | 责任 | 允许调用方 |
+| --- | --- | --- |
+| `tonglingyu.text.search` | 查询正文、版本、回目、人物和 source snapshot 位置，返回 evidence refs | `honglou-text` |
+| `tonglingyu.commentary.search` | 查询脂批、评语、版本对应正文和来源位置，返回 commentary evidence refs | `honglou-commentary` |
+| `tonglingyu.evidence.package.create` | 根据 profile 输出和 evidence refs 生成证据包 | Runtime step plan |
+| `tonglingyu.evidence.package.read` | 读取证据包摘要和引用明细 | `honglou-main`、`honglou-reviewer`、Gateway admin proxy |
+| `tonglingyu.evidence.package.replay` | 按 evidence/package ref 回放证据，不依赖上游模型 | Gateway admin proxy |
+<!-- markdownlint-enable MD013 -->
+
+工具输出必须保留原始字形、source snapshot 位置、版本边界、evidence refs、
+支持范围和不支持范围。工具不得返回 secret、写权限 credential、内部 prompt
+或无来源自然语言概括。
+
+## 四 Profile Contract 草案
+
+### `honglou-text`
+
+LLM profile。输入用户问题、检索意图、版本/回目/人物条件和 top_k；通过
+`tonglingyu.text.search` 获取正文证据；输出正文证据分析、支持范围、
+不支持范围和 evidence refs。
+
+禁止：解释脂批、输出最终回答、把影视或网络设定当正文证据。
+
+### `honglou-commentary`
+
+LLM profile。输入用户问题、脂批/版本问题、版本条件和对应正文需求；通过
+`tonglingyu.commentary.search` 获取批语证据；输出脂批证据分析、对应正文、
+支持范围、不支持范围和 evidence refs。
+
+禁止：把脂批当正文事实、忽略批语版本、输出最终回答。
+
+### `honglou-main`
+
+LLM profile。输入用户问题、`honglou-text` 输出、`honglou-commentary` 输出、
+证据包 ref 和回答策略；输出草稿回答、claim statements 和证据引用关系。
+
+禁止：直接访问数据库、绕过 reviewer、把无证据推断写成事实。
+
+### `honglou-reviewer`
+
+LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和负面清单；
+输出 review status、issues、severity 和 required revisions。
+
+禁止：重写最终答案、替代 text/commentary 大规模检索、泄露内部规则全文。
+
+## 实施 Checklist
+
+### R5A 薄 Gateway 边界
+
+- [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
+  trace/session 透传、SSE 转发、模型隐藏和响应封装。
+- [ ] Gateway 不直接执行 source snapshot、SQLite 或 FTS 查询。
+- [ ] Gateway 不构建证据卡片或证据包。
+- [ ] Gateway 不执行 reviewer 或本地审校规则。
+- [ ] Gateway 不维护证据包 replay 的领域逻辑。
+- [ ] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
+  内部 profile。
+
+### R5B Evidence Read-only Tools
+
+- [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
+- [ ] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
+- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
+- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
+- [ ] 定义 `tonglingyu.text.search` read-only tool。
+- [ ] 定义 `tonglingyu.commentary.search` read-only tool。
+- [ ] 定义 `tonglingyu.evidence.package.create` read-only tool。
+- [ ] 定义 `tonglingyu.evidence.package.read` read-only tool。
+- [ ] 定义 `tonglingyu.evidence.package.replay` read-only tool。
+- [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
+- [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
+
+### R5C 四 Profile 编排
+
+- [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
+- [ ] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
+- [ ] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
+- [ ] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
+- [ ] `honglou-text` 通过 `tonglingyu.text.search` 生成正文 evidence analysis。
+- [ ] `honglou-commentary` 通过 `tonglingyu.commentary.search` 生成脂批
+  evidence analysis。
+- [ ] 证据包由 Runtime Agent/tool 侧创建，`honglou-main` 只消费 package ref
+  和前序 profile 输出。
+- [ ] `honglou-reviewer` 强制消费草稿、claim statements 和 package ref。
+- [ ] reviewer 不可关闭；未通过 reviewer 的结果不能作为最终回答返回。
+- [ ] 四 profile step 的 schema、duration、tool set、output_ref 和 trace_id
+  可追踪。
+
+### R5D Gateway 集成和验证
+
+- [ ] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
+  step plan 调用。
+- [ ] Gateway streaming response 只转发 Runtime event，不自行生成领域内容。
+- [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
+  安全元数据，不暴露内部日志或 prompt。
+- [ ] 增加 fake runtime/tools 的本地 dry run。
+- [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
+- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
+- [ ] 目标环境 Open WebUI 单入口复测。
+
+## 验收口径
+
+完成后才能声明：
+
+```text
+通灵玉四个内部 Agent 已真实 Runtime 化。
+通灵玉 Gateway 已满足薄 Gateway + Runtime Agent 架构。
+```
+
+完成前只能声明：
+
+```text
+通灵玉已有可运行的 Gateway 内部闭环；目标 Runtime 接入仍在 R5 checklist 中。
+```
+
+Agent Runtime 本体完成不等于通灵玉接入完成；通灵玉接入必须以本文 checklist、
+Gateway 回归测试和目标环境 Open WebUI 单入口复测为准。

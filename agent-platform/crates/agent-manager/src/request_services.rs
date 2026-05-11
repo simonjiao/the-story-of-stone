@@ -3,8 +3,8 @@ use agent_core::{
     AGENT_TYPE_BACKGROUND_WORKER, AgentBridgeBinding, AgentCoreError, AgentInstance, AgentRequest,
     AgentRequestInput, AgentRequestResponse, AgentRequestStatus, AgentRun, AgentSession,
     ApprovalRequest, ApprovalStatus, AuditDecision, AuditLog, AuthContext, CoreResult, ErrorCode,
-    ExternalActionMode, PolicyContext, PolicyDecision, RequestType, ResourceRef, RiskLevel,
-    TriggerType, new_id, request_action,
+    ExternalActionMode, PolicyContext, PolicyDecision, ProfileContract, RequestType, ResourceRef,
+    RiskLevel, TriggerType, new_id, request_action,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -164,7 +164,9 @@ pub(crate) async fn fulfill_request(
             let target_resource = request.target_resource.clone().ok_or_else(|| {
                 AgentCoreError::coded(ErrorCode::Conflict, "target_resource required")
             })?;
-            let hash = core_hash(&request.structured_payload);
+            let mut config = request.structured_payload.clone();
+            normalize_runtime_requested_tools(&mut config);
+            let hash = core_hash(&config);
             if let Some(existing) = store
                 .find_reusable_agent(
                     &request.requested_by_user,
@@ -195,7 +197,7 @@ pub(crate) async fn fulfill_request(
                 agent_type,
                 target_resource,
                 hash,
-                request.structured_payload.clone(),
+                config,
                 auth.trace_id.clone(),
             );
             agent.display_name = request
@@ -245,6 +247,83 @@ pub(crate) async fn fulfill_request(
             let request = store.update_agent_request(request).await?;
             Ok(request_response(&request))
         }
+    }
+}
+
+fn normalize_runtime_requested_tools(config: &mut Value) {
+    if config.pointer("/runtime/requested_tools").is_some()
+        || config.get("requested_tools").is_some()
+    {
+        return;
+    }
+    let Some(contract_value) = config
+        .pointer("/runtime/profile_contract")
+        .or_else(|| config.get("profile_contract"))
+        .cloned()
+    else {
+        return;
+    };
+    let Ok(contract) = serde_json::from_value::<ProfileContract>(contract_value) else {
+        return;
+    };
+    let requested_tools = contract.tool_policy.effective_tools();
+    if requested_tools.is_empty() {
+        return;
+    }
+    let Some(object) = config.as_object_mut() else {
+        return;
+    };
+    let runtime = object.entry("runtime").or_insert_with(|| json!({}));
+    if !runtime.is_object() {
+        *runtime = json!({});
+    }
+    if let Some(runtime_object) = runtime.as_object_mut() {
+        runtime_object.insert("requested_tools".to_string(), json!(requested_tools));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::RuntimeToolPolicy;
+
+    #[test]
+    fn normalize_runtime_requested_tools_derives_scope_from_contract() {
+        let mut contract = ProfileContract::new("profile-a", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+        let mut config = json!({
+            "runtime": {
+                "profile_contract": contract
+            }
+        });
+
+        normalize_runtime_requested_tools(&mut config);
+
+        assert_eq!(
+            config.pointer("/runtime/requested_tools").unwrap(),
+            &json!(["tool.alpha", "tool.beta"])
+        );
+    }
+
+    #[test]
+    fn normalize_runtime_requested_tools_keeps_explicit_scope() {
+        let mut contract = ProfileContract::new("profile-a", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+        let mut config = json!({
+            "runtime": {
+                "profile_contract": contract,
+                "requested_tools": ["tool.alpha"]
+            }
+        });
+
+        normalize_runtime_requested_tools(&mut config);
+
+        assert_eq!(
+            config.pointer("/runtime/requested_tools").unwrap(),
+            &json!(["tool.alpha"])
+        );
     }
 }
 

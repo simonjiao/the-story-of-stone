@@ -81,6 +81,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "futures-util",
  "metrics",
  "reqwest",
  "serde",

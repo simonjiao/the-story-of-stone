@@ -239,8 +239,434 @@ string_enum! {
     }
 }
 
+string_enum! {
+    pub enum RuntimeStreamEventType {
+        Started => "started",
+        Delta => "delta",
+        ToolProgress => "tool_progress",
+        SchemaPartial => "schema_partial",
+        Final => "final",
+        Error => "error",
+    }
+}
+
+string_enum! {
+    pub enum RuntimeStepStatus {
+        Planned => "planned",
+        Executing => "executing",
+        Completed => "completed",
+        Failed => "failed",
+        Skipped => "skipped",
+    }
+}
+
+string_enum! {
+    pub enum RuntimeStepPlanOwner {
+        Manager => "manager",
+        Orchestrator => "orchestrator",
+        DomainGateway => "domain_gateway",
+    }
+}
+
+string_enum! {
+    pub enum RuntimeStepFailurePolicy {
+        Stop => "stop",
+        Continue => "continue",
+    }
+}
+
+string_enum! {
+    pub enum RuntimeToolCapability {
+        ReadOnly => "read_only",
+        Write => "write",
+    }
+}
+
+fn default_runtime_step_plan_owner() -> RuntimeStepPlanOwner {
+    RuntimeStepPlanOwner::Manager
+}
+
+fn default_runtime_step_failure_policy() -> RuntimeStepFailurePolicy {
+    RuntimeStepFailurePolicy::Stop
+}
+
+fn default_runtime_tool_capability() -> RuntimeToolCapability {
+    RuntimeToolCapability::ReadOnly
+}
+
 pub const AGENT_TYPE_BACKGROUND_WORKER: &str = "background_worker";
 pub const AGENT_TYPE_OBSERVER: &str = "observer_agent";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileContractVersion {
+    pub version: String,
+}
+
+impl ProfileContractVersion {
+    pub fn new(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeToolSpec {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub output_schema: Value,
+    #[serde(default)]
+    pub output_ref_required: bool,
+    #[serde(default = "default_runtime_tool_capability")]
+    pub capability: RuntimeToolCapability,
+}
+
+impl RuntimeToolSpec {
+    pub fn read_only(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            description: format!("Read-only runtime tool {name}"),
+            name,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }
+    }
+
+    pub fn write(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            description: format!("Write runtime tool {name}"),
+            name,
+            input_schema: json!({"type": "object"}),
+            output_schema: json!({"type": "object"}),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::Write,
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.capability == RuntimeToolCapability::ReadOnly
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RuntimeToolPolicy {
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub denied_tools: Vec<String>,
+    #[serde(default)]
+    pub tool_specs: Vec<RuntimeToolSpec>,
+}
+
+impl RuntimeToolPolicy {
+    pub fn read_only(allowed_tools: Vec<String>) -> Self {
+        let tool_specs = allowed_tools
+            .iter()
+            .map(|tool| RuntimeToolSpec::read_only(tool.clone()))
+            .collect();
+        Self {
+            allowed_tools,
+            denied_tools: vec![
+                "external_action.apply".to_string(),
+                "external_action.compensate".to_string(),
+                "direct_external_write".to_string(),
+            ],
+            tool_specs,
+        }
+    }
+
+    pub fn effective_tools(&self) -> Vec<String> {
+        self.allowed_tools
+            .iter()
+            .filter(|tool| {
+                !self.denied_tools.iter().any(|denied| denied == *tool)
+                    && self
+                        .spec_for_contract_tool(tool)
+                        .is_some_and(|spec| spec.is_read_only())
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn effective_tools_for_request(&self, requested_tools: &[String]) -> Vec<String> {
+        self.effective_tools()
+            .into_iter()
+            .filter(|tool| requested_tools.iter().any(|requested| requested == tool))
+            .collect()
+    }
+
+    pub fn effective_tool_specs(&self) -> Vec<RuntimeToolSpec> {
+        let effective_tools = self.effective_tools();
+        effective_tools
+            .iter()
+            .map(|tool| {
+                self.tool_specs
+                    .iter()
+                    .find(|spec| spec.name == *tool)
+                    .cloned()
+                    .unwrap_or_else(|| RuntimeToolSpec::read_only(tool.clone()))
+            })
+            .collect()
+    }
+
+    pub fn effective_tool_specs_for_request(
+        &self,
+        requested_tools: &[String],
+    ) -> Vec<RuntimeToolSpec> {
+        let effective_tools = self.effective_tools_for_request(requested_tools);
+        effective_tools
+            .iter()
+            .map(|tool| {
+                self.tool_specs
+                    .iter()
+                    .find(|spec| spec.name == *tool)
+                    .cloned()
+                    .unwrap_or_else(|| RuntimeToolSpec::read_only(tool.clone()))
+            })
+            .collect()
+    }
+
+    pub fn has_rules(&self) -> bool {
+        !(self.allowed_tools.is_empty()
+            && self.denied_tools.is_empty()
+            && self.tool_specs.is_empty())
+    }
+
+    fn spec_for_contract_tool(&self, tool: &str) -> Option<RuntimeToolSpec> {
+        if self.denied_tools.iter().any(|denied| denied == tool) {
+            return None;
+        }
+        if !self.allowed_tools.iter().any(|name| name == tool) {
+            return None;
+        }
+        self.tool_specs
+            .iter()
+            .find(|spec| spec.name == tool)
+            .cloned()
+            .or_else(|| Some(RuntimeToolSpec::read_only(tool.to_string())))
+    }
+
+    pub fn validate_requested_tools(&self, requested_tools: &[String]) -> CoreResult<()> {
+        for tool in requested_tools {
+            let Some(spec) = self.spec_for_contract_tool(tool) else {
+                return Err(AgentCoreError::coded(
+                    crate::ErrorCode::Forbidden,
+                    "runtime profile requested an unauthorized tool",
+                ));
+            };
+            if !spec.is_read_only() {
+                return Err(AgentCoreError::coded(
+                    crate::ErrorCode::Forbidden,
+                    "runtime profile requested a non-read-only tool",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_tool_call(
+        &self,
+        tool: &str,
+        requested_tools: &[String],
+    ) -> CoreResult<RuntimeToolSpec> {
+        if !requested_tools.iter().any(|requested| requested == tool) {
+            return Err(AgentCoreError::coded(
+                crate::ErrorCode::Forbidden,
+                "runtime profile requested a tool outside authorized scope",
+            ));
+        }
+        let Some(spec) = self.spec_for_contract_tool(tool) else {
+            return Err(AgentCoreError::coded(
+                crate::ErrorCode::Forbidden,
+                "runtime profile requested an unauthorized tool",
+            ));
+        };
+        if !spec.is_read_only() {
+            return Err(AgentCoreError::coded(
+                crate::ErrorCode::Forbidden,
+                "runtime profile requested a non-read-only tool",
+            ));
+        }
+        Ok(spec)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileContract {
+    pub profile_id: String,
+    pub version: ProfileContractVersion,
+    #[serde(default)]
+    pub input_schema: Value,
+    #[serde(default)]
+    pub output_schema: Value,
+    #[serde(default)]
+    pub tool_policy: RuntimeToolPolicy,
+    pub max_context_messages: Option<usize>,
+    pub max_runtime_seconds: Option<u64>,
+    #[serde(default)]
+    pub safety_policy: Value,
+}
+
+impl ProfileContract {
+    pub fn new(profile_id: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            profile_id: profile_id.into(),
+            version: ProfileContractVersion::new(version),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            tool_policy: RuntimeToolPolicy::default(),
+            max_context_messages: None,
+            max_runtime_seconds: None,
+            safety_policy: json!({}),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStep {
+    pub step_id: String,
+    pub profile_id: String,
+    pub contract_version: String,
+    pub status: RuntimeStepStatus,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default = "default_runtime_step_failure_policy")]
+    pub fallback_policy: RuntimeStepFailurePolicy,
+    #[serde(default)]
+    pub output_contract: Value,
+    #[serde(default)]
+    pub tool_policy: RuntimeToolPolicy,
+    #[serde(default)]
+    pub input_ref: Option<String>,
+    #[serde(default)]
+    pub output_ref: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+impl RuntimeStep {
+    pub fn new(
+        profile_id: impl Into<String>,
+        contract_version: impl Into<String>,
+        metadata: Value,
+    ) -> Self {
+        Self {
+            step_id: new_id("rtstep"),
+            profile_id: profile_id.into(),
+            contract_version: contract_version.into(),
+            status: RuntimeStepStatus::Planned,
+            depends_on: Vec::new(),
+            fallback_policy: RuntimeStepFailurePolicy::Stop,
+            output_contract: json!({}),
+            tool_policy: RuntimeToolPolicy::default(),
+            input_ref: None,
+            output_ref: None,
+            metadata,
+        }
+    }
+
+    pub fn from_profile_contract(contract: &ProfileContract, metadata: Value) -> Self {
+        let mut step = Self::new(
+            contract.profile_id.clone(),
+            contract.version.version.clone(),
+            metadata,
+        );
+        step.output_contract = contract.output_schema.clone();
+        step.tool_policy = contract.tool_policy.clone();
+        step
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeStepPlan {
+    pub plan_id: String,
+    pub trace_id: String,
+    #[serde(default = "default_runtime_step_plan_owner")]
+    pub owner: RuntimeStepPlanOwner,
+    pub status: RuntimeStepStatus,
+    pub steps: Vec<RuntimeStep>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+impl RuntimeStepPlan {
+    pub fn new(trace_id: impl Into<String>, steps: Vec<RuntimeStep>) -> Self {
+        Self {
+            plan_id: new_id("rtplan"),
+            trace_id: trace_id.into(),
+            owner: RuntimeStepPlanOwner::Manager,
+            status: RuntimeStepStatus::Planned,
+            steps,
+            metadata: json!({}),
+        }
+    }
+
+    pub fn for_profile_contracts(
+        trace_id: impl Into<String>,
+        owner: RuntimeStepPlanOwner,
+        contracts: impl IntoIterator<Item = ProfileContract>,
+        metadata: Value,
+    ) -> Self {
+        let mut plan = Self::new(
+            trace_id,
+            contracts
+                .into_iter()
+                .map(|contract| RuntimeStep::from_profile_contract(&contract, json!({})))
+                .collect(),
+        );
+        plan.owner = owner;
+        plan.metadata = metadata;
+        plan
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeToolCall {
+    pub call_id: String,
+    pub profile_id: String,
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: Value,
+    pub trace_id: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+impl RuntimeToolCall {
+    pub fn new(
+        profile_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        arguments: Value,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            call_id: new_id("rttool"),
+            profile_id: profile_id.into(),
+            tool_name: tool_name.into(),
+            arguments,
+            trace_id: trace_id.into(),
+            metadata: json!({}),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeToolResult {
+    pub call_id: String,
+    pub profile_id: String,
+    pub tool_name: String,
+    pub output_ref: Option<String>,
+    #[serde(default)]
+    pub output: Value,
+    #[serde(default)]
+    pub metadata: Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleAssignment {
@@ -1429,6 +1855,39 @@ mod tests {
         );
 
         assert_eq!(agent.hermes_profile, "background_worker:analysis");
+    }
+
+    #[test]
+    fn runtime_tool_policy_rejects_non_read_only_tool_call() {
+        let mut policy = RuntimeToolPolicy {
+            allowed_tools: vec!["tool.write".to_string()],
+            denied_tools: Vec::new(),
+            tool_specs: vec![RuntimeToolSpec::write("tool.write")],
+        };
+        let requested_tools = vec!["tool.write".to_string()];
+
+        let scope_error = policy
+            .validate_requested_tools(&requested_tools)
+            .unwrap_err();
+        assert_eq!(scope_error.code(), crate::ErrorCode::Forbidden);
+
+        let call_error = policy
+            .validate_tool_call("tool.write", &requested_tools)
+            .unwrap_err();
+        assert_eq!(call_error.code(), crate::ErrorCode::Forbidden);
+        assert!(call_error.to_string().contains("non-read-only tool"));
+        assert!(policy.effective_tools().is_empty());
+        assert!(
+            policy
+                .effective_tool_specs_for_request(&requested_tools)
+                .is_empty()
+        );
+
+        policy.denied_tools.push("tool.write".to_string());
+        let denied_error = policy
+            .validate_tool_call("tool.write", &requested_tools)
+            .unwrap_err();
+        assert_eq!(denied_error.code(), crate::ErrorCode::Forbidden);
     }
 
     #[test]

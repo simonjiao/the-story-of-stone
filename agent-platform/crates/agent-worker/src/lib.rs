@@ -1,8 +1,8 @@
 use agent_core::{
-    AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient, CoreResult,
-    EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ResourceLock, RuntimeClient,
-    RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, TriggerType, assess_observer_snapshot,
-    metric_names, new_id,
+    AgentInstance, AgentRunStatus, AgentSessionMessage, AuditDecision, AuditLog, ConnectorClient,
+    CoreResult, EmptyResponse, ExternalActionMode, MessageRole, ObserverReport, ProfileContract,
+    ResourceLock, RuntimeClient, RuntimeOutput, RuntimeRunInput, RuntimeSessionInput, RuntimeStep,
+    TriggerType, assess_observer_snapshot, metric_names, new_id,
 };
 use agent_runtime::{
     HermesRuntimeClient, HttpReadOnlyConnector, HttpReadOnlyConnectorConfig,
@@ -192,6 +192,23 @@ impl Worker {
             .read_only_snapshot(connector_name(&agent), &run.target_resource, &run.trace_id)
             .await?
             .summary;
+        let profile_contract = profile_contract_from_agent(&agent)?;
+        let requested_tools = requested_tools_from_agent(&agent, profile_contract.as_ref());
+        let runtime_step = Some(RuntimeStep::new(
+            profile_contract
+                .as_ref()
+                .map(|contract| contract.profile_id.as_str())
+                .unwrap_or(agent.hermes_profile.as_str()),
+            profile_contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str())
+                .unwrap_or("unversioned"),
+            serde_json::json!({
+                "run_id": &run.id,
+                "worker_id": &self.worker_id,
+                "trigger_type": run.trigger_type,
+            }),
+        ));
         let output = if matches!(run.trigger_type, TriggerType::SessionMessage) {
             let context =
                 context.ok_or_else(|| agent_store::store_error("session context missing"))?;
@@ -204,6 +221,9 @@ impl Worker {
                     message,
                     context,
                     snapshot: Some(snapshot),
+                    profile_contract,
+                    runtime_step,
+                    requested_tools,
                     trace_id: run.trace_id.clone(),
                 })
                 .await?
@@ -214,6 +234,9 @@ impl Worker {
                     agent: Some(agent.clone()),
                     context,
                     snapshot: Some(snapshot),
+                    profile_contract,
+                    runtime_step,
+                    requested_tools,
                     trace_id: run.trace_id.clone(),
                 })
                 .await?
@@ -222,6 +245,8 @@ impl Worker {
             .update_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
             .await?;
         self.audit_run_status(&run.id, AgentRunStatus::Validating, &run.trace_id)
+            .await;
+        self.audit_runtime_tool_events(&run.id, &run.trace_id, &output)
             .await;
         let summary = output.result_summary.clone();
         self.append_runtime_messages(&run, &output).await?;
@@ -286,6 +311,53 @@ impl Worker {
         let mut audit = AuditLog::new(None, action, decision, reason, trace_id.to_string());
         audit.run_id = Some(run_id.to_string());
         let _ = self.store.append_audit(audit).await;
+    }
+
+    async fn audit_runtime_tool_events(
+        &self,
+        run_id: &str,
+        trace_id: &str,
+        output: &RuntimeOutput,
+    ) {
+        let Some(events) = output
+            .metadata
+            .get("tool_audit_events")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return;
+        };
+        for event in events {
+            let action = event
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("runtime_tool_event");
+            let mut audit = AuditLog::new(
+                None,
+                action,
+                AuditDecision::Completed,
+                Some(safe_audit_reason(event)),
+                trace_id.to_string(),
+            );
+            audit.run_id = Some(run_id.to_string());
+            audit.resource_type = Some("runtime_tool".to_string());
+            audit.resource_id = event
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            let _ = self.store.append_audit(audit).await;
+        }
+    }
+}
+
+fn safe_audit_reason(value: &serde_json::Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    if text.len() <= 2048 {
+        text
+    } else {
+        format!(
+            "{}...<truncated>",
+            text.chars().take(2048).collect::<String>()
+        )
     }
 }
 
@@ -384,6 +456,44 @@ fn connector_name(agent: &agent_core::AgentInstance) -> &str {
         .unwrap_or("local")
 }
 
+fn profile_contract_from_agent(agent: &AgentInstance) -> CoreResult<Option<ProfileContract>> {
+    let Some(value) = agent
+        .config
+        .pointer("/runtime/profile_contract")
+        .or_else(|| agent.config.get("profile_contract"))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|_| agent_store::store_error("agent profile contract is malformed"))
+}
+
+fn requested_tools_from_agent(
+    agent: &AgentInstance,
+    profile_contract: Option<&ProfileContract>,
+) -> Vec<String> {
+    let configured = agent
+        .config
+        .pointer("/runtime/requested_tools")
+        .or_else(|| agent.config.get("requested_tools"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if configured.is_empty() {
+        profile_contract
+            .map(|contract| contract.tool_policy.effective_tools())
+            .unwrap_or_default()
+    } else {
+        configured
+    }
+}
+
 pub async fn idle_heartbeat(
     store: StoreRef,
     worker_id: &str,
@@ -399,7 +509,7 @@ mod tests {
     use super::*;
     use agent_core::{
         AgentInstance, AgentRun, AgentSession, AgentSessionMessage, ConnectorSnapshot, MemoryStore,
-        MessageRole, RuntimeSessionInput, TriggerType, new_trace_id,
+        MessageRole, RuntimeSessionInput, RuntimeToolPolicy, TriggerType, new_trace_id,
     };
     use async_trait::async_trait;
     use serde_json::json;
@@ -427,7 +537,26 @@ mod tests {
                 result_summary: "runtime assistant response".to_string(),
                 result_ref: Some("result://recording/session".to_string()),
                 messages: Vec::new(),
-                metadata: json!({"trace_id": input.trace_id}),
+                metadata: json!({
+                    "trace_id": input.trace_id,
+                    "tool_audit_events": [
+                        {
+                            "event": "runtime_tool_call",
+                            "call_id": "call-test",
+                            "profile_id": "test-profile",
+                            "tool_name": "tool.read",
+                            "trace_id": input.trace_id
+                        },
+                        {
+                            "event": "runtime_tool_result",
+                            "call_id": "call-test",
+                            "profile_id": "test-profile",
+                            "tool_name": "tool.read",
+                            "output_ref": "runtime://tool-results/call-test",
+                            "output_summary": "object_keys:value"
+                        }
+                    ]
+                }),
             })
         }
     }
@@ -483,6 +612,26 @@ mod tests {
         worker.tick().await.unwrap();
         let completed = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(completed.run_status, AgentRunStatus::Completed);
+    }
+
+    #[test]
+    fn requested_tools_fall_back_to_profile_contract_policy() {
+        let agent = AgentInstance::new(
+            "user-1",
+            "background_worker",
+            "resource:team/project-alpha",
+            "hash",
+            json!({}),
+            new_trace_id(),
+        );
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+
+        assert_eq!(
+            requested_tools_from_agent(&agent, Some(&contract)),
+            vec!["tool.alpha".to_string(), "tool.beta".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -547,6 +696,20 @@ mod tests {
                 && message.content_summary == "runtime assistant response"
                 && message.run_id.as_deref() == Some(run_id.as_str())
                 && message.content_ref.as_deref() == Some("result://recording/session")
+        }));
+        let audits = store.list_audit(100).await.unwrap();
+        assert!(audits.iter().any(|audit| {
+            audit.action == "runtime_tool_call"
+                && audit.run_id.as_deref() == Some(run_id.as_str())
+                && audit.resource_id.as_deref() == Some("call-test")
+        }));
+        assert!(audits.iter().any(|audit| {
+            audit.action == "runtime_tool_result"
+                && audit.run_id.as_deref() == Some(run_id.as_str())
+                && audit.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("runtime://tool-results/call-test")
+                        && !reason.contains("\"output\":")
+                })
         }));
     }
 }

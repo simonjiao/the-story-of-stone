@@ -45,6 +45,10 @@ P0 直接依赖只服务最小闭环：`tokio`、`axum`、`tower`、`serde`、`s
 
 ORM、GraphQL、外部 memory SDK、gRPC 或 exporter 不是永久禁止；禁止的是让它们反向改变 P0/P1 的 domain model、API contract、状态机和审计模型。
 
+Runtime streaming、profile schema、per-profile tool permission、multi-profile
+step plan 和领域 profile 接入的专项设计见
+[09-agent-runtime-design.md](09-agent-runtime-design.md)。
+
 ## API 分组
 
 ### Orchestrator 可用 API

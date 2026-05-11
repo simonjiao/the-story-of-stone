@@ -33,6 +33,9 @@
 - Rust `tonglingyu-gateway` 已实现 M2-M6 最小工程闭环：
   source snapshot loader、SQLite/FTS、别名种子、证据卡片、证据包、
   reviewer、OpenAI-compatible `/v1/models` 和 `/v1/chat/completions`。
+- 通灵玉目标架构已调整为“薄 Gateway + Runtime Agent”；当前 Gateway 内部
+  闭环作为运行基线和回归基线保留，目标 Runtime 接入设计和 checklist 见
+  `20_Runtime接入设计与实施计划.md`。
 - 本地建库已验证：5 个来源、10419 个 blocks、10419 条 FTS 记录。
 - 本地 HTTP 验证已通过：`/healthz`、`/v1/models`、`/v1/evidence/search`
   和 `/v1/chat/completions`。
@@ -95,7 +98,9 @@
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
-3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-4. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+2. 按 `20_Runtime接入设计与实施计划.md` 将 Gateway 内领域流程迁入
+   Runtime profile 与 read-only tools。
+3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。
