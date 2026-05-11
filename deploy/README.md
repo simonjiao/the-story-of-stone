@@ -376,6 +376,10 @@ Screenshot or local-file refs must be relative paths under the evidence JSON
 directory. Set `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` when the artifacts live
 in a separate directory. Admin audit refs should use `trace:tly-...`, and
 provider-setting refs should use `runbook:...` or a checked file/link.
+The verifier also rejects stale browser evidence older than
+`TONGLINGYU_BROWSER_REVIEW_MAX_AGE_HOURS` (default `24`) and rejects evidence
+whose `public_webui_url` does not match `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL`
+when that release URL is set.
 
 If writing the JSON manually, use this shape:
 

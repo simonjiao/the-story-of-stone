@@ -9,7 +9,10 @@ PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
+MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
+STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
+REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 mkdir -p "${WORK_DIR}/screenshots"
 : >"${WORK_DIR}/screenshots/models.png"
@@ -30,12 +33,12 @@ exit 42
 SH
 chmod +x "${FAIL_CMD}"
 
-cat >"${BROWSER_EVIDENCE_JSON}" <<'JSON'
+cat >"${BROWSER_EVIDENCE_JSON}" <<JSON
 {
   "object": "tonglingyu.openwebui_browser_review",
   "status": "passed",
   "review_ref": "mock-browser-review",
-  "reviewed_at": "2026-05-11T00:00:00Z",
+  "reviewed_at": "${REVIEWED_AT}",
   "reviewer": "release-reviewer",
   "public_webui_url": "https://example.invalid",
   "checks": {
@@ -149,6 +152,37 @@ if "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
 fi
 assert_report "${browser_evidence_missing_artifact_stdout}" \
   '"ordinary_user_model_visibility_evidence_ref_file_not_found" in report["errors"]'
+
+cp "${BROWSER_EVIDENCE_JSON}" "${MISMATCH_PUBLIC_URL_EVIDENCE_JSON}"
+browser_evidence_public_url_mismatch_stdout="${WORK_DIR}/browser-evidence-public-url-mismatch.stdout"
+if env TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://other.invalid \
+  "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${MISMATCH_PUBLIC_URL_EVIDENCE_JSON}" >"${browser_evidence_public_url_mismatch_stdout}"; then
+  echo "browser review evidence must be bound to the release public URL" >&2
+  exit 1
+fi
+assert_report "${browser_evidence_public_url_mismatch_stdout}" \
+  '"public_webui_url_mismatch" in report["errors"]'
+
+python3 - "${BROWSER_EVIDENCE_JSON}" "${STALE_BROWSER_EVIDENCE_JSON}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["reviewed_at"] = "2000-01-01T00:00:00Z"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+browser_evidence_stale_stdout="${WORK_DIR}/browser-evidence-stale.stdout"
+if "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${STALE_BROWSER_EVIDENCE_JSON}" >"${browser_evidence_stale_stdout}"; then
+  echo "browser review evidence must be recent" >&2
+  exit 1
+fi
+assert_report "${browser_evidence_stale_stdout}" \
+  '"reviewed_at_too_old" in report["errors"]'
 
 browser_record_missing_ack_stdout="${WORK_DIR}/browser-record-missing-ack.stdout"
 if env \

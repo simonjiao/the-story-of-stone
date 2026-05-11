@@ -311,11 +311,15 @@
   `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` 下找到，admin audit ref 需绑定
   `trace:tly-...`、文件或 HTTPS 链接，provider 设置复核需绑定 `runbook:...`、
   文件或 HTTPS 链接。
+- browser review evidence verifier 也会校验发布入口和时间窗口：设置
+  `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL` 后，证据中的 `public_webui_url`
+  必须匹配该入口；`reviewed_at` 默认必须在 24 小时内，避免用其他环境或过期
+  复核证据关闭 release gate。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
   readiness contract smoke，覆盖 browser review recorder 正负路径、
-  browser evidence ref 文件存在性、override guard、默认非 live 不 ready、
-  summary-only optional failure、mock live 条件满足但不 production ready、live
-  必过 gate 失败等路径；聚合脚本只允许显式
+  browser evidence ref 文件存在性、public URL mismatch、过期 evidence、
+  override guard、默认非 live 不 ready、summary-only optional failure、mock live
+  条件满足但不 production ready、live 必过 gate 失败等路径；聚合脚本只允许显式
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
   标为 `passed_with_gate_command_overrides`。

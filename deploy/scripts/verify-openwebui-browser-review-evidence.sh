@@ -15,13 +15,19 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 evidence_path = sys.argv[1].strip()
 expected_review_ref = sys.argv[2].strip()
 evidence_root = os.environ.get("TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT", "").strip()
+expected_public_url = (
+    os.environ.get("TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL", "").strip()
+    or os.environ.get("PUBLIC_WEBUI_URL", "").strip()
+    or os.environ.get("OPEN_WEBUI_BASE_URL", "").strip()
+)
+max_age_hours_raw = os.environ.get("TONGLINGYU_BROWSER_REVIEW_MAX_AGE_HOURS", "24").strip()
 required_checks = [
     "ordinary_user_model_visibility",
     "streaming_chat_ux",
@@ -72,6 +78,7 @@ def report(status):
                 "evidence_path": evidence_path,
                 "review_ref": evidence.get("review_ref", "") if isinstance(evidence, dict) else "",
                 "expected_review_ref_bound": bool(expected_review_ref),
+                "expected_public_url_bound": bool(expected_public_url),
                 "checked_items": required_checks,
                 "errors": errors,
                 "secret_values_printed": False,
@@ -97,6 +104,27 @@ def has_timezone(value):
     except ValueError:
         return False
     return parsed.tzinfo is not None and parsed.tzinfo.utcoffset(parsed) is not None
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def normalize_url(value):
+    parsed = urlparse(value.strip())
+    path = parsed.path.rstrip("/") or ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
 
 
 def secret_key_paths(value, prefix="$"):
@@ -227,6 +255,22 @@ if not nonempty(reviewed_at):
     errors.append("reviewed_at_missing")
 elif not has_timezone(reviewed_at):
     errors.append("reviewed_at_must_be_iso8601_with_timezone")
+else:
+    reviewed_at_dt = parse_timestamp(reviewed_at)
+    try:
+        max_age_hours = float(max_age_hours_raw)
+    except ValueError:
+        max_age_hours = -1.0
+    if max_age_hours <= 0:
+        errors.append("review_max_age_hours_must_be_positive")
+    elif reviewed_at_dt is not None:
+        now = datetime.now(timezone.utc)
+        age_seconds = (now - reviewed_at_dt).total_seconds()
+        future_skew_seconds = (reviewed_at_dt - now).total_seconds()
+        if future_skew_seconds > 300:
+            errors.append("reviewed_at_must_not_be_in_future")
+        elif age_seconds > max_age_hours * 3600:
+            errors.append("reviewed_at_too_old")
 if not nonempty(evidence.get("reviewer")):
     errors.append("reviewer_missing")
 
@@ -237,6 +281,8 @@ else:
     parsed_url = urlparse(public_webui_url.strip())
     if parsed_url.scheme != "https" or not parsed_url.netloc:
         errors.append("public_webui_url_must_be_https_url")
+    elif expected_public_url and normalize_url(public_webui_url) != normalize_url(expected_public_url):
+        errors.append("public_webui_url_mismatch")
 
 secret_paths = secret_key_paths(evidence)
 if secret_paths:
