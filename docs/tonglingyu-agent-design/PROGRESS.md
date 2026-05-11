@@ -278,17 +278,17 @@
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
   普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核
   变成显式发布前置，而不是报告里的被动备注。
-- 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
-  工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
-  目前承担 plan gate 和 profile step execution envelope，尚未承担 profile
-  content/tool execution；目标 Open WebUI 页面复测仍未完成。
+- 当前不能宣布生产完成：Hermes profile content/tool execution 已通过
+  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但事实源、
+  证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束，目标
+  Open WebUI live gate 和页面侧复测仍未完成。
 
 ## 下一步
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
    可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-2. 继续按 `20_Runtime接入设计与实施计划.md` 将 Runtime workflow 的 profile
-   content/tool execution 接入 `agent-runtime` / Hermes 执行面。
+2. 在目标环境运行 release readiness live gate，确认 Hermes Runtime、
+   strict Gateway、Open WebUI Function 和页面侧复核均通过。
 3. 在 Open WebUI 中嵌入通灵玉 Gateway 管理入口，仅 admin 可用。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
