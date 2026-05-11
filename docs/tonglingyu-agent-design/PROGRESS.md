@@ -187,6 +187,9 @@
   只写 rejected reason，不允许改写本地证据包。
 - Gateway eval/replay 检查已改为通过 `TonglingyuRuntimeStore` 调 runtime replay；
   gateway crate 不再直接调用 runtime reviewer 或 `replay_answer` 领域函数。
+- Gateway 公共 `/v1/*` 入口已增加 per-subject rate limit，
+  `TONGLINGYU_RATE_LIMIT_PER_MINUTE` 默认 120，`0` 表示关闭；health、JSON
+  metrics 和 Prometheus info 暴露有效配置，smoke 覆盖默认值。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。

@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
@@ -207,6 +207,8 @@ struct ServeArgs {
     max_messages: usize,
     #[arg(long, env = "TONGLINGYU_MAX_QUESTION_CHARS", default_value_t = 4000)]
     max_question_chars: usize,
+    #[arg(long, env = "TONGLINGYU_RATE_LIMIT_PER_MINUTE", default_value_t = 120)]
+    rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
     #[arg(long, env = "TONGLINGYU_PROFILE_MAIN", default_value = "honglou-main")]
@@ -243,6 +245,8 @@ struct AppState {
     allow_admin_with_gateway_key: bool,
     max_messages: usize,
     max_question_chars: usize,
+    rate_limit_per_minute: usize,
+    rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
     profiles: InternalProfiles,
     started_at: String,
@@ -254,6 +258,85 @@ struct InternalProfiles {
     text: String,
     commentary: String,
     reviewer: String,
+}
+
+#[derive(Debug)]
+struct GatewayRateLimiter {
+    max_per_window: usize,
+    window: Duration,
+    buckets: Mutex<BTreeMap<String, RateLimitBucket>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateLimitBucket {
+    window_start: Instant,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateLimitDecision {
+    allowed: bool,
+    limit: usize,
+    remaining: usize,
+    retry_after_secs: u64,
+}
+
+impl GatewayRateLimiter {
+    fn per_minute(max_per_minute: usize) -> Self {
+        Self::new(max_per_minute, Duration::from_secs(60))
+    }
+
+    fn new(max_per_window: usize, window: Duration) -> Self {
+        Self {
+            max_per_window,
+            window,
+            buckets: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn check(&self, subject: &str) -> RateLimitDecision {
+        if self.max_per_window == 0 {
+            return RateLimitDecision {
+                allowed: true,
+                limit: 0,
+                remaining: usize::MAX,
+                retry_after_secs: 0,
+            };
+        }
+        let now = Instant::now();
+        let mut buckets = self
+            .buckets
+            .lock()
+            .expect("gateway rate limiter mutex poisoned");
+        buckets.retain(|_, bucket| now.duration_since(bucket.window_start) < self.window);
+        let bucket = buckets
+            .entry(subject.to_string())
+            .or_insert(RateLimitBucket {
+                window_start: now,
+                count: 0,
+            });
+        if now.duration_since(bucket.window_start) >= self.window {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+        if bucket.count >= self.max_per_window {
+            let elapsed = now.duration_since(bucket.window_start);
+            let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);
+            return RateLimitDecision {
+                allowed: false,
+                limit: self.max_per_window,
+                remaining: 0,
+                retry_after_secs: retry_after,
+            };
+        }
+        bucket.count += 1;
+        RateLimitDecision {
+            allowed: true,
+            limit: self.max_per_window,
+            remaining: self.max_per_window.saturating_sub(bucket.count),
+            retry_after_secs: 0,
+        }
+    }
 }
 
 fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProfiles {
@@ -325,6 +408,20 @@ fn gateway_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<Str
     )
 }
 
+fn gateway_auth_and_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    trace_id: Option<&str>,
+) -> AuthResult<String> {
+    let subject = gateway_auth_subject(state, headers)?;
+    let decision = state.rate_limiter.check(&subject);
+    if decision.allowed {
+        Ok(subject)
+    } else {
+        Err(Box::new(rate_limit_response(&decision, trace_id)))
+    }
+}
+
 fn admin_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
     let keys = if state.admin_api_keys.is_empty() && state.allow_admin_with_gateway_key {
         &state.gateway_api_keys
@@ -372,6 +469,27 @@ fn authorize_with_keys(
             None,
         )))
     }
+}
+
+fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
+    let mut value = json!({
+        "error": {
+            "code": "gateway_rate_limited",
+            "message": "gateway rate limit exceeded",
+            "limit_per_minute": decision.limit,
+            "remaining": decision.remaining,
+            "retry_after_secs": decision.retry_after_secs,
+        }
+    });
+    if let Some(trace_id) = trace_id {
+        value["trace_id"] = json!(trace_id);
+    }
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, decision.retry_after_secs.to_string())],
+        Json(value),
+    )
+        .into_response()
 }
 
 fn configured_keys(primary: Option<String>, additional: Option<String>) -> Vec<String> {
@@ -626,6 +744,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         allow_admin_with_gateway_key: args.allow_admin_with_gateway_key,
         max_messages: args.max_messages,
         max_question_chars: args.max_question_chars,
+        rate_limit_per_minute: args.rate_limit_per_minute,
+        rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
         profiles: InternalProfiles {
             main: args.profile_main,
@@ -1846,6 +1966,11 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "mode": agent_runtime_mode.as_str(),
                 "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
             },
+            "rate_limit": {
+                "public_per_minute": state.rate_limit_per_minute,
+                "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
+                "disabled": state.rate_limit_per_minute == 0,
+            },
             "sources": stats.sources,
             "blocks": stats.blocks
         }))
@@ -1863,7 +1988,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = gateway_auth_subject(&state, &headers) {
+    if let Err(response) = gateway_auth_and_rate_limit(&state, &headers, None) {
         return *response;
     }
     Json(json!({
@@ -1884,7 +2009,7 @@ async fn search_endpoint(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    if let Err(response) = gateway_auth_subject(&state, &headers) {
+    if let Err(response) = gateway_auth_and_rate_limit(&state, &headers, None) {
         return *response;
     }
     match search_evidence_with_policy(&state.runtime_store, &params.q, params.limit.unwrap_or(8)) {
@@ -1911,7 +2036,7 @@ async fn package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    let subject = match gateway_auth_subject(&state, &headers) {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
@@ -1936,7 +2061,7 @@ async fn replay_package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    let subject = match gateway_auth_subject(&state, &headers) {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
@@ -2075,7 +2200,7 @@ async fn chat_completions(
 ) -> Response {
     let trace_id = new_trace_id();
     let started = Instant::now();
-    let auth_subject = match gateway_auth_subject(&state, &headers) {
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
@@ -2991,6 +3116,8 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "gateway_key_count": state.gateway_api_keys.len(),
             "admin_key_count": state.admin_api_keys.len(),
             "admin_key_isolated": !state.allow_admin_with_gateway_key,
+            "rate_limit_per_minute": state.rate_limit_per_minute,
+            "rate_limit_disabled": state.rate_limit_per_minute == 0,
         },
         "retention": {
             "retention_days": state.retention_days,
@@ -3020,11 +3147,12 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\"}} 1",
+        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\"}} 1",
         escape_metric_label(&state.model_id),
         escape_metric_label(&state.profiles.main),
         escape_metric_label(&state.profiles.reviewer),
-        escape_metric_label(agent_runtime_mode.as_str())
+        escape_metric_label(agent_runtime_mode.as_str()),
+        state.rate_limit_per_minute
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -3183,6 +3311,36 @@ mod tests {
         assert!(public.get("_runtime_stream_events").is_none());
         assert!(public.get("_stream_source").is_none());
         assert_eq!(public["session_id"], "session-test");
+    }
+
+    #[test]
+    fn gateway_rate_limiter_rejects_after_subject_budget() {
+        let limiter = GatewayRateLimiter::new(2, Duration::from_secs(60));
+
+        let first = limiter.check("subject-a");
+        let second = limiter.check("subject-a");
+        let third = limiter.check("subject-a");
+        let other_subject = limiter.check("subject-b");
+
+        assert!(first.allowed);
+        assert_eq!(first.remaining, 1);
+        assert!(second.allowed);
+        assert_eq!(second.remaining, 0);
+        assert!(!third.allowed);
+        assert_eq!(third.limit, 2);
+        assert!(third.retry_after_secs >= 1);
+        assert!(other_subject.allowed);
+    }
+
+    #[test]
+    fn gateway_rate_limiter_can_be_disabled() {
+        let limiter = GatewayRateLimiter::new(0, Duration::from_secs(60));
+
+        for _ in 0..10 {
+            let decision = limiter.check("subject-a");
+            assert!(decision.allowed);
+            assert_eq!(decision.limit, 0);
+        }
     }
 
     #[test]

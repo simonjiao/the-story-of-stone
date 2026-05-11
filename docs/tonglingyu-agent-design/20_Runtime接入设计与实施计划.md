@@ -159,6 +159,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 请求路径、dry-run、eval、health、search、metrics、admin trace/package
   读取和 build/prune 管理路径通过 `TonglingyuRuntimeStore` 访问 runtime store，
   不复用 Gateway `Connection`。
+- [x] Gateway 公共 `/v1/*` 入口已增加 per-subject rate limit，
+  `TONGLINGYU_RATE_LIMIT_PER_MINUTE` 可配置，`0` 表示关闭；health、JSON
+  metrics 和 Prometheus info 暴露有效配置，smoke 覆盖默认值。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

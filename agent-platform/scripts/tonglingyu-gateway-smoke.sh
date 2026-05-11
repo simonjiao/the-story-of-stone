@@ -182,6 +182,7 @@ curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics/prometheus" >"${PROMETHEUS_TXT}"
 grep -q 'tonglingyu_evidence_packages_total' "${PROMETHEUS_TXT}"
 grep -q 'agent_runtime_mode="minimal"' "${PROMETHEUS_TXT}"
+grep -q 'rate_limit_per_minute="120"' "${PROMETHEUS_TXT}"
 
 "${GATEWAY_BIN}" eval --db "${DB_PATH}" --report "${REPORT_PATH}" >/dev/null
 
@@ -228,6 +229,8 @@ import sys
 
 assert health["status"] == "ok", health
 assert health["agent_runtime"]["mode"] == "minimal", health
+assert health["rate_limit"]["public_per_minute"] == 120, health
+assert health["rate_limit"]["disabled"] is False, health
 assert health["sources"] >= 5, health
 assert health["blocks"] >= 10000, health
 assert models_unauth["error"]["code"] == "gateway_unauthorized", models_unauth
@@ -324,6 +327,8 @@ assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
 assert metrics["counts"]["evidence_packages"] >= 1, metrics
 assert metrics["dependencies"]["sqlite"] == "ok", metrics
 assert metrics["dependencies"]["agent_runtime"]["mode"] == "minimal", metrics
+assert metrics["security"]["rate_limit_per_minute"] == 120, metrics
+assert metrics["security"]["rate_limit_disabled"] is False, metrics
 
 assert report["status"] == "passed", report
 assert report["summary"]["total"] >= 20, report
