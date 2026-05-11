@@ -165,6 +165,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 请求体上限已显式配置为 `TONGLINGYU_MAX_BODY_BYTES`
   默认 1 MiB，避免依赖框架隐式默认；health、JSON metrics 和 Prometheus
   info 暴露有效配置，smoke 覆盖默认值。
+- [x] Gateway 启动时强制 admin API key 与 Gateway service key 集合隔离；
+  已配置 admin key 时不允许继续开启 gateway-key admin fallback，metrics
+  的 `admin_key_isolated` 反映真实 key 集合状态。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。
@@ -338,6 +341,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-runtime-config.sh`，基于 compose
+  渲染结果检查 Tonglingyu/Hermes strict runtime wiring、Open WebUI 默认模型、
+  admin/gateway key 隔离和 provider key 不含 admin credential。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
   回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`

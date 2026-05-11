@@ -11,10 +11,10 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
-- `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It builds the
-  SQLite/FTS evidence knowledge base from source snapshots, assembles evidence
-  packages, runs reviewer checks, and calls Hermes as the upstream generation
-  layer when configured.
+- `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It owns the
+  HTTP/auth/rate-limit/model surface and calls `tonglingyu-runtime` for
+  source-snapshot, evidence package, reviewer, replay, audit, and stats work.
+  Hermes remains the upstream generation layer when configured.
 - `agent-manager`: Agent Platform control plane, internal Docker network only.
 - `agent-orchestrator`: internal Agent Platform gateway for control-plane
   workflows; ordinary 通灵玉 chat enters through `tonglingyu-gateway`.
@@ -62,7 +62,8 @@ Required changes:
   `http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1`.
 - `OPEN_WEBUI_OPENAI_API_KEYS`: optional semicolon-separated provider keys for
   those Open WebUI connections. Leave empty for the default internal
-  `tonglingyu-gateway` and `agent-orchestrator` connections.
+  `tonglingyu-gateway` and `agent-orchestrator` connections. It may contain the
+  Gateway service key, but must never contain `TONGLINGYU_ADMIN_API_KEY`.
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
@@ -75,12 +76,14 @@ Required changes:
 - `TONGLINGYU_GATEWAY_API_KEYS`: optional comma-separated old/new gateway keys
   during rotation.
 - `TONGLINGYU_ADMIN_API_KEY`: separate administrator credential for
-  `/v1/admin/*`; it must not be the same value as `TONGLINGYU_GATEWAY_API_KEY`.
+  `/v1/admin/*`; it must not overlap with any `TONGLINGYU_GATEWAY_API_KEY(S)`
+  value.
 - `TONGLINGYU_ADMIN_API_KEYS`: optional comma-separated old/new admin keys during
   rotation.
 - `TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY`: defaults to `false`; keep it false
   outside local development so admin endpoints cannot be opened with the normal
-  Open WebUI provider key.
+  Open WebUI provider key. Production verification rejects enabling this flag
+  when admin keys are configured.
 - `TONGLINGYU_RETENTION_DAYS`: runtime audit/session/package retention window.
   Default is `90`; set `0` only when automatic pruning must be disabled.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
@@ -177,6 +180,19 @@ it once before restarting:
 ```bash
 ./scripts/migrate-runtime-data.sh
 ```
+
+Verify the rendered formal runtime configuration before starting or restarting
+the production stack:
+
+```bash
+./scripts/verify-tonglingyu-runtime-config.sh
+```
+
+This gate checks the compose-rendered service environment for strict
+Tonglingyu/Hermes runtime wiring, `DEFAULT_MODELS=tonglingyu`, Gateway/admin key
+set isolation, and Open WebUI provider keys that do not contain admin
+credentials. It prints variable names and gate status only; it must not print
+secret values.
 
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and

@@ -329,6 +329,9 @@ assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
 assert metrics["counts"]["evidence_packages"] >= 1, metrics
 assert metrics["dependencies"]["sqlite"] == "ok", metrics
 assert metrics["dependencies"]["agent_runtime"]["mode"] == "minimal", metrics
+assert metrics["security"]["gateway_key_count"] == 1, metrics
+assert metrics["security"]["admin_key_count"] == 1, metrics
+assert metrics["security"]["admin_key_isolated"] is True, metrics
 assert metrics["security"]["rate_limit_per_minute"] == 120, metrics
 assert metrics["security"]["rate_limit_disabled"] is False, metrics
 assert metrics["limits"]["max_body_bytes"] == 1048576, metrics

@@ -209,6 +209,13 @@
   `_runtime_stream_events` / `_stream_source`，smoke 已断言公开 completion 不暴露
   runtime step plan、agent runtime plan gate、planned profiles 或内部 stream
   event 列表。
+- Gateway 已强制 admin API key 与 Gateway service key 集合隔离：启动时拒绝
+  重叠 key，拒绝在已配置 admin key 时继续开启 gateway-key admin fallback；
+  metrics 的 `admin_key_isolated` 现在反映真实 key 集合隔离状态。
+- `deploy/scripts/verify-tonglingyu-runtime-config.sh` 已补 compose 渲染配置 gate：
+  检查 Tonglingyu Gateway/Hermes/Agent Runtime strict wiring、Open WebUI 默认
+  模型、admin/gateway key 集合隔离，以及 Open WebUI provider key 不含 admin
+  credential；输出只包含变量名和 gate 状态。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
   工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
   目前承担 plan gate 和 profile step execution envelope，尚未承担 profile

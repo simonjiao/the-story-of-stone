@@ -513,6 +513,46 @@ fn configured_keys(primary: Option<String>, additional: Option<String>) -> Vec<S
         .collect()
 }
 
+fn validate_admin_key_isolation(
+    gateway_api_keys: &[String],
+    admin_api_keys: &[String],
+    allow_admin_with_gateway_key: bool,
+) -> Result<()> {
+    let gateway_keys = gateway_api_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if admin_api_keys
+        .iter()
+        .any(|key| gateway_keys.contains(key.as_str()))
+    {
+        return Err(anyhow!(
+            "TONGLINGYU admin API keys must not overlap gateway API keys"
+        ));
+    }
+    if allow_admin_with_gateway_key && !admin_api_keys.is_empty() {
+        return Err(anyhow!(
+            "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY requires empty admin API key configuration"
+        ));
+    }
+    Ok(())
+}
+
+fn is_admin_key_isolated(state: &AppState) -> bool {
+    if state.admin_api_keys.is_empty() || state.allow_admin_with_gateway_key {
+        return false;
+    }
+    let gateway_keys = state
+        .gateway_api_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    state
+        .admin_api_keys
+        .iter()
+        .all(|key| !gateway_keys.contains(key.as_str()))
+}
+
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let value = header_value(headers, "authorization")?;
     value
@@ -718,6 +758,13 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
+    let gateway_api_keys = configured_keys(args.gateway_api_key, args.gateway_api_keys);
+    let admin_api_keys = configured_keys(args.admin_api_key, args.admin_api_keys);
+    validate_admin_key_isolation(
+        &gateway_api_keys,
+        &admin_api_keys,
+        args.allow_admin_with_gateway_key,
+    )?;
     if args.auto_build_kb && !TonglingyuRuntimeStore::new(args.db.clone()).has_knowledge_base()? {
         let build = BuildKbArgs {
             source_root: args.source_root.clone(),
@@ -742,8 +789,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         upstream_model: args.upstream_model,
         upstream_timeout_secs: args.upstream_timeout_secs,
         max_evidence: args.max_evidence,
-        gateway_api_keys: configured_keys(args.gateway_api_key, args.gateway_api_keys),
-        admin_api_keys: configured_keys(args.admin_api_key, args.admin_api_keys),
+        gateway_api_keys,
+        admin_api_keys,
         allow_admin_with_gateway_key: args.allow_admin_with_gateway_key,
         max_messages: args.max_messages,
         max_question_chars: args.max_question_chars,
@@ -3125,7 +3172,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "security": {
             "gateway_key_count": state.gateway_api_keys.len(),
             "admin_key_count": state.admin_api_keys.len(),
-            "admin_key_isolated": !state.allow_admin_with_gateway_key,
+            "admin_key_isolated": is_admin_key_isolated(state),
             "rate_limit_per_minute": state.rate_limit_per_minute,
             "rate_limit_disabled": state.rate_limit_per_minute == 0,
         },
@@ -3357,6 +3404,54 @@ mod tests {
             assert!(decision.allowed);
             assert_eq!(decision.limit, 0);
         }
+    }
+
+    #[test]
+    fn configured_keys_deduplicates_trims_and_splits_rotation_keys() {
+        let keys = configured_keys(
+            Some(" gateway-a ".to_string()),
+            Some("gateway-b, gateway-a, ,gateway-c".to_string()),
+        );
+
+        assert_eq!(keys, ["gateway-a", "gateway-b", "gateway-c"]);
+    }
+
+    #[test]
+    fn rejects_overlapping_gateway_and_admin_keys() {
+        let err = validate_admin_key_isolation(
+            &["gateway-a".to_string(), "shared".to_string()],
+            &["admin-a".to_string(), "shared".to_string()],
+            false,
+        )
+        .expect_err("overlapping gateway/admin keys must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("admin API keys must not overlap gateway API keys")
+        );
+        assert!(!err.to_string().contains("shared"));
+    }
+
+    #[test]
+    fn rejects_admin_gateway_fallback_when_admin_keys_are_configured() {
+        let err = validate_admin_key_isolation(
+            &["gateway-a".to_string()],
+            &["admin-a".to_string()],
+            true,
+        )
+        .expect_err("admin fallback must not coexist with admin keys");
+
+        assert!(
+            err.to_string()
+                .contains("requires empty admin API key configuration")
+        );
+        assert!(!err.to_string().contains("admin-a"));
+    }
+
+    #[test]
+    fn allows_gateway_fallback_only_without_admin_keys() {
+        validate_admin_key_isolation(&["gateway-a".to_string()], &[], true)
+            .expect("local gateway-key admin fallback should remain available without admin keys");
     }
 
     #[test]
