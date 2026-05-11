@@ -161,12 +161,24 @@ impl TonglingyuRuntimeStore {
         input: RuntimeWorkflowInput,
         mode: TonglingyuAgentRuntimeMode,
     ) -> Result<RuntimeWorkflowOutput> {
+        let registry =
+            RuntimeProfileRegistry::new(agent_runtime_profile_contracts(&input.profiles));
+        let runtime = tonglingyu_agent_runtime_client(mode, self.clone(), registry)?;
+        self.execute_workflow_with_agent_runtime_client(input, mode, runtime)
+            .await
+    }
+
+    async fn execute_workflow_with_agent_runtime_client(
+        &self,
+        input: RuntimeWorkflowInput,
+        mode: TonglingyuAgentRuntimeMode,
+        runtime: Arc<dyn RuntimeClient>,
+    ) -> Result<RuntimeWorkflowOutput> {
         let mut workflow = {
             let conn = self.open_connection()?;
             execute_runtime_workflow(&conn, input.clone())?
         };
-        attach_agent_runtime_step_execution(&mut workflow, &input.profiles, self.clone(), mode)
-            .await?;
+        attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await?;
         let agent_runtime_content_application =
             apply_agent_runtime_content_outputs(&mut workflow, mode);
         workflow.stream_events = workflow_stream_events(
@@ -1427,16 +1439,14 @@ pub fn execute_runtime_workflow(
 async fn attach_agent_runtime_step_execution(
     workflow: &mut RuntimeWorkflowOutput,
     profiles: &RuntimeWorkflowProfiles,
-    store: TonglingyuRuntimeStore,
     mode: TonglingyuAgentRuntimeMode,
+    runtime: Arc<dyn RuntimeClient>,
 ) -> Result<()> {
     let profile_contracts = agent_runtime_profile_contracts(profiles);
-    let registry = RuntimeProfileRegistry::new(profile_contracts.clone());
     let contracts = profile_contracts
         .into_iter()
         .map(|contract| (contract.profile_id.clone(), contract))
         .collect::<BTreeMap<_, _>>();
-    let runtime = tonglingyu_agent_runtime_client(mode, store, registry)?;
     let trace_id = workflow.trace_id.clone();
     let question = workflow.question.clone();
     for step in &mut workflow.steps {
@@ -3801,6 +3811,64 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::{RuntimeOutput, RuntimeRunInput, RuntimeSessionInput};
+
+    #[derive(Debug, Default)]
+    struct DraftRuntimeClient;
+
+    #[async_trait]
+    impl RuntimeClient for DraftRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "draft runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "draft runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let operation = input
+                .runtime_step
+                .as_ref()
+                .and_then(|step| step.metadata.get("operation"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let message = input
+                .messages
+                .first()
+                .map(|message| message.content.clone())
+                .unwrap_or_default();
+            Ok(RuntimeOutput {
+                result_summary: if operation == "draft_answer" {
+                    format!("Hermes full workflow draft from {operation}. context={message}")
+                } else {
+                    format!("Hermes full workflow step {operation}. context={message}")
+                },
+                result_ref: Some(format!(
+                    "result://draft-runtime/{}/{}",
+                    input.profile_id, operation
+                )),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "operation": operation,
+                }),
+            })
+        }
+    }
 
     fn sample_card(evidence_type: &str) -> EvidenceCard {
         EvidenceCard {
@@ -4207,6 +4275,68 @@ mod tests {
             )
             .expect("audit count");
         assert_eq!(count, workflow.steps.len() as i64);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-draft-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let workflow = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: "trace-hermes-draft-workflow-test".to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(DraftRuntimeClient),
+            )
+            .await
+            .expect("workflow executes");
+
+        assert_eq!(workflow.package.review.status, "needs_revision");
+        assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
+        assert!(workflow.draft_answer.contains(&workflow.package.package_id));
+        assert!(!workflow.final_answer.contains("Hermes full workflow draft"));
+        assert_eq!(
+            workflow.answer_source,
+            "agent_runtime_hermes_profile_rejected_by_local_review"
+        );
+        let draft_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "draft_answer")
+            .expect("draft step");
+        assert_eq!(
+            draft_step.agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
+            json!(false)
+        );
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "content_delta"
+                && event
+                    .content_delta
+                    .as_deref()
+                    .is_some_and(|chunk| chunk.contains("证据不足"))
+        }));
+        let events = store
+            .audit_events_for_trace(&workflow.trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_draft_consumed"
+                && event["payload"]["content_used_for_final_answer"] == json!(false)
+        }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

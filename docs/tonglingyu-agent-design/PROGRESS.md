@@ -162,6 +162,9 @@
 - profile step message 已携带 trace_id、profile、operation、question、input/output
   ref、allowed tools 和 step output JSON，避免 Hermes profile 只收到空泛
   envelope。
+- Runtime 单测已覆盖完整 store workflow：注入 fake Hermes runtime client，验证
+  Hermes draft 候选在 reviewer 降级时不会进入 final answer，并写入
+  `agent_runtime_profile_draft_consumed` audit event。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
