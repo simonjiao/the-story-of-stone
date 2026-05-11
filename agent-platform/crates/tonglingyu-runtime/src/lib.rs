@@ -1478,6 +1478,18 @@ async fn attach_agent_runtime_step_execution(
                 trace_id: trace_id.clone(),
             })
             .await?;
+        let tool_results = output
+            .metadata
+            .get("tool_results")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let tool_audit_events = output
+            .metadata
+            .get("tool_audit_events")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let tool_result_count = tool_results.as_array().map_or(0, Vec::len);
+        let tool_audit_event_count = tool_audit_events.as_array().map_or(0, Vec::len);
         step.agent_runtime = Some(json!({
             "client": mode.as_str(),
             "status": "executed",
@@ -1486,6 +1498,15 @@ async fn attach_agent_runtime_step_execution(
             "content_used_for_final_answer": false,
             "result_ref": output.result_ref,
             "result_summary": output.result_summary,
+            "tool_rounds": output
+                .metadata
+                .get("tool_rounds")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "tool_result_count": tool_result_count,
+            "tool_audit_event_count": tool_audit_event_count,
+            "tool_results": tool_results,
+            "tool_audit_events": tool_audit_events,
             "schema_version": output
                 .metadata
                 .get("schema_version")
@@ -1788,6 +1809,15 @@ fn workflow_stream_events(
                     "content_source": value.get("content_source").cloned().unwrap_or(Value::Null),
                     "content_used_for_final_answer": value
                         .get("content_used_for_final_answer")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "tool_rounds": value.get("tool_rounds").cloned().unwrap_or(Value::Null),
+                    "tool_result_count": value
+                        .get("tool_result_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "tool_audit_event_count": value
+                        .get("tool_audit_event_count")
                         .cloned()
                         .unwrap_or(Value::Null),
                 })),
@@ -3850,6 +3880,26 @@ mod tests {
                 .first()
                 .map(|message| message.content.clone())
                 .unwrap_or_default();
+            let tool_rounds = if operation == "draft_answer" { 1 } else { 0 };
+            let tool_results = if operation == "draft_answer" {
+                json!([{
+                    "call_id": "call-runtime-draft-package-read",
+                    "profile_id": input.profile_id,
+                    "tool_name": "tonglingyu.evidence.package.read",
+                    "output_ref": format!("runtime://tool-results/{operation}"),
+                }])
+            } else {
+                json!([])
+            };
+            let tool_audit_events = if operation == "draft_answer" {
+                json!([{
+                    "event": "runtime_tool_result",
+                    "tool_name": "tonglingyu.evidence.package.read",
+                    "trace_id": input.trace_id,
+                }])
+            } else {
+                json!([])
+            };
             Ok(RuntimeOutput {
                 result_summary: if operation == "draft_answer" {
                     format!("Hermes full workflow draft from {operation}. context={message}")
@@ -3865,6 +3915,9 @@ mod tests {
                     "runtime_profile": input.profile_id,
                     "trace_id": input.trace_id,
                     "operation": operation,
+                    "tool_rounds": tool_rounds,
+                    "tool_results": tool_results,
+                    "tool_audit_events": tool_audit_events,
                 }),
             })
         }
@@ -4323,6 +4376,18 @@ mod tests {
             draft_step.agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
             json!(false)
         );
+        let draft_agent_runtime = draft_step.agent_runtime.as_ref().unwrap();
+        assert_eq!(draft_agent_runtime["tool_rounds"], json!(1));
+        assert_eq!(draft_agent_runtime["tool_result_count"], json!(1));
+        assert_eq!(draft_agent_runtime["tool_audit_event_count"], json!(1));
+        assert_eq!(
+            draft_agent_runtime["tool_results"][0]["tool_name"],
+            "tonglingyu.evidence.package.read"
+        );
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "content_delta"
                 && event
@@ -4336,6 +4401,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_draft_consumed"
                 && event["payload"]["content_used_for_final_answer"] == json!(false)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_step_executed"
+                && event["payload"]["agent_runtime"]["tool_result_count"] == json!(1)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

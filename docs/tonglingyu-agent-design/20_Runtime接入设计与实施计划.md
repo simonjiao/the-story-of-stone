@@ -239,6 +239,10 @@ Hermes draft 候选会写入草稿、reviewer 降级时不会进入 final answer
 Gateway health、JSON metrics、Prometheus info 和 `runtime-dry-run` 已暴露
 `TONGLINGYU_AGENT_RUNTIME_MODE` 的有效模式，smoke 会断言默认 `minimal`，避免
 生产排障时误判当前使用的 Runtime client。
+Runtime step report、SQLite audit 和 streaming step summary 已透出
+agent-runtime/Hermes 工具 loop 观测信息，包括 `tool_rounds`、tool result
+count 和 tool audit event count；完整 tool result/audit event 保留在 step
+report/audit payload 中，stream 只暴露计数级摘要。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -289,6 +293,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   context，Hermes 不再只收到空泛 envelope。
 - [x] health、metrics、Prometheus info 和 dry-run 暴露 agent runtime mode，
   smoke 覆盖默认 `minimal` 模式。
+- [x] step report、audit 和 streaming step summary 暴露 Hermes tool loop
+  观测信息，避免生产排障时看不到 profile 是否实际调用工具。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`

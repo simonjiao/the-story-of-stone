@@ -167,6 +167,9 @@
   `agent_runtime_profile_draft_consumed` audit event。
 - Gateway health、JSON metrics、Prometheus info 和 `runtime-dry-run` 已暴露
   `TONGLINGYU_AGENT_RUNTIME_MODE` 的有效模式；smoke 断言默认 `minimal`。
+- Runtime step report、SQLite audit 和 streaming step summary 已透出
+  agent-runtime/Hermes 工具 loop 观测信息；完整 tool result/audit event
+  保留在 step report/audit payload 中，stream 只暴露计数级摘要。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。
