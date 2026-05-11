@@ -299,7 +299,9 @@
   `verify-openwebui-browser-review-evidence.sh` 校验
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE` 指向的 JSON 证据报告；
   Open WebUI 页面侧普通用户模型可见性、streaming UX、admin audit 和持久化
-  provider 设置复核必须逐项 `passed` 且带 `evidence_ref`，不能只靠口头 ACK。
+  provider 设置复核必须逐项 `passed` 且带 `evidence_ref`；证据报告内
+  `review_ref` 必须匹配 release ref，`reviewed_at` 必须带时区，公网入口必须是
+  HTTPS，不能只靠口头 ACK 或任意 JSON。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
   readiness contract smoke，覆盖 override guard、默认非 live 不 ready、
   summary-only optional failure、mock live 条件满足但不 production ready、live
@@ -390,14 +392,14 @@
 
 ## 下一步
 
-1. 先修复目标 `hhost` 的 Hermes -> `sub2api` -> 模型后端 502/超时问题。
-2. 在目标环境重新运行 strict Gateway live gate，确认新请求不再返回 500，且
-   admin trace 出现完整 Hermes Runtime summary/audit 闭环。
-3. 用真实 Open WebUI 账号做页面侧人工点击复核，确认登录态、普通用户模型
-   可见性、streaming 体验和管理员审计入口与容器内 smoke 口径一致。
-4. 在目标环境运行 release readiness live gate，确认 Hermes Runtime、
-   strict Gateway、Open WebUI Function、Gateway Admin Action 和页面侧复核均
-   通过。
-5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-6. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+1. 用真实 Open WebUI 账号做页面侧人工点击复核，生成
+   `openwebui-browser-review.json`，确认普通用户模型可见性、streaming 体验、
+   管理员审计入口和持久化 provider 设置都逐项带证据 ref。
+2. 在目标环境设置 browser review ACK、release ref 和 evidence path 后运行
+   release readiness live gate；只有无 command override 且
+   `production_release_ready=true` 时，才能关闭 R5D 最后一个 checklist 项。
+3. 关闭 R5D 后再声明“通灵玉四个内部 Agent 已真实 Runtime 化”和“通灵玉
+   Gateway 已满足薄 Gateway + Runtime Agent 架构”。
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。

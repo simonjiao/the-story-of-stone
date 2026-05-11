@@ -8,14 +8,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 load_optional_deploy_env_file
 
 EVIDENCE_PATH="${1:-${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}}"
+EXPECTED_REVIEW_REF="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
 
-python3 - "${EVIDENCE_PATH}" <<'PY'
+python3 - "${EVIDENCE_PATH}" "${EXPECTED_REVIEW_REF}" <<'PY'
 import json
-import os
 import sys
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 evidence_path = sys.argv[1].strip()
+expected_review_ref = sys.argv[2].strip()
 required_checks = [
     "ordinary_user_model_visibility",
     "streaming_chat_ux",
@@ -32,6 +35,20 @@ secret_key_terms = [
     "secret",
     "token",
 ]
+secret_value_needles = [
+    "api-key=",
+    "api_key=",
+    "apikey=",
+    "authorization:",
+    "bearer ",
+    "ghp_",
+    "github_pat_",
+    "password=",
+    "secret=",
+    "sk-",
+    "token=",
+    "xoxb-",
+]
 errors = []
 evidence = {}
 
@@ -43,6 +60,8 @@ def report(status):
                 "object": "tonglingyu.openwebui_browser_review_gate",
                 "status": status,
                 "evidence_path": evidence_path,
+                "review_ref": evidence.get("review_ref", "") if isinstance(evidence, dict) else "",
+                "expected_review_ref_bound": bool(expected_review_ref),
                 "checked_items": required_checks,
                 "errors": errors,
                 "secret_values_printed": False,
@@ -55,6 +74,19 @@ def report(status):
 
 def nonempty(value):
     return isinstance(value, str) and value.strip()
+
+
+def has_timezone(value):
+    if not isinstance(value, str):
+        return False
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.tzinfo.utcoffset(parsed) is not None
 
 
 def secret_key_paths(value, prefix="$"):
@@ -71,6 +103,21 @@ def secret_key_paths(value, prefix="$"):
     elif isinstance(value, list):
         for index, child in enumerate(value):
             paths.extend(secret_key_paths(child, f"{prefix}[{index}]"))
+    return paths
+
+
+def secret_value_paths(value, prefix="$"):
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(secret_value_paths(child, f"{prefix}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(secret_value_paths(child, f"{prefix}[{index}]"))
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(needle in lowered for needle in secret_value_needles):
+            paths.append(prefix)
     return paths
 
 
@@ -99,16 +146,35 @@ elif evidence.get("object") != "tonglingyu.openwebui_browser_review":
 
 if evidence.get("status") != "passed":
     errors.append("status_must_be_passed")
-if not nonempty(evidence.get("reviewed_at")):
+
+review_ref = evidence.get("review_ref")
+if not nonempty(review_ref):
+    errors.append("review_ref_missing")
+elif expected_review_ref and review_ref.strip() != expected_review_ref:
+    errors.append("review_ref_mismatch")
+
+reviewed_at = evidence.get("reviewed_at")
+if not nonempty(reviewed_at):
     errors.append("reviewed_at_missing")
+elif not has_timezone(reviewed_at):
+    errors.append("reviewed_at_must_be_iso8601_with_timezone")
 if not nonempty(evidence.get("reviewer")):
     errors.append("reviewer_missing")
-if not nonempty(evidence.get("public_webui_url")):
+
+public_webui_url = evidence.get("public_webui_url")
+if not nonempty(public_webui_url):
     errors.append("public_webui_url_missing")
+else:
+    parsed_url = urlparse(public_webui_url.strip())
+    if parsed_url.scheme != "https" or not parsed_url.netloc:
+        errors.append("public_webui_url_must_be_https_url")
 
 secret_paths = secret_key_paths(evidence)
 if secret_paths:
     errors.append("secret_like_fields_present=" + ",".join(secret_paths[:8]))
+secret_value_hits = secret_value_paths(evidence)
+if secret_value_hits:
+    errors.append("secret_like_values_present=" + ",".join(secret_value_hits[:8]))
 
 checks = evidence.get("checks") or {}
 if not isinstance(checks, dict):

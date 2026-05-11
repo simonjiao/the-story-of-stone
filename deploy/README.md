@@ -336,20 +336,26 @@ When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
 ordinary-user model visibility, streaming chat UX, admin audit visibility, and
 that persisted Open WebUI provider settings match the rendered environment.
 The ACK must also set `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE`
-to a JSON report accepted by:
+to a JSON report whose `review_ref` matches
+`TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF` and is accepted by:
 
 ```bash
-./scripts/verify-openwebui-browser-review-evidence.sh \
+review_ref=openwebui-browser-review-2026-05-11-hhost
+TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF="${review_ref}" \
+  ./scripts/verify-openwebui-browser-review-evidence.sh \
   ./openwebui-browser-review.json
 ```
 
 Use this report shape and keep screenshots, trace links, or runbook paths in
-`evidence_ref`; do not include token, key, password, or secret values:
+`evidence_ref`; do not include token, key, password, authorization header, or
+secret values. `reviewed_at` must include a timezone and `public_webui_url`
+must be the HTTPS public endpoint:
 
 ```json
 {
   "object": "tonglingyu.openwebui_browser_review",
   "status": "passed",
+  "review_ref": "openwebui-browser-review-2026-05-11-hhost",
   "reviewed_at": "2026-05-11T00:00:00Z",
   "reviewer": "operator-name",
   "public_webui_url": "https://chat.example.invalid",

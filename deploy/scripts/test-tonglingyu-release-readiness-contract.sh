@@ -28,6 +28,7 @@ cat >"${BROWSER_EVIDENCE_JSON}" <<'JSON'
 {
   "object": "tonglingyu.openwebui_browser_review",
   "status": "passed",
+  "review_ref": "mock-browser-review",
   "reviewed_at": "2026-05-11T00:00:00Z",
   "reviewer": "release-reviewer",
   "public_webui_url": "https://example.invalid",
@@ -101,6 +102,25 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 if report["status"] != "ok":
     raise SystemExit(report)
 if report["secret_values_printed"] is not False:
+    raise SystemExit(report)
+PY
+
+browser_evidence_mismatch_stdout="${WORK_DIR}/browser-evidence-mismatch.stdout"
+if env TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=other-review \
+  "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${BROWSER_EVIDENCE_JSON}" >"${browser_evidence_mismatch_stdout}"; then
+  echo "browser review evidence must be bound to the release review ref" >&2
+  exit 1
+fi
+python3 - "${browser_evidence_mismatch_stdout}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed":
+    raise SystemExit(report)
+if "review_ref_mismatch" not in report["errors"]:
     raise SystemExit(report)
 PY
 
