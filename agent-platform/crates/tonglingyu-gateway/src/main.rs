@@ -659,14 +659,8 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "profile_config",
         "internal_config",
     ];
-    const NESTED_OBJECTS: &[&str] = &[
-        "metadata",
-        "user",
-        "extra_body",
-        "options",
-        "parameters",
-        "config",
-    ];
+    const NESTED_OBJECTS: &[&str] = &["metadata", "extra_body", "options", "parameters", "config"];
+    const SHALLOW_NESTED_OBJECTS: &[&str] = &["user"];
     let mut found = Vec::new();
     if let Some(object) = payload.as_object() {
         for key in FORBIDDEN {
@@ -675,6 +669,14 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
             }
         }
         for nested_name in NESTED_OBJECTS {
+            collect_forbidden_control_fields(
+                nested_name,
+                object.get(*nested_name),
+                FORBIDDEN,
+                &mut found,
+            );
+        }
+        for nested_name in SHALLOW_NESTED_OBJECTS {
             if let Some(nested) = object.get(*nested_name).and_then(Value::as_object) {
                 for key in FORBIDDEN {
                     if nested.contains_key(*key) {
@@ -685,6 +687,49 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         }
     }
     found
+}
+
+fn collect_forbidden_control_fields(
+    prefix: &str,
+    value: Option<&Value>,
+    forbidden: &[&str],
+    found: &mut Vec<String>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    match value {
+        Value::Object(object) => {
+            for forbidden_key in forbidden {
+                if object.contains_key(*forbidden_key) {
+                    let field = format!("{prefix}.{forbidden_key}");
+                    found.push(field.clone());
+                }
+            }
+            for (key, nested) in object {
+                if forbidden.iter().any(|forbidden_key| forbidden_key == key) {
+                    continue;
+                }
+                collect_forbidden_control_fields(
+                    &format!("{prefix}.{key}"),
+                    Some(nested),
+                    forbidden,
+                    found,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (index, nested) in items.iter().enumerate() {
+                collect_forbidden_control_fields(
+                    &format!("{prefix}[{index}]"),
+                    Some(nested),
+                    forbidden,
+                    found,
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn error_response(
@@ -3449,27 +3494,32 @@ mod tests {
 
     #[test]
     fn forbidden_control_fields_rejects_runtime_and_admin_trace_controls() {
-        let fields = forbidden_control_fields(&json!({
+        let mut fields = forbidden_control_fields(&json!({
             "model": "tonglingyu",
             "agent_runtime_summary": {"status": "forged"},
             "metadata": {
                 "runtime_step_plan": [],
                 "admin_trace": {"trace_id": "forged"},
+                "nested": {"agent_runtime": {"mode": "forged"}},
                 "message_id": "open-webui-message",
             },
             "extra_body": {
                 "allowed_tools": ["tonglingyu.text.search"],
+                "layers": [{"runtime_step_outputs": []}],
             },
             "messages": [{"role": "user", "content": "通灵玉是什么？"}],
         }));
+        fields.sort();
 
         assert_eq!(
             fields,
             vec![
                 "agent_runtime_summary",
-                "metadata.runtime_step_plan",
-                "metadata.admin_trace",
                 "extra_body.allowed_tools",
+                "extra_body.layers[0].runtime_step_outputs",
+                "metadata.admin_trace",
+                "metadata.nested.agent_runtime",
+                "metadata.runtime_step_plan",
             ]
         );
     }

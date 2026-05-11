@@ -197,7 +197,8 @@
 - Gateway 公共 OpenAI-compatible 请求路径的 forbidden control fields 已覆盖
   后续新增的 Runtime/admin trace 字段，包括 `agent_runtime_summary`、
   `runtime_step_plan`、`allowed_tools` 和 `admin_trace`，防止普通 Open WebUI
-  请求伪造内部执行、工具或审计状态。
+  请求伪造内部执行、工具或审计状态；`metadata`、`extra_body`、`options`、
+  `parameters` 和 `config` 下会递归扫描这些控制字段。
 - strict Gateway live gate 已增加公共 chat 响应字段检查，拒绝
   `agent_runtime_summary`、`runtime_step_outputs`、`audit_events`、
   `_runtime_stream_events` 等内部 runtime/admin trace 字段泄露到普通响应。
