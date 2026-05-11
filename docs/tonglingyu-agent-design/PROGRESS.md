@@ -170,6 +170,10 @@
 - Runtime step report、SQLite audit 和 streaming step summary 已透出
   agent-runtime/Hermes 工具 loop 观测信息；完整 tool result/audit event
   保留在 step report/audit payload 中，stream 只暴露计数级摘要。
+- Hermes mode 已对 required profile step 增加 runtime tool result 强制校验：
+  step 声明了 allowed tools 但 agent-runtime/Hermes 没有返回匹配工具结果时，
+  workflow fail-closed，避免把未实际调用工具的 profile 文本误判为
+  content/tool execution。
 - Hermes `draft_answer` 结构化 JSON 候选必须匹配当前 evidence package
   `package_id` 且提供非空 `draft_answer`；错误 package 或缺少草稿时只写
   rejected audit，不进入本地草稿或最终回答。

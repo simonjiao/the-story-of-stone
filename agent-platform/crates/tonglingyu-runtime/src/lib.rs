@@ -1557,6 +1557,7 @@ async fn attach_agent_runtime_step_execution(
             .get("tool_results")
             .cloned()
             .unwrap_or_else(|| json!([]));
+        validate_agent_runtime_required_tools(mode, step, &tool_results)?;
         let tool_audit_events = output
             .metadata
             .get("tool_audit_events")
@@ -1600,6 +1601,38 @@ async fn attach_agent_runtime_step_execution(
         }));
     }
     Ok(())
+}
+
+fn validate_agent_runtime_required_tools(
+    mode: TonglingyuAgentRuntimeMode,
+    step: &RuntimeWorkflowStepReport,
+    tool_results: &Value,
+) -> Result<()> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes || !step.required || step.allowed_tools.is_empty()
+    {
+        return Ok(());
+    }
+    let executed_tools = tool_results
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("tool_name").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let missing_tools = step
+        .allowed_tools
+        .iter()
+        .filter(|tool| !executed_tools.contains(tool.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if missing_tools.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "Hermes runtime step {} ({}) did not execute required tool(s): {}",
+        step.step_id,
+        step.operation,
+        missing_tools.join(",")
+    ))
 }
 
 fn tonglingyu_agent_runtime_client(
@@ -4526,6 +4559,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct DraftRuntimeClient;
 
+    #[derive(Debug, Default)]
+    struct NoToolRuntimeClient;
+
     #[async_trait]
     impl RuntimeClient for DraftRuntimeClient {
         async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -4560,25 +4596,46 @@ mod tests {
                 .first()
                 .map(|message| message.content.clone())
                 .unwrap_or_default();
-            let tool_rounds = if operation == "draft_answer" { 1 } else { 0 };
-            let tool_results = if operation == "draft_answer" {
-                json!([{
-                    "call_id": "call-runtime-draft-package-read",
-                    "profile_id": input.profile_id,
-                    "tool_name": "tonglingyu.evidence.package.read",
-                    "output_ref": format!("runtime://tool-results/{operation}"),
-                }])
+            let tool_rounds = if input.requested_tools.is_empty() {
+                0
             } else {
-                json!([])
+                1
             };
-            let tool_audit_events = if operation == "draft_answer" {
-                json!([{
-                    "event": "runtime_tool_result",
-                    "tool_name": "tonglingyu.evidence.package.read",
-                    "trace_id": input.trace_id,
-                }])
-            } else {
+            let tool_results = if input.requested_tools.is_empty() {
                 json!([])
+            } else {
+                Value::Array(
+                    input
+                        .requested_tools
+                        .iter()
+                        .enumerate()
+                        .map(|(index, tool_name)| {
+                            json!({
+                                "call_id": format!("call-runtime-{operation}-{index}"),
+                                "profile_id": input.profile_id,
+                                "tool_name": tool_name,
+                                "output_ref": format!("runtime://tool-results/{operation}/{index}"),
+                            })
+                        })
+                        .collect(),
+                )
+            };
+            let tool_audit_events = if input.requested_tools.is_empty() {
+                json!([])
+            } else {
+                Value::Array(
+                    input
+                        .requested_tools
+                        .iter()
+                        .map(|tool_name| {
+                            json!({
+                                "event": "runtime_tool_result",
+                                "tool_name": tool_name,
+                                "trace_id": input.trace_id,
+                            })
+                        })
+                        .collect(),
+                )
             };
             Ok(RuntimeOutput {
                 result_summary: match operation {
@@ -4624,6 +4681,44 @@ mod tests {
                     "tool_rounds": tool_rounds,
                     "tool_results": tool_results,
                     "tool_audit_events": tool_audit_events,
+                }),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for NoToolRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "no-tool runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "no-tool runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Ok(RuntimeOutput {
+                result_summary: "{}".to_string(),
+                result_ref: Some(format!("result://no-tool-runtime/{}", input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "tool_rounds": 0,
+                    "tool_results": [],
+                    "tool_audit_events": [],
                 }),
             })
         }
@@ -5410,6 +5505,41 @@ mod tests {
             event["event_type"] == "agent_runtime_profile_review_observed"
                 && event["payload"]["local_reviewer_override"] == json!(true)
         }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_requires_runtime_tool_results_for_required_steps() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-required-tools-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: "trace-hermes-required-tools-test".to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(NoToolRuntimeClient),
+            )
+            .await
+            .expect_err("Hermes profile steps with required tools must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("did not execute required tool"));
+        assert!(message.contains("text_evidence_search"));
+        assert!(message.contains("tonglingyu.text.search"));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
