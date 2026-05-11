@@ -14,7 +14,9 @@ MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-revie
 STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
+TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
+TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -278,6 +280,32 @@ assert_report "${tampered_validation_stdout}" 'report["status"] == "failed"'
 assert_report "${tampered_validation_stdout}" \
   '"production_ready_requires_release_conditions_met" in report["errors"]'
 
+python3 - "${default_report}" "${TAMPERED_DERIVED_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["status"] = "passed"
+report["skipped_live_gates"] = []
+report["release_blockers"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_derived_stdout="${WORK_DIR}/tampered-derived-validation.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_DERIVED_REPORT}" >"${tampered_derived_stdout}"; then
+  echo "tampered derived release readiness fields must fail validation" >&2
+  exit 1
+fi
+assert_report "${tampered_derived_stdout}" \
+  '"status_mismatch" in report["errors"]'
+assert_report "${tampered_derived_stdout}" \
+  '"skipped_live_gates_mismatch" in report["errors"]'
+assert_report "${tampered_derived_stdout}" \
+  '"release_blockers_mismatch" in report["errors"]'
+
 optional_report="${WORK_DIR}/summary-optional-failure.json"
 env "${common_env[@]}" \
   TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
@@ -382,6 +410,26 @@ with open(target, "w", encoding="utf-8") as handle:
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRODUCTION_FLAG_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["production_release_ready"] = False
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_production_flag_stdout="${WORK_DIR}/tampered-production-flag.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_PRODUCTION_FLAG_REPORT}" >"${tampered_production_flag_stdout}"; then
+  echo "saved release reports must keep production-ready flag derived" >&2
+  exit 1
+fi
+assert_report "${tampered_production_flag_stdout}" \
+  '"production_release_ready_mismatch" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_VALIDATION_REPORT}" <<'PY'
 import json

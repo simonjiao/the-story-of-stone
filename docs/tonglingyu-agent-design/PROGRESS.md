@@ -303,6 +303,10 @@
 - Saved release report 校验继续收紧：summary-only 报告不能被标记为生产 ready；
   `browser_review_validation` 必须是同一 release review ref/evidence path 的
   成功 verifier 输出，并携带 checked items、空 errors 和 evidence SHA-256。
+- Saved release report validator 现在会从 gate records 重算 `status`、
+  failures、live gate 列表、blockers、manual checks、release conditions 和
+  production-ready flag；contract 覆盖派生字段篡改和 ready flag 反向篡改，
+  避免 artifact 字段与实际 gate 证据分叉。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

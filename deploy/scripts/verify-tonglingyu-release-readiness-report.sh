@@ -17,6 +17,12 @@ live_gate_names = [
     "openwebui_function",
     "openwebui_admin_action",
 ]
+manual_browser_checks = [
+    "Open WebUI browser-side ordinary-user model visibility",
+    "Open WebUI browser-side admin audit entry visibility",
+    "Open WebUI streaming chat UX against the live public endpoint",
+    "Human confirmation that existing Open WebUI webui.db persisted settings match env-rendered provider settings",
+]
 required_browser_review_items = [
     "ordinary_user_model_visibility",
     "streaming_chat_ux",
@@ -56,6 +62,11 @@ def emit(status):
 def add_if(condition, error):
     if condition:
         errors.append(error)
+
+
+def add_mismatch(field, expected, actual):
+    if expected != actual:
+        errors.append(f"{field}_mismatch")
 
 
 def nonempty(value):
@@ -137,6 +148,7 @@ gates_by_name = {
 }
 
 required_failures = report.get("required_failures") if isinstance(report.get("required_failures"), list) else []
+optional_failures = report.get("optional_failures") if isinstance(report.get("optional_failures"), list) else []
 skipped_live_gates = report.get("skipped_live_gates") if isinstance(report.get("skipped_live_gates"), list) else []
 failed_live_gates = report.get("failed_live_gates") if isinstance(report.get("failed_live_gates"), list) else []
 release_blockers = report.get("release_blockers") if isinstance(report.get("release_blockers"), list) else []
@@ -151,6 +163,110 @@ summary_only = report.get("summary_only") is True
 browser_review_ref = report.get("browser_review_ref")
 browser_review_evidence = report.get("browser_review_evidence")
 browser_review_validation = report.get("browser_review_validation")
+
+computed_required_failures = [
+    gate["name"]
+    for gate in gates
+    if isinstance(gate, dict)
+    and gate.get("required") is True
+    and gate.get("status") != "passed"
+]
+computed_optional_failures = [
+    gate["name"]
+    for gate in gates
+    if isinstance(gate, dict)
+    and gate.get("required") is False
+    and gate.get("status") == "failed"
+]
+computed_skipped_gate_names = [
+    gate["name"]
+    for gate in gates
+    if isinstance(gate, dict)
+    and isinstance(gate.get("name"), str)
+    and gate.get("status") == "skipped"
+]
+computed_skipped_live_gates = [
+    name
+    for name in live_gate_names
+    if (gates_by_name.get(name) or {}).get("status") == "skipped"
+]
+computed_failed_live_gates = [
+    name
+    for name in live_gate_names
+    if (gates_by_name.get(name) or {}).get("status") == "failed"
+]
+browser_gate = gates_by_name.get("openwebui_browser_review")
+browser_gate_passed = (
+    isinstance(browser_gate, dict)
+    and browser_gate.get("name") == "openwebui_browser_review"
+    and browser_gate.get("status") == "passed"
+)
+browser_validation_present = isinstance(browser_review_validation, dict)
+computed_browser_review_acknowledged = browser_gate_passed and browser_validation_present
+browser_validation_missing = browser_gate_passed and not browser_validation_present
+if browser_validation_missing:
+    if isinstance(browser_gate, dict) and browser_gate.get("required") is True:
+        computed_required_failures.append("openwebui_browser_review_validation")
+    else:
+        computed_optional_failures.append("openwebui_browser_review_validation")
+
+computed_status = "failed" if computed_required_failures else "passed"
+if computed_status == "passed" and computed_optional_failures:
+    computed_status = "passed_with_failed_optional_gates"
+elif computed_status == "passed" and computed_skipped_gate_names:
+    computed_status = "passed_with_skipped_gates"
+elif computed_status == "passed" and gate_overrides_used:
+    computed_status = "passed_with_gate_command_overrides"
+elif computed_status == "passed" and summary_only:
+    computed_status = "passed_in_summary_only_mode"
+
+computed_manual_checks = [] if computed_browser_review_acknowledged else manual_browser_checks
+computed_release_blockers = []
+if not require_live:
+    computed_release_blockers.append("live release mode was not required")
+for name in computed_required_failures:
+    computed_release_blockers.append(f"required gate did not pass: {name}")
+for name in computed_skipped_live_gates:
+    computed_release_blockers.append(f"live gate was skipped: {name}")
+for name in computed_failed_live_gates:
+    if name not in computed_required_failures:
+        computed_release_blockers.append(f"live gate failed: {name}")
+if browser_validation_missing:
+    computed_release_blockers.append("Open WebUI browser-side review validation summary was missing")
+if not computed_browser_review_acknowledged:
+    computed_release_blockers.append("Open WebUI browser-side review was not acknowledged")
+if summary_only:
+    computed_release_blockers.append("summary-only mode was used")
+computed_release_conditions_met = (
+    require_live
+    and not computed_required_failures
+    and not computed_skipped_live_gates
+    and computed_browser_review_acknowledged
+)
+if gate_overrides_used:
+    computed_release_blockers.append("gate command overrides were used")
+computed_production_ready = (
+    computed_release_conditions_met and not gate_overrides_used and not summary_only
+)
+
+add_mismatch("required_failures", computed_required_failures, required_failures)
+add_mismatch("optional_failures", computed_optional_failures, optional_failures)
+add_mismatch("skipped_live_gates", computed_skipped_live_gates, skipped_live_gates)
+add_mismatch("failed_live_gates", computed_failed_live_gates, failed_live_gates)
+add_mismatch("status", computed_status, report.get("status"))
+add_mismatch(
+    "browser_review_acknowledged",
+    computed_browser_review_acknowledged,
+    browser_review_acknowledged,
+)
+add_mismatch("remaining_manual_checks", computed_manual_checks, manual_checks)
+add_mismatch("release_blockers", computed_release_blockers, release_blockers)
+add_mismatch(
+    "release_conditions_met",
+    computed_release_conditions_met,
+    release_conditions_met,
+)
+add_mismatch("production_release_ready", computed_production_ready, production_ready)
 
 add_if(
     production_ready and not release_conditions_met,
@@ -195,7 +311,6 @@ for name in live_gate_names:
             f"production_ready_requires_{name}_required",
         )
 
-browser_gate = gates_by_name.get("openwebui_browser_review")
 if production_ready:
     add_if(not isinstance(browser_gate, dict), "production_ready_missing_openwebui_browser_review")
     if isinstance(browser_gate, dict):

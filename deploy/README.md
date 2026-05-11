@@ -332,6 +332,10 @@ The saved-report verifier also checks that a `production_release_ready=true`
 report was not generated in summary-only mode and that
 `browser_review_validation` is the successful browser evidence verifier output
 for the same review ref, evidence path, checked items, and evidence SHA-256.
+It recomputes derived fields such as `status`, `required_failures`,
+`skipped_live_gates`, `release_blockers`, `remaining_manual_checks`,
+`release_conditions_met`, and `production_release_ready` from the saved gate
+records; edited reports fail if these fields drift from the gate evidence.
 
 The aggregate gate can be contract-tested without a live deployment:
 
