@@ -8,6 +8,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
+GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 
 cat >"${PASS_CMD}" <<'SH'
 #!/usr/bin/env bash
@@ -123,6 +124,42 @@ if report["status"] != "failed":
 if "review_ref_mismatch" not in report["errors"]:
     raise SystemExit(report)
 PY
+
+browser_record_missing_ack_stdout="${WORK_DIR}/browser-record-missing-ack.stdout"
+if env \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER=release-reviewer \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
+  TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF=screenshots/models.png \
+  TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF=screenshots/streaming.png \
+  TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF=trace:tly-123 \
+  TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF=runbook:provider-settings \
+  TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
+  "${SCRIPT_DIR}/record-openwebui-browser-review-evidence.sh" \
+  "${GENERATED_BROWSER_EVIDENCE_JSON}" >"${browser_record_missing_ack_stdout}"; then
+  echo "browser review evidence recorder must require explicit ACK" >&2
+  exit 1
+fi
+assert_report "${browser_record_missing_ack_stdout}" \
+  '"browser_review_ack_must_be_true" in report["errors"]'
+
+browser_record_stdout="${WORK_DIR}/browser-record.stdout"
+env \
+  TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER=release-reviewer \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
+  TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF=screenshots/models.png \
+  TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF=screenshots/streaming.png \
+  TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF=trace:tly-123 \
+  TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF=runbook:provider-settings \
+  TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
+  "${SCRIPT_DIR}/record-openwebui-browser-review-evidence.sh" \
+  "${GENERATED_BROWSER_EVIDENCE_JSON}" >"${browser_record_stdout}"
+assert_report "${browser_record_stdout}" 'report["status"] == "ok"'
+assert_report "${browser_record_stdout}" 'report["review_ref"] == "mock-browser-review"'
+assert_report "${GENERATED_BROWSER_EVIDENCE_JSON}" \
+  'report["checks"]["persisted_provider_settings"]["matched_rendered_env"] is True'
 
 default_report="${WORK_DIR}/default-not-ready.json"
 if env "${common_env[@]}" \

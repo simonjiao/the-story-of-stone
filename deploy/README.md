@@ -346,10 +346,34 @@ TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF="${review_ref}" \
   ./openwebui-browser-review.json
 ```
 
-Use this report shape and keep screenshots, trace links, or runbook paths in
-`evidence_ref`; do not include token, key, password, authorization header, or
-secret values. `reviewed_at` must include a timezone and `public_webui_url`
-must be the HTTPS public endpoint:
+After the browser-side review is complete, prefer recording the evidence through
+the helper instead of hand-writing JSON:
+
+<!-- markdownlint-disable MD013 -->
+```bash
+review_ref=openwebui-browser-review-2026-05-11-hhost
+TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF="${review_ref}" \
+TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER=operator-name \
+TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://chat.example.invalid \
+TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF=screenshots/models.png \
+TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF=screenshots/streaming.png \
+TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF=trace:tly-... \
+TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF=runbook:provider \
+TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
+  ./scripts/record-openwebui-browser-review-evidence.sh \
+  ./openwebui-browser-review.json
+```
+<!-- markdownlint-enable MD013 -->
+
+The helper writes the evidence file and immediately runs the verifier. It
+refuses to overwrite an existing file unless
+`TONGLINGYU_BROWSER_REVIEW_EVIDENCE_OVERWRITE=true` is set. Keep screenshots,
+trace links, or runbook paths in `evidence_ref`; do not include token, key,
+password, authorization header, or secret values. `reviewed_at` must include a
+timezone and `public_webui_url` must be the HTTPS public endpoint.
+
+If writing the JSON manually, use this shape:
 
 ```json
 {

@@ -302,10 +302,14 @@
   provider 设置复核必须逐项 `passed` 且带 `evidence_ref`；证据报告内
   `review_ref` 必须匹配 release ref，`reviewed_at` 必须带时区，公网入口必须是
   HTTPS，不能只靠口头 ACK 或任意 JSON。
+- 已新增 `record-openwebui-browser-review-evidence.sh`，人工页面复核完成后用
+  env 填入 reviewer、公网 URL、四项 evidence ref 和 provider 设置匹配确认，
+  由脚本生成 evidence JSON 并立即运行 verifier；脚本要求显式 ACK 且默认不
+  覆盖已有证据文件，减少手写 JSON 造成的发布误判。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
-  readiness contract smoke，覆盖 override guard、默认非 live 不 ready、
-  summary-only optional failure、mock live 条件满足但不 production ready、live
-  必过 gate 失败等路径；聚合脚本只允许显式
+  readiness contract smoke，覆盖 browser review recorder 正负路径、override
+  guard、默认非 live 不 ready、summary-only optional failure、mock live 条件
+  满足但不 production ready、live 必过 gate 失败等路径；聚合脚本只允许显式
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
   标为 `passed_with_gate_command_overrides`。
@@ -392,7 +396,8 @@
 
 ## 下一步
 
-1. 用真实 Open WebUI 账号做页面侧人工点击复核，生成
+1. 用真实 Open WebUI 账号做页面侧人工点击复核，并通过
+   `record-openwebui-browser-review-evidence.sh` 生成
    `openwebui-browser-review.json`，确认普通用户模型可见性、streaming 体验、
    管理员审计入口和持久化 provider 设置都逐项带证据 ref。
 2. 在目标环境设置 browser review ACK、release ref 和 evidence path 后运行
