@@ -159,6 +159,9 @@
   `agent_runtime_profile_draft_consumed` audit event，并区分
   `content_used_for_final_answer`。该路径仍不是四 profile 全量 content/tool
   execution 完成。
+- profile step message 已携带 trace_id、profile、operation、question、input/output
+  ref、allowed tools 和 step output JSON，避免 Hermes profile 只收到空泛
+  envelope。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。

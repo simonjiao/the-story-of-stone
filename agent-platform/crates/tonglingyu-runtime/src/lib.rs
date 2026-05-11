@@ -1437,6 +1437,8 @@ async fn attach_agent_runtime_step_execution(
         .map(|contract| (contract.profile_id.clone(), contract))
         .collect::<BTreeMap<_, _>>();
     let runtime = tonglingyu_agent_runtime_client(mode, store, registry)?;
+    let trace_id = workflow.trace_id.clone();
+    let question = workflow.question.clone();
     for step in &mut workflow.steps {
         let contract = contracts
             .get(&step.profile)
@@ -1446,22 +1448,24 @@ async fn attach_agent_runtime_step_execution(
         let output = runtime
             .execute_profile_step(RuntimeProfileInput {
                 profile_id: step.profile.clone(),
-                messages: vec![RuntimeProfileMessage::new(
-                    "user",
-                    "tonglingyu profile step execution envelope",
+                messages: vec![agent_runtime_profile_step_message(
+                    &trace_id, &question, step,
                 )],
                 metadata: json!({
                     "runtime": "tonglingyu",
                     "workflow_step_id": &step.step_id,
                     "operation": &step.operation,
-                    "question_chars": workflow.question.chars().count(),
-                    "question_sha256": hash_text(&workflow.question),
+                    "input_ref": &step.input_ref,
+                    "output_ref": &step.output_ref,
+                    "step_output": &step.output,
+                    "question_chars": question.chars().count(),
+                    "question_sha256": hash_text(&question),
                     "content_source": "tonglingyu-deterministic-workflow",
                 }),
                 profile_contract: Some(contract),
                 runtime_step: Some(runtime_step),
                 requested_tools: step.allowed_tools.clone(),
-                trace_id: workflow.trace_id.clone(),
+                trace_id: trace_id.clone(),
             })
             .await?;
         step.agent_runtime = Some(json!({
@@ -1507,6 +1511,37 @@ fn tonglingyu_agent_runtime_client(
                 .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
         )),
     }
+}
+
+fn agent_runtime_profile_step_message(
+    trace_id: &str,
+    question: &str,
+    step: &RuntimeWorkflowStepReport,
+) -> RuntimeProfileMessage {
+    RuntimeProfileMessage::new(
+        "user",
+        format!(
+            concat!(
+                "Tonglingyu profile step execution context.\n",
+                "trace_id: {trace_id}\n",
+                "profile: {profile}\n",
+                "operation: {operation}\n",
+                "question: {question}\n",
+                "input_ref: {input_ref}\n",
+                "output_ref: {output_ref}\n",
+                "allowed_tools: {allowed_tools}\n",
+                "step_output_json: {step_output}\n"
+            ),
+            trace_id = trace_id,
+            profile = &step.profile,
+            operation = &step.operation,
+            question = question,
+            input_ref = step.input_ref.as_deref().unwrap_or("none"),
+            output_ref = &step.output_ref,
+            allowed_tools = step.allowed_tools.join(","),
+            step_output = serde_json::to_string(&step.output).unwrap_or_else(|_| "{}".to_string()),
+        ),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4149,6 +4184,15 @@ mod tests {
                     && value["content_source"] == "tonglingyu-deterministic-workflow"
                     && value["content_used_for_final_answer"] == json!(false)
             })
+        }));
+        assert!(workflow.steps.iter().any(|step| {
+            step.operation == "draft_answer"
+                && step.agent_runtime.as_ref().is_some_and(|value| {
+                    value["result_summary"].as_str().is_some_and(|summary| {
+                        summary.contains("operation: draft_answer")
+                            && summary.contains(&workflow.package.package_id)
+                    })
+                })
         }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
