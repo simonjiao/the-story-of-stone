@@ -307,6 +307,9 @@
   failures、live gate 列表、blockers、manual checks、release conditions 和
   production-ready flag；contract 覆盖派生字段篡改和 ready flag 反向篡改，
   避免 artifact 字段与实际 gate 证据分叉。
+- Saved release report validator 进一步要求顶层 `browser_review_validation`
+  与 `openwebui_browser_review` gate `stdout_tail` 中实际输出的成功 verifier
+  JSON 一致；contract 覆盖删除 stdout validation 和顶层 validation 篡改。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

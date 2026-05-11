@@ -17,6 +17,7 @@ TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
+TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -431,6 +432,28 @@ fi
 assert_report "${tampered_production_flag_stdout}" \
   '"production_release_ready_mismatch" in report["errors"]'
 
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_browser_review":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_stdout_stdout="${WORK_DIR}/tampered-browser-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_STDOUT_REPORT}" >"${tampered_browser_stdout_stdout}"; then
+  echo "saved browser validation must be backed by browser gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_stdout_stdout}" \
+  '"browser_review_validation_stdout_missing" in report["errors"]'
+
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_VALIDATION_REPORT}" <<'PY'
 import json
 import sys
@@ -462,6 +485,8 @@ assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_review_ref_mismatch" in report["errors"]'
 assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_evidence_sha256_invalid" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_stdout_mismatch" in report["errors"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \

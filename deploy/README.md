@@ -336,6 +336,10 @@ It recomputes derived fields such as `status`, `required_failures`,
 `skipped_live_gates`, `release_blockers`, `remaining_manual_checks`,
 `release_conditions_met`, and `production_release_ready` from the saved gate
 records; edited reports fail if these fields drift from the gate evidence.
+It also requires the top-level `browser_review_validation` to match the
+successful verifier JSON emitted by the `openwebui_browser_review` gate
+`stdout_tail`, so a saved report cannot inject browser evidence that the gate
+did not actually run.
 
 The aggregate gate can be contract-tested without a live deployment:
 

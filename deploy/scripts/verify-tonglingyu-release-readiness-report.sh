@@ -73,6 +73,28 @@ def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def browser_validation_from_gate(gate):
+    if not isinstance(gate, dict):
+        return None
+    stdout_tail = gate.get("stdout_tail")
+    if not isinstance(stdout_tail, list):
+        return None
+    for line in reversed(stdout_tail):
+        if not isinstance(line, str):
+            continue
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("object") == "tonglingyu.openwebui_browser_review_gate"
+            and candidate.get("status") == "ok"
+        ):
+            return candidate
+    return None
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -196,6 +218,7 @@ computed_failed_live_gates = [
     if (gates_by_name.get(name) or {}).get("status") == "failed"
 ]
 browser_gate = gates_by_name.get("openwebui_browser_review")
+browser_gate_validation = browser_validation_from_gate(browser_gate)
 browser_gate_passed = (
     isinstance(browser_gate, dict)
     and browser_gate.get("name") == "openwebui_browser_review"
@@ -327,6 +350,10 @@ if browser_review_acknowledged and not isinstance(browser_review_validation, dic
     errors.append("browser_review_ack_requires_validation")
 
 if isinstance(browser_review_validation, dict):
+    if browser_gate_validation is None:
+        errors.append("browser_review_validation_stdout_missing")
+    elif browser_review_validation != browser_gate_validation:
+        errors.append("browser_review_validation_stdout_mismatch")
     validation_errors = browser_review_validation.get("errors")
     evidence_sha256 = browser_review_validation.get("evidence_sha256")
     checked_items = browser_review_validation.get("checked_items")
