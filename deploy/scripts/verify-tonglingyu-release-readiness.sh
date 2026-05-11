@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 RESULTS_JSONL="${WORK_DIR}/results.jsonl"
+READY_STATUS="${WORK_DIR}/production-ready.status"
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -87,6 +88,10 @@ require_live="false"
 if is_true "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}"; then
   require_live="true"
 fi
+summary_only="false"
+if is_true "${TONGLINGYU_RELEASE_SUMMARY_ONLY:-false}"; then
+  summary_only="true"
+fi
 
 verify_strict_gateway="false"
 if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_STRICT_GATEWAY:-false}"; then
@@ -126,13 +131,14 @@ else
     "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${require_live}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
-results_path, report_path, require_live_raw = sys.argv[1:4]
+results_path, report_path, ready_status_path, require_live_raw, summary_only_raw = sys.argv[1:6]
 require_live = require_live_raw == "true"
+summary_only = summary_only_raw == "true"
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
@@ -190,6 +196,8 @@ report = {
     "status": status,
     "production_release_ready": production_release_ready,
     "require_live": require_live,
+    "summary_only": summary_only,
+    "exit_policy": "summary_only" if summary_only else "production_release_ready",
     "browser_review_acknowledged": browser_review_acknowledged,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
@@ -205,8 +213,13 @@ if report_path:
     with open(report_path, "w", encoding="utf-8") as handle:
         handle.write(encoded)
         handle.write("\n")
+with open(ready_status_path, "w", encoding="utf-8") as handle:
+    handle.write("true\n" if production_release_ready else "false\n")
 PY
 
 if [[ "${failed}" -ne 0 ]]; then
+  exit 1
+fi
+if [[ "${summary_only}" != "true" ]] && [[ "$(cat "${READY_STATUS}")" != "true" ]]; then
   exit 1
 fi

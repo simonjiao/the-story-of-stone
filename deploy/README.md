@@ -246,7 +246,10 @@ compose-rendered config check and records live Gateway/Open WebUI Function
 checks as skipped. The JSON report includes `production_release_ready=false`,
 `browser_review_acknowledged`, `skipped_live_gates`, and `release_blockers`
 whenever live mode, live gates, or browser review are missing, so partial local
-verification cannot be mistaken for a production release pass.
+verification cannot be mistaken for a production release pass. By default the
+script exits non-zero unless `production_release_ready=true`; set
+`TONGLINGYU_RELEASE_SUMMARY_ONLY=true` only when intentionally generating a
+non-release summary report.
 When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
 `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` after a human has checked
 ordinary-user model visibility, streaming chat UX, admin audit visibility, and

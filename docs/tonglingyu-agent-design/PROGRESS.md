@@ -290,7 +290,8 @@
   `production_release_ready`、`browser_review_acknowledged`、skipped live gates、
   release blockers 和仍需人工页面复核的项目；只有显式 live release mode、必过
   gate 和页面 ACK 都满足时才会标记 production ready，避免把局部验证当作生产
-  完成。
+  完成；脚本默认退出码也跟随 `production_release_ready`，只有显式
+  `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
   普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核
