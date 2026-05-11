@@ -179,6 +179,8 @@ impl TonglingyuRuntimeStore {
             execute_runtime_workflow(&conn, input.clone())?
         };
         attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await?;
+        let agent_runtime_package_observation =
+            apply_agent_runtime_package_output(&mut workflow, mode);
         let agent_runtime_content_application =
             apply_agent_runtime_content_outputs(&mut workflow, mode);
         let agent_runtime_review_observation =
@@ -227,6 +229,22 @@ impl TonglingyuRuntimeStore {
                     "rejected_reason": &application.rejected_reason,
                     "local_reviewer_enforced": true,
                     "content_used_for_final_answer": application.content_used_for_final_answer,
+                }),
+            )?;
+        }
+        if let Some(observation) = agent_runtime_package_observation {
+            append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_package_observed",
+                &json!({
+                    "package_id": &workflow.package.package_id,
+                    "runtime_mode": mode.as_str(),
+                    "result_format": &observation.result_format,
+                    "observed_package_id": &observation.package_id,
+                    "matches_runtime_package": observation.matches_runtime_package,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_package_enforced": true,
                 }),
             )?;
         }
@@ -1656,6 +1674,14 @@ struct AgentRuntimeDraftExtraction {
 }
 
 #[derive(Debug, Clone)]
+struct AgentRuntimePackageObservation {
+    result_format: &'static str,
+    package_id: Option<String>,
+    matches_runtime_package: bool,
+    rejected_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
 struct AgentRuntimeReviewObservation {
     result_format: &'static str,
     review_status: Option<String>,
@@ -1665,6 +1691,97 @@ struct AgentRuntimeReviewObservation {
     agrees_with_local_reviewer: bool,
     local_reviewer_override: bool,
     rejected_reason: Option<&'static str>,
+}
+
+fn apply_agent_runtime_package_output(
+    workflow: &mut RuntimeWorkflowOutput,
+    mode: TonglingyuAgentRuntimeMode,
+) -> Option<AgentRuntimePackageObservation> {
+    if mode != TonglingyuAgentRuntimeMode::Hermes {
+        return None;
+    }
+    let (package_step_index, summary) =
+        workflow
+            .steps
+            .iter()
+            .enumerate()
+            .find_map(|(index, step)| {
+                if step.operation != "evidence_package_create" {
+                    return None;
+                }
+                let summary = step
+                    .agent_runtime
+                    .as_ref()
+                    .and_then(|value| value.get("result_summary"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                Some((index, summary.to_string()))
+            })?;
+    let observation =
+        extract_agent_runtime_package_observation(&summary, &workflow.package.package_id);
+    if let Some(step) = workflow.steps.get_mut(package_step_index) {
+        step.output["agent_runtime_package_observed"] = json!(true);
+        step.output["agent_runtime_package_result_format"] = json!(observation.result_format);
+        step.output["agent_runtime_observed_package_id"] = json!(observation.package_id);
+        step.output["agent_runtime_package_matches_local"] =
+            json!(observation.matches_runtime_package);
+        step.output["agent_runtime_package_rejected_reason"] = json!(observation.rejected_reason);
+        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "package_observation".to_string(),
+                json!({
+                    "result_format": observation.result_format,
+                    "package_id": &observation.package_id,
+                    "local_package_id": &workflow.package.package_id,
+                    "matches_runtime_package": observation.matches_runtime_package,
+                    "rejected_reason": &observation.rejected_reason,
+                    "local_package_enforced": true,
+                }),
+            );
+        }
+    }
+    Some(observation)
+}
+
+fn extract_agent_runtime_package_observation(
+    result_summary: &str,
+    expected_package_id: &str,
+) -> AgentRuntimePackageObservation {
+    let trimmed = result_summary.trim();
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return AgentRuntimePackageObservation {
+            result_format: "text",
+            package_id: None,
+            matches_runtime_package: false,
+            rejected_reason: Some("unsupported_text_package"),
+        };
+    };
+    let Some(object) = value.as_object() else {
+        return AgentRuntimePackageObservation {
+            result_format: "json",
+            package_id: None,
+            matches_runtime_package: false,
+            rejected_reason: Some("unsupported_json_package"),
+        };
+    };
+    let package_id = object
+        .get("package_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let rejected_reason = match package_id.as_deref() {
+        None => Some("package_id_missing"),
+        Some(value) if value != expected_package_id => Some("package_id_mismatch"),
+        Some(_) => None,
+    };
+    AgentRuntimePackageObservation {
+        result_format: "json",
+        matches_runtime_package: rejected_reason.is_none(),
+        package_id,
+        rejected_reason,
+    }
 }
 
 fn apply_agent_runtime_content_outputs(
@@ -2185,6 +2302,10 @@ fn workflow_stream_events(
                         .unwrap_or(Value::Null),
                     "tool_audit_event_count": value
                         .get("tool_audit_event_count")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "package_observation": value
+                        .get("package_observation")
                         .cloned()
                         .unwrap_or(Value::Null),
                     "review_observation": value
@@ -4276,6 +4397,12 @@ mod tests {
                     "draft_answer" => {
                         format!("Hermes full workflow draft from {operation}. context={message}")
                     }
+                    "evidence_package_create" => serde_json::to_string(&json!({
+                        "package_id": package_id_from_step_message(&message)
+                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                        "summary": "Hermes observed runtime package ref",
+                    }))
+                    .expect("package output serializes"),
                     "review_answer" => serde_json::to_string(&json!({
                         "review_status": "passed",
                         "severity": "none",
@@ -4300,6 +4427,17 @@ mod tests {
                 }),
             })
         }
+    }
+
+    fn package_id_from_step_message(message: &str) -> Option<String> {
+        message.lines().find_map(|line| {
+            let value = line.strip_prefix("step_output_json: ")?;
+            serde_json::from_str::<Value>(value)
+                .ok()?
+                .get("package_id")?
+                .as_str()
+                .map(ToOwned::to_owned)
+        })
     }
 
     fn sample_card(evidence_type: &str) -> EvidenceCard {
@@ -4676,6 +4814,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn package_observation_rejects_wrong_runtime_package_id() {
+        let observation = extract_agent_runtime_package_observation(
+            r#"{"package_id":"pkg-other","summary":"wrong package"}"#,
+            "pkg-runtime-draft-test",
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.package_id.as_deref(), Some("pkg-other"));
+        assert!(!observation.matches_runtime_package);
+        assert_eq!(observation.rejected_reason, Some("package_id_mismatch"));
+    }
+
     fn runtime_draft_workflow(
         cards: Vec<EvidenceCard>,
         review: ReviewRecord,
@@ -4944,6 +5095,15 @@ mod tests {
             draft_agent_runtime["tool_results"][0]["tool_name"],
             "tonglingyu.evidence.package.read"
         );
+        let package_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "evidence_package_create")
+            .expect("package step");
+        assert_eq!(
+            package_step.agent_runtime.as_ref().unwrap()["package_observation"]["matches_runtime_package"],
+            json!(true)
+        );
         let review_step = workflow
             .steps
             .iter()
@@ -4956,6 +5116,11 @@ mod tests {
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
                 && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["agent_runtime"]["package_observation"]["matches_runtime_package"]
+                    == json!(true)
         }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
@@ -4979,6 +5144,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_step_executed"
                 && event["payload"]["agent_runtime"]["tool_result_count"] == json!(1)
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_package_observed"
+                && event["payload"]["matches_runtime_package"] == json!(true)
         }));
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_review_observed"

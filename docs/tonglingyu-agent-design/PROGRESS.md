@@ -179,6 +179,9 @@
 - Profile step message 和 metadata 已携带 operation-specific
   `result_summary_contract`，明确 `draft_answer` 与 `review_answer` 的结构化
   JSON 输出要求，避免 Hermes 只收到泛化 step context。
+- Hermes `evidence_package_create` 结构化输出已进入 package observation；
+  Runtime 校验 observation `package_id` 是否匹配本地 evidence package，不匹配
+  只写 rejected reason，不允许改写本地证据包。
 - Gateway eval/replay 检查已改为通过 `TonglingyuRuntimeStore` 调 runtime replay；
   gateway crate 不再直接调用 runtime reviewer 或 `replay_answer` 领域函数。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools

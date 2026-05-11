@@ -256,6 +256,9 @@ operation-specific `result_summary_contract`：`draft_answer` 明确要求返回
 `draft_answer`、`package_id`、`claim_statements` JSON object string，
 `review_answer` 明确要求返回 `review_status`、`severity`、`issues` 和
 `required_revisions` JSON object string。
+Hermes `evidence_package_create` profile output 已进入 package observation；
+Runtime 会校验 observation 中的 `package_id` 是否匹配本地 evidence package，
+不匹配时写 rejected reason。该 observation 不允许改写本地证据包。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -314,6 +317,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   记录与本地强制 reviewer 的一致性，但不替代最终裁决。
 - [x] profile step message/metadata 携带 operation-specific
   `result_summary_contract`，避免 Hermes 不知道 draft/reviewer 的结构化输出要求。
+- [x] Hermes `evidence_package_create` 输出进入 package observation，
+  校验 `package_id` 是否匹配本地 runtime package，但不允许改写证据包。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`
