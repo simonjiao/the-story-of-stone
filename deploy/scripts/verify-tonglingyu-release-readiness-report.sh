@@ -266,6 +266,10 @@ add_if(
     "browser_review_acknowledged_must_be_bool",
 )
 add_if(
+    report.get("exit_policy") not in {"production_release_ready", "summary_only"},
+    "exit_policy_invalid",
+)
+add_if(
     report.get("secret_values_printed") is not False,
     "secret_values_printed_must_be_false",
 )
@@ -320,6 +324,7 @@ browser_review_acknowledged = report.get("browser_review_acknowledged") is True
 gate_overrides_used = report.get("gate_command_overrides_used") is True
 require_live = report.get("require_live") is True
 summary_only = report.get("summary_only") is True
+exit_policy = report.get("exit_policy")
 browser_review_ref = report.get("browser_review_ref")
 browser_review_evidence = report.get("browser_review_evidence")
 browser_review_validation = report.get("browser_review_validation")
@@ -423,6 +428,7 @@ if gate_overrides_used:
 computed_production_ready = (
     computed_release_conditions_met and not gate_overrides_used and not summary_only
 )
+computed_exit_policy = "summary_only" if summary_only else "production_release_ready"
 
 add_mismatch("required_failures", computed_required_failures, required_failures)
 add_mismatch("optional_failures", computed_optional_failures, optional_failures)
@@ -442,6 +448,7 @@ add_mismatch(
     release_conditions_met,
 )
 add_mismatch("production_release_ready", computed_production_ready, production_ready)
+add_mismatch("exit_policy", computed_exit_policy, exit_policy)
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
 

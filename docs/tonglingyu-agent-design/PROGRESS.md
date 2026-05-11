@@ -305,8 +305,8 @@
   成功 verifier 输出，并携带 checked items、空 errors 和 evidence SHA-256。
 - Saved release report validator 现在会从 gate records 重算 `status`、
   failures、live gate 列表、blockers、manual checks、release conditions 和
-  production-ready flag；contract 覆盖派生字段篡改和 ready flag 反向篡改，
-  避免 artifact 字段与实际 gate 证据分叉。
+  production-ready flag / exit policy；contract 覆盖派生字段、exit policy
+  和 ready flag 篡改，避免 artifact 字段与实际 gate 证据分叉。
 - Saved release report validator 进一步要求顶层 `browser_review_validation`
   与 `openwebui_browser_review` gate `stdout_tail` 中实际输出的成功 verifier
   JSON 一致；contract 覆盖删除 stdout validation 和顶层 validation 篡改。

@@ -15,6 +15,7 @@ STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
+TAMPERED_EXIT_POLICY_REPORT="${WORK_DIR}/tampered-exit-policy-report.json"
 TAMPERED_MISSING_GENERATED_REPORT="${WORK_DIR}/tampered-missing-generated-report.json"
 TAMPERED_SECRET_REPORT="${WORK_DIR}/tampered-secret-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
@@ -312,6 +313,26 @@ assert_report "${tampered_derived_stdout}" \
   '"skipped_live_gates_mismatch" in report["errors"]'
 assert_report "${tampered_derived_stdout}" \
   '"release_blockers_mismatch" in report["errors"]'
+
+python3 - "${default_report}" "${TAMPERED_EXIT_POLICY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["exit_policy"] = "summary_only"
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_exit_policy_stdout="${WORK_DIR}/tampered-exit-policy-validation.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_EXIT_POLICY_REPORT}" >"${tampered_exit_policy_stdout}"; then
+  echo "saved release reports must keep exit policy derived" >&2
+  exit 1
+fi
+assert_report "${tampered_exit_policy_stdout}" \
+  '"exit_policy_mismatch" in report["errors"]'
 
 python3 - "${default_report}" "${TAMPERED_MISSING_GENERATED_REPORT}" <<'PY'
 import json
