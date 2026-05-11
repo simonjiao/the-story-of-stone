@@ -23,6 +23,11 @@ live_gate_names = [
     "openwebui_function",
     "openwebui_admin_action",
 ]
+required_gate_names = [
+    "runtime_config",
+    *live_gate_names,
+    "openwebui_browser_review",
+]
 manual_browser_checks = [
     "Open WebUI browser-side ordinary-user model visibility",
     "Open WebUI browser-side admin audit entry visibility",
@@ -332,6 +337,8 @@ gates_by_name = {
     for gate in gates
     if isinstance(gate, dict) and isinstance(gate.get("name"), str)
 }
+for name in required_gate_names:
+    add_if(name not in gates_by_name, f"missing_gate={name}")
 
 required_failures = report.get("required_failures") if isinstance(report.get("required_failures"), list) else []
 optional_failures = report.get("optional_failures") if isinstance(report.get("optional_failures"), list) else []
