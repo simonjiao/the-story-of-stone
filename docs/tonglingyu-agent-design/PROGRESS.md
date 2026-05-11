@@ -176,6 +176,9 @@
 - Hermes `review_answer` 结构化 JSON 输出已进入 review observation；Runtime
   会记录 LLM reviewer status/severity/issues 与本地强制 reviewer 的一致性，
   不一致时标记 `local_reviewer_override=true`，最终裁决仍由本地 reviewer 决定。
+- Profile step message 和 metadata 已携带 operation-specific
+  `result_summary_contract`，明确 `draft_answer` 与 `review_answer` 的结构化
+  JSON 输出要求，避免 Hermes 只收到泛化 step context。
 - Gateway eval/replay 检查已改为通过 `TonglingyuRuntimeStore` 调 runtime replay；
   gateway crate 不再直接调用 runtime reviewer 或 `replay_answer` 领域函数。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools

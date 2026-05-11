@@ -251,6 +251,11 @@ Hermes `review_answer` profile output 已支持结构化 review observation，Ru
 会记录 review status、severity、issue count、required revision count，并标记
 是否与本地强制 reviewer 一致；不一致时写 `local_reviewer_override=true`，
 最终裁决仍以本地 reviewer enforcement 为准。
+Runtime 发给 agent-runtime/Hermes 的 profile step message 和 metadata 已携带
+operation-specific `result_summary_contract`：`draft_answer` 明确要求返回
+`draft_answer`、`package_id`、`claim_statements` JSON object string，
+`review_answer` 明确要求返回 `review_status`、`severity`、`issues` 和
+`required_revisions` JSON object string。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -307,6 +312,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   错误 package 或缺少草稿时拒绝消费并写入 rejected audit。
 - [x] Hermes `review_answer` 结构化 JSON 输出进入 review observation，
   记录与本地强制 reviewer 的一致性，但不替代最终裁决。
+- [x] profile step message/metadata 携带 operation-specific
+  `result_summary_contract`，避免 Hermes 不知道 draft/reviewer 的结构化输出要求。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`

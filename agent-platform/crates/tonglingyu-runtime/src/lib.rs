@@ -1481,6 +1481,7 @@ async fn attach_agent_runtime_step_execution(
     let trace_id = workflow.trace_id.clone();
     let question = workflow.question.clone();
     for step in &mut workflow.steps {
+        let result_summary_contract = agent_runtime_result_summary_contract(step);
         let contract = contracts
             .get(&step.profile)
             .cloned()
@@ -1490,7 +1491,10 @@ async fn attach_agent_runtime_step_execution(
             .execute_profile_step(RuntimeProfileInput {
                 profile_id: step.profile.clone(),
                 messages: vec![agent_runtime_profile_step_message(
-                    &trace_id, &question, step,
+                    &trace_id,
+                    &question,
+                    step,
+                    result_summary_contract,
                 )],
                 metadata: json!({
                     "runtime": "tonglingyu",
@@ -1499,6 +1503,7 @@ async fn attach_agent_runtime_step_execution(
                     "input_ref": &step.input_ref,
                     "output_ref": &step.output_ref,
                     "step_output": &step.output,
+                    "result_summary_contract": result_summary_contract,
                     "question_chars": question.chars().count(),
                     "question_sha256": hash_text(&question),
                     "content_source": "tonglingyu-deterministic-workflow",
@@ -1527,6 +1532,7 @@ async fn attach_agent_runtime_step_execution(
             "content_source": "tonglingyu-deterministic-workflow",
             "executor_output_source": format!("agent-runtime-{}", mode.as_str()),
             "content_used_for_final_answer": false,
+            "result_summary_contract": result_summary_contract,
             "result_ref": output.result_ref,
             "result_summary": output.result_summary,
             "tool_rounds": output
@@ -1579,6 +1585,7 @@ fn agent_runtime_profile_step_message(
     trace_id: &str,
     question: &str,
     step: &RuntimeWorkflowStepReport,
+    result_summary_contract: &str,
 ) -> RuntimeProfileMessage {
     RuntimeProfileMessage::new(
         "user",
@@ -1592,6 +1599,7 @@ fn agent_runtime_profile_step_message(
                 "input_ref: {input_ref}\n",
                 "output_ref: {output_ref}\n",
                 "allowed_tools: {allowed_tools}\n",
+                "result_summary_contract: {result_summary_contract}\n",
                 "step_output_json: {step_output}\n"
             ),
             trace_id = trace_id,
@@ -1601,9 +1609,33 @@ fn agent_runtime_profile_step_message(
             input_ref = step.input_ref.as_deref().unwrap_or("none"),
             output_ref = &step.output_ref,
             allowed_tools = step.allowed_tools.join(","),
+            result_summary_contract = result_summary_contract,
             step_output = serde_json::to_string(&step.output).unwrap_or_else(|_| "{}".to_string()),
         ),
     )
+}
+
+fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
+    match step.operation.as_str() {
+        "draft_answer" => {
+            "Return result_summary as a JSON object string with keys draft_answer, package_id, and claim_statements. package_id must match step_output_json.package_id; local reviewer remains required."
+        }
+        "review_answer" => {
+            "Return result_summary as a JSON object string with keys review_status, severity, issues, and required_revisions. This is observation only; local reviewer enforcement remains authoritative."
+        }
+        "text_evidence_search" => {
+            "Return result_summary as a concise evidence-analysis note; do not write a final answer."
+        }
+        "commentary_evidence_search" => {
+            "Return result_summary as a concise commentary-analysis note and label commentary limits; do not prove base-text facts from commentary alone."
+        }
+        "evidence_package_create" => {
+            "Return result_summary as a concise package summary using the package_id from step_output_json; do not invent package ids."
+        }
+        _ => {
+            "Return result_summary as a concise step observation that preserves the step output boundary."
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4821,10 +4853,26 @@ mod tests {
         assert!(workflow.steps.iter().any(|step| {
             step.operation == "draft_answer"
                 && step.agent_runtime.as_ref().is_some_and(|value| {
-                    value["result_summary"].as_str().is_some_and(|summary| {
-                        summary.contains("operation: draft_answer")
-                            && summary.contains(&workflow.package.package_id)
-                    })
+                    value["result_summary_contract"]
+                        .as_str()
+                        .is_some_and(|contract| {
+                            contract.contains("draft_answer") && contract.contains("package_id")
+                        })
+                        && value["result_summary"].as_str().is_some_and(|summary| {
+                            summary.contains("operation: draft_answer")
+                                && summary.contains(&workflow.package.package_id)
+                        })
+                })
+        }));
+        assert!(workflow.steps.iter().any(|step| {
+            step.operation == "review_answer"
+                && step.agent_runtime.as_ref().is_some_and(|value| {
+                    value["result_summary_contract"]
+                        .as_str()
+                        .is_some_and(|contract| {
+                            contract.contains("review_status")
+                                && contract.contains("local reviewer")
+                        })
                 })
         }));
         assert!(workflow.stream_events.iter().any(|event| {
