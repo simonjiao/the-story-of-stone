@@ -310,6 +310,10 @@
   `__user__.role == "admin"` 后才调用 `/v1/admin/*`；普通用户不会触发 Gateway
   admin 请求。已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入
   release readiness live gate。
+- `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已补 Gateway
+  Admin Action contract smoke，覆盖 Action 编译和单测、verify fixture 正向、
+  admin key 为空、缺少 admin role guard、缺少 admin action endpoint，以及
+  verify 输出不泄露 fixture-secret 值。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。

@@ -462,6 +462,16 @@ key names only, never secret values. For local/CI contract checks, set
 `OPEN_WEBUI_GATEWAY_ADMIN_ACTION_VERIFY_JSON` to a fixture file and the script
 validates the fixture without connecting to Open WebUI.
 
+Run the local contract smoke before changing the Action or its verify gate:
+
+```bash
+./scripts/test-openwebui-gateway-admin-action-contract.sh
+```
+
+The smoke compiles the Action, runs its unit tests, verifies positive and
+negative fixture reports, and checks that fixture-secret values are not emitted
+by the verify script.
+
 Do not print or commit `OPEN_WEBUI_ADMIN_TOKEN`, `AGENT_BRIDGE_SECRET`,
 `AGENT_JWT_SECRET`, or `TONGLINGYU_ADMIN_API_KEY`. Before editing `deploy/.env`,
 run:
