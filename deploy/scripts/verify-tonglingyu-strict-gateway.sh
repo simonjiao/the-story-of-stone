@@ -194,6 +194,16 @@ else:
         errors.append("runtime summary local_governance_enforced must be true")
     if int(runtime_summary.get("tool_result_count") or 0) <= 0:
         errors.append("runtime summary tool_result_count must be positive")
+    if int(runtime_summary.get("profile_step_count") or 0) != len(runtime_step_events):
+        errors.append("runtime summary profile_step_count must match runtime step events")
+    if int(runtime_summary.get("executed_profile_step_count") or 0) != len(runtime_step_events):
+        errors.append("runtime summary executed_profile_step_count must match runtime step events")
+    step_tool_result_count = 0
+    for item in runtime_step_events:
+        agent_runtime = (item.get("payload") or {}).get("agent_runtime") or {}
+        step_tool_result_count += int(agent_runtime.get("tool_result_count") or 0)
+    if int(runtime_summary.get("tool_result_count") or 0) != step_tool_result_count:
+        errors.append("runtime summary tool_result_count must match runtime step tool results")
 operations = {
     ((item.get("payload") or {}).get("operation"))
     for item in runtime_step_events

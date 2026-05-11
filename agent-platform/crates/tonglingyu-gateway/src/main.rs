@@ -3070,6 +3070,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         trace_id,
     )?;
     let audit_events = runtime_store.audit_events_for_trace(trace_id)?;
+    let agent_runtime_summary = latest_agent_runtime_summary(&audit_events);
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -3093,9 +3094,22 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "trace_id": trace_id,
         "workflow_states": workflow_states,
         "audit_events": audit_events,
+        "agent_runtime_summary": agent_runtime_summary,
         "messages": messages,
         "packages": packages,
     })))
+}
+
+fn latest_agent_runtime_summary(audit_events: &[Value]) -> Value {
+    audit_events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.get("event_type") == Some(&json!("agent_runtime_profile_execution_summarized"))
+        })
+        .and_then(|event| event.get("payload"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
@@ -3386,6 +3400,39 @@ mod tests {
         assert!(public.get("_runtime_stream_events").is_none());
         assert!(public.get("_stream_source").is_none());
         assert_eq!(public["session_id"], "session-test");
+    }
+
+    #[test]
+    fn latest_agent_runtime_summary_uses_last_summary_event() {
+        let events = vec![
+            json!({
+                "event_type": "agent_runtime_profile_execution_summarized",
+                "payload": {
+                    "profile_execution_status": "minimal_envelope_only",
+                    "tool_result_count": 0,
+                },
+            }),
+            json!({
+                "event_type": "agent_runtime_profile_step_executed",
+                "payload": {"operation": "draft_answer"},
+            }),
+            json!({
+                "event_type": "agent_runtime_profile_execution_summarized",
+                "payload": {
+                    "profile_execution_status": "hermes_profile_observed_with_local_governance",
+                    "tool_result_count": 4,
+                },
+            }),
+        ];
+
+        let summary = latest_agent_runtime_summary(&events);
+
+        assert_eq!(
+            summary["profile_execution_status"],
+            "hermes_profile_observed_with_local_governance"
+        );
+        assert_eq!(summary["tool_result_count"], json!(4));
+        assert!(latest_agent_runtime_summary(&[]).is_null());
     }
 
     #[test]

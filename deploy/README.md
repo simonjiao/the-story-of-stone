@@ -222,7 +222,8 @@ tool refs must match the current evidence package id. The same trace must also
 show local evidence/package/reviewer enforcement and a consumed Hermes draft
 observation, plus an `agent_runtime_profile_execution_summarized` event whose
 summary reports `hermes_profile_observed_with_local_governance`, so the gate
-does not pass on tool-result plumbing alone.
+does not pass on tool-result plumbing alone. The summary step/tool counts must
+also match the detailed runtime step audit events.
 
 For a release-readiness summary, run the aggregate gate:
 
