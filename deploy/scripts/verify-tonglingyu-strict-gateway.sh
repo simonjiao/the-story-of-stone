@@ -251,6 +251,17 @@ for item in runtime_step_events:
             continue
         tool_name = result.get("tool_name")
         output_ref = result.get("output_ref")
+        matching_result_audit = any(
+            isinstance(event, dict)
+            and event.get("event") == "runtime_tool_result"
+            and event.get("tool_name") == tool_name
+            and event.get("output_ref") == output_ref
+            for event in tool_audit_events
+        )
+        if not matching_result_audit:
+            errors.append(
+                f"runtime step {operation} tool {tool_name} result must have matching audit event"
+            )
         if not output_ref:
             errors.append(f"runtime step {operation} tool {tool_name} must include output_ref")
             continue

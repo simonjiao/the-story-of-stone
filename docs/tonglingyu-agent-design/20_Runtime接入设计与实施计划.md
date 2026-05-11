@@ -379,6 +379,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] Runtime summary 和 strict Gateway gate 已增加 `tool_audit_event_count`
   交叉校验；Hermes mode 下 tool result 没有被 tool audit event 覆盖时会
   fail-closed，避免只验证工具结果字段、不验证工具执行审计。
+- [x] strict Gateway gate 会要求 tool result 与 `runtime_tool_result` audit
+  event 按 `tool_name` / `output_ref` 绑定，避免 audit 数量正确但具体工具输出
+  无法审计归因。
 - [x] strict Gateway gate 会校验 admin trace 顶层 `agent_runtime_summary`
   与最新 runtime summary audit event 完全一致，避免 Gateway 管理入口展示陈旧或
   缺失 summary 仍被误判为通过。
