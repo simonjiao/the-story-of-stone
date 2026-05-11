@@ -198,6 +198,9 @@
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果
   字段”误判为“工具执行已被审计”。
+- strict Gateway gate 已校验 admin trace 顶层 `agent_runtime_summary` 必须等于
+  最新 `agent_runtime_profile_execution_summarized` audit event，避免管理员入口
+  展示字段与审计链脱节。
 - Hermes mode 已把 incomplete profile content/tool execution 前移为 Runtime
   fail-closed：如果 summary 未达到
   `hermes_profile_observed_with_local_governance`，请求会写

@@ -224,7 +224,9 @@ observation, plus an `agent_runtime_profile_execution_summarized` event whose
 summary reports `hermes_profile_observed_with_local_governance`, so the gate
 does not pass on tool-result plumbing alone. The summary step/tool counts must
 also match the detailed runtime step audit events, and every reported tool
-result must be covered by tool audit events.
+result must be covered by tool audit events. The trace-level
+`agent_runtime_summary` must match the latest runtime summary audit event, so
+the admin trace surface cannot drift from the audit chain.
 
 For a release-readiness summary, run the aggregate gate:
 

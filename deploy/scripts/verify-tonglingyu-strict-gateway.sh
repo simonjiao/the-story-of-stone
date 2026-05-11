@@ -178,6 +178,9 @@ if not runtime_summary_events:
     errors.append("admin trace must include agent_runtime_profile_execution_summarized")
 else:
     runtime_summary = runtime_summary_events[-1].get("payload") or {}
+    trace_runtime_summary = trace.get("agent_runtime_summary") or {}
+    if trace_runtime_summary != runtime_summary:
+        errors.append("admin trace agent_runtime_summary must match latest runtime summary event")
     if runtime_summary.get("mode") != "hermes":
         errors.append("runtime summary mode must be hermes")
     if (
