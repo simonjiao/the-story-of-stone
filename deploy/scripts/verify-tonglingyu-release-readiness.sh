@@ -17,7 +17,8 @@ if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]] \
-  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-}" ]]; then
+  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD:-}" ]]; then
   GATE_CMD_OVERRIDES_USED="true"
 fi
 RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
@@ -25,6 +26,7 @@ MODEL_UPSTREAM_CMD="${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-${SCRIPT_DIR}/verif
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
 OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DIR}/verify-openwebui-function.sh}"
 OPENWEBUI_ADMIN_ACTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh}"
+OPENWEBUI_BROWSER_REVIEW_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD:-${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 cd "${DEPLOY_DIR}"
@@ -182,20 +184,26 @@ if is_true "${TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW:-false}"; then
     if [[ "${require_live}" == "true" ]]; then
       failed=1
     fi
+  elif [[ -z "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}" ]]; then
+    append_result "openwebui_browser_review" "failed" "${require_live}" \
+      "set TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE to a validated browser review JSON report"
+    if [[ "${require_live}" == "true" ]]; then
+      failed=1
+    fi
   else
-    append_result "openwebui_browser_review" "passed" "${require_live}" \
-      "browser-side Open WebUI review was acknowledged by environment"
+    run_gate "openwebui_browser_review" "${require_live}" \
+      "${OPENWEBUI_BROWSER_REVIEW_CMD}" || failed=1
   fi
 elif [[ "${require_live}" == "true" ]]; then
   append_result "openwebui_browser_review" "failed" "true" \
-    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF after browser-side review"
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true, TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF, and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE after browser-side review"
   failed=1
 else
   skip_gate "openwebui_browser_review" "false" \
-    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF after browser-side review"
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true, TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF, and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" "${GATE_CMD_OVERRIDES_USED}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}" "${GATE_CMD_OVERRIDES_USED}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
@@ -207,11 +215,13 @@ from datetime import datetime, timezone
     require_live_raw,
     summary_only_raw,
     browser_review_ref,
+    browser_review_evidence,
     gate_cmd_overrides_raw,
-) = sys.argv[1:8]
+) = sys.argv[1:9]
 require_live = require_live_raw == "true"
 summary_only = summary_only_raw == "true"
 browser_review_ref = browser_review_ref.strip()
+browser_review_evidence = browser_review_evidence.strip()
 gate_cmd_overrides_used = gate_cmd_overrides_raw == "true"
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
@@ -293,6 +303,7 @@ report = {
     "gate_command_overrides_used": gate_cmd_overrides_used,
     "browser_review_acknowledged": browser_review_acknowledged,
     "browser_review_ref": browser_review_ref,
+    "browser_review_evidence": browser_review_evidence,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,

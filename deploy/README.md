@@ -334,8 +334,46 @@ When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
 `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` and a non-empty
 `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF` after a human has checked
 ordinary-user model visibility, streaming chat UX, admin audit visibility, and
-that persisted Open WebUI provider settings match the rendered environment. Use
-the ref for the review note, ticket, runbook entry, or captured report path.
+that persisted Open WebUI provider settings match the rendered environment.
+The ACK must also set `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE`
+to a JSON report accepted by:
+
+```bash
+./scripts/verify-openwebui-browser-review-evidence.sh \
+  ./openwebui-browser-review.json
+```
+
+Use this report shape and keep screenshots, trace links, or runbook paths in
+`evidence_ref`; do not include token, key, password, or secret values:
+
+```json
+{
+  "object": "tonglingyu.openwebui_browser_review",
+  "status": "passed",
+  "reviewed_at": "2026-05-11T00:00:00Z",
+  "reviewer": "operator-name",
+  "public_webui_url": "https://chat.example.invalid",
+  "checks": {
+    "ordinary_user_model_visibility": {
+      "status": "passed",
+      "evidence_ref": "screenshots/openwebui-models.png"
+    },
+    "streaming_chat_ux": {
+      "status": "passed",
+      "evidence_ref": "screenshots/openwebui-streaming-chat.png"
+    },
+    "admin_audit_visibility": {
+      "status": "passed",
+      "evidence_ref": "trace:tly-..."
+    },
+    "persisted_provider_settings": {
+      "status": "passed",
+      "evidence_ref": "runbook:provider-settings-check",
+      "matched_rendered_env": true
+    }
+  }
+}
+```
 
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and

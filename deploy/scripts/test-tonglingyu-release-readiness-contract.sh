@@ -7,6 +7,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
+BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 
 cat >"${PASS_CMD}" <<'SH'
 #!/usr/bin/env bash
@@ -22,6 +23,35 @@ echo 'mock gate failed' >&2
 exit 42
 SH
 chmod +x "${FAIL_CMD}"
+
+cat >"${BROWSER_EVIDENCE_JSON}" <<'JSON'
+{
+  "object": "tonglingyu.openwebui_browser_review",
+  "status": "passed",
+  "reviewed_at": "2026-05-11T00:00:00Z",
+  "reviewer": "release-reviewer",
+  "public_webui_url": "https://example.invalid",
+  "checks": {
+    "ordinary_user_model_visibility": {
+      "status": "passed",
+      "evidence_ref": "browser://ordinary-user-models"
+    },
+    "streaming_chat_ux": {
+      "status": "passed",
+      "evidence_ref": "browser://streaming-chat"
+    },
+    "admin_audit_visibility": {
+      "status": "passed",
+      "evidence_ref": "browser://admin-audit"
+    },
+    "persisted_provider_settings": {
+      "status": "passed",
+      "evidence_ref": "browser://provider-settings",
+      "matched_rendered_env": true
+    }
+  }
+}
+JSON
 
 assert_report() {
   local report_path="$1"
@@ -58,6 +88,21 @@ if ! grep -q "Production release readiness cannot be proven" "${override_guard_s
   echo "override guard did not explain production readiness boundary" >&2
   exit 1
 fi
+
+browser_evidence_stdout="${WORK_DIR}/browser-evidence.stdout"
+"${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${BROWSER_EVIDENCE_JSON}" >"${browser_evidence_stdout}"
+python3 - "${browser_evidence_stdout}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "ok":
+    raise SystemExit(report)
+if report["secret_values_printed"] is not False:
+    raise SystemExit(report)
+PY
 
 default_report="${WORK_DIR}/default-not-ready.json"
 if env "${common_env[@]}" \
@@ -106,6 +151,7 @@ env "${common_env[@]}" \
   TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
   TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
   TONGLINGYU_RELEASE_REPORT_PATH="${conditions_report}" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
 assert_report "${conditions_report}" 'report["release_conditions_met"] is True'
@@ -113,6 +159,7 @@ assert_report "${conditions_report}" 'report["production_release_ready"] is Fals
 assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_command_overrides"'
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'
 assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-browser-review"'
+assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
@@ -126,6 +173,7 @@ if env \
   TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
   TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
   TONGLINGYU_RELEASE_REPORT_PATH="${failed_report}" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null; then
   echo "live release readiness must fail when strict Gateway gate fails" >&2

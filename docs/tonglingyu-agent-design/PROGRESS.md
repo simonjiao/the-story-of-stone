@@ -295,9 +295,11 @@
   只有显式 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
-  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，把 Open WebUI 页面侧普通
-  用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核变成
-  带证据引用的显式发布前置，而不是报告里的被动备注。
+  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增
+  `verify-openwebui-browser-review-evidence.sh` 校验
+  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE` 指向的 JSON 证据报告；
+  Open WebUI 页面侧普通用户模型可见性、streaming UX、admin audit 和持久化
+  provider 设置复核必须逐项 `passed` 且带 `evidence_ref`，不能只靠口头 ACK。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
   readiness contract smoke，覆盖 override guard、默认非 live 不 ready、
   summary-only optional failure、mock live 条件满足但不 production ready、live
