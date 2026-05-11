@@ -95,6 +95,33 @@ with open(trace_path, "r", encoding="utf-8") as handle:
     trace = json.load(handle)
 
 errors = []
+forbidden_public_chat_keys = {
+    "_runtime_stream_events",
+    "_stream_source",
+    "agent_runtime",
+    "agent_runtime_plan_gate",
+    "agent_runtime_summary",
+    "audit_events",
+    "internal_trace",
+    "runtime_step_outputs",
+    "runtime_step_plan",
+    "workflow_states",
+}
+
+
+def forbidden_public_chat_paths(value, prefix="$"):
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            field = f"{prefix}.{key}"
+            if key in forbidden_public_chat_keys:
+                paths.append(field)
+                continue
+            paths.extend(forbidden_public_chat_paths(child, field))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(forbidden_public_chat_paths(child, f"{prefix}[{index}]"))
+    return paths
 
 if health.get("status") != "ok":
     errors.append("health.status must be ok")
@@ -148,20 +175,8 @@ if not chat_trace_id:
     errors.append("chat response must include trace_id")
 if not chat_package_id:
     errors.append("chat response must include evidence_package_id")
-for forbidden_chat_key in [
-    "_runtime_stream_events",
-    "_stream_source",
-    "agent_runtime",
-    "agent_runtime_plan_gate",
-    "agent_runtime_summary",
-    "audit_events",
-    "internal_trace",
-    "runtime_step_outputs",
-    "runtime_step_plan",
-    "workflow_states",
-]:
-    if forbidden_chat_key in chat:
-        errors.append(f"chat response must not expose {forbidden_chat_key}")
+for forbidden_chat_path in forbidden_public_chat_paths(chat):
+    errors.append(f"chat response must not expose {forbidden_chat_path}")
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
 event_types = {

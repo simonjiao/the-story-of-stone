@@ -175,7 +175,8 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
   `config` 下会递归扫描，避免 Open WebUI 请求伪造内部执行/审计状态。
 - [x] strict Gateway live gate 会拒绝公共 chat 响应泄露
   `agent_runtime_summary`、`runtime_step_outputs`、`audit_events` 或
-  `_runtime_stream_events` 等内部 runtime/admin trace 字段。
+  `_runtime_stream_events` 等内部 runtime/admin trace 字段，且会递归扫描任意
+  嵌套层级。
 - [x] Gateway smoke 对新 streaming 和去重 replay streaming 响应增加内部字段
   负向断言，避免 SSE 路径漏掉非流式响应已覆盖的泄露检查。
 - [x] Gateway 不构建证据卡片或证据包。
