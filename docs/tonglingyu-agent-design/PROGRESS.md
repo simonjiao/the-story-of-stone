@@ -216,6 +216,10 @@
   检查 Tonglingyu Gateway/Hermes/Agent Runtime strict wiring、Open WebUI 默认
   模型、admin/gateway key 集合隔离，以及 Open WebUI provider key 不含 admin
   credential；输出只包含变量名和 gate 状态。
+- `deploy/docker-compose.yml` 已把 `tonglingyu-gateway` 的
+  `TONGLINGYU_AGENT_RUNTIME_MODE` 生产默认值设为 `hermes`，并显式注入
+  `AGENT_RUNTIME_HERMES_*`；配置 gate 会拒绝 Gateway 自身仍落回 `minimal`
+  runtime mode 的生产渲染结果。
 - 当前不能宣布“薄 Gateway + Runtime Agent 已完成”：profile workflow 的领域内容、
   工具调用和 reviewer 结果仍由 `tonglingyu-runtime` 确定性执行，`agent-runtime`
   目前承担 plan gate 和 profile step execution envelope，尚未承担 profile

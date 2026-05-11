@@ -122,6 +122,14 @@ if value(gateway_env, "TONGLINGYU_UPSTREAM_BASE_URL") != "http://hermes:8642/v1"
     errors.append("tonglingyu-gateway.TONGLINGYU_UPSTREAM_BASE_URL must be http://hermes:8642/v1")
 if hermes_api_key and value(gateway_env, "TONGLINGYU_UPSTREAM_API_KEY") != hermes_api_key:
     errors.append("tonglingyu-gateway.TONGLINGYU_UPSTREAM_API_KEY must match hermes.API_SERVER_KEY")
+if value(gateway_env, "TONGLINGYU_AGENT_RUNTIME_MODE") != "hermes":
+    errors.append("tonglingyu-gateway.TONGLINGYU_AGENT_RUNTIME_MODE must be hermes")
+if value(gateway_env, "AGENT_RUNTIME_HERMES_BASE_URL") != "http://hermes:8642/v1":
+    errors.append("tonglingyu-gateway.AGENT_RUNTIME_HERMES_BASE_URL must be http://hermes:8642/v1")
+if value(gateway_env, "AGENT_RUNTIME_HERMES_MODEL") != value(gateway_env, "TONGLINGYU_UPSTREAM_MODEL"):
+    errors.append("tonglingyu-gateway.AGENT_RUNTIME_HERMES_MODEL must match TONGLINGYU_UPSTREAM_MODEL")
+if hermes_api_key and value(gateway_env, "AGENT_RUNTIME_HERMES_API_KEY") != hermes_api_key:
+    errors.append("tonglingyu-gateway.AGENT_RUNTIME_HERMES_API_KEY must match hermes.API_SERVER_KEY")
 
 if value(worker_env, "AGENT_RUNTIME_MODE") != "hermes":
     errors.append("agent-worker.AGENT_RUNTIME_MODE must be hermes")
@@ -155,12 +163,14 @@ print(json.dumps(
             "TONGLINGYU_GATEWAY_API_KEY(S)",
             "TONGLINGYU_ADMIN_API_KEY(S)",
             "OPENAI_API_KEYS",
+            "tonglingyu-gateway.AGENT_RUNTIME_HERMES_API_KEY",
             "AGENT_RUNTIME_HERMES_API_KEY",
         ],
         "checked_policy_fields": [
             "DEFAULT_MODELS",
             "OPENAI_API_BASE_URLS",
             "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY",
+            "TONGLINGYU_AGENT_RUNTIME_MODE",
             "AGENT_RUNTIME_MODE",
         ],
     },

@@ -344,6 +344,9 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
 - [x] 增加 `deploy/scripts/verify-tonglingyu-runtime-config.sh`，基于 compose
   渲染结果检查 Tonglingyu/Hermes strict runtime wiring、Open WebUI 默认模型、
   admin/gateway key 隔离和 provider key 不含 admin credential。
+- [x] 生产 compose 显式设置 Gateway `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`
+  并注入 `AGENT_RUNTIME_HERMES_*`；release gate 拒绝 Gateway runtime mode
+  仍为 `minimal` 的渲染结果。
 - [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
   回归断言。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`

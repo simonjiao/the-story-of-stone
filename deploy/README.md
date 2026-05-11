@@ -84,6 +84,15 @@ Required changes:
   outside local development so admin endpoints cannot be opened with the normal
   Open WebUI provider key. Production verification rejects enabling this flag
   when admin keys are configured.
+- `TONGLINGYU_AGENT_RUNTIME_MODE`: Tonglingyu Gateway profile execution client.
+  The production compose default is `hermes`; use `minimal` only for local
+  smoke or deterministic development runs.
+- `AGENT_RUNTIME_HERMES_BASE_URL`, `AGENT_RUNTIME_HERMES_MODEL`,
+  `AGENT_RUNTIME_HERMES_PROFILE_MODELS`, `AGENT_RUNTIME_HERMES_API_KEY`, and
+  `AGENT_RUNTIME_TIMEOUT_SECONDS`: Hermes runtime client settings used by
+  Tonglingyu Gateway and Agent Worker. The Gateway container receives the same
+  Hermes key as its upstream generation key, but it still keeps separate
+  Gateway/admin inbound credentials.
 - `TONGLINGYU_RETENTION_DAYS`: runtime audit/session/package retention window.
   Default is `90`; set `0` only when automatic pruning must be disabled.
 - `AGENT_BRIDGE_SECRET`: shared secret used by the Open WebUI
