@@ -274,7 +274,8 @@
   默认运行 compose 渲染配置检查，`TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时把
   strict Gateway 和 Open WebUI Function 检查作为必过 gate；报告会显式记录
   `production_release_ready`、skipped live gates、release blockers 和仍需人工页面
-  复核的项目，避免把局部验证当作生产完成。
+  复核的项目；只有显式 live release mode、必过 gate 和页面 ACK 都满足时才会
+  标记 production ready，避免把局部验证当作生产完成。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
   普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核

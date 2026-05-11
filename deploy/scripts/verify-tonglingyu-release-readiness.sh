@@ -168,6 +168,8 @@ manual_checks = [] if browser_review_acknowledged else [
     "Human confirmation that existing Open WebUI webui.db persisted settings match env-rendered provider settings",
 ]
 release_blockers = []
+if not require_live:
+    release_blockers.append("live release mode was not required")
 for name in required_failures:
     release_blockers.append(f"required gate did not pass: {name}")
 for name in skipped_live_gates:
@@ -178,7 +180,8 @@ for name in failed_live_gates:
 if not browser_review_acknowledged:
     release_blockers.append("Open WebUI browser-side review was not acknowledged")
 production_release_ready = (
-    not required_failures
+    require_live
+    and not required_failures
     and not skipped_live_gates
     and browser_review_acknowledged
 )
