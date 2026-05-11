@@ -184,6 +184,10 @@
 - strict Gateway live gate 已要求 admin trace 同时出现 evidence/package/reviewer
   local enforcement observation 和已消费的 Hermes draft observation，避免只因
   tool-result plumbing 存在就误判 Runtime 接入完成。
+- Hermes mode 的 step `content_source` 已从固定
+  `tonglingyu-deterministic-workflow` 改为按 observation/application 状态标记
+  `agent-runtime-hermes-*`，使 audit 和 streaming metadata 能区分 Hermes 观察、
+  Hermes 草稿消费和本地治理兜底。
 - Hermes `review_answer` 结构化 JSON 输出已进入 review observation；Runtime
   会记录 LLM reviewer status/severity/issues 与本地强制 reviewer 的一致性，
   不一致时标记 `local_reviewer_override=true`，最终裁决仍由本地 reviewer 决定。

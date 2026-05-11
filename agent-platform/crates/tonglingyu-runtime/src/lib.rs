@@ -1926,6 +1926,10 @@ fn apply_agent_runtime_evidence_outputs(
         step.output["agent_runtime_evidence_rejected_reason"] = json!(observation.rejected_reason);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
+                "content_source".to_string(),
+                json!("agent-runtime-hermes-evidence-observation"),
+            );
+            agent_runtime.insert(
                 "evidence_observation".to_string(),
                 json!({
                     "result_format": observation.result_format,
@@ -2062,6 +2066,10 @@ fn apply_agent_runtime_package_output(
         step.output["agent_runtime_package_rejected_reason"] = json!(observation.rejected_reason);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
+                "content_source".to_string(),
+                json!("agent-runtime-hermes-package-observation"),
+            );
+            agent_runtime.insert(
                 "package_observation".to_string(),
                 json!({
                     "result_format": observation.result_format,
@@ -2154,6 +2162,10 @@ fn apply_agent_runtime_content_outputs(
             step.output["agent_runtime_package_id"] = json!(extraction.package_id);
             if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
             {
+                agent_runtime.insert(
+                    "content_source".to_string(),
+                    json!("agent-runtime-hermes-profile-rejected"),
+                );
                 agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
                 agent_runtime.insert(
                     "content_application".to_string(),
@@ -2197,6 +2209,10 @@ fn apply_agent_runtime_content_outputs(
         step.output["agent_runtime_claim_statement_count"] =
             json!(extraction.claim_statement_count);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "content_source".to_string(),
+                json!("agent-runtime-hermes-profile"),
+            );
             agent_runtime.insert(
                 "content_used_for_final_answer".to_string(),
                 json!(content_used_for_final_answer),
@@ -2367,6 +2383,10 @@ fn apply_agent_runtime_reviewer_output(
             json!(observation.local_reviewer_override);
         step.output["agent_runtime_review_rejected_reason"] = json!(observation.rejected_reason);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "content_source".to_string(),
+                json!("agent-runtime-hermes-review-observation"),
+            );
             agent_runtime.insert(
                 "review_observation".to_string(),
                 json!({
@@ -5705,6 +5725,10 @@ mod tests {
             json!(false)
         );
         let draft_agent_runtime = draft_step.agent_runtime.as_ref().unwrap();
+        assert_eq!(
+            draft_agent_runtime["content_source"],
+            json!("agent-runtime-hermes-profile")
+        );
         assert_eq!(draft_agent_runtime["tool_rounds"], json!(1));
         assert_eq!(draft_agent_runtime["tool_result_count"], json!(1));
         assert_eq!(draft_agent_runtime["tool_audit_event_count"], json!(1));
@@ -5718,6 +5742,10 @@ mod tests {
             .find(|step| step.operation == "text_evidence_search")
             .expect("text evidence step");
         assert_eq!(
+            text_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-hermes-evidence-observation")
+        );
+        assert_eq!(
             text_step.agent_runtime.as_ref().unwrap()["evidence_observation"]["matches_runtime_evidence"],
             json!(true)
         );
@@ -5726,6 +5754,10 @@ mod tests {
             .iter()
             .find(|step| step.operation == "evidence_package_create")
             .expect("package step");
+        assert_eq!(
+            package_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-hermes-package-observation")
+        );
         assert_eq!(
             package_step.agent_runtime.as_ref().unwrap()["package_observation"]["matches_runtime_package"],
             json!(true)
@@ -5736,9 +5768,19 @@ mod tests {
             .find(|step| step.operation == "review_answer")
             .expect("review step");
         assert_eq!(
+            review_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-hermes-review-observation")
+        );
+        assert_eq!(
             review_step.agent_runtime.as_ref().unwrap()["review_observation"]["local_reviewer_override"],
             json!(true)
         );
+        assert!(workflow.stream_events.iter().any(|event| {
+            event.event_type == "step_completed"
+                && event.metadata["operation"] == json!("draft_answer")
+                && event.metadata["agent_runtime"]["content_source"]
+                    == json!("agent-runtime-hermes-profile")
+        }));
         assert!(workflow.stream_events.iter().any(|event| {
             event.event_type == "step_completed"
                 && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
