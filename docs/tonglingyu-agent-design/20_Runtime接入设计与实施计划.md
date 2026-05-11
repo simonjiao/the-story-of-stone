@@ -162,6 +162,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 公共 `/v1/*` 入口已增加 per-subject rate limit，
   `TONGLINGYU_RATE_LIMIT_PER_MINUTE` 可配置，`0` 表示关闭；health、JSON
   metrics 和 Prometheus info 暴露有效配置，smoke 覆盖默认值。
+- [x] Gateway 请求体上限已显式配置为 `TONGLINGYU_MAX_BODY_BYTES`
+  默认 1 MiB，避免依赖框架隐式默认；health、JSON metrics 和 Prometheus
+  info 暴露有效配置，smoke 覆盖默认值。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

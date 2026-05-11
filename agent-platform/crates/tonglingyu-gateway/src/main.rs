@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -207,6 +207,8 @@ struct ServeArgs {
     max_messages: usize,
     #[arg(long, env = "TONGLINGYU_MAX_QUESTION_CHARS", default_value_t = 4000)]
     max_question_chars: usize,
+    #[arg(long, env = "TONGLINGYU_MAX_BODY_BYTES", default_value_t = 1_048_576)]
+    max_body_bytes: usize,
     #[arg(long, env = "TONGLINGYU_RATE_LIMIT_PER_MINUTE", default_value_t = 120)]
     rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
@@ -245,6 +247,7 @@ struct AppState {
     allow_admin_with_gateway_key: bool,
     max_messages: usize,
     max_question_chars: usize,
+    max_body_bytes: usize,
     rate_limit_per_minute: usize,
     rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
@@ -744,6 +747,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         allow_admin_with_gateway_key: args.allow_admin_with_gateway_key,
         max_messages: args.max_messages,
         max_question_chars: args.max_question_chars,
+        max_body_bytes: args.max_body_bytes,
         rate_limit_per_minute: args.rate_limit_per_minute,
         rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
@@ -777,6 +781,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             get(prometheus_metrics_endpoint),
         )
         .with_state(state)
+        .layer(DefaultBodyLimit::max(args.max_body_bytes))
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     tracing::info!(bind = %args.bind, "tonglingyu gateway listening");
@@ -1971,6 +1976,11 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
                 "disabled": state.rate_limit_per_minute == 0,
             },
+            "request_limits": {
+                "max_messages": state.max_messages,
+                "max_question_chars": state.max_question_chars,
+                "max_body_bytes": state.max_body_bytes,
+            },
             "sources": stats.sources,
             "blocks": stats.blocks
         }))
@@ -3119,6 +3129,11 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "rate_limit_per_minute": state.rate_limit_per_minute,
             "rate_limit_disabled": state.rate_limit_per_minute == 0,
         },
+        "limits": {
+            "max_messages": state.max_messages,
+            "max_question_chars": state.max_question_chars,
+            "max_body_bytes": state.max_body_bytes,
+        },
         "retention": {
             "retention_days": state.retention_days,
             "auto_prune_enabled": state.retention_days > 0,
@@ -3147,12 +3162,13 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\"}} 1",
+        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
         escape_metric_label(&state.model_id),
         escape_metric_label(&state.profiles.main),
         escape_metric_label(&state.profiles.reviewer),
         escape_metric_label(agent_runtime_mode.as_str()),
-        state.rate_limit_per_minute
+        state.rate_limit_per_minute,
+        state.max_body_bytes
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
