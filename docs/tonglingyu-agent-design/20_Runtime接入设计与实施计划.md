@@ -179,6 +179,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
   嵌套层级。
 - [x] Gateway smoke 对新 streaming 和去重 replay streaming 响应增加内部字段
   负向断言，避免 SSE 路径漏掉非流式响应已覆盖的泄露检查。
+- [x] strict Gateway live gate 已增加 streaming chat completion 验证，要求
+  `[DONE]`、package metadata 和 Runtime workflow source marker，且不泄露内部
+  runtime/admin trace 字段。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

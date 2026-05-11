@@ -11,6 +11,7 @@ MODELS_JSON="${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-${WORK_DIR}/models.json}"
 METRICS_JSON="${TONGLINGYU_GATEWAY_VERIFY_METRICS_JSON:-${WORK_DIR}/metrics.json}"
 PROMETHEUS_TXT="${TONGLINGYU_GATEWAY_VERIFY_PROMETHEUS_TXT:-${WORK_DIR}/metrics.prom}"
 CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
+STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
 
 cd "${DEPLOY_DIR}"
@@ -57,6 +58,21 @@ curl -fsS \
 ' >"${CHAT_JSON}"
 fi
 
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-}" ]]; then
+  docker compose exec -T open-webui sh -lc '
+key="${OPENAI_API_KEYS%%;*}"
+test -n "${key}"
+curl -fsS \
+  -H "Authorization: Bearer ${key}" \
+  -H "content-type: application/json" \
+  -H "x-tonglingyu-user-id: release-gate" \
+  -H "x-tonglingyu-chat-id: strict-gateway" \
+  -H "x-tonglingyu-message-id: strict-gateway-runtime-stream-smoke" \
+  --data "{\"model\":\"tonglingyu\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"通灵玉是什么？\"}]}" \
+  http://tonglingyu-gateway:8090/v1/chat/completions
+' >"${STREAM_TXT}"
+fi
+
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-}" ]]; then
   TRACE_ID="$(python3 - "${CHAT_JSON}" <<'PY'
 import json
@@ -76,11 +92,11 @@ curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0
 fi
 
 python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
-  "${CHAT_JSON}" "${TRACE_JSON}" <<'PY'
+  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" <<'PY'
 import json
 import sys
 
-health_path, models_path, metrics_path, prometheus_path, chat_path, trace_path = sys.argv[1:7]
+health_path, models_path, metrics_path, prometheus_path, chat_path, stream_path, trace_path = sys.argv[1:8]
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
 with open(models_path, "r", encoding="utf-8") as handle:
@@ -91,6 +107,8 @@ with open(prometheus_path, "r", encoding="utf-8") as handle:
     prometheus = handle.read()
 with open(chat_path, "r", encoding="utf-8") as handle:
     chat = json.load(handle)
+with open(stream_path, "r", encoding="utf-8") as handle:
+    stream = handle.read()
 with open(trace_path, "r", encoding="utf-8") as handle:
     trace = json.load(handle)
 
@@ -177,6 +195,15 @@ if not chat_package_id:
     errors.append("chat response must include evidence_package_id")
 for forbidden_chat_path in forbidden_public_chat_paths(chat):
     errors.append(f"chat response must not expose {forbidden_chat_path}")
+if "data: [DONE]" not in stream:
+    errors.append("stream response must include data: [DONE]")
+if "evidence_package_id" not in stream:
+    errors.append("stream response must include evidence_package_id")
+if "runtime_workflow" not in stream:
+    errors.append("stream response must identify runtime_workflow source")
+for forbidden_stream_key in sorted(forbidden_public_chat_keys):
+    if forbidden_stream_key in stream:
+        errors.append(f"stream response must not expose {forbidden_stream_key}")
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
 event_types = {
@@ -350,6 +377,7 @@ print(json.dumps(
             "tonglingyu-gateway:/v1/admin/metrics",
             "tonglingyu-gateway:/v1/admin/metrics/prometheus",
             "open-webui->tonglingyu-gateway:/v1/chat/completions",
+            "open-webui->tonglingyu-gateway:/v1/chat/completions stream",
             "tonglingyu-gateway:/v1/admin/traces/{trace_id}",
         ],
         "model_ids": model_ids,
