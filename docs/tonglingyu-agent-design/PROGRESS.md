@@ -293,9 +293,10 @@
   完成；脚本默认退出码也跟随 `production_release_ready`，只有显式
   `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许非发布 summary 返回成功。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
-  `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true`，把 Open WebUI 页面侧
-  普通用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核
-  变成显式发布前置，而不是报告里的被动备注。
+  `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
+  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，把 Open WebUI 页面侧普通
+  用户模型可见性、streaming UX、admin audit 和持久化 provider 设置复核变成
+  带证据引用的显式发布前置，而不是报告里的被动备注。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。

@@ -92,6 +92,7 @@ summary_only="false"
 if is_true "${TONGLINGYU_RELEASE_SUMMARY_ONLY:-false}"; then
   summary_only="true"
 fi
+browser_review_ref="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
 
 verify_strict_gateway="false"
 if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_STRICT_GATEWAY:-false}"; then
@@ -120,25 +121,41 @@ else
 fi
 
 if is_true "${TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW:-false}"; then
-  append_result "openwebui_browser_review" "passed" "${require_live}" \
-    "browser-side Open WebUI review was acknowledged by environment"
+  if [[ -z "${browser_review_ref//[[:space:]]/}" ]]; then
+    append_result "openwebui_browser_review" "failed" "${require_live}" \
+      "set TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF with the browser review evidence reference"
+    if [[ "${require_live}" == "true" ]]; then
+      failed=1
+    fi
+  else
+    append_result "openwebui_browser_review" "passed" "${require_live}" \
+      "browser-side Open WebUI review was acknowledged by environment"
+  fi
 elif [[ "${require_live}" == "true" ]]; then
   append_result "openwebui_browser_review" "failed" "true" \
-    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF after browser-side review"
   failed=1
 else
   skip_gate "openwebui_browser_review" "false" \
-    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
+    "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
-results_path, report_path, ready_status_path, require_live_raw, summary_only_raw = sys.argv[1:6]
+(
+    results_path,
+    report_path,
+    ready_status_path,
+    require_live_raw,
+    summary_only_raw,
+    browser_review_ref,
+) = sys.argv[1:7]
 require_live = require_live_raw == "true"
 summary_only = summary_only_raw == "true"
+browser_review_ref = browser_review_ref.strip()
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
@@ -199,6 +216,7 @@ report = {
     "summary_only": summary_only,
     "exit_policy": "summary_only" if summary_only else "production_release_ready",
     "browser_review_acknowledged": browser_review_acknowledged,
+    "browser_review_ref": browser_review_ref,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,

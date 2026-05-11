@@ -251,9 +251,11 @@ script exits non-zero unless `production_release_ready=true`; set
 `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` only when intentionally generating a
 non-release summary report.
 When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
-`TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` after a human has checked
+`TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` and a non-empty
+`TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF` after a human has checked
 ordinary-user model visibility, streaming chat UX, admin audit visibility, and
-that persisted Open WebUI provider settings match the rendered environment.
+that persisted Open WebUI provider settings match the rendered environment. Use
+the ref for the review note, ticket, runbook entry, or captured report path.
 
 Agent Platform uses its own Postgres container. Do not reuse
 `sub2api-postgres`; it belongs to the separate `sub2api` compose project and
