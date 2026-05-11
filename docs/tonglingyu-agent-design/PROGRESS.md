@@ -318,12 +318,16 @@
 - browser review evidence verifier 已输出 evidence JSON SHA-256 和本地 artifact
   SHA-256；release readiness 聚合报告新增 `browser_review_validation`，保留
   verifier 的结构化校验摘要，避免生产发布记录只留下可变 evidence 路径。
+- release readiness 聚合逻辑现在要求 browser review gate 成功时必须解析出
+  `browser_review_validation`；如果 gate 退出 0 但没有 validation 摘要，会记为
+  `openwebui_browser_review_validation` 必过失败，避免报告出现 gate passed 但
+  browser review 仍未被承认的灰色状态。
 - `deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 已补 release
   readiness contract smoke，覆盖 browser review recorder 正负路径、
   browser evidence ref 文件存在性、public URL mismatch、过期 evidence、
-  evidence/artifact digest 输出、aggregate report validation 摘要、override guard、
-  默认非 live 不 ready、summary-only optional failure、mock live 条件满足但不
-  production ready、live 必过 gate 失败等路径；聚合脚本只允许显式
+  evidence/artifact digest 输出、aggregate report validation 摘要、缺 validation
+  摘要失败、override guard、默认非 live 不 ready、summary-only optional failure、
+  mock live 条件满足但不 production ready、live 必过 gate 失败等路径；聚合脚本只允许显式
   `TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true` 使用 mock gate，且一旦使用
   override 报告会保持 `production_release_ready=false`，条件满足时的状态也会
   标为 `passed_with_gate_command_overrides`。

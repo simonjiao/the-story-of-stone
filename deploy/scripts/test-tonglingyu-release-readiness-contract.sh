@@ -7,6 +7,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
+BROWSER_NO_VALIDATION_CMD="${WORK_DIR}/browser-gate-no-validation.sh"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
 MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
@@ -32,6 +33,13 @@ echo 'mock gate failed' >&2
 exit 42
 SH
 chmod +x "${FAIL_CMD}"
+
+cat >"${BROWSER_NO_VALIDATION_CMD}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+echo '{"status":"ok","source":"mock-browser-without-validation"}'
+SH
+chmod +x "${BROWSER_NO_VALIDATION_CMD}"
 
 cat >"${BROWSER_EVIDENCE_JSON}" <<JSON
 {
@@ -252,6 +260,23 @@ env "${common_env[@]}" \
 assert_report "${optional_report}" 'report["status"] == "passed_with_failed_optional_gates"'
 assert_report "${optional_report}" 'report["optional_failures"] == ["openwebui_browser_review"]'
 assert_report "${optional_report}" 'report["browser_review_acknowledged"] is False'
+
+missing_validation_report="${WORK_DIR}/browser-missing-validation.json"
+if env "${common_env[@]}" \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD="${BROWSER_NO_VALIDATION_CMD}" \
+  TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
+  TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
+  TONGLINGYU_RELEASE_REPORT_PATH="${missing_validation_report}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null; then
+  echo "browser review gate must fail when validation summary is missing" >&2
+  exit 1
+fi
+assert_report "${missing_validation_report}" 'report["status"] == "failed"'
+assert_report "${missing_validation_report}" '"openwebui_browser_review_validation" in report["required_failures"]'
+assert_report "${missing_validation_report}" 'report["browser_review_acknowledged"] is False'
+assert_report "${missing_validation_report}" '"Open WebUI browser-side review validation summary was missing" in report["release_blockers"]'
 
 env_file="${WORK_DIR}/release-readiness.env"
 env_file_report="${WORK_DIR}/env-file-report.json"

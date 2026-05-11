@@ -241,6 +241,14 @@ for line in reversed(browser_review_gate.get("stdout_tail") or []):
         browser_review_validation = candidate
         break
 
+browser_review_gate_passed = (
+    browser_review_gate.get("name") == "openwebui_browser_review"
+    and browser_review_gate.get("status") == "passed"
+)
+browser_review_validation_missing = (
+    browser_review_gate_passed and browser_review_validation is None
+)
+
 live_gate_names = [
     "model_upstream_network",
     "strict_gateway",
@@ -252,6 +260,8 @@ required_failures = [
     for gate in gates
     if gate["required"] and gate["status"] != "passed"
 ]
+if browser_review_validation_missing:
+    required_failures.append("openwebui_browser_review_validation")
 optional_failures = [
     gate["name"]
     for gate in gates
@@ -275,12 +285,8 @@ elif status == "passed" and skipped:
     status = "passed_with_skipped_gates"
 elif status == "passed" and gate_cmd_overrides_used:
     status = "passed_with_gate_command_overrides"
-browser_review_gate_passed = (
-    browser_review_gate.get("name") == "openwebui_browser_review"
-    and browser_review_gate.get("status") == "passed"
-)
-browser_review_acknowledged = browser_review_gate_passed and (
-    browser_review_validation is not None or gate_cmd_overrides_used
+browser_review_acknowledged = (
+    browser_review_gate_passed and browser_review_validation is not None
 )
 manual_checks = [] if browser_review_acknowledged else [
     "Open WebUI browser-side ordinary-user model visibility",
@@ -298,6 +304,8 @@ for name in skipped_live_gates:
 for name in failed_live_gates:
     if name not in required_failures:
         release_blockers.append(f"live gate failed: {name}")
+if browser_review_validation_missing:
+    release_blockers.append("Open WebUI browser-side review validation summary was missing")
 if not browser_review_acknowledged:
     release_blockers.append("Open WebUI browser-side review was not acknowledged")
 release_conditions_met = (
