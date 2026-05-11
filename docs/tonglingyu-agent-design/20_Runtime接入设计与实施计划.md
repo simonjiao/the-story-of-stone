@@ -178,10 +178,12 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
   `_runtime_stream_events` 等内部 runtime/admin trace 字段，且会递归扫描任意
   嵌套层级。
 - [x] Gateway smoke 对新 streaming 和去重 replay streaming 响应增加内部字段
-  负向断言，避免 SSE 路径漏掉非流式响应已覆盖的泄露检查。
+  结构化 SSE JSON 断言，避免 SSE 路径只做字符串可用性检查、漏掉非流式响应
+  已覆盖的泄露检查。
 - [x] strict Gateway live gate 已增加 streaming chat completion 验证，要求
   `[DONE]`、package metadata 和 Runtime workflow source marker，且不泄露内部
-  runtime/admin trace 字段。
+  runtime/admin trace 字段；streaming 响应会按 SSE JSON chunk 解析后递归检查
+  公共字段边界。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。

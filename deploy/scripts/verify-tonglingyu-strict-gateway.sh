@@ -141,6 +141,34 @@ def forbidden_public_chat_paths(value, prefix="$"):
             paths.extend(forbidden_public_chat_paths(child, f"{prefix}[{index}]"))
     return paths
 
+
+def parse_stream_events(stream_text):
+    events = []
+    done_seen = False
+    for line_number, raw_line in enumerate(stream_text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith(":"):
+            continue
+        if line.startswith(("event:", "id:", "retry:")):
+            continue
+        if not line.startswith("data:"):
+            errors.append(f"stream line {line_number} must be an SSE data line")
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            done_seen = True
+            continue
+        if not payload:
+            errors.append(f"stream line {line_number} must not have an empty data payload")
+            continue
+        try:
+            events.append(json.loads(payload))
+        except json.JSONDecodeError as exc:
+            errors.append(
+                f"stream line {line_number} data must be JSON or [DONE]: {exc.msg}"
+            )
+    return events, done_seen
+
 if health.get("status") != "ok":
     errors.append("health.status must be ok")
 if health.get("model") != "tonglingyu":
@@ -195,15 +223,28 @@ if not chat_package_id:
     errors.append("chat response must include evidence_package_id")
 for forbidden_chat_path in forbidden_public_chat_paths(chat):
     errors.append(f"chat response must not expose {forbidden_chat_path}")
-if "data: [DONE]" not in stream:
+stream_events, stream_done_seen = parse_stream_events(stream)
+if not stream_done_seen:
     errors.append("stream response must include data: [DONE]")
-if "evidence_package_id" not in stream:
+if not stream_events:
+    errors.append("stream response must include JSON data chunks")
+if not any(
+    isinstance(event, dict) and event.get("evidence_package_id")
+    for event in stream_events
+):
     errors.append("stream response must include evidence_package_id")
-if "runtime_workflow" not in stream:
+if not any(
+    isinstance(event, dict)
+    and (
+        event.get("runtime_workflow")
+        or event.get("stream_source") == "runtime_workflow"
+    )
+    for event in stream_events
+):
     errors.append("stream response must identify runtime_workflow source")
-for forbidden_stream_key in sorted(forbidden_public_chat_keys):
-    if forbidden_stream_key in stream:
-        errors.append(f"stream response must not expose {forbidden_stream_key}")
+for index, stream_event in enumerate(stream_events):
+    for forbidden_stream_path in forbidden_public_chat_paths(stream_event, f"$[{index}]"):
+        errors.append(f"stream response must not expose {forbidden_stream_path}")
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
 event_types = {

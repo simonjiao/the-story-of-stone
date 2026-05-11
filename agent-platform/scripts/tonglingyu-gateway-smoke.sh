@@ -74,20 +74,87 @@ expect_status() {
   fi
 }
 
-assert_stream_hides_internal_fields() {
+assert_stream_contract() {
   local stream_path="$1"
-  for forbidden in \
-    "_runtime_stream_events" \
-    "_stream_source" \
-    "agent_runtime_summary" \
-    "audit_events" \
-    "runtime_step_outputs" \
-    "runtime_step_plan"; do
-    if grep -q "${forbidden}" "${stream_path}"; then
-      echo "stream response leaked internal field ${forbidden}: ${stream_path}" >&2
-      return 1
-    fi
-  done
+  python3 - "${stream_path}" <<'PY'
+import json
+import sys
+
+stream_path = sys.argv[1]
+with open(stream_path, "r", encoding="utf-8") as handle:
+    stream = handle.read()
+
+forbidden_keys = {
+    "_runtime_stream_events",
+    "_stream_source",
+    "agent_runtime_summary",
+    "audit_events",
+    "runtime_step_outputs",
+    "runtime_step_plan",
+}
+errors = []
+
+
+def forbidden_paths(value, prefix="$"):
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            field = f"{prefix}.{key}"
+            if key in forbidden_keys:
+                paths.append(field)
+                continue
+            paths.extend(forbidden_paths(child, field))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(forbidden_paths(child, f"{prefix}[{index}]"))
+    return paths
+
+
+events = []
+done_seen = False
+for line_number, raw_line in enumerate(stream.splitlines(), start=1):
+    line = raw_line.strip()
+    if not line or line.startswith(":"):
+        continue
+    if line.startswith(("event:", "id:", "retry:")):
+        continue
+    if not line.startswith("data:"):
+        errors.append(f"line {line_number} is not an SSE data line")
+        continue
+    payload = line[len("data:"):].strip()
+    if payload == "[DONE]":
+        done_seen = True
+        continue
+    if not payload:
+        errors.append(f"line {line_number} has empty SSE data")
+        continue
+    try:
+        events.append(json.loads(payload))
+    except json.JSONDecodeError as exc:
+        errors.append(f"line {line_number} is not JSON or [DONE]: {exc.msg}")
+
+if not done_seen:
+    errors.append("missing data: [DONE]")
+if not events:
+    errors.append("missing JSON stream chunks")
+if not any(isinstance(event, dict) and event.get("evidence_package_id") for event in events):
+    errors.append("missing evidence_package_id")
+if not any(
+    isinstance(event, dict)
+    and (event.get("runtime_workflow") or event.get("stream_source") == "runtime_workflow")
+    for event in events
+):
+    errors.append("missing runtime_workflow source")
+
+for index, event in enumerate(events):
+    for path in forbidden_paths(event, f"$[{index}]"):
+        errors.append(f"leaked internal field {path}")
+
+if errors:
+    for error in errors:
+        print(f"stream_contract_error={error}", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
 auth=(-H "authorization: Bearer ${SMOKE_TOKEN}")
@@ -174,7 +241,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
 grep -q 'evidence_package_id' "${STREAM_TXT}"
 grep -q 'runtime_workflow' "${STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${STREAM_TXT}"
-assert_stream_hides_internal_fields "${STREAM_TXT}"
+assert_stream_contract "${STREAM_TXT}"
 curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -H "x-tonglingyu-message-id: smoke-message-stream" \
   -X POST \
@@ -183,7 +250,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
 grep -q 'evidence_package_id' "${DUP_STREAM_TXT}"
 grep -q 'runtime_workflow' "${DUP_STREAM_TXT}"
 grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
-assert_stream_hides_internal_fields "${DUP_STREAM_TXT}"
+assert_stream_contract "${DUP_STREAM_TXT}"
 
 PACKAGE_ID="$(cat "${CHAT_JSON}" | json_get "evidence_package_id")"
 TRACE_ID="$(cat "${CHAT_JSON}" | json_get "trace_id")"
