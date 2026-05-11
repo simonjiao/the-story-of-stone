@@ -176,7 +176,8 @@
   content/tool execution。
 - Hermes mode 同时要求 runtime tool result 的 `output_ref` 绑定
   `runtime://tonglingyu/{trace_id}/...`；package create/read/replay 类工具必须
-  绑定当前 evidence package id，防止无法追溯到本地 Runtime store 的伪工具结果。
+  绑定当前 evidence package id，text/commentary search 工具必须绑定当前本地
+  evidence set 指纹，防止无法追溯到本地 Runtime store 的伪工具结果。
 - Hermes `draft_answer` 结构化 JSON 候选必须匹配当前 evidence package
   `package_id` 且提供非空 `draft_answer`；错误 package 或缺少草稿时只写
   rejected audit，不进入本地草稿或最终回答。

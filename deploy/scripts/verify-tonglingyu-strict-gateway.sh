@@ -206,6 +206,15 @@ for item in runtime_step_events:
         if chat_trace_id and not str(output_ref).startswith(f"runtime://tonglingyu/{chat_trace_id}/"):
             errors.append(f"runtime step {operation} tool {tool_name} output_ref must bind to trace")
         if tool_name in {
+            "tonglingyu.text.search",
+            "tonglingyu.commentary.search",
+        } and chat_trace_id:
+            expected_prefix = f"runtime://tonglingyu/{chat_trace_id}/evidence/"
+            if not str(output_ref).startswith(expected_prefix):
+                errors.append(
+                    f"runtime step {operation} tool {tool_name} output_ref must bind to evidence set"
+                )
+        if tool_name in {
             "tonglingyu.evidence.package.create",
             "tonglingyu.evidence.package.read",
             "tonglingyu.evidence.package.replay",

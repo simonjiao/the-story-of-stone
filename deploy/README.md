@@ -216,7 +216,9 @@ trace. It requires `agent_runtime_mode=hermes`, a single visible `tonglingyu`
 model, hidden `honglou-*` profiles, positive KB counts, active rate limiting,
 isolated admin credentials, and Hermes runtime profile steps with non-empty
 tool results bound to `runtime://tonglingyu/{trace_id}/...` output refs in the
-trace.
+trace. Evidence search tool refs must use the
+`runtime://tonglingyu/{trace_id}/evidence/{digest}` namespace, while package
+tool refs must match the current evidence package id.
 
 For a release-readiness summary, run the aggregate gate:
 

@@ -814,6 +814,9 @@ fn runtime_tool_arg_error(message: &'static str) -> AgentCoreError {
 
 fn runtime_tool_output_ref(call: &RuntimeToolCall, output: &TonglingyuToolOutput) -> String {
     match output {
+        TonglingyuToolOutput::EvidenceCards { cards, .. } => {
+            evidence_set_output_ref(&call.trace_id, &evidence_ids(cards))
+        }
         TonglingyuToolOutput::EvidencePackage { package, .. } => {
             format!(
                 "runtime://tonglingyu/{}/packages/{}",
@@ -1671,6 +1674,21 @@ fn validate_agent_runtime_tool_output_ref(
             tool_name
         ));
     }
+    if matches!(
+        tool_name,
+        "tonglingyu.text.search" | "tonglingyu.commentary.search"
+    ) {
+        let expected_ref = evidence_tool_expected_output_ref(step)?;
+        if output_ref != expected_ref {
+            return Err(anyhow!(
+                "Hermes runtime step {} ({}) evidence tool {} returned mismatched output_ref",
+                step.step_id,
+                step.operation,
+                tool_name
+            ));
+        }
+        return Ok(());
+    }
     if !matches!(
         tool_name,
         "tonglingyu.evidence.package.create"
@@ -1705,6 +1723,32 @@ fn validate_agent_runtime_tool_output_ref(
         ));
     }
     Ok(())
+}
+
+fn evidence_tool_expected_output_ref(step: &RuntimeWorkflowStepReport) -> Result<String> {
+    let evidence_ids = step
+        .output
+        .get("evidence_ids")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!(
+                "Hermes runtime step {} ({}) evidence tool cannot be bound without evidence_ids",
+                step.step_id,
+                step.operation
+            )
+        })?
+        .iter()
+        .map(|value| {
+            value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                anyhow!(
+                    "Hermes runtime step {} ({}) evidence_ids must be strings",
+                    step.step_id,
+                    step.operation
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(evidence_set_output_ref(&step.trace_id, &evidence_ids))
 }
 
 fn tonglingyu_agent_runtime_client(
@@ -2529,6 +2573,13 @@ fn merge_cards(mut left: Vec<EvidenceCard>, right: Vec<EvidenceCard>) -> Vec<Evi
 
 fn evidence_ids(cards: &[EvidenceCard]) -> Vec<String> {
     cards.iter().map(|card| card.evidence_id.clone()).collect()
+}
+
+fn evidence_set_output_ref(trace_id: &str, evidence_ids: &[String]) -> String {
+    let mut ids = evidence_ids.to_vec();
+    ids.sort();
+    let digest = hash_text(&ids.join("\n"));
+    format!("runtime://tonglingyu/{trace_id}/evidence/{digest}")
 }
 
 fn evidence_types(cards: &[EvidenceCard]) -> Vec<String> {
@@ -4637,6 +4688,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct BadOutputRefRuntimeClient;
 
+    #[derive(Debug, Default)]
+    struct WrongEvidenceOutputRefRuntimeClient;
+
     #[async_trait]
     impl RuntimeClient for DraftRuntimeClient {
         async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -4706,6 +4760,14 @@ mod tests {
                                             input.trace_id
                                         )
                                     })
+                            } else if matches!(
+                                tool_name.as_str(),
+                                "tonglingyu.text.search" | "tonglingyu.commentary.search"
+                            ) {
+                                evidence_set_output_ref(
+                                    &input.trace_id,
+                                    &evidence_ids_from_step_message(&message),
+                                )
                             } else {
                                 format!(
                                     "runtime://tonglingyu/{}/tools/{operation}/{index}",
@@ -4868,6 +4930,70 @@ mod tests {
                 result_summary: "{}".to_string(),
                 result_ref: Some(format!(
                     "result://bad-output-ref-runtime/{}",
+                    input.profile_id
+                )),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "tool_rounds": 1,
+                    "tool_results": tool_results,
+                    "tool_audit_events": [],
+                }),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for WrongEvidenceOutputRefRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "wrong-evidence-output-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "wrong-evidence-output-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let tool_results = Value::Array(
+                input
+                    .requested_tools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tool_name)| {
+                        let output_ref = if matches!(
+                            tool_name.as_str(),
+                            "tonglingyu.text.search" | "tonglingyu.commentary.search"
+                        ) {
+                            format!("runtime://tonglingyu/{}/evidence/wrong-set", input.trace_id)
+                        } else {
+                            format!("runtime://tonglingyu/{}/tools/{index}", input.trace_id)
+                        };
+                        json!({
+                            "call_id": format!("call-wrong-evidence-output-ref-{index}"),
+                            "profile_id": input.profile_id,
+                            "tool_name": tool_name,
+                            "output_ref": output_ref,
+                        })
+                    })
+                    .collect(),
+            );
+            Ok(RuntimeOutput {
+                result_summary: "{}".to_string(),
+                result_ref: Some(format!(
+                    "result://wrong-evidence-output-ref-runtime/{}",
                     input.profile_id
                 )),
                 messages: Vec::new(),
@@ -5739,6 +5865,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hermes_workflow_rejects_mismatched_evidence_tool_output_refs() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-evidence-output-ref-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                RuntimeWorkflowInput {
+                    trace_id: "trace-hermes-evidence-output-ref-test".to_string(),
+                    question: "通灵玉是什么？".to_string(),
+                    limit: 2,
+                    required_evidence_types: vec!["base_text".to_string()],
+                    profiles: RuntimeWorkflowProfiles::default(),
+                },
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(WrongEvidenceOutputRefRuntimeClient),
+            )
+            .await
+            .expect_err("Hermes evidence tool output refs must bind to exact runtime evidence set");
+
+        let message = error.to_string();
+        assert!(message.contains("evidence tool"));
+        assert!(message.contains("mismatched output_ref"));
+        assert!(message.contains("text_evidence_search"));
+        assert!(message.contains("tonglingyu.text.search"));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
     async fn runtime_tool_executor_runs_store_backed_tools() {
         let db_path = std::env::temp_dir().join(format!(
             "tonglingyu-runtime-tool-executor-{}.db",
@@ -5768,7 +5930,7 @@ mod tests {
             .expect("text search tool executes");
         assert_eq!(search.tool_name, "tonglingyu.text.search");
         assert!(search.output_ref.as_deref().is_some_and(|value| {
-            value.starts_with("runtime://tonglingyu/trace-runtime-tool-executor-test/tools/")
+            value.starts_with("runtime://tonglingyu/trace-runtime-tool-executor-test/evidence/")
         }));
         assert_eq!(search.output["object"], "evidence_cards");
         assert_eq!(
