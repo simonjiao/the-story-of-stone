@@ -243,6 +243,10 @@ Runtime step report、SQLite audit 和 streaming step summary 已透出
 agent-runtime/Hermes 工具 loop 观测信息，包括 `tool_rounds`、tool result
 count 和 tool audit event count；完整 tool result/audit event 保留在 step
 report/audit payload 中，stream 只暴露计数级摘要。
+Hermes `draft_answer` profile output 已支持结构化 JSON 候选；JSON 候选必须带
+当前 evidence package 的 `package_id` 和非空 `draft_answer`，package 不匹配或
+缺少草稿时只写 rejected audit，不进入本地草稿或最终回答。纯文本
+`result_summary` 仅作为兼容路径保留。
 
 Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
 Gateway streaming response 只把 Runtime `content_delta` event 包装为
@@ -295,6 +299,8 @@ profile content/tool 执行面接入 `agent-runtime`/Hermes 和目标环境 Open
   smoke 覆盖默认 `minimal` 模式。
 - [x] step report、audit 和 streaming step summary 暴露 Hermes tool loop
   观测信息，避免生产排障时看不到 profile 是否实际调用工具。
+- [x] Hermes `draft_answer` 结构化 JSON 候选必须校验 `package_id`，
+  错误 package 或缺少草稿时拒绝消费并写入 rejected audit。
 - [ ] profile content/tool execution 仍需从确定性 workflow 接入
   `agent-runtime`/Hermes 执行面。
 - [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`

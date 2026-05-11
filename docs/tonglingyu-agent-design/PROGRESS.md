@@ -170,6 +170,9 @@
 - Runtime step report、SQLite audit 和 streaming step summary 已透出
   agent-runtime/Hermes 工具 loop 观测信息；完整 tool result/audit event
   保留在 step report/audit payload 中，stream 只暴露计数级摘要。
+- Hermes `draft_answer` 结构化 JSON 候选必须匹配当前 evidence package
+  `package_id` 且提供非空 `draft_answer`；错误 package 或缺少草稿时只写
+  rejected audit，不进入本地草稿或最终回答。
 - Gateway CLI 已新增 `runtime-dry-run`，可在本地 DB 上通过 runtime tools
   执行 search、package create、package replay 和 reviewer 约束检查；
   gateway smoke 已覆盖该 dry run。

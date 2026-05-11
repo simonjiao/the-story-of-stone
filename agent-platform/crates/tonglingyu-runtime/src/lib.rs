@@ -205,16 +205,24 @@ impl TonglingyuRuntimeStore {
             }
         }
         if let Some(application) = agent_runtime_content_application {
+            let event_type = if application.draft_consumed {
+                "agent_runtime_profile_draft_consumed"
+            } else {
+                "agent_runtime_profile_draft_rejected"
+            };
             append_runtime_audit_event(
                 &conn,
                 &workflow.trace_id,
-                "agent_runtime_profile_draft_consumed",
+                event_type,
                 &json!({
                     "answer_source": &workflow.answer_source,
                     "package_id": &workflow.package.package_id,
                     "review_status": &workflow.package.review.status,
                     "draft_profile": &input.profiles.main,
                     "runtime_mode": mode.as_str(),
+                    "result_format": &application.result_format,
+                    "draft_consumed": application.draft_consumed,
+                    "rejected_reason": &application.rejected_reason,
                     "local_reviewer_enforced": true,
                     "content_used_for_final_answer": application.content_used_for_final_answer,
                 }),
@@ -1577,7 +1585,19 @@ fn agent_runtime_profile_step_message(
 
 #[derive(Debug, Clone, Copy)]
 struct AgentRuntimeContentApplication {
+    draft_consumed: bool,
     content_used_for_final_answer: bool,
+    result_format: &'static str,
+    rejected_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentRuntimeDraftExtraction {
+    draft_answer: Option<String>,
+    result_format: &'static str,
+    package_id: Option<String>,
+    claim_statement_count: Option<usize>,
+    rejected_reason: Option<&'static str>,
 }
 
 fn apply_agent_runtime_content_outputs(
@@ -1587,7 +1607,7 @@ fn apply_agent_runtime_content_outputs(
     if mode != TonglingyuAgentRuntimeMode::Hermes {
         return None;
     }
-    let (draft_step_index, draft) =
+    let (draft_step_index, extraction) =
         workflow
             .steps
             .iter()
@@ -1596,15 +1616,51 @@ fn apply_agent_runtime_content_outputs(
                 if step.operation != "draft_answer" {
                     return None;
                 }
-                let draft = step
+                let summary = step
                     .agent_runtime
                     .as_ref()
                     .and_then(|value| value.get("result_summary"))
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())?;
-                Some((index, draft.to_string()))
+                Some((
+                    index,
+                    extract_agent_runtime_draft(summary, &workflow.package.package_id),
+                ))
             })?;
+
+    if let Some(reason) = extraction.rejected_reason {
+        if let Some(step) = workflow.steps.get_mut(draft_step_index) {
+            step.output["agent_runtime_draft_consumed"] = json!(false);
+            step.output["agent_runtime_result_format"] = json!(extraction.result_format);
+            step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
+            step.output["agent_runtime_package_id"] = json!(extraction.package_id);
+            if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
+            {
+                agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
+                agent_runtime.insert(
+                    "content_application".to_string(),
+                    json!({
+                        "answer_source": &workflow.answer_source,
+                        "local_reviewer_enforced": true,
+                        "review_status": &workflow.package.review.status,
+                        "result_format": extraction.result_format,
+                        "draft_consumed": false,
+                        "rejected_reason": reason,
+                        "content_used_for_final_answer": false,
+                    }),
+                );
+            }
+        }
+        return Some(AgentRuntimeContentApplication {
+            draft_consumed: false,
+            content_used_for_final_answer: false,
+            result_format: extraction.result_format,
+            rejected_reason: Some(reason),
+        });
+    }
+
+    let draft = extraction.draft_answer?;
 
     workflow.draft_answer = draft.clone();
     workflow.final_answer = enforce_review(draft, &workflow.package);
@@ -1619,6 +1675,10 @@ fn apply_agent_runtime_content_outputs(
         step.output["agent_runtime_draft_consumed"] = json!(true);
         step.output["agent_runtime_content_used_for_final_answer"] =
             json!(content_used_for_final_answer);
+        step.output["agent_runtime_result_format"] = json!(extraction.result_format);
+        step.output["agent_runtime_package_id"] = json!(extraction.package_id);
+        step.output["agent_runtime_claim_statement_count"] =
+            json!(extraction.claim_statement_count);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_used_for_final_answer".to_string(),
@@ -1630,6 +1690,9 @@ fn apply_agent_runtime_content_outputs(
                     "answer_source": &workflow.answer_source,
                     "local_reviewer_enforced": true,
                     "review_status": &workflow.package.review.status,
+                    "result_format": extraction.result_format,
+                    "package_id": extraction.package_id,
+                    "claim_statement_count": extraction.claim_statement_count,
                     "draft_consumed": true,
                     "content_used_for_final_answer": content_used_for_final_answer,
                 }),
@@ -1646,8 +1709,101 @@ fn apply_agent_runtime_content_outputs(
         step.output["local_reviewer_enforced"] = json!(true);
     }
     Some(AgentRuntimeContentApplication {
+        draft_consumed: true,
         content_used_for_final_answer,
+        result_format: extraction.result_format,
+        rejected_reason: None,
     })
+}
+
+fn extract_agent_runtime_draft(
+    result_summary: &str,
+    expected_package_id: &str,
+) -> AgentRuntimeDraftExtraction {
+    let trimmed = result_summary.trim();
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: Some(trimmed.to_string()),
+            result_format: "text",
+            package_id: None,
+            claim_statement_count: None,
+            rejected_reason: None,
+        };
+    };
+
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: Some(text.to_string()),
+            result_format: "json_string",
+            package_id: None,
+            claim_statement_count: None,
+            rejected_reason: None,
+        };
+    }
+
+    let Some(object) = value.as_object() else {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: None,
+            result_format: "json",
+            package_id: None,
+            claim_statement_count: None,
+            rejected_reason: Some("unsupported_json_draft"),
+        };
+    };
+    let package_id = object
+        .get("package_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let claim_statement_count = object
+        .get("claim_statements")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    if package_id.is_none() {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: None,
+            result_format: "json",
+            package_id,
+            claim_statement_count,
+            rejected_reason: Some("package_id_missing"),
+        };
+    }
+    if package_id
+        .as_deref()
+        .is_some_and(|value| value != expected_package_id)
+    {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: None,
+            result_format: "json",
+            package_id,
+            claim_statement_count,
+            rejected_reason: Some("package_id_mismatch"),
+        };
+    }
+    let draft_answer = object
+        .get("draft_answer")
+        .or_else(|| object.get("answer"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let rejected_reason = if draft_answer.is_some() {
+        None
+    } else {
+        Some("draft_answer_missing")
+    };
+    AgentRuntimeDraftExtraction {
+        draft_answer,
+        result_format: "json",
+        package_id,
+        claim_statement_count,
+        rejected_reason,
+    }
 }
 
 fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> AgentRuntimeStep {
@@ -4083,6 +4239,7 @@ mod tests {
         let application =
             apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
                 .expect("runtime draft consumed");
+        assert!(application.draft_consumed);
         assert!(application.content_used_for_final_answer);
         assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
         assert_eq!(workflow.final_answer, workflow.draft_answer);
@@ -4115,6 +4272,7 @@ mod tests {
         let application =
             apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
                 .expect("runtime draft consumed");
+        assert!(application.draft_consumed);
         assert!(!application.content_used_for_final_answer);
         assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
         assert!(!workflow.final_answer.contains("Hermes profile 草稿"));
@@ -4129,6 +4287,91 @@ mod tests {
         assert_eq!(
             workflow.steps[1].output["final_answer_source"],
             "agent_runtime_hermes_profile_rejected_by_local_review"
+        );
+    }
+
+    #[test]
+    fn hermes_mode_accepts_structured_draft_with_matching_package() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        let package_id = workflow.package.package_id.clone();
+        workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "draft_answer": "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
+                "package_id": package_id,
+                "claim_statements": ["结构化 claim"],
+            }))
+            .expect("structured draft serializes")
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("structured runtime draft consumed");
+
+        assert!(application.draft_consumed);
+        assert_eq!(application.result_format, "json");
+        assert!(application.rejected_reason.is_none());
+        assert_eq!(
+            workflow.draft_answer,
+            "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。"
+        );
+        assert_eq!(
+            workflow.steps[0].output["agent_runtime_result_format"],
+            "json"
+        );
+        assert_eq!(
+            workflow.steps[0].output["agent_runtime_claim_statement_count"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn hermes_mode_rejects_structured_draft_with_wrong_package() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        let original_draft = workflow.draft_answer.clone();
+        let original_final = workflow.final_answer.clone();
+        workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "draft_answer": "错误 package 的 Hermes 草稿不应被消费。",
+                "package_id": "pkg-other",
+                "claim_statements": ["wrong package claim"],
+            }))
+            .expect("structured draft serializes")
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("structured runtime draft rejected");
+
+        assert!(!application.draft_consumed);
+        assert!(!application.content_used_for_final_answer);
+        assert_eq!(application.result_format, "json");
+        assert_eq!(application.rejected_reason, Some("package_id_mismatch"));
+        assert_eq!(workflow.draft_answer, original_draft);
+        assert_eq!(workflow.final_answer, original_final);
+        assert_eq!(workflow.answer_source, "runtime_local_profile");
+        assert_eq!(
+            workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+            "package_id_mismatch"
+        );
+        assert_eq!(
+            workflow.steps[0].agent_runtime.as_ref().unwrap()["content_application"]["draft_consumed"],
+            json!(false)
         );
     }
 
