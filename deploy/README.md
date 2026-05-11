@@ -356,6 +356,9 @@ Saved reports include `secret_values_printed=false`; the saved-report verifier
 also scans report values for secret-like strings such as authorization headers,
 bearer tokens, API-key assignments, and `sk-` style keys. It reports only JSON
 paths for suspected leaks, not the matched values.
+Gate `stdout_tail` and `stderr_tail` entries are also bounded: each must be a
+string array of at most 20 lines, with each line capped at 16 KiB and no embedded
+newlines.
 
 The aggregate gate can be contract-tested without a live deployment:
 

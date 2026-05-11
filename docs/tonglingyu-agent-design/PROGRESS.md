@@ -323,6 +323,9 @@
 - Release report 现在带 `secret_values_printed=false`，saved report validator
   会递归扫描 secret-like 值并只报告 JSON path；contract 覆盖 gate tail 泄露
   `authorization` / `sk-` 风格值时报告校验失败。
+- Saved release report validator 对 gate `stdout_tail` / `stderr_tail` 增加
+  有界 schema 校验；contract 覆盖 tail 超过 20 行和非字符串 tail item，避免
+  发布 artifact 被篡改成难以审计或展示的日志载体。
 - release readiness gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时还要求
   `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
   `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`，并新增

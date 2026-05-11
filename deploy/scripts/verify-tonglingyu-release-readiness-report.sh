@@ -44,6 +44,8 @@ allowed_report_statuses = {
     "passed_in_summary_only_mode",
 }
 allowed_gate_statuses = {"passed", "failed", "skipped"}
+max_tail_lines = 20
+max_tail_line_chars = 16384
 secret_value_needles = [
     "api-key=",
     "api_key=",
@@ -146,6 +148,23 @@ def secret_value_paths(value, prefix="$"):
         if any(needle in lowered for needle in secret_value_needles):
             paths.append(prefix)
     return paths
+
+
+def validate_gate_tail(name, gate, field):
+    tail = gate.get(field)
+    if not isinstance(tail, list):
+        errors.append(f"{name}_{field}_must_be_array")
+        return
+    if len(tail) > max_tail_lines:
+        errors.append(f"{name}_{field}_too_many_lines")
+    for index, line in enumerate(tail):
+        if not isinstance(line, str):
+            errors.append(f"{name}_{field}_{index}_must_be_string")
+            continue
+        if len(line) > max_tail_line_chars:
+            errors.append(f"{name}_{field}_{index}_too_long")
+        if "\r" in line or "\n" in line:
+            errors.append(f"{name}_{field}_{index}_contains_newline")
 
 
 def parse_timestamp(value):
@@ -304,6 +323,9 @@ for index, gate in enumerate(gates):
         seen_gate_names.add(name)
     add_if(gate.get("status") not in allowed_gate_statuses, f"gate_{index}_status_invalid")
     add_if(not isinstance(gate.get("required"), bool), f"gate_{index}_required_must_be_bool")
+    if nonempty(name):
+        validate_gate_tail(name, gate, "stdout_tail")
+        validate_gate_tail(name, gate, "stderr_tail")
 
 gates_by_name = {
     gate.get("name"): gate
