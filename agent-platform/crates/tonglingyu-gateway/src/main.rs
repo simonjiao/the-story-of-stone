@@ -626,16 +626,28 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "agent",
         "agent_id",
         "agent_profile",
+        "agent_runtime",
+        "agent_runtime_plan_gate",
+        "agent_runtime_summary",
         "profile",
         "internal_agent",
         "honglou_agent",
+        "runtime_profile",
+        "runtime_step_outputs",
+        "runtime_step_plan",
         "reviewer",
         "skip_reviewer",
         "disable_reviewer",
+        "allowed_tools",
+        "required_evidence_types",
         "trace_id",
         "package_id",
         "evidence_package_id",
+        "admin_trace",
+        "audit_events",
         "internal_trace",
+        "runtime_tools_used",
+        "workflow_states",
         "workflow_state",
         "tools",
         "tool_choice",
@@ -3433,6 +3445,48 @@ mod tests {
         );
         assert_eq!(summary["tool_result_count"], json!(4));
         assert!(latest_agent_runtime_summary(&[]).is_null());
+    }
+
+    #[test]
+    fn forbidden_control_fields_rejects_runtime_and_admin_trace_controls() {
+        let fields = forbidden_control_fields(&json!({
+            "model": "tonglingyu",
+            "agent_runtime_summary": {"status": "forged"},
+            "metadata": {
+                "runtime_step_plan": [],
+                "admin_trace": {"trace_id": "forged"},
+                "message_id": "open-webui-message",
+            },
+            "extra_body": {
+                "allowed_tools": ["tonglingyu.text.search"],
+            },
+            "messages": [{"role": "user", "content": "通灵玉是什么？"}],
+        }));
+
+        assert_eq!(
+            fields,
+            vec![
+                "agent_runtime_summary",
+                "metadata.runtime_step_plan",
+                "metadata.admin_trace",
+                "extra_body.allowed_tools",
+            ]
+        );
+    }
+
+    #[test]
+    fn forbidden_control_fields_allows_openwebui_identity_metadata() {
+        let fields = forbidden_control_fields(&json!({
+            "model": "tonglingyu",
+            "metadata": {
+                "user_id": "user-a",
+                "chat_id": "chat-a",
+                "message_id": "message-a",
+            },
+            "messages": [{"role": "user", "content": "通灵玉是什么？"}],
+        }));
+
+        assert!(fields.is_empty());
     }
 
     #[test]

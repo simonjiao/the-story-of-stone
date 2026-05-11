@@ -194,6 +194,10 @@
   `minimal_envelope_only`、Hermes observation/local governance 和 incomplete
   fallback，避免只靠分散 step metadata 人工推断；strict gate 会同时校验 summary
   的 step/tool 计数与详细 runtime step audit event 一致。
+- Gateway 公共 OpenAI-compatible 请求路径的 forbidden control fields 已覆盖
+  后续新增的 Runtime/admin trace 字段，包括 `agent_runtime_summary`、
+  `runtime_step_plan`、`allowed_tools` 和 `admin_trace`，防止普通 Open WebUI
+  请求伪造内部执行、工具或审计状态。
 - Runtime summary 已把 `tool_audit_event_count` 提升为一等生产校验字段；
   Hermes mode 若存在 tool result 但缺少对应 tool audit event 会 fail-closed，
   strict Gateway gate 也会交叉校验 summary 和 step audit，避免把“返回了工具结果

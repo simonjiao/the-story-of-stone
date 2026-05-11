@@ -151,8 +151,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 ### R5A 薄 Gateway 边界
 
-- [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
-  trace/session 透传、SSE 转发、模型隐藏和响应封装。
+- [x] Gateway 公共 OpenAI-compatible 请求路径只做协议适配、鉴权、限流、
+  路由、trace/session 透传、SSE 转发、模型隐藏和响应封装；admin/debug/eval
+  入口只允许通过 Runtime store API 代理受控能力。
 - [x] Gateway 不直接执行 source snapshot loader、KB SQLite/FTS 检索或 FTS 写入。
 - [x] Gateway 不直接读取 KB/domain SQLite 表；health、metrics、admin trace 和
   prune 通过 Runtime stats/audit/prune API 访问 runtime store。
@@ -168,6 +169,9 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 - [x] Gateway 启动时强制 admin API key 与 Gateway service key 集合隔离；
   已配置 admin key 时不允许继续开启 gateway-key admin fallback，metrics
   的 `admin_key_isolated` 反映真实 key 集合状态。
+- [x] Gateway 公共入口会拒绝用户提交内部 runtime/admin trace 控制字段，
+  包括 `agent_runtime_summary`、`runtime_step_plan`、`allowed_tools` 和
+  `admin_trace` 等，避免 Open WebUI 请求伪造内部执行/审计状态。
 - [x] Gateway 不构建证据卡片或证据包。
 - [x] Gateway 不执行 reviewer 或本地审校规则。
 - [x] Gateway 不维护证据包 replay 的领域逻辑。
