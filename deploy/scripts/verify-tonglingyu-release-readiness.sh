@@ -126,21 +126,34 @@ else
     "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${require_live}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 
-results_path, report_path = sys.argv[1:3]
+results_path, report_path, require_live_raw = sys.argv[1:4]
+require_live = require_live_raw == "true"
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
+gates_by_name = {gate["name"]: gate for gate in gates}
+live_gate_names = ["strict_gateway", "openwebui_function"]
 required_failures = [
     gate["name"]
     for gate in gates
     if gate["required"] and gate["status"] != "passed"
 ]
 skipped = [gate["name"] for gate in gates if gate["status"] == "skipped"]
+skipped_live_gates = [
+    name
+    for name in live_gate_names
+    if (gates_by_name.get(name) or {}).get("status") == "skipped"
+]
+failed_live_gates = [
+    name
+    for name in live_gate_names
+    if (gates_by_name.get(name) or {}).get("status") == "failed"
+]
 status = "failed" if required_failures else "passed"
 if status == "passed" and skipped:
     status = "passed_with_skipped_gates"
@@ -154,12 +167,32 @@ manual_checks = [] if browser_review_acknowledged else [
     "Open WebUI streaming chat UX against the live public endpoint",
     "Human confirmation that existing Open WebUI webui.db persisted settings match env-rendered provider settings",
 ]
+release_blockers = []
+for name in required_failures:
+    release_blockers.append(f"required gate did not pass: {name}")
+for name in skipped_live_gates:
+    release_blockers.append(f"live gate was skipped: {name}")
+for name in failed_live_gates:
+    if name not in required_failures:
+        release_blockers.append(f"live gate failed: {name}")
+if not browser_review_acknowledged:
+    release_blockers.append("Open WebUI browser-side review was not acknowledged")
+production_release_ready = (
+    not required_failures
+    and not skipped_live_gates
+    and browser_review_acknowledged
+)
 
 report = {
     "status": status,
+    "production_release_ready": production_release_ready,
+    "require_live": require_live,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "gates": gates,
     "required_failures": required_failures,
+    "skipped_live_gates": skipped_live_gates,
+    "failed_live_gates": failed_live_gates,
+    "release_blockers": release_blockers,
     "remaining_manual_checks": manual_checks,
 }
 encoded = json.dumps(report, ensure_ascii=True, sort_keys=True)
