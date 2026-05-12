@@ -6,11 +6,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
 load_optional_deploy_env_file
 
-FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
+FUNCTION_ID="${FUNCTION_ID:-tonglingyu_gateway_admin}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"
 COMPOSE_SERVICE="${OPEN_WEBUI_COMPOSE_SERVICE:-open-webui}"
-FIXTURE_JSON="${OPEN_WEBUI_FUNCTION_VERIFY_JSON:-}"
+FIXTURE_JSON="${OPEN_WEBUI_GATEWAY_ADMIN_ACTION_VERIFY_JSON:-}"
 
 if [[ -n "${FIXTURE_JSON}" ]]; then
   python3 - "$FUNCTION_ID" "$FIXTURE_JSON" <<'PY'
@@ -28,8 +28,8 @@ if isinstance(valves, str):
     except json.JSONDecodeError:
         valves = {}
 required_valves = [
-    "AGENT_BRIDGE_SECRET",
-    "AGENT_BRIDGE_ISSUER",
+    "GATEWAY_BASE_URL",
+    "GATEWAY_ADMIN_API_KEY",
     "TARGET_MODEL",
     "TARGET_MODELS",
 ]
@@ -44,16 +44,18 @@ empty = [
 errors = []
 if function.get("id", function_id) != function_id:
     errors.append(f"id={function.get('id')!r}")
-if function.get("type") != "filter":
+if function.get("type") != "action":
     errors.append(f"type={function.get('type')!r}")
 if not bool(function.get("is_active")):
     errors.append("is_active=false")
 if not bool(function.get("is_global")):
     errors.append("is_global=false")
-if "class Filter" not in content or "agent_bridge_context" not in content:
-    errors.append("content_missing_bridge_filter")
-if "TARGET_MODELS" not in content:
-    errors.append("content_missing_target_models")
+if "class Action" not in content or "GATEWAY_ADMIN_API_KEY" not in content:
+    errors.append("content_missing_gateway_admin_action")
+if "__user__" not in content or "role" not in content or "admin" not in content:
+    errors.append("content_missing_admin_role_guard")
+if "actions =" not in content or "/v1/admin/metrics" not in content:
+    errors.append("content_missing_admin_actions")
 if missing:
     errors.append("missing_valves=" + ",".join(missing))
 if empty:
@@ -114,25 +116,27 @@ valve_keys = sorted(str(key) for key in valves.keys())
 content = row["content"] or ""
 missing = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    for key in ["GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"]
     if key not in valves
 ]
 empty = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    for key in ["GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"]
     if key in valves and not str(valves.get(key) or "").strip()
 ]
 errors = []
-if row["type"] != "filter":
+if row["type"] != "action":
     errors.append(f"type={row['type']!r}")
 if not bool(row["is_active"]):
     errors.append("is_active=false")
 if not bool(row["is_global"]):
     errors.append("is_global=false")
-if "class Filter" not in content or "agent_bridge_context" not in content:
-    errors.append("content_missing_bridge_filter")
-if "TARGET_MODELS" not in content:
-    errors.append("content_missing_target_models")
+if "class Action" not in content or "GATEWAY_ADMIN_API_KEY" not in content:
+    errors.append("content_missing_gateway_admin_action")
+if "__user__" not in content or "role" not in content or "admin" not in content:
+    errors.append("content_missing_admin_role_guard")
+if "actions =" not in content or "/v1/admin/metrics" not in content:
+    errors.append("content_missing_admin_actions")
 if missing:
     errors.append("missing_valves=" + ",".join(missing))
 if empty:
@@ -210,25 +214,27 @@ valve_keys = sorted(str(key) for key in valves.keys())
 
 missing = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    for key in ["GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"]
     if key not in valves
 ]
 empty = [
     key
-    for key in ["AGENT_BRIDGE_SECRET", "AGENT_BRIDGE_ISSUER", "TARGET_MODEL", "TARGET_MODELS"]
+    for key in ["GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"]
     if key in valves and not str(valves.get(key) or "").strip()
 ]
 errors = []
-if function_type != "filter":
+if function_type != "action":
     errors.append(f"type={function_type!r}")
 if not is_active:
     errors.append("is_active=false")
 if not is_global:
     errors.append("is_global=false")
-if "class Filter" not in content or "agent_bridge_context" not in content:
-    errors.append("content_missing_bridge_filter")
-if "TARGET_MODELS" not in content:
-    errors.append("content_missing_target_models")
+if "class Action" not in content or "GATEWAY_ADMIN_API_KEY" not in content:
+    errors.append("content_missing_gateway_admin_action")
+if "__user__" not in content or "role" not in content or "admin" not in content:
+    errors.append("content_missing_admin_role_guard")
+if "actions =" not in content or "/v1/admin/metrics" not in content:
+    errors.append("content_missing_admin_actions")
 if missing:
     errors.append("missing_valves=" + ",".join(missing))
 if empty:

@@ -10,6 +10,7 @@ members = [
     "crates/agentctl",
     "crates/global-router",
     "crates/tonglingyu-gateway",
+    "crates/tonglingyu-runtime",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ rust-version = "1.95"
 agent-core = { path = "crates/agent-core" }
 agent-store = { path = "crates/agent-store" }
 agent-runtime = { path = "crates/agent-runtime" }
+tonglingyu-runtime = { path = "crates/tonglingyu-runtime" }
 
 anyhow = "1"
 async-trait = "0.1"

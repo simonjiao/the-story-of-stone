@@ -2679,9 +2679,27 @@ dependencies = [
  "sha2",
  "time",
  "tokio",
+ "tonglingyu-runtime",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "tonglingyu-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-core",
+ "agent-runtime",
+ "anyhow",
+ "async-trait",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
  "uuid",
 ]
 

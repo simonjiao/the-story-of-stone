@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, Query, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -13,23 +13,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     fs,
-    io::{BufRead, BufReader},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
+use tonglingyu_runtime::{
+    AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json,
+};
 use tower_http::trace::TraceLayer;
+
+mod plan;
+
+use crate::plan::{
+    RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
+};
 
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
 const DEFAULT_MODEL_NAME: &str = "通灵玉";
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
-#[command(about = "Tonglingyu source snapshot loader and OpenAI-compatible gateway")]
+#[command(about = "Tonglingyu Runtime-backed OpenAI-compatible gateway")]
 struct Args {
     #[command(subcommand)]
     command: Command,
@@ -41,6 +51,7 @@ enum Command {
     BuildKb(BuildKbArgs),
     Query(QueryArgs),
     ReplayPackage(ReplayPackageArgs),
+    RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
@@ -87,6 +98,19 @@ struct ReplayPackageArgs {
     )]
     db: PathBuf,
     package_id: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeDryRunArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    question: String,
+    #[arg(long, default_value_t = 8)]
+    limit: usize,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -183,6 +207,10 @@ struct ServeArgs {
     max_messages: usize,
     #[arg(long, env = "TONGLINGYU_MAX_QUESTION_CHARS", default_value_t = 4000)]
     max_question_chars: usize,
+    #[arg(long, env = "TONGLINGYU_MAX_BODY_BYTES", default_value_t = 1_048_576)]
+    max_body_bytes: usize,
+    #[arg(long, env = "TONGLINGYU_RATE_LIMIT_PER_MINUTE", default_value_t = 120)]
+    rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
     #[arg(long, env = "TONGLINGYU_PROFILE_MAIN", default_value = "honglou-main")]
@@ -206,21 +234,25 @@ struct ServeArgs {
 #[derive(Clone)]
 struct AppState {
     db: PathBuf,
+    runtime_store: TonglingyuRuntimeStore,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
     upstream_api_key: Option<String>,
     upstream_model: String,
+    upstream_timeout_secs: u64,
     max_evidence: usize,
     gateway_api_keys: Vec<String>,
     admin_api_keys: Vec<String>,
     allow_admin_with_gateway_key: bool,
     max_messages: usize,
     max_question_chars: usize,
+    max_body_bytes: usize,
+    rate_limit_per_minute: usize,
+    rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
     profiles: InternalProfiles,
     started_at: String,
-    client: reqwest::Client,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,101 +263,92 @@ struct InternalProfiles {
     reviewer: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct SourceMetadata {
-    source_id: String,
-    source_category: String,
-    format: Option<String>,
-    title: Option<String>,
-    work: Option<String>,
-    edition: Option<String>,
-    language: Option<String>,
-    api_url: Option<String>,
-    fetched_at: Option<String>,
-    notes: Option<String>,
-    #[serde(default)]
-    snapshot_contract: Value,
+#[derive(Debug)]
+struct GatewayRateLimiter {
+    max_per_window: usize,
+    window: Duration,
+    buckets: Mutex<BTreeMap<String, RateLimitBucket>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ExtractionReport {
-    documents: i64,
-    blocks: i64,
-    rare_char_annotations: Option<i64>,
-    missing: i64,
-    raw_html_files: Option<i64>,
+#[derive(Debug, Clone, Copy)]
+struct RateLimitBucket {
+    window_start: Instant,
+    count: usize,
 }
 
-#[derive(Debug, Deserialize)]
-struct DocumentRecord {
-    source_id: String,
-    section_id: String,
-    section_index: Option<i64>,
-    title: Option<String>,
-    display_title: Option<String>,
-    fullurl: Option<String>,
-    pageid: Option<i64>,
-    revision_id: Option<i64>,
-    revision_timestamp: Option<String>,
-    wikitext_sha256: Option<String>,
+#[derive(Debug, Clone, Copy)]
+struct RateLimitDecision {
+    allowed: bool,
+    limit: usize,
+    remaining: usize,
+    retry_after_secs: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct BlockRecord {
-    block_id: String,
-    block_index: i64,
-    kind: String,
-    revision_id: Option<i64>,
-    section_id: String,
-    source_id: String,
-    source_title: String,
-    source_url: String,
-    tag: Option<String>,
-    text: String,
+impl GatewayRateLimiter {
+    fn per_minute(max_per_minute: usize) -> Self {
+        Self::new(max_per_minute, Duration::from_secs(60))
+    }
+
+    fn new(max_per_window: usize, window: Duration) -> Self {
+        Self {
+            max_per_window,
+            window,
+            buckets: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn check(&self, subject: &str) -> RateLimitDecision {
+        if self.max_per_window == 0 {
+            return RateLimitDecision {
+                allowed: true,
+                limit: 0,
+                remaining: usize::MAX,
+                retry_after_secs: 0,
+            };
+        }
+        let now = Instant::now();
+        let mut buckets = self
+            .buckets
+            .lock()
+            .expect("gateway rate limiter mutex poisoned");
+        buckets.retain(|_, bucket| now.duration_since(bucket.window_start) < self.window);
+        let bucket = buckets
+            .entry(subject.to_string())
+            .or_insert(RateLimitBucket {
+                window_start: now,
+                count: 0,
+            });
+        if now.duration_since(bucket.window_start) >= self.window {
+            bucket.window_start = now;
+            bucket.count = 0;
+        }
+        if bucket.count >= self.max_per_window {
+            let elapsed = now.duration_since(bucket.window_start);
+            let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);
+            return RateLimitDecision {
+                allowed: false,
+                limit: self.max_per_window,
+                remaining: 0,
+                retry_after_secs: retry_after,
+            };
+        }
+        bucket.count += 1;
+        RateLimitDecision {
+            allowed: true,
+            limit: self.max_per_window,
+            remaining: self.max_per_window.saturating_sub(bucket.count),
+            retry_after_secs: 0,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvidenceCard {
-    evidence_id: String,
-    evidence_type: String,
-    source_id: String,
-    source_title: String,
-    source_url: String,
-    revision_id: Option<i64>,
-    block_id: String,
-    text: String,
-    support_scope: String,
-    unsupported_scope: String,
-    evidence_level: String,
-    confidence: String,
-    verification_status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ClaimEvidenceMap {
-    claim_index: usize,
-    claim: String,
-    evidence_ids: Vec<String>,
-    forbidden_conclusions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ReviewRecord {
-    status: String,
-    severity: String,
-    issues: Vec<String>,
-    summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct EvidencePackage {
-    package_id: String,
-    trace_id: String,
-    question: String,
-    cards: Vec<EvidenceCard>,
-    claims: Vec<String>,
-    claim_evidence_map: Vec<ClaimEvidenceMap>,
-    review: ReviewRecord,
+fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProfiles {
+    RuntimeWorkflowProfiles {
+        main: profiles.main.clone(),
+        text: profiles.text.clone(),
+        commentary: profiles.commentary.clone(),
+        reviewer: profiles.reviewer.clone(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -342,14 +365,6 @@ struct GatewayRequestContext {
     external_message_id: String,
     external_message_id_provided: bool,
     auth_subject: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SearchPolicy {
-    question_type: String,
-    required_evidence_types: Vec<String>,
-    planned_profiles: Vec<String>,
-    blocked_controls: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,6 +409,20 @@ fn gateway_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<Str
         "gateway_unauthorized",
         false,
     )
+}
+
+fn gateway_auth_and_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    trace_id: Option<&str>,
+) -> AuthResult<String> {
+    let subject = gateway_auth_subject(state, headers)?;
+    let decision = state.rate_limiter.check(&subject);
+    if decision.allowed {
+        Ok(subject)
+    } else {
+        Err(Box::new(rate_limit_response(&decision, trace_id)))
+    }
 }
 
 fn admin_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
@@ -445,6 +474,27 @@ fn authorize_with_keys(
     }
 }
 
+fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
+    let mut value = json!({
+        "error": {
+            "code": "gateway_rate_limited",
+            "message": "gateway rate limit exceeded",
+            "limit_per_minute": decision.limit,
+            "remaining": decision.remaining,
+            "retry_after_secs": decision.retry_after_secs,
+        }
+    });
+    if let Some(trace_id) = trace_id {
+        value["trace_id"] = json!(trace_id);
+    }
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, decision.retry_after_secs.to_string())],
+        Json(value),
+    )
+        .into_response()
+}
+
 fn configured_keys(primary: Option<String>, additional: Option<String>) -> Vec<String> {
     primary
         .into_iter()
@@ -461,6 +511,46 @@ fn configured_keys(primary: Option<String>, additional: Option<String>) -> Vec<S
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn validate_admin_key_isolation(
+    gateway_api_keys: &[String],
+    admin_api_keys: &[String],
+    allow_admin_with_gateway_key: bool,
+) -> Result<()> {
+    let gateway_keys = gateway_api_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if admin_api_keys
+        .iter()
+        .any(|key| gateway_keys.contains(key.as_str()))
+    {
+        return Err(anyhow!(
+            "TONGLINGYU admin API keys must not overlap gateway API keys"
+        ));
+    }
+    if allow_admin_with_gateway_key && !admin_api_keys.is_empty() {
+        return Err(anyhow!(
+            "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY requires empty admin API key configuration"
+        ));
+    }
+    Ok(())
+}
+
+fn is_admin_key_isolated(state: &AppState) -> bool {
+    if state.admin_api_keys.is_empty() || state.allow_admin_with_gateway_key {
+        return false;
+    }
+    let gateway_keys = state
+        .gateway_api_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    state
+        .admin_api_keys
+        .iter()
+        .all(|key| !gateway_keys.contains(key.as_str()))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -536,16 +626,28 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "agent",
         "agent_id",
         "agent_profile",
+        "agent_runtime",
+        "agent_runtime_plan_gate",
+        "agent_runtime_summary",
         "profile",
         "internal_agent",
         "honglou_agent",
+        "runtime_profile",
+        "runtime_step_outputs",
+        "runtime_step_plan",
         "reviewer",
         "skip_reviewer",
         "disable_reviewer",
+        "allowed_tools",
+        "required_evidence_types",
         "trace_id",
         "package_id",
         "evidence_package_id",
+        "admin_trace",
+        "audit_events",
         "internal_trace",
+        "runtime_tools_used",
+        "workflow_states",
         "workflow_state",
         "tools",
         "tool_choice",
@@ -557,14 +659,8 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "profile_config",
         "internal_config",
     ];
-    const NESTED_OBJECTS: &[&str] = &[
-        "metadata",
-        "user",
-        "extra_body",
-        "options",
-        "parameters",
-        "config",
-    ];
+    const NESTED_OBJECTS: &[&str] = &["metadata", "extra_body", "options", "parameters", "config"];
+    const SHALLOW_NESTED_OBJECTS: &[&str] = &["user"];
     let mut found = Vec::new();
     if let Some(object) = payload.as_object() {
         for key in FORBIDDEN {
@@ -573,6 +669,14 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
             }
         }
         for nested_name in NESTED_OBJECTS {
+            collect_forbidden_control_fields(
+                nested_name,
+                object.get(*nested_name),
+                FORBIDDEN,
+                &mut found,
+            );
+        }
+        for nested_name in SHALLOW_NESTED_OBJECTS {
             if let Some(nested) = object.get(*nested_name).and_then(Value::as_object) {
                 for key in FORBIDDEN {
                     if nested.contains_key(*key) {
@@ -583,6 +687,49 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         }
     }
     found
+}
+
+fn collect_forbidden_control_fields(
+    prefix: &str,
+    value: Option<&Value>,
+    forbidden: &[&str],
+    found: &mut Vec<String>,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    match value {
+        Value::Object(object) => {
+            for forbidden_key in forbidden {
+                if object.contains_key(*forbidden_key) {
+                    let field = format!("{prefix}.{forbidden_key}");
+                    found.push(field.clone());
+                }
+            }
+            for (key, nested) in object {
+                if forbidden.iter().any(|forbidden_key| forbidden_key == key) {
+                    continue;
+                }
+                collect_forbidden_control_fields(
+                    &format!("{prefix}.{key}"),
+                    Some(nested),
+                    forbidden,
+                    found,
+                );
+            }
+        }
+        Value::Array(items) => {
+            for (index, nested) in items.iter().enumerate() {
+                collect_forbidden_control_fields(
+                    &format!("{prefix}[{index}]"),
+                    Some(nested),
+                    forbidden,
+                    found,
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 fn error_response(
@@ -625,20 +772,24 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Query(args) => {
-            let conn = open_db(&args.db)?;
-            let (cards, _policy) = search_evidence_with_policy(&conn, &args.question, args.limit)?;
+            let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+            let (cards, _policy) =
+                search_evidence_with_policy(&runtime_store, &args.question, args.limit)?;
             let trace_id = new_trace_id();
-            let package = create_evidence_package(&conn, &trace_id, &args.question, cards)?;
+            let package = runtime_store.create_package(&trace_id, &args.question, cards)?;
             println!("{}", serde_json::to_string_pretty(&package)?);
             Ok(())
         }
         Command::ReplayPackage(args) => {
-            let package = load_evidence_package(&args.db, &args.package_id)?
+            let replay = TonglingyuRuntimeStore::new(args.db.clone())
+                .replay_package(&args.package_id)?
                 .ok_or_else(|| anyhow!("evidence package not found: {}", args.package_id))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&replay_package_json(&package))?
-            );
+            println!("{}", serde_json::to_string_pretty(&replay)?);
+            Ok(())
+        }
+        Command::RuntimeDryRun(args) => {
+            let report = runtime_dry_run(&args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         Command::Eval(args) => {
@@ -664,7 +815,14 @@ async fn main() -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    if args.auto_build_kb && !has_kb(&args.db)? {
+    let gateway_api_keys = configured_keys(args.gateway_api_key, args.gateway_api_keys);
+    let admin_api_keys = configured_keys(args.admin_api_key, args.admin_api_keys);
+    validate_admin_key_isolation(
+        &gateway_api_keys,
+        &admin_api_keys,
+        args.allow_admin_with_gateway_key,
+    )?;
+    if args.auto_build_kb && !TonglingyuRuntimeStore::new(args.db.clone()).has_knowledge_base()? {
         let build = BuildKbArgs {
             source_root: args.source_root.clone(),
             db: args.db.clone(),
@@ -673,12 +831,12 @@ async fn serve(args: ServeArgs) -> Result<()> {
         build_kb(&build)?;
     }
     if args.retention_days > 0 {
-        let conn = open_db(&args.db)?;
-        let report = prune_runtime_data(&conn, args.retention_days, false)?;
+        let report = prune_gateway_and_runtime_data(&args.db, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
     let state = Arc::new(AppState {
         db: args.db.clone(),
+        runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -686,12 +844,16 @@ async fn serve(args: ServeArgs) -> Result<()> {
             .map(|value| value.trim_end_matches('/').to_string()),
         upstream_api_key: args.upstream_api_key.filter(|value| !value.is_empty()),
         upstream_model: args.upstream_model,
+        upstream_timeout_secs: args.upstream_timeout_secs,
         max_evidence: args.max_evidence,
-        gateway_api_keys: configured_keys(args.gateway_api_key, args.gateway_api_keys),
-        admin_api_keys: configured_keys(args.admin_api_key, args.admin_api_keys),
+        gateway_api_keys,
+        admin_api_keys,
         allow_admin_with_gateway_key: args.allow_admin_with_gateway_key,
         max_messages: args.max_messages,
         max_question_chars: args.max_question_chars,
+        max_body_bytes: args.max_body_bytes,
+        rate_limit_per_minute: args.rate_limit_per_minute,
+        rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
         profiles: InternalProfiles {
             main: args.profile_main,
@@ -700,9 +862,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
             reviewer: args.profile_reviewer,
         },
         started_at: now_rfc3339(),
-        client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(args.upstream_timeout_secs))
-            .build()?,
     });
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -726,6 +885,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             get(prometheus_metrics_endpoint),
         )
         .with_state(state)
+        .layer(DefaultBodyLimit::max(args.max_body_bytes))
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(args.bind).await?;
     tracing::info!(bind = %args.bind, "tonglingyu gateway listening");
@@ -742,29 +902,29 @@ fn build_kb(args: &BuildKbArgs) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
 
-    let mut conn = open_db(&args.db)?;
-    init_schema(&conn)?;
-    let source_dirs = list_source_dirs(&args.source_root)?;
-    if source_dirs.is_empty() {
-        return Err(anyhow!(
-            "no source snapshots found under {}",
-            args.source_root.display()
-        ));
-    }
-
-    let tx = conn.transaction()?;
-    clear_generated_rows(&tx)?;
-    seed_aliases(&tx)?;
-    for source_dir in source_dirs {
-        load_source_snapshot(&tx, &source_dir)?;
-    }
-    write_kb_version(&tx, &args.source_root)?;
-    tx.commit()?;
+    let conn = open_db(&args.db)?;
+    clear_gateway_generated_rows(&conn)?;
+    let report = TonglingyuRuntimeStore::new(args.db.clone())
+        .rebuild_knowledge_base_from_snapshots(&args.source_root)?;
     println!(
-        "OK build_kb db={} source_root={}",
+        "OK build_kb db={} source_root={} sources={} blocks={} schema={}",
         args.db.display(),
-        args.source_root.display()
+        report.source_root,
+        report.source_count,
+        report.block_count,
+        report.schema_version
     );
+    Ok(())
+}
+
+fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        DELETE FROM gateway_messages;
+        DELETE FROM gateway_sessions;
+        DELETE FROM workflow_states;
+        "#,
+    )?;
     Ok(())
 }
 
@@ -783,59 +943,37 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
 }
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
-    let conn = open_db(&args.db)?;
-    prune_runtime_data(&conn, args.retention_days, args.dry_run)
+    prune_gateway_and_runtime_data(&args.db, args.retention_days, args.dry_run)
 }
 
-fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> Result<Value> {
+fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool) -> Result<Value> {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
     if retention_days == 0 {
-        return Ok(json!({
-            "object": "tonglingyu.runtime_prune_report",
-            "status": "disabled",
-            "retention_days": retention_days,
-            "dry_run": dry_run,
-        }));
+        return runtime_store.prune_data(retention_days, dry_run);
     }
-    let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64))
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-    let old_packages = collect_string_column(
-        conn,
-        "SELECT package_id FROM evidence_packages WHERE created_at < ?1",
-        &cutoff,
-    )?;
-    let counts = json!({
-        "packages": old_packages.len(),
-        "gateway_messages": count_where(conn, "gateway_messages", "created_at < ?1", &cutoff)?,
-        "workflow_states": count_where(conn, "workflow_states", "created_at < ?1", &cutoff)?,
-        "audit_events": count_where(conn, "audit_events", "created_at < ?1", &cutoff)?,
+    let mut report = runtime_store.prune_data(retention_days, dry_run)?;
+    let conn = open_db(db)?;
+    let cutoff = report
+        .get("cutoff")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("runtime prune report missing cutoff"))?
+        .to_string();
+    let gateway_counts = json!({
+        "gateway_messages": count_where(&conn, "gateway_messages", "created_at < ?1", &cutoff)?,
+        "workflow_states": count_where(&conn, "workflow_states", "created_at < ?1", &cutoff)?,
     });
-    if dry_run {
-        return Ok(json!({
-            "object": "tonglingyu.runtime_prune_report",
-            "status": "dry_run",
-            "retention_days": retention_days,
-            "cutoff": cutoff,
-            "counts": counts,
-        }));
+    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
+        counts.insert(
+            "gateway_messages".to_string(),
+            gateway_counts["gateway_messages"].clone(),
+        );
+        counts.insert(
+            "workflow_states".to_string(),
+            gateway_counts["workflow_states"].clone(),
+        );
     }
-    for package_id in &old_packages {
-        conn.execute(
-            "DELETE FROM evidence_claim_links WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM review_records WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_cards WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_packages WHERE package_id = ?1",
-            params![package_id],
-        )?;
+    if dry_run {
+        return Ok(report);
     }
     conn.execute(
         "DELETE FROM gateway_messages WHERE created_at < ?1",
@@ -846,27 +984,10 @@ fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> 
         params![&cutoff],
     )?;
     conn.execute(
-        "DELETE FROM audit_events WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
         "DELETE FROM gateway_sessions WHERE updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM gateway_messages WHERE gateway_messages.session_id = gateway_sessions.session_id)",
         params![&cutoff],
     )?;
-    Ok(json!({
-        "object": "tonglingyu.runtime_prune_report",
-        "status": "pruned",
-        "retention_days": retention_days,
-        "cutoff": cutoff,
-        "counts": counts,
-    }))
-}
-
-fn collect_string_column(conn: &Connection, sql: &str, value: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(sql)?;
-    stmt.query_map(params![value], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    Ok(report)
 }
 
 fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
@@ -882,11 +1003,11 @@ fn open_db(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    init_runtime_schema(&conn)?;
+    init_gateway_schema(&conn)?;
     Ok(conn)
 }
 
-fn init_runtime_schema(conn: &Connection) -> Result<()> {
+fn init_gateway_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -928,1240 +1049,28 @@ fn init_runtime_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS evidence_claim_links (
-            package_id TEXT NOT NULL,
-            claim_index INTEGER NOT NULL,
-            evidence_id TEXT NOT NULL,
-            support_relation TEXT NOT NULL,
-            PRIMARY KEY(package_id, claim_index, evidence_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_events (
-            event_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_session ON gateway_messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_trace ON gateway_messages(trace_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_package ON gateway_messages(package_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_trace ON workflow_states(trace_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_package ON workflow_states(package_id);
-        CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
         "#,
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
-        params!["runtime-schema-v2", now_rfc3339()],
+        params!["tonglingyu-gateway-schema-v1", now_rfc3339()],
     )?;
     Ok(())
-}
-
-fn has_kb(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let conn = open_db(path)?;
-    let count: Option<i64> = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_version'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if count.unwrap_or_default() == 0 {
-        return Ok(false);
-    }
-    let sources: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
-        .unwrap_or_default();
-    Ok(sources > 0)
-}
-
-fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS sources (
-            source_id TEXT PRIMARY KEY,
-            source_category TEXT NOT NULL,
-            format TEXT,
-            title TEXT,
-            work TEXT,
-            edition TEXT,
-            language TEXT,
-            api_url TEXT,
-            fetched_at TEXT,
-            notes TEXT,
-            snapshot_contract_json TEXT NOT NULL,
-            source_hash TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS source_documents (
-            section_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            section_index INTEGER,
-            title TEXT,
-            display_title TEXT,
-            fullurl TEXT,
-            pageid INTEGER,
-            revision_id INTEGER,
-            revision_timestamp TEXT,
-            wikitext_sha256 TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS editions (
-            edition_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            edition_label TEXT NOT NULL,
-            version_system TEXT NOT NULL,
-            usage_limit TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS chapters (
-            chapter_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            chapter_no INTEGER,
-            title TEXT NOT NULL,
-            version_range TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS blocks (
-            block_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            section_id TEXT NOT NULL,
-            source_title TEXT NOT NULL,
-            source_url TEXT NOT NULL,
-            revision_id INTEGER,
-            block_index INTEGER NOT NULL,
-            kind TEXT NOT NULL,
-            tag TEXT,
-            text TEXT NOT NULL,
-            normalized_text TEXT NOT NULL,
-            evidence_type TEXT NOT NULL,
-            chapter_no INTEGER
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
-            block_id UNINDEXED,
-            source_id UNINDEXED,
-            source_title,
-            text,
-            normalized_text,
-            tokenize = 'unicode61'
-        );
-
-        CREATE TABLE IF NOT EXISTS rare_char_annotations (
-            annotation_id TEXT PRIMARY KEY,
-            block_id TEXT NOT NULL REFERENCES blocks(block_id),
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            character TEXT NOT NULL,
-            reading TEXT,
-            note TEXT,
-            provenance TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS commentaries (
-            commentary_id TEXT PRIMARY KEY,
-            block_id TEXT NOT NULL REFERENCES blocks(block_id),
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            commentary_text TEXT NOT NULL,
-            commentary_type TEXT NOT NULL,
-            version_label TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS version_notes (
-            version_note_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL REFERENCES sources(source_id),
-            note TEXT NOT NULL,
-            source_status TEXT NOT NULL,
-            usage_limit TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS version_differences (
-            difference_id TEXT PRIMARY KEY,
-            left_block_id TEXT,
-            right_block_id TEXT,
-            scope TEXT NOT NULL,
-            evidence_level TEXT NOT NULL,
-            note TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS people (
-            person_id TEXT PRIMARY KEY,
-            canonical_name TEXT NOT NULL,
-            description TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS aliases (
-            alias TEXT PRIMARY KEY,
-            person_id TEXT NOT NULL REFERENCES people(person_id),
-            scope TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS relationships (
-            relationship_id TEXT PRIMARY KEY,
-            subject_person_id TEXT NOT NULL,
-            object_person_id TEXT NOT NULL,
-            relation_type TEXT NOT NULL,
-            evidence_block_id TEXT,
-            evidence_level TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS events (
-            event_id TEXT PRIMARY KEY,
-            event_name TEXT NOT NULL,
-            chapter_no INTEGER,
-            evidence_block_id TEXT,
-            theme_tags TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS poems (
-            poem_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            source_block_id TEXT NOT NULL,
-            topic TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS evidence_cards (
-            evidence_id TEXT PRIMARY KEY,
-            package_id TEXT,
-            evidence_type TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            block_id TEXT NOT NULL,
-            support_scope TEXT NOT NULL,
-            unsupported_scope TEXT NOT NULL,
-            evidence_level TEXT NOT NULL,
-            confidence TEXT NOT NULL,
-            verification_status TEXT NOT NULL,
-            evidence_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS evidence_packages (
-            package_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            question TEXT NOT NULL,
-            claim_statements_json TEXT NOT NULL,
-            evidence_ids_json TEXT NOT NULL,
-            review_status TEXT NOT NULL,
-            review_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS review_records (
-            review_id TEXT PRIMARY KEY,
-            package_id TEXT NOT NULL REFERENCES evidence_packages(package_id),
-            status TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            issues_json TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS audit_events (
-            event_id TEXT PRIMARY KEY,
-            trace_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS kb_version (
-            version_id TEXT PRIMARY KEY,
-            source_root TEXT NOT NULL,
-            source_count INTEGER NOT NULL,
-            block_count INTEGER NOT NULL,
-            schema_version TEXT NOT NULL,
-            built_at TEXT NOT NULL
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
-        CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
-        CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
-        CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
-        CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
-        "#,
-    )?;
-    Ok(())
-}
-
-fn clear_generated_rows(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        DELETE FROM gateway_messages;
-        DELETE FROM gateway_sessions;
-        DELETE FROM workflow_states;
-        DELETE FROM evidence_claim_links;
-        DELETE FROM audit_events;
-        DELETE FROM review_records;
-        DELETE FROM evidence_cards;
-        DELETE FROM evidence_packages;
-        DELETE FROM poems;
-        DELETE FROM events;
-        DELETE FROM relationships;
-        DELETE FROM aliases;
-        DELETE FROM people;
-        DELETE FROM version_differences;
-        DELETE FROM version_notes;
-        DELETE FROM commentaries;
-        DELETE FROM rare_char_annotations;
-        DELETE FROM blocks_fts;
-        DELETE FROM blocks;
-        DELETE FROM chapters;
-        DELETE FROM editions;
-        DELETE FROM source_documents;
-        DELETE FROM sources;
-        DELETE FROM kb_version;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn list_source_dirs(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut dirs = Vec::new();
-    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let path = entry?.path();
-        if path.is_dir() && path.join("metadata/source.json").is_file() {
-            dirs.push(path);
-        }
-    }
-    dirs.sort();
-    Ok(dirs)
-}
-
-fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
-    let source_path = source_dir.join("metadata/source.json");
-    let report_path = source_dir.join("metadata/extraction_report.json");
-    let documents_path = source_dir.join("documents/documents.jsonl");
-    let blocks_path = source_dir.join("documents/blocks.jsonl");
-
-    let source: SourceMetadata = read_json(&source_path)?;
-    let report: ExtractionReport = read_json(&report_path)?;
-    if report.missing != 0 {
-        return Err(anyhow!("{} has missing pages", source.source_id));
-    }
-    if report.raw_html_files.unwrap_or_default() != 0 {
-        return Err(anyhow!(
-            "{} contains raw_html files in current M1 contract",
-            source.source_id
-        ));
-    }
-    let source_hash = hash_files([&source_path, &report_path, &documents_path, &blocks_path])?;
-    conn.execute(
-        r#"
-        INSERT INTO sources (
-            source_id, source_category, format, title, work, edition, language,
-            api_url, fetched_at, notes, snapshot_contract_json, source_hash
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-        "#,
-        params![
-            source.source_id,
-            source.source_category,
-            source.format,
-            source.title,
-            source.work,
-            source.edition,
-            source.language,
-            source.api_url,
-            source.fetched_at,
-            source.notes,
-            serde_json::to_string(&source.snapshot_contract)?,
-            source_hash
-        ],
-    )?;
-
-    conn.execute(
-        "INSERT INTO editions (edition_id, source_id, edition_label, version_system, usage_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            format!("edition:{}", source.source_id),
-            source.source_id,
-            source.edition.unwrap_or_else(|| "未标注版本".to_string()),
-            version_system(&source.source_id),
-            usage_limit(&source.source_category),
-        ],
-    )?;
-    conn.execute(
-        "INSERT INTO version_notes (version_note_id, source_id, note, source_status, usage_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            format!("version-note:{}", source.source_id),
-            source.source_id,
-            source.notes.unwrap_or_else(|| "第一批 Wikisource source snapshot".to_string()),
-            "source_snapshot_ready",
-            usage_limit(&source.source_category),
-        ],
-    )?;
-
-    let mut document_count = 0_i64;
-    for document in read_jsonl::<DocumentRecord>(&documents_path)? {
-        document_count += 1;
-        conn.execute(
-            r#"
-            INSERT INTO source_documents (
-                section_id, source_id, section_index, title, display_title, fullurl,
-                pageid, revision_id, revision_timestamp, wikitext_sha256
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                document.section_id,
-                document.source_id,
-                document.section_index,
-                document.title,
-                document.display_title,
-                document.fullurl,
-                document.pageid,
-                document.revision_id,
-                document.revision_timestamp,
-                document.wikitext_sha256,
-            ],
-        )?;
-    }
-    if document_count != report.documents {
-        return Err(anyhow!(
-            "{} document count mismatch: report={} loaded={}",
-            source.source_id,
-            report.documents,
-            document_count
-        ));
-    }
-
-    let mut block_count = 0_i64;
-    let mut seen_chapters = HashSet::new();
-    let mut commentary_count = 0_i64;
-    for block in read_jsonl::<BlockRecord>(&blocks_path)? {
-        block_count += 1;
-        let normalized_text = normalize_text(&block.text);
-        let evidence_type = evidence_type(&source.source_category, &source.source_id, &block);
-        let chapter_no = extract_chapter_no(&block.source_title);
-        if let Some(no) = chapter_no {
-            let chapter_id = format!("{}:chapter:{no:03}", source.source_id);
-            if seen_chapters.insert(chapter_id.clone()) {
-                conn.execute(
-                    "INSERT OR IGNORE INTO chapters (chapter_id, source_id, chapter_no, title, version_range) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![chapter_id, source.source_id, no, block.source_title, version_range(no)],
-                )?;
-            }
-        }
-        conn.execute(
-            r#"
-            INSERT INTO blocks (
-                block_id, source_id, section_id, source_title, source_url, revision_id,
-                block_index, kind, tag, text, normalized_text, evidence_type, chapter_no
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            "#,
-            params![
-                block.block_id,
-                block.source_id,
-                block.section_id,
-                block.source_title,
-                block.source_url,
-                block.revision_id,
-                block.block_index,
-                block.kind,
-                block.tag,
-                block.text,
-                normalized_text,
-                evidence_type,
-                chapter_no,
-            ],
-        )?;
-        conn.execute(
-            "INSERT INTO blocks_fts (block_id, source_id, source_title, text, normalized_text) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![block.block_id, block.source_id, block.source_title, block.text, normalized_text],
-        )?;
-        if evidence_type == "commentary" && useful_text(&block.text) {
-            commentary_count += 1;
-            conn.execute(
-                "INSERT INTO commentaries (commentary_id, block_id, source_id, commentary_text, commentary_type, version_label) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    format!("commentary:{}:{commentary_count}", source.source_id),
-                    block.block_id,
-                    block.source_id,
-                    block.text,
-                    commentary_type(&block.text),
-                    version_system(&source.source_id),
-                ],
-            )?;
-        }
-    }
-    if block_count != report.blocks {
-        return Err(anyhow!(
-            "{} block count mismatch: report={} loaded={}",
-            source.source_id,
-            report.blocks,
-            block_count
-        ));
-    }
-    let _rare_count = report.rare_char_annotations.unwrap_or_default();
-    Ok(())
-}
-
-fn write_kb_version(conn: &Connection, source_root: &Path) -> Result<()> {
-    let source_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
-    let block_count: i64 = conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
-    conn.execute(
-        "INSERT INTO kb_version (version_id, source_root, source_count, block_count, schema_version, built_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            format!("kb-{}", uuid::Uuid::now_v7().simple()),
-            source_root.display().to_string(),
-            source_count,
-            block_count,
-            "tonglingyu-v1-sqlite-fts",
-            now_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
-fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
-}
-
-fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
-    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut records = Vec::new();
-    for (line_no, line) in BufReader::new(file).lines().enumerate() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record = serde_json::from_str(&line)
-            .with_context(|| format!("parse {}:{}", path.display(), line_no + 1))?;
-        records.push(record);
-    }
-    Ok(records)
-}
-
-fn hash_files<'a>(paths: impl IntoIterator<Item = &'a PathBuf>) -> Result<String> {
-    let mut hasher = Sha256::new();
-    for path in paths {
-        hasher.update(path.display().to_string().as_bytes());
-        hasher.update(fs::read(path).with_context(|| format!("hash {}", path.display()))?);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn seed_aliases(conn: &Connection) -> Result<()> {
-    let people = [
-        (
-            "person:baoyu",
-            "贾宝玉",
-            "核心人物，通灵玉持有者。",
-            &["宝玉", "寶玉", "宝二爷", "寳玉"][..],
-        ),
-        (
-            "person:daiyu",
-            "林黛玉",
-            "核心人物，金陵十二钗之一。",
-            &["黛玉", "林姑娘", "颦儿", "顰兒"][..],
-        ),
-        (
-            "person:baochai",
-            "薛宝钗",
-            "核心人物，金陵十二钗之一。",
-            &["宝钗", "寶釵", "宝姐姐", "薛姑娘"][..],
-        ),
-        (
-            "person:wangxifeng",
-            "王熙凤",
-            "贾府管家人物。",
-            &["凤姐", "鳳姐", "凤姐儿", "璉二奶奶"][..],
-        ),
-        (
-            "person:jiazheng",
-            "贾政",
-            "贾宝玉之父。",
-            &["贾政", "賈政"][..],
-        ),
-        (
-            "person:jiamu",
-            "贾母",
-            "贾府长辈。",
-            &["贾母", "賈母", "老太太"][..],
-        ),
-        (
-            "person:wangfuren",
-            "王夫人",
-            "贾宝玉之母。",
-            &["王夫人", "太太"][..],
-        ),
-        (
-            "person:xiren",
-            "袭人",
-            "贾宝玉身边丫鬟。",
-            &["袭人", "襲人"][..],
-        ),
-        ("person:qingwen", "晴雯", "贾宝玉身边丫鬟。", &["晴雯"][..]),
-        (
-            "person:xiangyun",
-            "史湘云",
-            "金陵十二钗之一。",
-            &["湘云", "湘雲", "云妹妹"][..],
-        ),
-        (
-            "person:tanchun",
-            "贾探春",
-            "金陵十二钗之一。",
-            &["探春", "三姑娘"][..],
-        ),
-        (
-            "person:yuanchun",
-            "贾元春",
-            "金陵十二钗之一。",
-            &["元春", "元妃"][..],
-        ),
-        (
-            "person:yingchun",
-            "贾迎春",
-            "金陵十二钗之一。",
-            &["迎春", "二姑娘"][..],
-        ),
-        (
-            "person:xichun",
-            "贾惜春",
-            "金陵十二钗之一。",
-            &["惜春", "四姑娘"][..],
-        ),
-        (
-            "person:qiaojie",
-            "巧姐",
-            "金陵十二钗之一。",
-            &["巧姐", "巧姐儿"][..],
-        ),
-        (
-            "person:liwan",
-            "李纨",
-            "金陵十二钗之一。",
-            &["李纨", "李紈", "宫裁", "宮裁"][..],
-        ),
-        ("person:miaoyu", "妙玉", "金陵十二钗之一。", &["妙玉"][..]),
-        (
-            "person:keqing",
-            "秦可卿",
-            "金陵十二钗之一。",
-            &["秦可卿", "可卿"][..],
-        ),
-    ];
-    for (person_id, name, description, aliases) in people {
-        conn.execute(
-            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
-            params![person_id, name, description],
-        )?;
-        for alias in aliases {
-            conn.execute(
-                "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
-                params![alias, person_id, "v1_seed_alias"],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn search_evidence(conn: &Connection, question: &str, limit: usize) -> Result<Vec<EvidenceCard>> {
-    let terms = extract_terms(conn, question)?;
-    let mut scored: BTreeMap<String, (i64, EvidenceCard)> = BTreeMap::new();
-    for term in &terms {
-        for block in query_blocks_like(conn, term, limit * 4)? {
-            let score = score_block(question, term, &block);
-            let card = evidence_card_from_block_with_focus(block, term);
-            scored
-                .entry(card.block_id.clone())
-                .and_modify(|(existing, _)| *existing += score)
-                .or_insert((score, card));
-        }
-    }
-    if scored.is_empty() {
-        for block in query_blocks_like(conn, question, limit * 2)? {
-            let card = evidence_card_from_block_with_focus(block, question);
-            scored.insert(card.block_id.clone(), (1, card));
-        }
-    }
-    let mut ranked: Vec<_> = scored.into_values().collect();
-    ranked.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.block_id.cmp(&right.1.block_id))
-    });
-    ranked.truncate(limit);
-    Ok(ranked.into_iter().map(|(_, card)| card).collect())
 }
 
 fn search_evidence_with_policy(
-    conn: &Connection,
+    runtime_store: &TonglingyuRuntimeStore,
     question: &str,
     limit: usize,
 ) -> Result<(Vec<EvidenceCard>, SearchPolicy)> {
     let policy = search_policy(question);
-    let mut cards = search_evidence(conn, question, limit)?;
-    let terms = extract_terms(conn, question)?;
-    let mut seen = cards
-        .iter()
-        .map(|card| card.block_id.clone())
-        .collect::<HashSet<_>>();
-    for exact_term in required_exact_terms(question) {
-        for block in query_blocks_exact_text(conn, exact_term, limit * 8)? {
-            if !block.text.contains(exact_term) {
-                continue;
-            }
-            let card = evidence_card_from_block(block);
-            if seen.insert(card.block_id.clone()) {
-                cards.insert(0, card);
-                break;
-            }
-        }
-    }
-    for required_type in &policy.required_evidence_types {
-        if cards
-            .iter()
-            .any(|card| card.evidence_type == required_type.as_str())
-        {
-            continue;
-        }
-        for term in &terms {
-            for block in query_blocks_like(conn, term, limit * 8)? {
-                let card = evidence_card_from_block(block);
-                if card.evidence_type == *required_type && seen.insert(card.block_id.clone()) {
-                    cards.insert(0, card);
-                    break;
-                }
-            }
-            if cards
-                .iter()
-                .any(|card| card.evidence_type == required_type.as_str())
-            {
-                break;
-            }
-        }
-    }
-    cards.truncate(limit.max(policy.required_evidence_types.len()));
+    let cards = runtime_store.search_cards(question, limit, &policy.required_evidence_types)?;
     Ok((cards, policy))
-}
-
-fn required_exact_terms(question: &str) -> Vec<&'static str> {
-    let mut terms = Vec::new();
-    if question.contains("寳玉") {
-        terms.push("寳玉");
-    }
-    if question.contains("寳釵") {
-        terms.push("寳釵");
-    }
-    terms
-}
-
-fn search_policy(question: &str) -> SearchPolicy {
-    let normalized = normalize_text(question);
-    let mut required = BTreeSet::new();
-    required.insert("base_text".to_string());
-    let asks_commentary = question.contains("脂批")
-        || question.contains("脂評")
-        || question.contains("甲戌")
-        || normalized.contains("脂批");
-    let asks_version = question.contains("程甲")
-        || question.contains("程乙")
-        || question.contains("版本")
-        || question.contains("前八十")
-        || question.contains("后四十")
-        || question.contains("後四十");
-    if asks_commentary {
-        required.insert("commentary".to_string());
-    }
-    if asks_version {
-        required.insert("version_note".to_string());
-    }
-    let blocked_controls = blocked_prompt_controls(question);
-    let question_type = if !blocked_controls.is_empty() {
-        "control_injection"
-    } else if asks_commentary {
-        "commentary"
-    } else if asks_version {
-        "version"
-    } else if question.contains("判词") || question.contains("判詞") || question.contains("诗")
-    {
-        "poem_or_judgement"
-    } else {
-        "base_text"
-    };
-    let mut profiles = vec![
-        "honglou-text".to_string(),
-        "honglou-main".to_string(),
-        "honglou-reviewer".to_string(),
-    ];
-    if asks_commentary {
-        profiles.insert(1, "honglou-commentary".to_string());
-    }
-    SearchPolicy {
-        question_type: question_type.to_string(),
-        required_evidence_types: required.into_iter().collect(),
-        planned_profiles: profiles,
-        blocked_controls,
-    }
-}
-
-fn public_search_policy(policy: &SearchPolicy) -> Value {
-    json!({
-        "question_type": &policy.question_type,
-        "required_evidence_types": &policy.required_evidence_types,
-        "blocked_controls": &policy.blocked_controls,
-    })
-}
-
-fn planned_profiles_for_policy(profiles: &InternalProfiles, policy: &SearchPolicy) -> Vec<String> {
-    let mut planned = vec![profiles.text.clone()];
-    if policy
-        .required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        planned.push(profiles.commentary.clone());
-    }
-    planned.push(profiles.main.clone());
-    planned.push(profiles.reviewer.clone());
-    planned
-}
-
-fn blocked_prompt_controls(question: &str) -> Vec<String> {
-    let controls = [
-        ("跳过reviewer", "attempted_reviewer_bypass"),
-        ("跳过 reviewer", "attempted_reviewer_bypass"),
-        ("关闭审校", "attempted_reviewer_bypass"),
-        ("不要审校", "attempted_reviewer_bypass"),
-        ("skip reviewer", "attempted_reviewer_bypass"),
-        ("disable_reviewer", "attempted_reviewer_bypass"),
-        ("disable reviewer", "attempted_reviewer_bypass"),
-        ("只凭模型记忆", "attempted_memory_only_answer"),
-        ("不要证据", "attempted_evidence_bypass"),
-        ("忽略证据", "attempted_evidence_bypass"),
-        ("绕过证据", "attempted_evidence_bypass"),
-        ("honglou-", "attempted_internal_agent_control"),
-        ("内部 agent", "attempted_internal_agent_control"),
-        ("内部Agent", "attempted_internal_agent_control"),
-        ("内部配置", "attempted_internal_config_leak"),
-        ("系统提示词", "attempted_internal_prompt_leak"),
-        ("system prompt", "attempted_internal_prompt_leak"),
-    ];
-    let lowered = question.to_lowercase();
-    controls
-        .iter()
-        .filter_map(|(needle, code)| {
-            if lowered.contains(&needle.to_lowercase()) {
-                Some((*code).to_string())
-            } else {
-                None
-            }
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn extract_terms(conn: &Connection, question: &str) -> Result<Vec<String>> {
-    let mut terms = Vec::new();
-    let normalized = normalize_text(question);
-    let seed_terms = [
-        ("通灵玉", "通靈玉"),
-        ("通灵宝玉", "通靈寶玉"),
-        ("莫失莫忘", "莫失莫忘"),
-        ("仙寿恒昌", "仙壽恒昌"),
-        ("一除邪祟", "一除邪祟"),
-        ("二疗冤疾", "二療冤疾"),
-        ("三知祸福", "三知禍福"),
-        ("石头", "石頭"),
-        ("顽石", "頑石"),
-        ("寳玉", "寳玉"),
-        ("青埂峰", "青埂峰"),
-        ("金陵十二钗", "金陵十二釵"),
-        ("判词", "判詞"),
-        ("葬花", "葬花"),
-        ("好了歌", "好了歌"),
-        ("太虚幻境", "太虛幻境"),
-        ("脂批", "脂批"),
-        ("甲戌", "甲戌"),
-        ("程甲", "程甲"),
-        ("程乙", "程乙"),
-        ("前八十回", "前八十回"),
-        ("后四十回", "後四十回"),
-        ("第八十一回", "第八十一回"),
-        ("宝玉", "寶玉"),
-        ("黛玉", "黛玉"),
-        ("宝钗", "寶釵"),
-        ("凤姐", "鳳姐"),
-        ("贾母", "賈母"),
-        ("袭人", "襲人"),
-        ("李纨", "李紈"),
-        ("女娲", "女媧"),
-        ("补天", "補天"),
-        ("甄士隐", "甄士隱"),
-        ("贾雨村", "賈雨村"),
-        ("冷子兴", "冷子興"),
-        ("刘姥姥", "劉姥姥"),
-        ("大观园", "大觀園"),
-        ("怡红院", "怡紅院"),
-        ("潇湘馆", "瀟湘館"),
-        ("蘅芜苑", "蘅蕪苑"),
-        ("荣国府", "榮國府"),
-        ("宁国府", "寧國府"),
-        ("贾府", "賈府"),
-        ("薛蟠", "薛蟠"),
-        ("香菱", "香菱"),
-        ("平儿", "平兒"),
-        ("尤氏", "尤氏"),
-        ("贾琏", "賈璉"),
-        ("秦钟", "秦鐘"),
-        ("北静王", "北靜王"),
-        ("金陵", "金陵"),
-        ("红楼梦", "紅樓夢"),
-        ("风月宝鉴", "風月寶鑒"),
-        ("芙蓉女儿", "芙蓉女兒"),
-        ("桃花社", "桃花社"),
-        ("海棠", "海棠"),
-        ("菊花", "菊花"),
-        ("灯谜", "燈謎"),
-        ("省亲", "省親"),
-        ("第八回", "第八回"),
-        ("第一回", "第一回"),
-        ("脂砚斋", "脂硯齋"),
-    ];
-    for (simple, traditional) in seed_terms {
-        if question.contains(simple)
-            || question.contains(traditional)
-            || normalized.contains(&normalize_text(simple))
-        {
-            push_term(&mut terms, simple);
-            push_term(&mut terms, traditional);
-        }
-    }
-    let asks_inscription = question.contains('字')
-        || question.contains("铭")
-        || question.contains("銘")
-        || question.contains("写")
-        || question.contains("寫");
-    let asks_tonglingyu =
-        question.contains("通灵玉") || question.contains("通靈玉") || normalized.contains("通灵玉");
-    if asks_inscription && asks_tonglingyu {
-        for term in [
-            "莫失莫忘",
-            "仙寿恒昌",
-            "仙壽恒昌",
-            "一除邪祟",
-            "二疗冤疾",
-            "二療冤疾",
-            "三知祸福",
-            "三知禍福",
-        ] {
-            push_term(&mut terms, term);
-        }
-    }
-    if question.contains("顽石") || question.contains("頑石") {
-        push_term(&mut terms, "石頭");
-        push_term(&mut terms, "石头");
-    }
-    if question.contains("后四十") || question.contains("後四十") {
-        push_term(&mut terms, "第八十一回");
-        push_term(&mut terms, "第081回");
-        push_term(&mut terms, "八十一");
-    }
-
-    let mut stmt = conn.prepare("SELECT alias FROM aliases")?;
-    let aliases = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    for alias in aliases {
-        let alias = alias?;
-        if question.contains(&alias) || normalized.contains(&normalize_text(&alias)) {
-            push_term(&mut terms, &alias);
-        }
-    }
-
-    for token in cjk_tokens(question) {
-        if token.chars().count() >= 2 && token.chars().count() <= 8 {
-            push_term(&mut terms, &token);
-        }
-    }
-    if terms.is_empty() && question.chars().count() <= 24 {
-        push_term(&mut terms, question);
-    }
-    Ok(terms)
-}
-
-fn query_blocks_like(conn: &Connection, term: &str, limit: usize) -> Result<Vec<BlockRecord>> {
-    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
-    let normalized_like = format!(
-        "%{}%",
-        normalize_text(term).replace('%', "\\%").replace('_', "\\_")
-    );
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT block_id, block_index, kind, revision_id, section_id,
-               source_id, source_title, source_url, tag, text
-        FROM blocks
-        WHERE text LIKE ?1 ESCAPE '\'
-           OR source_title LIKE ?1 ESCAPE '\'
-           OR normalized_text LIKE ?2 ESCAPE '\'
-        ORDER BY
-          CASE evidence_type
-            WHEN 'base_text' THEN 1
-            WHEN 'commentary' THEN 2
-            WHEN 'version_note' THEN 3
-            ELSE 4
-          END,
-          LENGTH(text) ASC
-        LIMIT ?3
-        "#,
-    )?;
-    let rows = stmt.query_map(params![like, normalized_like, limit as i64], |row| {
-        Ok(BlockRecord {
-            block_id: row.get(0)?,
-            block_index: row.get(1)?,
-            kind: row.get(2)?,
-            revision_id: row.get(3)?,
-            section_id: row.get(4)?,
-            source_id: row.get(5)?,
-            source_title: row.get(6)?,
-            source_url: row.get(7)?,
-            tag: row.get(8)?,
-            text: row.get(9)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn query_blocks_exact_text(
-    conn: &Connection,
-    term: &str,
-    limit: usize,
-) -> Result<Vec<BlockRecord>> {
-    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT block_id, block_index, kind, revision_id, section_id,
-               source_id, source_title, source_url, tag, text
-        FROM blocks
-        WHERE text LIKE ?1 ESCAPE '\'
-        ORDER BY
-          CASE
-            WHEN source_id LIKE '%chengjia%' THEN 1
-            WHEN source_id LIKE '%chengyi%' THEN 2
-            ELSE 3
-          END,
-          LENGTH(text) ASC
-        LIMIT ?2
-        "#,
-    )?;
-    let rows = stmt.query_map(params![like, limit as i64], |row| {
-        Ok(BlockRecord {
-            block_id: row.get(0)?,
-            block_index: row.get(1)?,
-            kind: row.get(2)?,
-            revision_id: row.get(3)?,
-            section_id: row.get(4)?,
-            source_id: row.get(5)?,
-            source_title: row.get(6)?,
-            source_url: row.get(7)?,
-            tag: row.get(8)?,
-            text: row.get(9)?,
-        })
-    })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn evidence_card_from_block(block: BlockRecord) -> EvidenceCard {
-    evidence_card_from_block_text(block, None)
-}
-
-fn evidence_card_from_block_with_focus(block: BlockRecord, focus: &str) -> EvidenceCard {
-    evidence_card_from_block_text(block, Some(focus))
-}
-
-fn evidence_card_from_block_text(block: BlockRecord, focus: Option<&str>) -> EvidenceCard {
-    let evidence_type =
-        if block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu") {
-            "commentary"
-        } else if block.text.contains("程甲")
-            || block.text.contains("程乙")
-            || block.text.contains("脂評本")
-        {
-            "version_note"
-        } else {
-            "base_text"
-        };
-    let (support_scope, unsupported_scope, evidence_level, confidence) = match evidence_type {
-        "commentary" => (
-            "可支持脂批、评语或版本线索层面的说明；必须标注为脂批来源。".to_string(),
-            "不能单独证明正文事实，也不能扩展为所有版本共同结论。".to_string(),
-            "脂批提示".to_string(),
-            "medium".to_string(),
-        ),
-        "version_note" => (
-            "可支持版本边界、整理来源或版本系统说明。".to_string(),
-            "不能单独证明情节事实，不能替代影印或权威校注本校勘。".to_string(),
-            "版本边界".to_string(),
-            "medium".to_string(),
-        ),
-        _ => (
-            "可支持该版本该 block 中直接出现的原文事实或文本定位。".to_string(),
-            "不能证明未出现的情节、人物命运定论或其他版本必然相同。".to_string(),
-            "正文直接".to_string(),
-            "high".to_string(),
-        ),
-    };
-    EvidenceCard {
-        evidence_id: format!("ev-{}", uuid::Uuid::now_v7().simple()),
-        evidence_type: evidence_type.to_string(),
-        source_id: block.source_id,
-        source_title: block.source_title,
-        source_url: block.source_url,
-        revision_id: block.revision_id,
-        block_id: block.block_id,
-        text: match focus {
-            Some(focus) => trim_text_around(&block.text, focus, 520),
-            None => trim_text(&block.text, 520),
-        },
-        support_scope,
-        unsupported_scope,
-        evidence_level,
-        confidence,
-        verification_status: "source_snapshot_ready_not_scholarly_collated".to_string(),
-    }
-}
-
-fn create_evidence_package(
-    conn: &Connection,
-    trace_id: &str,
-    question: &str,
-    cards: Vec<EvidenceCard>,
-) -> Result<EvidencePackage> {
-    let claims = claims_from_cards(question, &cards);
-    let claim_evidence_map = claim_evidence_map(&claims, &cards);
-    let review = review(question, &cards, &claims);
-    let package_id = format!("pkg-{}", uuid::Uuid::now_v7().simple());
-    let now = now_rfc3339();
-    let evidence_ids: Vec<_> = cards.iter().map(|card| card.evidence_id.clone()).collect();
-    conn.execute(
-        "INSERT INTO evidence_packages (package_id, trace_id, question, claim_statements_json, evidence_ids_json, review_status, review_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            package_id,
-            trace_id,
-            question,
-            serde_json::to_string(&claims)?,
-            serde_json::to_string(&evidence_ids)?,
-            review.status,
-            serde_json::to_string(&review)?,
-            now,
-        ],
-    )?;
-    for card in &cards {
-        conn.execute(
-            "INSERT INTO evidence_cards (evidence_id, package_id, evidence_type, source_id, block_id, support_scope, unsupported_scope, evidence_level, confidence, verification_status, evidence_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                card.evidence_id,
-                package_id,
-                card.evidence_type,
-                card.source_id,
-                card.block_id,
-                card.support_scope,
-                card.unsupported_scope,
-                card.evidence_level,
-                card.confidence,
-                card.verification_status,
-                serde_json::to_string(card)?,
-                now,
-            ],
-        )?;
-    }
-    conn.execute(
-        "INSERT INTO review_records (review_id, package_id, status, severity, issues_json, summary, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            format!("review-{}", uuid::Uuid::now_v7().simple()),
-            package_id,
-            review.status,
-            review.severity,
-            serde_json::to_string(&review.issues)?,
-            review.summary,
-            now,
-        ],
-    )?;
-    for item in &claim_evidence_map {
-        for evidence_id in &item.evidence_ids {
-            conn.execute(
-                "INSERT INTO evidence_claim_links (package_id, claim_index, evidence_id, support_relation) VALUES (?1, ?2, ?3, ?4)",
-                params![package_id, item.claim_index as i64, evidence_id, "supports_scope_limited_claim"],
-            )?;
-        }
-    }
-    insert_audit_event(
-        conn,
-        trace_id,
-        "evidence_package_created",
-        &json!({
-            "package_id": &package_id,
-            "question": question,
-            "evidence_count": evidence_ids.len(),
-            "evidence_ids": &evidence_ids,
-            "claim_evidence_map": &claim_evidence_map,
-        }),
-    )?;
-    insert_audit_event(
-        conn,
-        trace_id,
-        "review_completed",
-        &json!({
-            "package_id": &package_id,
-            "status": &review.status,
-            "severity": &review.severity,
-            "issues": &review.issues,
-            "summary": &review.summary,
-        }),
-    )?;
-    Ok(EvidencePackage {
-        package_id,
-        trace_id: trace_id.to_string(),
-        question: question.to_string(),
-        cards,
-        claims,
-        claim_evidence_map,
-        review,
-    })
-}
-
-fn claim_evidence_map(claims: &[String], cards: &[EvidenceCard]) -> Vec<ClaimEvidenceMap> {
-    claims
-        .iter()
-        .enumerate()
-        .map(|(claim_index, claim)| {
-            let evidence_ids = cards
-                .iter()
-                .filter(|card| {
-                    if claim.contains("脂批") {
-                        card.evidence_type == "commentary"
-                    } else if claim.contains("正文") || claim.contains("通灵玉") {
-                        card.evidence_type == "base_text" || card.evidence_type == "version_note"
-                    } else {
-                        true
-                    }
-                })
-                .map(|card| card.evidence_id.clone())
-                .collect::<Vec<_>>();
-            let forbidden_conclusions = if cards.is_empty() {
-                vec!["不能给出确定结论。".to_string()]
-            } else {
-                cards
-                    .iter()
-                    .map(|card| card.unsupported_scope.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            };
-            ClaimEvidenceMap {
-                claim_index,
-                claim: claim.clone(),
-                evidence_ids,
-                forbidden_conclusions,
-            }
-        })
-        .collect()
 }
 
 fn insert_audit_event(
@@ -2170,17 +1079,7 @@ fn insert_audit_event(
     event_type: &str,
     payload: &Value,
 ) -> Result<()> {
-    conn.execute(
-        "INSERT INTO audit_events (event_id, trace_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            format!("audit-{}", uuid::Uuid::now_v7().simple()),
-            trace_id,
-            event_type,
-            serde_json::to_string(payload)?,
-            now_rfc3339(),
-        ],
-    )?;
-    Ok(())
+    tonglingyu_runtime::append_runtime_audit_event(conn, trace_id, event_type, payload)
 }
 
 fn record_workflow_state(
@@ -2305,114 +1204,81 @@ fn hash_value(value: &Value) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> {
-    if cards.is_empty() {
-        return vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()];
+async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
+    if args.limit == 0 {
+        return Err(anyhow!("--limit must be greater than 0"));
     }
-    let mut claims = Vec::new();
-    if question.contains("通灵玉") || question.contains("通靈玉") {
-        claims.push("通灵玉相关回答必须回到第八回等具体文本证据，并区分正文与脂批。".to_string());
-    }
-    if cards.iter().any(|card| card.evidence_type == "commentary") {
-        claims.push("命中的脂批材料只能作为脂批或版本线索，不能当作正文事实。".to_string());
-    }
-    if cards.iter().any(|card| card.evidence_type == "base_text") {
-        claims.push("命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string());
-    }
-    if claims.is_empty() {
-        claims.push("回答只能在已命中证据的支持范围内表述。".to_string());
-    }
-    claims
-}
-
-fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> ReviewRecord {
-    let mut issues = Vec::new();
-    for control in blocked_prompt_controls(question) {
-        issues.push(format!("用户请求包含受控内部流程绕过企图：{control}。"));
-    }
-    if cards.is_empty() {
-        issues.push("未命中可追溯证据，必须返回证据不足。".to_string());
-    }
-    if cards.iter().all(|card| card.evidence_type == "commentary")
-        && (question.contains("原文") || question.contains("正文"))
-    {
-        issues.push("当前证据全为脂批，不能回答为正文直接事实。".to_string());
-    }
-    if (question.contains("结局") || question.contains("命运"))
-        && !cards.iter().any(|card| card.evidence_type == "base_text")
-    {
-        issues.push("人物命运问题缺少正文证据，必须标注限制。".to_string());
-    }
-    if (question.contains("嫁给")
-        || question.contains("北静王")
-        || question.contains("北靜王")
-        || question.contains("断定")
-        || question.contains("必然")
-        || question.contains("一定"))
-        && cards.iter().all(|card| {
-            !card.text.contains("北静王")
-                && !card.text.contains("北靜王")
-                && !card.text.contains("嫁")
-                && !card.text.contains("断定")
+    let started = Instant::now();
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
+    let trace_id = format!("dryrun-{}", new_trace_id());
+    let profiles = InternalProfiles {
+        main: "honglou-main".to_string(),
+        text: "honglou-text".to_string(),
+        commentary: "honglou-commentary".to_string(),
+        reviewer: "honglou-reviewer".to_string(),
+    };
+    let mut policy = search_policy(&args.question);
+    policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
+    let agent_runtime_plan_gate = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+        trace_id: trace_id.clone(),
+        question: args.question.clone(),
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&profiles),
+    })
+    .await?;
+    let workflow = runtime_store
+        .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: args.question.clone(),
+            limit: args.limit,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&profiles),
         })
-    {
-        issues.push("问题含高风险结论或过度断言，当前证据不能支持确定表述。".to_string());
-    }
-    if question.contains("量子")
-        || question.contains("现代程序员")
-        || question.contains("程序员")
-        || question.to_lowercase().contains("modern programmer")
-    {
-        issues.push("问题含现代外部概念，当前资料不能作为可追溯证据支持。".to_string());
-    }
-    if question.contains("内部配置")
-        || question.contains("系统提示词")
-        || question.to_lowercase().contains("system prompt")
-    {
-        issues.push("请求涉及内部配置或系统提示词，必须拒绝泄露。".to_string());
-    }
-    if (question.contains("脂批") || question.contains("脂評") || question.contains("甲戌"))
-        && !cards.iter().any(|card| card.evidence_type == "commentary")
-    {
-        issues.push("脂批或甲戌相关问题缺少脂批证据，必须标注限制。".to_string());
-    }
-    if (question.contains("程甲")
-        || question.contains("程乙")
-        || question.contains("版本")
-        || question.contains("前八十")
-        || question.contains("后四十")
-        || question.contains("後四十"))
-        && !cards.iter().any(|card| {
-            card.evidence_type == "version_note"
-                || card.source_id.contains("chengjia")
-                || card.source_id.contains("chengyi")
-        })
-    {
-        issues.push("版本边界问题缺少版本证据，必须标注限制。".to_string());
-    }
-    let status = if issues.is_empty() {
-        "passed"
-    } else {
-        "needs_revision"
-    };
-    let severity = if cards.is_empty() {
-        "high"
-    } else if issues.is_empty() {
-        "none"
-    } else {
-        "medium"
-    };
-    let summary = if issues.is_empty() {
-        format!("reviewer 通过：{} 条结论声明均有证据包约束。", claims.len())
-    } else {
-        format!("reviewer 要求谨慎降级：{} 个问题。", issues.len())
-    };
-    ReviewRecord {
-        status: status.to_string(),
-        severity: severity.to_string(),
-        issues,
-        summary,
-    }
+        .await?;
+    let package = workflow.package;
+    let replay = runtime_store
+        .replay_package(&package.package_id)?
+        .ok_or_else(|| anyhow!("runtime dry run package replay missing"))?;
+    Ok(json!({
+        "object": "tonglingyu.runtime_dry_run",
+        "status": "passed",
+        "trace_id": trace_id,
+        "question": &args.question,
+        "policy": policy,
+        "runtime_step_plan": runtime_step_plan,
+        "agent_runtime_plan_gate": agent_runtime_plan_gate,
+        "agent_runtime": {
+            "mode": agent_runtime_mode.as_str(),
+            "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            "summary": &workflow.agent_runtime_summary,
+        },
+        "runtime_step_outputs": workflow.steps,
+        "runtime_stream_events": workflow.stream_events,
+        "package_id": &package.package_id,
+        "review": &package.review,
+        "final_answer": workflow.final_answer,
+        "replay": replay,
+        "elapsed_ms": elapsed_ms(started),
+        "checks": {
+            "card_count": package.cards.len(),
+            "claim_count": package.claims.len(),
+            "reviewer_enforced": true,
+            "agent_runtime_plan_gate": "passed",
+            "agent_runtime_profile_execution_status": workflow.agent_runtime_summary
+                .get("profile_execution_status")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "profile_step_count": workflow.steps.len(),
+            "runtime_stream_event_count": workflow.stream_events.len(),
+            "runtime_tools_used": [
+                "tonglingyu.text.search",
+                "tonglingyu.evidence.package.create",
+                "tonglingyu.evidence.package.replay"
+            ],
+        },
+    }))
 }
 
 #[derive(Debug)]
@@ -2432,17 +1298,28 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     if args.limit == 0 {
         return Err(anyhow!("--limit must be greater than 0"));
     }
-    let conn = open_db(&args.db)?;
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
     let cases = builtin_eval_cases();
     let total = cases.len();
     let mut passed = 0_usize;
     let mut case_results = Vec::new();
     for case in cases {
         let trace_id = format!("eval-{}", new_trace_id());
-        let (cards, _policy) =
-            search_evidence_with_policy(&conn, case.question, case.limit.unwrap_or(args.limit))?;
-        let package = create_evidence_package(&conn, &trace_id, case.question, cards)?;
-        let replay = replay_answer(&package);
+        let (cards, _policy) = search_evidence_with_policy(
+            &runtime_store,
+            case.question,
+            case.limit.unwrap_or(args.limit),
+        )?;
+        let package = runtime_store.create_package(&trace_id, case.question, cards)?;
+        let replay = runtime_store
+            .replay_package(&package.package_id)?
+            .and_then(|value| {
+                value
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .ok_or_else(|| anyhow!("runtime replay missing answer for {}", package.package_id))?;
         let mut failures = Vec::new();
         if package.review.status != case.expected_review_status {
             failures.push(format!(
@@ -3181,18 +2058,40 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
-    match open_db(&state.db).and_then(|conn| {
-        let source_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
-        let block_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
-        Ok((source_count, block_count))
-    }) {
-        Ok((source_count, block_count)) => Json(json!({
+    let agent_runtime_mode = match TonglingyuAgentRuntimeMode::from_env() {
+        Ok(mode) => mode,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "degraded",
+                    "error": "agent_runtime_mode_invalid",
+                    "detail": safe_error_detail(&error),
+                })),
+            )
+                .into_response();
+        }
+    };
+    match state.runtime_store.store_stats() {
+        Ok(stats) => Json(json!({
             "status": "ok",
             "model": state.model_id,
-            "sources": source_count,
-            "blocks": block_count
+            "agent_runtime": {
+                "mode": agent_runtime_mode.as_str(),
+                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
+            "rate_limit": {
+                "public_per_minute": state.rate_limit_per_minute,
+                "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
+                "disabled": state.rate_limit_per_minute == 0,
+            },
+            "request_limits": {
+                "max_messages": state.max_messages,
+                "max_question_chars": state.max_question_chars,
+                "max_body_bytes": state.max_body_bytes,
+            },
+            "sources": stats.sources,
+            "blocks": stats.blocks
         }))
         .into_response(),
         Err(error) => (
@@ -3208,7 +2107,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = gateway_auth_subject(&state, &headers) {
+    if let Err(response) = gateway_auth_and_rate_limit(&state, &headers, None) {
         return *response;
     }
     Json(json!({
@@ -3229,12 +2128,10 @@ async fn search_endpoint(
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    if let Err(response) = gateway_auth_subject(&state, &headers) {
+    if let Err(response) = gateway_auth_and_rate_limit(&state, &headers, None) {
         return *response;
     }
-    match open_db(&state.db)
-        .and_then(|conn| search_evidence_with_policy(&conn, &params.q, params.limit.unwrap_or(8)))
-    {
+    match search_evidence_with_policy(&state.runtime_store, &params.q, params.limit.unwrap_or(8)) {
         Ok((cards, policy)) => Json(json!({
             "object": "list",
             "data": cards,
@@ -3258,7 +2155,7 @@ async fn package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    let subject = match gateway_auth_subject(&state, &headers) {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
@@ -3283,13 +2180,13 @@ async fn replay_package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    let subject = match gateway_auth_subject(&state, &headers) {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
     let access = package_access_context(&headers, subject);
-    match load_evidence_package_for_subject(&state.db, &package_id, &access) {
-        Ok(Some(package)) => Json(replay_package_json(&package)).into_response(),
+    match load_package_replay_for_subject(&state.db, &package_id, &access) {
+        Ok(Some(replay)) => Json(replay).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
         Err(error) => {
             tracing::warn!(package_id = %package_id, error = %error, "package replay failed");
@@ -3422,7 +2319,7 @@ async fn chat_completions(
 ) -> Response {
     let trace_id = new_trace_id();
     let started = Instant::now();
-    let auth_subject = match gateway_auth_subject(&state, &headers) {
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
         Ok(subject) => subject,
         Err(response) => return *response,
     };
@@ -3611,9 +2508,9 @@ async fn chat_completions(
                     &json!({"deduped_external_message_id": &context.external_message_id}),
                 );
                 return if request.stream.unwrap_or(false) {
-                    streaming_response_from_completion_value(&value)
+                    streaming_response_from_cached_completion_value(&value)
                 } else {
-                    Json(value).into_response()
+                    Json(public_completion_value(&value)).into_response()
                 };
             }
             Ok(None) => {}
@@ -3639,28 +2536,36 @@ async fn chat_completions(
         return Json(value).into_response();
     }
 
-    let (cards, mut policy) =
-        match search_evidence_with_policy(&conn, &question, state.max_evidence) {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = record_workflow_state(
-                    &conn,
-                    &trace_id,
-                    Some(&session_id),
-                    None,
-                    "Failed with Controlled Response",
-                    "evidence_retrieval_failed",
-                    &json!({"error": error.to_string()}),
-                );
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "evidence_retrieval_failed",
-                    "evidence retrieval failed",
-                    Some(&trace_id),
-                );
-            }
-        };
+    let mut policy = search_policy(&question);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
+    let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+        trace_id: trace_id.clone(),
+        question: question.clone(),
+        required_evidence_types: policy.required_evidence_types.clone(),
+        profiles: runtime_workflow_profiles(&state.profiles),
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&session_id),
+                None,
+                "Failed with Controlled Response",
+                "agent_runtime_plan_gate_failed",
+                &json!({"error": error.to_string()}),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "agent_runtime_plan_gate_failed",
+                "agent runtime plan gate failed",
+                Some(&trace_id),
+            );
+        }
+    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -3668,7 +2573,11 @@ async fn chat_completions(
         None,
         "Planned",
         "ok",
-        &json!({"policy": policy}),
+        &json!({
+            "policy": &policy,
+            "runtime_step_plan": &runtime_step_plan,
+            "agent_runtime_plan_gate": &agent_runtime_plan_gate,
+        }),
     );
     let _ = insert_audit_event(
         &conn,
@@ -3680,18 +2589,78 @@ async fn chat_completions(
             "required_evidence_types": &policy.required_evidence_types,
             "planned_profiles": &policy.planned_profiles,
             "blocked_controls": &policy.blocked_controls,
+            "runtime_step_plan": &runtime_step_plan,
+            "agent_runtime_plan_gate": &agent_runtime_plan_gate,
+        }),
+    );
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "agent_runtime_plan_gate_completed",
+        &json!({
+            "session_id": &session_id,
+            "agent_runtime_client": &agent_runtime_plan_gate.agent_runtime_client,
+            "profile_contract_version": &agent_runtime_plan_gate.profile_contract_version,
+            "profile_contract_count": agent_runtime_plan_gate.profile_contract_count,
+            "runtime_step_count": agent_runtime_plan_gate.runtime_step_count,
+            "runtime_step_outputs": &agent_runtime_plan_gate.runtime_step_outputs,
+        }),
+    );
+    let workflow = match state
+        .runtime_store
+        .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: question.clone(),
+            limit: state.max_evidence,
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: runtime_workflow_profiles(&state.profiles),
+        })
+        .await
+    {
+        Ok(workflow) => workflow,
+        Err(error) => {
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&session_id),
+                None,
+                "Failed with Controlled Response",
+                "runtime_workflow_failed",
+                &json!({"error": error.to_string()}),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime_workflow_failed",
+                "runtime workflow failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let agent_runtime_summary = workflow.agent_runtime_summary.clone();
+    let package = workflow.package;
+    let _ = record_workflow_state(
+        &conn,
+        &trace_id,
+        Some(&session_id),
+        Some(&package.package_id),
+        "Runtime Executed",
+        "ok",
+        &json!({
+            "runtime_step_outputs": &workflow.steps,
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = record_workflow_state(
         &conn,
         &trace_id,
         Some(&session_id),
-        None,
+        Some(&package.package_id),
         "Evidence Retrieved",
         "ok",
         &json!({
-            "card_count": cards.len(),
-            "evidence_types": cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "card_count": package.cards.len(),
+            "evidence_types": package.cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
         }),
     );
     let _ = insert_audit_event(
@@ -3701,32 +2670,14 @@ async fn chat_completions(
         &json!({
             "session_id": &session_id,
             "profiles": &policy.planned_profiles,
-            "operation": "evidence_retrieval",
-            "card_count": cards.len(),
-            "evidence_types": cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "operation": "runtime_profile_workflow",
+            "package_id": &package.package_id,
+            "card_count": package.cards.len(),
+            "evidence_types": package.cards.iter().map(|card| card.evidence_type.clone()).collect::<BTreeSet<_>>(),
+            "runtime_step_outputs": &workflow.steps,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
-
-    let package = match create_evidence_package(&conn, &trace_id, &question, cards) {
-        Ok(package) => package,
-        Err(error) => {
-            let _ = record_workflow_state(
-                &conn,
-                &trace_id,
-                Some(&session_id),
-                None,
-                "Failed with Controlled Response",
-                "evidence_package_failed",
-                &json!({"error": error.to_string()}),
-            );
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "evidence_pipeline_failed",
-                "evidence package creation failed",
-                Some(&trace_id),
-            );
-        }
-    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -3741,38 +2692,6 @@ async fn chat_completions(
         }),
     );
 
-    let _ = insert_audit_event(
-        &conn,
-        &trace_id,
-        "agent_invocation_started",
-        &json!({
-            "session_id": &session_id,
-            "package_id": &package.package_id,
-            "profile": "honglou-main",
-            "operation": "draft_answer",
-        }),
-    );
-    let draft = match answer_with_optional_upstream(&state, &question, &package).await {
-        Ok(draft) => draft,
-        Err(error) => {
-            tracing::warn!(%trace_id, error = %error, "upstream answer failed; using local fallback");
-            let _ = insert_audit_event(
-                &conn,
-                &trace_id,
-                "upstream_call_failed",
-                &json!({
-                    "session_id": &session_id,
-                    "package_id": &package.package_id,
-                    "upstream_configured": state.upstream_base_url.is_some(),
-                    "error": safe_error_detail(&error),
-                }),
-            );
-            AnswerDraft {
-                content: local_answer(&question, &package),
-                source: "local_fallback_after_upstream_failure".to_string(),
-            }
-        }
-    };
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -3781,8 +2700,8 @@ async fn chat_completions(
         "Drafted",
         "ok",
         &json!({
-            "upstream_configured": state.upstream_base_url.is_some(),
-            "answer_source": &draft.source,
+            "answer_source": &workflow.answer_source,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = insert_audit_event(
@@ -3794,10 +2713,11 @@ async fn chat_completions(
             "package_id": &package.package_id,
             "profile": "honglou-main",
             "operation": "draft_answer",
-            "answer_source": &draft.source,
+            "answer_source": &workflow.answer_source,
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
-    let final_answer = enforce_review(draft.content, &package);
+    let final_answer = workflow.final_answer;
     let revision_status = if package.review.status == "passed" {
         "not_needed"
     } else {
@@ -3840,6 +2760,7 @@ async fn chat_completions(
         Some(&package),
         Some(&session_id),
     );
+    let cached_value = cache_completion_value(&value, &workflow.stream_events);
     if let Ok(request_hash) = hash_value(&payload) {
         let _ = store_gateway_message(
             &conn,
@@ -3850,7 +2771,7 @@ async fn chat_completions(
                 package_id: Some(&package.package_id),
                 request_hash: &request_hash,
                 question: &question,
-                response: &value,
+                response: &cached_value,
             },
         );
     }
@@ -3864,6 +2785,7 @@ async fn chat_completions(
         &json!({
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     let _ = insert_audit_event(
@@ -3875,136 +2797,14 @@ async fn chat_completions(
             "package_id": &package.package_id,
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
         }),
     );
     if request.stream.unwrap_or(false) {
-        streaming_response_from_completion_value(&value)
+        streaming_response_from_runtime_events(&state.model_id, &value, &workflow.stream_events)
     } else {
         Json(value).into_response()
     }
-}
-
-async fn answer_with_optional_upstream(
-    state: &AppState,
-    question: &str,
-    package: &EvidencePackage,
-) -> Result<AnswerDraft> {
-    let Some(base_url) = &state.upstream_base_url else {
-        return Ok(AnswerDraft {
-            content: local_answer(question, package),
-            source: "local".to_string(),
-        });
-    };
-    let prompt = upstream_prompt(question, package);
-    let mut request = state
-        .client
-        .post(format!("{base_url}/chat/completions"))
-        .json(&json!({
-            "model": state.upstream_model,
-            "stream": false,
-            "metadata": {
-                "tonglingyu_profile": &state.profiles.main,
-                "evidence_package_id": &package.package_id,
-                "trace_id": &package.trace_id,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你是通灵玉的回答生成层。只能依据给定证据包回答；必须保留版本边界、支持范围和不支持范围；证据不足时直说证据不足。"
-                },
-                {"role": "user", "content": prompt}
-            ]
-        }));
-    if let Some(key) = &state.upstream_api_key {
-        request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
-    }
-    let response = request.send().await?.error_for_status()?;
-    let value: Value = response.json().await?;
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("upstream response missing choices[0].message.content"))?;
-    Ok(AnswerDraft {
-        content: format!(
-            "{}\n\n证据包：{}\nreviewer：{}",
-            content.trim(),
-            package.package_id,
-            package.review.summary
-        ),
-        source: "upstream".to_string(),
-    })
-}
-
-fn upstream_prompt(question: &str, package: &EvidencePackage) -> String {
-    let evidence = package
-        .cards
-        .iter()
-        .enumerate()
-        .map(|(index, card)| {
-            format!(
-                "[{}] {} {} {} rev={:?}\n证据：{}\n支持：{}\n不支持：{}",
-                index + 1,
-                card.evidence_type,
-                card.source_id,
-                card.source_title,
-                card.revision_id,
-                card.text,
-                card.support_scope,
-                card.unsupported_scope
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!(
-        "问题：{}\n\n证据包编号：{}\n审校预判：{}\n\n证据：\n{}\n\n请给出简洁中文回答。",
-        question, package.package_id, package.review.summary, evidence
-    )
-}
-
-fn local_answer(question: &str, package: &EvidencePackage) -> String {
-    if package.cards.is_empty() {
-        return format!(
-            "证据不足：当前第一批 Wikisource source snapshot 没有命中可追溯证据，不能仅凭模型记忆回答。\n\n证据包：{}\nreviewer：{}",
-            package.package_id, package.review.summary
-        );
-    }
-    let mut answer = String::new();
-    answer.push_str("根据当前第一批 Wikisource source snapshot，只能作如下有边界的回答：\n\n");
-    if question.contains("通灵玉") || question.contains("通靈玉") || question.contains("莫失莫忘")
-    {
-        answer.push_str("通灵玉相关文本需要以第八回等具体 block 为依据；若涉及铭文，命中的证据显示“莫失莫忘，仙寿恒昌”等字样。不同来源可能记录字形或图式细节差异，不能把本批 snapshot 视为影印校勘完成。\n\n");
-    } else {
-        answer.push_str("已命中若干正文、脂批或版本证据。下面列出最靠前的证据，回答只能在这些证据的支持范围内成立。\n\n");
-    }
-    for (index, card) in package.cards.iter().take(4).enumerate() {
-        answer.push_str(&format!(
-            "{}. [{}] {}：{}\n   来源：{}；revision_id={:?}\n   不支持：{}\n",
-            index + 1,
-            card.evidence_level,
-            card.source_title,
-            card.text,
-            card.source_id,
-            card.revision_id,
-            card.unsupported_scope
-        ));
-    }
-    answer.push_str(&format!(
-        "\n证据包：{}\nreviewer：{}",
-        package.package_id, package.review.summary
-    ));
-    answer
-}
-
-fn enforce_review(draft: String, package: &EvidencePackage) -> String {
-    if package.review.status == "passed" {
-        return draft;
-    }
-    format!(
-        "证据不足或需要降级：{}\n\n{}\n\n证据包：{}",
-        package.review.issues.join("；"),
-        local_answer(&package.question, package),
-        package.package_id
-    )
 }
 
 fn completion_value(
@@ -4032,6 +2832,36 @@ fn completion_value(
         value["session_id"] = json!(session_id);
     }
     value
+}
+
+fn cache_completion_value(value: &Value, events: &[RuntimeWorkflowStreamEvent]) -> Value {
+    let mut cached = value.clone();
+    if let Value::Object(map) = &mut cached {
+        map.insert("_runtime_stream_events".to_string(), json!(events));
+        map.insert("_stream_source".to_string(), json!("runtime_workflow"));
+    }
+    cached
+}
+
+fn public_completion_value(value: &Value) -> Value {
+    let mut public = value.clone();
+    if let Value::Object(map) = &mut public {
+        map.remove("_runtime_stream_events");
+        map.remove("_stream_source");
+    }
+    public
+}
+
+fn cached_runtime_stream_events(value: &Value) -> Option<Vec<RuntimeWorkflowStreamEvent>> {
+    serde_json::from_value::<Vec<RuntimeWorkflowStreamEvent>>(
+        value.get("_runtime_stream_events")?.clone(),
+    )
+    .ok()
+    .filter(|events| {
+        events
+            .iter()
+            .any(|event| event.event_type == "content_delta")
+    })
 }
 
 fn streaming_response_from_completion_value(value: &Value) -> Response {
@@ -4107,6 +2937,107 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
         .into_response()
 }
 
+fn streaming_response_from_cached_completion_value(value: &Value) -> Response {
+    let public = public_completion_value(value);
+    let model = public
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_MODEL_ID);
+    if let Some(events) = cached_runtime_stream_events(value) {
+        streaming_response_from_runtime_events(model, &public, &events)
+    } else {
+        streaming_response_from_completion_value(&public)
+    }
+}
+
+fn streaming_response_from_runtime_events(
+    model: &str,
+    value: &Value,
+    events: &[RuntimeWorkflowStreamEvent],
+) -> Response {
+    let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
+    let mut chunks = Vec::new();
+    chunks.push(format!(
+        "data: {}\n\n",
+        json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "trace_id": value.get("trace_id"),
+            "evidence_package_id": value.get("evidence_package_id"),
+            "session_id": value.get("session_id"),
+            "review": value.get("review"),
+            "stream_source": "runtime_workflow",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant"},
+                "finish_reason": null
+            }]
+        })
+    ));
+    let mut forwarded_delta = false;
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == "content_delta")
+    {
+        let Some(piece) = event.content_delta.as_deref() else {
+            continue;
+        };
+        forwarded_delta = true;
+        chunks.push(format!(
+            "data: {}\n\n",
+            json!({
+                "id": &completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "trace_id": value.get("trace_id"),
+                "evidence_package_id": value.get("evidence_package_id"),
+                "session_id": value.get("session_id"),
+                "review": value.get("review"),
+                "runtime_event": {
+                    "sequence": event.sequence,
+                    "event_type": &event.event_type,
+                    "profile": &event.profile,
+                    "output_ref": &event.output_ref,
+                },
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": piece},
+                    "finish_reason": null
+                }]
+            })
+        ));
+    }
+    if !forwarded_delta {
+        return streaming_response_from_completion_value(value);
+    }
+    chunks.push(format!(
+        "data: {}\n\n",
+        json!({
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "trace_id": value.get("trace_id"),
+            "evidence_package_id": value.get("evidence_package_id"),
+            "session_id": value.get("session_id"),
+            "review": value.get("review"),
+            "stream_source": "runtime_workflow",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        })
+    ));
+    chunks.push("data: [DONE]\n\n".to_string());
+    let body = chunks.join("");
+    (
+        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
 fn text_stream_chunks(content: &str, max_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -4149,14 +3080,29 @@ fn load_evidence_package_for_subject(
     access: &PackageAccessContext,
 ) -> Result<Option<EvidencePackage>> {
     let conn = open_db(db)?;
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM evidence_packages WHERE package_id = ?1",
-        params![package_id],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
+    if !package_owned_by_subject(&conn, package_id, access)? {
         return Ok(None);
     }
+    TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)
+}
+
+fn load_package_replay_for_subject(
+    db: &Path,
+    package_id: &str,
+    access: &PackageAccessContext,
+) -> Result<Option<Value>> {
+    let conn = open_db(db)?;
+    if !package_owned_by_subject(&conn, package_id, access)? {
+        return Ok(None);
+    }
+    TonglingyuRuntimeStore::new(db.to_path_buf()).replay_package(package_id)
+}
+
+fn package_owned_by_subject(
+    conn: &Connection,
+    package_id: &str,
+    access: &PackageAccessContext,
+) -> Result<bool> {
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
@@ -4168,30 +3114,20 @@ fn load_evidence_package_for_subject(
         params![package_id, &access.user_ref, &access.subject],
         |row| row.get(0),
     )?;
-    if owned == 0 {
-        return Ok(None);
-    }
-    load_evidence_package(db, package_id)
+    Ok(owned > 0)
 }
 
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
-    let package_ids = {
-        let mut stmt =
-            conn.prepare("SELECT package_id FROM evidence_packages WHERE trace_id = ?1")?;
-        stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?
-    };
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    let package_ids = runtime_store.package_ids_for_trace(trace_id)?;
     let workflow_states = load_rows_json(
         &conn,
         "SELECT state_id, session_id, package_id, state, status, detail_json, created_at FROM workflow_states WHERE trace_id = ?1 ORDER BY created_at, state_id",
         trace_id,
     )?;
-    let audit_events = load_rows_json(
-        &conn,
-        "SELECT event_id, event_type, payload_json, created_at FROM audit_events WHERE trace_id = ?1 ORDER BY created_at, event_id",
-        trace_id,
-    )?;
+    let audit_events = runtime_store.audit_events_for_trace(trace_id)?;
+    let agent_runtime_summary = latest_agent_runtime_summary(&audit_events);
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -4206,7 +3142,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     }
     let mut packages = Vec::new();
     for package_id in package_ids {
-        if let Some(package) = load_evidence_package(db, &package_id)? {
+        if let Some(package) = runtime_store.read_package(&package_id)? {
             packages.push(package_json(&package));
         }
     }
@@ -4215,13 +3151,27 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "trace_id": trace_id,
         "workflow_states": workflow_states,
         "audit_events": audit_events,
+        "agent_runtime_summary": agent_runtime_summary,
         "messages": messages,
         "packages": packages,
     })))
 }
 
+fn latest_agent_runtime_summary(audit_events: &[Value]) -> Value {
+    audit_events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.get("event_type") == Some(&json!("agent_runtime_profile_execution_summarized"))
+        })
+        .and_then(|event| event.get("payload"))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
-    let Some(package) = load_evidence_package(db, package_id)? else {
+    let Some(package) = TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)?
+    else {
         return Ok(None);
     };
     let trace = load_trace(db, &package.trace_id)?;
@@ -4278,22 +3228,10 @@ fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
     })))
 }
 
-#[derive(Debug)]
-struct AnswerDraft {
-    content: String,
-    source: String,
-}
-
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
-    let review_counts = grouped_counts(
-        &conn,
-        "SELECT review_status, COUNT(*) FROM evidence_packages GROUP BY review_status",
-    )?;
-    let evidence_type_counts = grouped_counts(
-        &conn,
-        "SELECT evidence_type, COUNT(*) FROM evidence_cards GROUP BY evidence_type",
-    )?;
+    let runtime_stats = state.runtime_store.store_stats()?;
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -4306,68 +3244,90 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "dependencies": {
             "sqlite": "ok",
             "upstream": if state.upstream_base_url.is_some() { "configured" } else { "local" },
+            "upstream_model": &state.upstream_model,
+            "upstream_api_key_configured": state.upstream_api_key.is_some(),
+            "upstream_timeout_secs": state.upstream_timeout_secs,
+            "agent_runtime": {
+                "mode": agent_runtime_mode.as_str(),
+                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
         },
         "security": {
             "gateway_key_count": state.gateway_api_keys.len(),
             "admin_key_count": state.admin_api_keys.len(),
-            "admin_key_isolated": !state.allow_admin_with_gateway_key,
+            "admin_key_isolated": is_admin_key_isolated(state),
+            "rate_limit_per_minute": state.rate_limit_per_minute,
+            "rate_limit_disabled": state.rate_limit_per_minute == 0,
+        },
+        "limits": {
+            "max_messages": state.max_messages,
+            "max_question_chars": state.max_question_chars,
+            "max_body_bytes": state.max_body_bytes,
         },
         "retention": {
             "retention_days": state.retention_days,
             "auto_prune_enabled": state.retention_days > 0,
         },
         "counts": {
-            "sources": table_count(&conn, "sources")?,
-            "blocks": table_count(&conn, "blocks")?,
+            "sources": runtime_stats.sources,
+            "blocks": runtime_stats.blocks,
             "sessions": table_count(&conn, "gateway_sessions")?,
             "messages": table_count(&conn, "gateway_messages")?,
-            "evidence_packages": table_count(&conn, "evidence_packages")?,
-            "evidence_cards": table_count(&conn, "evidence_cards")?,
+            "evidence_packages": runtime_stats.evidence_packages,
+            "evidence_cards": runtime_stats.evidence_cards,
             "workflow_states": table_count(&conn, "workflow_states")?,
-            "audit_events": table_count(&conn, "audit_events")?,
+            "audit_events": runtime_stats.audit_events,
         },
-        "review_status": review_counts,
-        "evidence_types": evidence_type_counts,
+        "review_status": runtime_stats.review_status,
+        "evidence_types": runtime_stats.evidence_types,
         "workflow_status": workflow_status_counts,
     }))
 }
 
 fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
+    let runtime_stats = state.runtime_store.store_stats()?;
+    let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\"}} 1",
+        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
         escape_metric_label(&state.model_id),
         escape_metric_label(&state.profiles.main),
-        escape_metric_label(&state.profiles.reviewer)
+        escape_metric_label(&state.profiles.reviewer),
+        escape_metric_label(agent_runtime_mode.as_str()),
+        state.rate_limit_per_minute,
+        state.max_body_bytes
     ));
-    for (metric, table) in [
-        ("tonglingyu_sources_total", "sources"),
-        ("tonglingyu_blocks_total", "blocks"),
-        ("tonglingyu_sessions_total", "gateway_sessions"),
-        ("tonglingyu_messages_total", "gateway_messages"),
-        ("tonglingyu_evidence_packages_total", "evidence_packages"),
-        ("tonglingyu_audit_events_total", "audit_events"),
+    for (metric, count) in [
+        ("tonglingyu_sources_total", runtime_stats.sources),
+        ("tonglingyu_blocks_total", runtime_stats.blocks),
+        (
+            "tonglingyu_sessions_total",
+            table_count(&conn, "gateway_sessions")?,
+        ),
+        (
+            "tonglingyu_messages_total",
+            table_count(&conn, "gateway_messages")?,
+        ),
+        (
+            "tonglingyu_evidence_packages_total",
+            runtime_stats.evidence_packages,
+        ),
+        ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
         lines.push(format!("# TYPE {metric} gauge"));
-        lines.push(format!("{metric} {}", table_count(&conn, table)?));
+        lines.push(format!("{metric} {count}"));
     }
-    for (status, count) in grouped_count_pairs(
-        &conn,
-        "SELECT review_status, COUNT(*) FROM evidence_packages GROUP BY review_status",
-    )? {
+    for (status, count) in runtime_stats.review_status {
         lines.push(format!(
             "tonglingyu_review_status_total{{status=\"{}\"}} {}",
             escape_metric_label(&status),
             count
         ));
     }
-    for (event_type, count) in grouped_count_pairs(
-        &conn,
-        "SELECT event_type, COUNT(*) FROM audit_events GROUP BY event_type",
-    )? {
+    for (event_type, count) in runtime_stats.audit_event_types {
         lines.push(format!(
             "tonglingyu_audit_events_by_type_total{{event_type=\"{}\"}} {}",
             escape_metric_label(&event_type),
@@ -4437,127 +3397,6 @@ fn load_rows_json(conn: &Connection, sql: &str, trace_id: &str) -> Result<Vec<Va
         .map_err(Into::into)
 }
 
-fn load_evidence_package(db: &Path, package_id: &str) -> Result<Option<EvidencePackage>> {
-    let conn = open_db(db)?;
-    let package: Option<(String, String, String, String, String, String)> = conn
-        .query_row(
-            "SELECT package_id, trace_id, question, claim_statements_json, evidence_ids_json, review_json FROM evidence_packages WHERE package_id = ?1",
-            params![package_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        )
-        .optional()?;
-    let Some((package_id, trace_id, question, claims_json, evidence_ids_json, review_json)) =
-        package
-    else {
-        return Ok(None);
-    };
-    let evidence_ids: Vec<String> = serde_json::from_str(&evidence_ids_json)?;
-    let mut stmt = conn
-        .prepare("SELECT evidence_id, evidence_json FROM evidence_cards WHERE package_id = ?1")?;
-    let mut cards_by_id = BTreeMap::new();
-    for row in stmt.query_map(params![&package_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (evidence_id, evidence_json) = row?;
-        cards_by_id.insert(
-            evidence_id,
-            serde_json::from_str::<EvidenceCard>(&evidence_json)?,
-        );
-    }
-    let mut cards = Vec::new();
-    for evidence_id in &evidence_ids {
-        let card = cards_by_id.remove(evidence_id).ok_or_else(|| {
-            anyhow!(
-                "evidence package {} is missing stored card {}",
-                package_id,
-                evidence_id
-            )
-        })?;
-        cards.push(card);
-    }
-    if let Some(extra_id) = cards_by_id.keys().next() {
-        return Err(anyhow!(
-            "evidence package {} has unstated stored card {}",
-            package_id,
-            extra_id
-        ));
-    }
-    let claims: Vec<String> = serde_json::from_str(&claims_json)?;
-    let mut claim_evidence_ids: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    let mut link_stmt = conn.prepare(
-        "SELECT claim_index, evidence_id FROM evidence_claim_links WHERE package_id = ?1 ORDER BY claim_index, evidence_id",
-    )?;
-    for row in link_stmt.query_map(params![&package_id], |row| {
-        Ok((row.get::<_, i64>(0)? as usize, row.get::<_, String>(1)?))
-    })? {
-        let (claim_index, evidence_id) = row?;
-        claim_evidence_ids
-            .entry(claim_index)
-            .or_default()
-            .push(evidence_id);
-    }
-    let claim_evidence_map = if claim_evidence_ids.is_empty() {
-        claim_evidence_map(&claims, &cards)
-    } else {
-        claims
-            .iter()
-            .enumerate()
-            .map(|(claim_index, claim)| ClaimEvidenceMap {
-                claim_index,
-                claim: claim.clone(),
-                evidence_ids: claim_evidence_ids.remove(&claim_index).unwrap_or_default(),
-                forbidden_conclusions: cards
-                    .iter()
-                    .map(|card| card.unsupported_scope.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-            })
-            .collect()
-    };
-    Ok(Some(EvidencePackage {
-        package_id,
-        trace_id,
-        question,
-        cards,
-        claims,
-        claim_evidence_map,
-        review: serde_json::from_str(&review_json)?,
-    }))
-}
-
-fn package_json(package: &EvidencePackage) -> Value {
-    let evidence_ids: Vec<_> = package
-        .cards
-        .iter()
-        .map(|card| card.evidence_id.as_str())
-        .collect();
-    json!({
-        "package_id": &package.package_id,
-        "trace_id": &package.trace_id,
-        "question": &package.question,
-        "claims": &package.claims,
-        "claim_evidence_map": &package.claim_evidence_map,
-        "evidence_ids": evidence_ids,
-        "cards": &package.cards,
-        "review": &package.review,
-    })
-}
-
-fn replay_package_json(package: &EvidencePackage) -> Value {
-    json!({
-        "object": "tonglingyu.evidence_package_replay",
-        "package": package_json(package),
-        "answer": replay_answer(package),
-        "deterministic": true,
-        "answer_source": "local_replay_no_upstream",
-    })
-}
-
-fn replay_answer(package: &EvidencePackage) -> String {
-    enforce_review(local_answer(&package.question, package), package)
-}
-
 fn last_user_message(messages: &[ChatMessage]) -> String {
     messages
         .iter()
@@ -4576,317 +3415,6 @@ fn last_user_message(messages: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
-fn evidence_type(source_category: &str, source_id: &str, block: &BlockRecord) -> &'static str {
-    if source_category == "commentary_material"
-        || source_id.contains("zhiyanzhai")
-        || source_id.contains("jiaxu")
-    {
-        "commentary"
-    } else if block.text.contains("程甲")
-        || block.text.contains("程乙")
-        || block.text.contains("脂評")
-        || block.text.contains("版本")
-    {
-        "version_note"
-    } else {
-        "base_text"
-    }
-}
-
-fn score_block(question: &str, term: &str, block: &BlockRecord) -> i64 {
-    let mut score = 1;
-    if block.text.contains(term) {
-        score += 10;
-    }
-    if normalize_text(&block.text).contains(&normalize_text(term)) {
-        score += 8;
-    }
-    if block.source_title.contains(term) {
-        score += 5;
-    }
-    if question.contains("脂批")
-        && (block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu"))
-    {
-        score += 8;
-    }
-    if question.contains("程甲") && block.source_id.contains("chengjia") {
-        score += 40;
-    }
-    if question.contains("程乙") && block.source_id.contains("chengyi") {
-        score += 40;
-    }
-    if block.kind == "heading" {
-        score -= 2;
-    }
-    let asks_inscription = question.contains('字')
-        || question.contains("铭")
-        || question.contains("銘")
-        || question.contains("写")
-        || question.contains("寫");
-    let looks_like_inscription = block.text.contains("莫失莫忘")
-        || block.text.contains("仙壽")
-        || block.text.contains("仙寿")
-        || block.text.contains("一除邪祟")
-        || block.text.contains("二療冤疾")
-        || block.text.contains("二疗冤疾")
-        || block.text.contains("三知禍福")
-        || block.text.contains("三知祸福");
-    if asks_inscription && looks_like_inscription {
-        score += 50;
-    } else if (term.contains("通灵") || term.contains("通靈")) && looks_like_inscription {
-        score += 20;
-    }
-    score
-}
-
-fn normalize_text(input: &str) -> String {
-    let replacements = [
-        ("紅", "红"),
-        ("樓", "楼"),
-        ("夢", "梦"),
-        ("寶", "宝"),
-        ("寳", "宝"),
-        ("賈", "贾"),
-        ("襲", "袭"),
-        ("紈", "纨"),
-        ("媧", "娲"),
-        ("隱", "隐"),
-        ("興", "兴"),
-        ("劉", "刘"),
-        ("觀", "观"),
-        ("園", "园"),
-        ("院", "院"),
-        ("瀟", "潇"),
-        ("館", "馆"),
-        ("蕪", "芜"),
-        ("榮", "荣"),
-        ("國", "国"),
-        ("寧", "宁"),
-        ("兒", "儿"),
-        ("璉", "琏"),
-        ("鐘", "钟"),
-        ("靜", "静"),
-        ("鑒", "鉴"),
-        ("補", "补"),
-        ("燈", "灯"),
-        ("親", "亲"),
-        ("鎖", "锁"),
-        ("玉寶靈通", "玉宝灵通"),
-        ("靈", "灵"),
-        ("釵", "钗"),
-        ("鳳", "凤"),
-        ("壽", "寿"),
-        ("恆", "恒"),
-        ("恒", "恒"),
-        ("僊", "仙"),
-        ("癒", "愈"),
-        ("療", "疗"),
-        ("禍", "祸"),
-        ("硯", "砚"),
-        ("齋", "斋"),
-        ("評", "评"),
-        ("衆", "众"),
-        ("眾", "众"),
-        ("裏", "里"),
-        ("裡", "里"),
-        ("説", "说"),
-        ("說", "说"),
-        ("冩", "写"),
-        ("臺", "台"),
-        ("檯", "台"),
-        ("後", "后"),
-    ];
-    let mut output = input.to_lowercase();
-    for (from, to) in replacements {
-        output = output.replace(from, to);
-    }
-    output
-}
-
-fn cjk_tokens(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in input.chars() {
-        if is_cjk(ch) {
-            current.push(ch);
-        } else if !current.is_empty() {
-            tokens.extend(split_cjk_token(&current));
-            current.clear();
-        }
-    }
-    if !current.is_empty() {
-        tokens.extend(split_cjk_token(&current));
-    }
-    tokens
-}
-
-fn split_cjk_token(token: &str) -> Vec<String> {
-    let chars: Vec<char> = token.chars().collect();
-    if chars.len() <= 8 {
-        return vec![token.to_string()];
-    }
-    chars
-        .windows(4)
-        .map(|window| window.iter().collect::<String>())
-        .collect()
-}
-
-fn is_cjk(ch: char) -> bool {
-    ('\u{4e00}'..='\u{9fff}').contains(&ch)
-        || ('\u{3400}'..='\u{4dbf}').contains(&ch)
-        || ('\u{20000}'..='\u{2a6df}').contains(&ch)
-        || ('\u{2a700}'..='\u{2b73f}').contains(&ch)
-        || ('\u{2b740}'..='\u{2b81f}').contains(&ch)
-        || ('\u{2b820}'..='\u{2ceaf}').contains(&ch)
-}
-
-fn push_term(terms: &mut Vec<String>, term: &str) {
-    let term = term.trim();
-    if !term.is_empty() && !terms.iter().any(|item| item == term) {
-        terms.push(term.to_string());
-    }
-}
-
-fn trim_text(text: &str, max_chars: usize) -> String {
-    let mut output = String::new();
-    for (index, ch) in text.chars().enumerate() {
-        if index >= max_chars {
-            output.push_str("...");
-            break;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn trim_text_around(text: &str, focus: &str, max_chars: usize) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    let Some(byte_index) = text.find(focus) else {
-        return trim_text(text, max_chars);
-    };
-    let focus_index = text[..byte_index].chars().count();
-    let half = max_chars / 2;
-    let start = focus_index.saturating_sub(half);
-    let end = (start + max_chars).min(chars.len());
-    let mut output = String::new();
-    if start > 0 {
-        output.push_str("...");
-    }
-    for ch in &chars[start..end] {
-        output.push(*ch);
-    }
-    if end < chars.len() {
-        output.push_str("...");
-    }
-    output
-}
-
-fn useful_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    !trimmed.is_empty() && trimmed != "----" && !trimmed.starts_with("[[../")
-}
-
-fn version_system(source_id: &str) -> &'static str {
-    if source_id.contains("chengjia") {
-        "程甲本"
-    } else if source_id.contains("chengyi") {
-        "程乙本"
-    } else if source_id.contains("jiaxu") {
-        "甲戌本脂评"
-    } else if source_id.contains("zhiyanzhai") {
-        "脂砚斋重评整理资料"
-    } else {
-        "Wikisource 120回汇校本"
-    }
-}
-
-fn usage_limit(source_category: &str) -> &'static str {
-    if source_category == "commentary_material" {
-        "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。"
-    } else {
-        "可作为正文或版本对照证据候选；不声明完成学术校勘。"
-    }
-}
-
-fn version_range(chapter_no: i64) -> &'static str {
-    if chapter_no <= 80 {
-        "前八十回"
-    } else {
-        "后四十回"
-    }
-}
-
-fn commentary_type(text: &str) -> &'static str {
-    if text.contains("{{~|") || text.contains("[") {
-        "inline_commentary"
-    } else {
-        "commentary_text"
-    }
-}
-
-fn extract_chapter_no(title: &str) -> Option<i64> {
-    let after_di = title.split('第').nth(1)?;
-    let value = after_di.split('回').next()?;
-    if value.is_empty() {
-        return None;
-    }
-    if value.chars().all(|ch| ch.is_ascii_digit()) {
-        return value.parse().ok();
-    }
-    chinese_number(value)
-}
-
-fn chinese_number(value: &str) -> Option<i64> {
-    let value = value.replace('零', "");
-    if value.is_empty() {
-        return None;
-    }
-    if let Some((hundred, rest)) = value.split_once('百') {
-        let hundreds = if hundred.is_empty() {
-            1
-        } else {
-            chinese_digit(hundred.chars().next()?)?
-        };
-        return Some(hundreds * 100 + chinese_under_100(rest).unwrap_or(0));
-    }
-    chinese_under_100(&value)
-}
-
-fn chinese_under_100(value: &str) -> Option<i64> {
-    if value.is_empty() {
-        return Some(0);
-    }
-    if let Some((tens, ones)) = value.split_once('十') {
-        let ten_value = if tens.is_empty() {
-            1
-        } else {
-            chinese_digit(tens.chars().next()?)?
-        };
-        let one_value = if ones.is_empty() {
-            0
-        } else {
-            chinese_digit(ones.chars().next()?)?
-        };
-        return Some(ten_value * 10 + one_value);
-    }
-    chinese_digit(value.chars().next()?)
-}
-
-fn chinese_digit(ch: char) -> Option<i64> {
-    match ch {
-        '一' => Some(1),
-        '二' | '兩' | '两' => Some(2),
-        '三' => Some(3),
-        '四' => Some(4),
-        '五' => Some(5),
-        '六' => Some(6),
-        '七' => Some(7),
-        '八' => Some(8),
-        '九' => Some(9),
-        _ => None,
-    }
-}
-
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -4901,69 +3429,232 @@ fn new_trace_id() -> String {
 mod tests {
     use super::*;
 
-    fn sample_card(evidence_type: &str) -> EvidenceCard {
-        EvidenceCard {
-            evidence_id: format!("ev-test-{evidence_type}"),
-            evidence_type: evidence_type.to_string(),
-            source_id: "test-source".to_string(),
-            source_title: "test-title".to_string(),
-            source_url: "https://example.test/source".to_string(),
-            revision_id: Some(1),
-            block_id: format!("block-test-{evidence_type}"),
-            text: "脂批：测试证据".to_string(),
-            support_scope: "测试支持范围".to_string(),
-            unsupported_scope: "测试不支持范围".to_string(),
-            evidence_level: "测试层级".to_string(),
-            confidence: "medium".to_string(),
-            verification_status: "test".to_string(),
+    #[test]
+    fn public_completion_strips_cached_runtime_stream_events() {
+        let value = completion_value(
+            "tonglingyu",
+            "测试回答".to_string(),
+            None,
+            Some("session-test"),
+        );
+        let cached = cache_completion_value(
+            &value,
+            &[RuntimeWorkflowStreamEvent {
+                sequence: 0,
+                event_type: "content_delta".to_string(),
+                profile: "honglou-main".to_string(),
+                trace_id: "trace-test".to_string(),
+                content_delta: Some("测试回答".to_string()),
+                output_ref: None,
+                package_id: None,
+                metadata: json!({}),
+            }],
+        );
+
+        assert!(cached.get("_runtime_stream_events").is_some());
+        assert!(cached_runtime_stream_events(&cached).is_some());
+        let public = public_completion_value(&cached);
+        assert!(public.get("_runtime_stream_events").is_none());
+        assert!(public.get("_stream_source").is_none());
+        assert_eq!(public["session_id"], "session-test");
+    }
+
+    #[test]
+    fn latest_agent_runtime_summary_uses_last_summary_event() {
+        let events = vec![
+            json!({
+                "event_type": "agent_runtime_profile_execution_summarized",
+                "payload": {
+                    "profile_execution_status": "minimal_envelope_only",
+                    "tool_result_count": 0,
+                },
+            }),
+            json!({
+                "event_type": "agent_runtime_profile_step_executed",
+                "payload": {"operation": "draft_answer"},
+            }),
+            json!({
+                "event_type": "agent_runtime_profile_execution_summarized",
+                "payload": {
+                    "profile_execution_status": "hermes_profile_observed_with_local_governance",
+                    "tool_result_count": 4,
+                },
+            }),
+        ];
+
+        let summary = latest_agent_runtime_summary(&events);
+
+        assert_eq!(
+            summary["profile_execution_status"],
+            "hermes_profile_observed_with_local_governance"
+        );
+        assert_eq!(summary["tool_result_count"], json!(4));
+        assert!(latest_agent_runtime_summary(&[]).is_null());
+    }
+
+    #[test]
+    fn forbidden_control_fields_rejects_runtime_and_admin_trace_controls() {
+        let mut fields = forbidden_control_fields(&json!({
+            "model": "tonglingyu",
+            "agent_runtime_summary": {"status": "forged"},
+            "metadata": {
+                "runtime_step_plan": [],
+                "admin_trace": {"trace_id": "forged"},
+                "nested": {"agent_runtime": {"mode": "forged"}},
+                "message_id": "open-webui-message",
+            },
+            "extra_body": {
+                "allowed_tools": ["tonglingyu.text.search"],
+                "layers": [{"runtime_step_outputs": []}],
+            },
+            "messages": [{"role": "user", "content": "通灵玉是什么？"}],
+        }));
+        fields.sort();
+
+        assert_eq!(
+            fields,
+            vec![
+                "agent_runtime_summary",
+                "extra_body.allowed_tools",
+                "extra_body.layers[0].runtime_step_outputs",
+                "metadata.admin_trace",
+                "metadata.nested.agent_runtime",
+                "metadata.runtime_step_plan",
+            ]
+        );
+    }
+
+    #[test]
+    fn forbidden_control_fields_allows_openwebui_identity_metadata() {
+        let fields = forbidden_control_fields(&json!({
+            "model": "tonglingyu",
+            "metadata": {
+                "user_id": "user-a",
+                "chat_id": "chat-a",
+                "message_id": "message-a",
+            },
+            "messages": [{"role": "user", "content": "通灵玉是什么？"}],
+        }));
+
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn gateway_rate_limiter_rejects_after_subject_budget() {
+        let limiter = GatewayRateLimiter::new(2, Duration::from_secs(60));
+
+        let first = limiter.check("subject-a");
+        let second = limiter.check("subject-a");
+        let third = limiter.check("subject-a");
+        let other_subject = limiter.check("subject-b");
+
+        assert!(first.allowed);
+        assert_eq!(first.remaining, 1);
+        assert!(second.allowed);
+        assert_eq!(second.remaining, 0);
+        assert!(!third.allowed);
+        assert_eq!(third.limit, 2);
+        assert!(third.retry_after_secs >= 1);
+        assert!(other_subject.allowed);
+    }
+
+    #[test]
+    fn gateway_rate_limiter_can_be_disabled() {
+        let limiter = GatewayRateLimiter::new(0, Duration::from_secs(60));
+
+        for _ in 0..10 {
+            let decision = limiter.check("subject-a");
+            assert!(decision.allowed);
+            assert_eq!(decision.limit, 0);
         }
     }
 
     #[test]
-    fn parses_chapter_numbers() {
-        assert_eq!(extract_chapter_no("紅樓夢/第015回"), Some(15));
-        assert_eq!(extract_chapter_no("脂硯齋重評石頭記/第一回"), Some(1));
-        assert_eq!(
-            extract_chapter_no("紅樓夢_程乙本_第一百十一回_至第一百二十回"),
-            Some(111)
+    fn configured_keys_deduplicates_trims_and_splits_rotation_keys() {
+        let keys = configured_keys(
+            Some(" gateway-a ".to_string()),
+            Some("gateway-b, gateway-a, ,gateway-c".to_string()),
         );
+
+        assert_eq!(keys, ["gateway-a", "gateway-b", "gateway-c"]);
     }
 
     #[test]
-    fn reviewer_blocks_no_evidence() {
-        let review = review("黛玉结局是什么", &[], &[]);
-        assert_eq!(review.status, "needs_revision");
-        assert_eq!(review.severity, "high");
-    }
+    fn rejects_overlapping_gateway_and_admin_keys() {
+        let err = validate_admin_key_isolation(
+            &["gateway-a".to_string(), "shared".to_string()],
+            &["admin-a".to_string(), "shared".to_string()],
+            false,
+        )
+        .expect_err("overlapping gateway/admin keys must be rejected");
 
-    #[test]
-    fn reviewer_blocks_commentary_only_body_claim() {
-        let cards = vec![sample_card("commentary")];
-        let claims = claims_from_cards("脂批原文如何评价石头？", &cards);
-        let review = review("脂批原文如何评价石头？", &cards, &claims);
-        assert_eq!(review.status, "needs_revision");
-        assert_eq!(review.severity, "medium");
         assert!(
-            review
-                .issues
-                .iter()
-                .any(|issue| issue.contains("当前证据全为脂批"))
+            err.to_string()
+                .contains("admin API keys must not overlap gateway API keys")
         );
+        assert!(!err.to_string().contains("shared"));
     }
 
     #[test]
-    fn replay_keeps_package_id_and_review_downgrade() {
-        let package = EvidencePackage {
-            package_id: "pkg-test".to_string(),
-            trace_id: "trace-test".to_string(),
-            question: "量子计算机是什么？".to_string(),
-            cards: vec![],
-            claims: vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()],
-            claim_evidence_map: vec![],
-            review: review("量子计算机是什么？", &[], &[]),
-        };
-        let answer = replay_answer(&package);
-        assert!(answer.contains("pkg-test"));
-        assert!(answer.contains("证据不足"));
+    fn rejects_admin_gateway_fallback_when_admin_keys_are_configured() {
+        let err = validate_admin_key_isolation(
+            &["gateway-a".to_string()],
+            &["admin-a".to_string()],
+            true,
+        )
+        .expect_err("admin fallback must not coexist with admin keys");
+
+        assert!(
+            err.to_string()
+                .contains("requires empty admin API key configuration")
+        );
+        assert!(!err.to_string().contains("admin-a"));
+    }
+
+    #[test]
+    fn allows_gateway_fallback_only_without_admin_keys() {
+        validate_admin_key_isolation(&["gateway-a".to_string()], &[], true)
+            .expect("local gateway-key admin fallback should remain available without admin keys");
+    }
+
+    #[test]
+    fn gateway_does_not_reown_runtime_domain_or_kb_functions() {
+        let main_source = include_str!("main.rs");
+        for function_name in [
+            "init_knowledge_base_schema",
+            "load_source_snapshot",
+            "seed_aliases",
+            "extract_terms",
+            "query_blocks_like",
+            "query_blocks_exact_text",
+            "evidence_card_from_block",
+            "create_evidence_package",
+            "load_evidence_package",
+            "claims_from_cards",
+            "review",
+            "local_answer",
+            "enforce_review",
+        ] {
+            let forbidden = format!("fn {function_name}(");
+            assert!(
+                !main_source.contains(&forbidden),
+                "Gateway must not re-own runtime domain function {function_name}"
+            );
+        }
+        for forbidden in [
+            format!("struct Source{}", "Metadata"),
+            format!("struct Block{}", "Record"),
+            format!("CREATE VIRTUAL TABLE IF NOT EXISTS {}", "blocks_fts"),
+            format!("INSERT INTO {}", "blocks_fts"),
+            format!("SELECT package_id FROM {}", "evidence_packages"),
+            format!("DELETE FROM {}", "evidence_packages"),
+            format!("INSERT INTO {}", "audit_events"),
+            format!("SELECT COUNT(*) FROM {}", "sources"),
+        ] {
+            assert!(
+                !main_source.contains(&forbidden),
+                "Gateway must not re-own Runtime KB/source snapshot code: {forbidden}"
+            );
+        }
     }
 }

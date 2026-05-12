@@ -151,58 +151,417 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 ### R5A 薄 Gateway 边界
 
-- [ ] Gateway 只做 OpenAI-compatible 协议适配、鉴权、限流、路由、
-  trace/session 透传、SSE 转发、模型隐藏和响应封装。
-- [ ] Gateway 不直接执行 source snapshot、SQLite 或 FTS 查询。
-- [ ] Gateway 不构建证据卡片或证据包。
-- [ ] Gateway 不执行 reviewer 或本地审校规则。
-- [ ] Gateway 不维护证据包 replay 的领域逻辑。
-- [ ] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
+- [x] Gateway 公共 OpenAI-compatible 请求路径只做协议适配、鉴权、限流、
+  路由、trace/session 透传、SSE 转发、模型隐藏和响应封装；admin/debug/eval
+  入口只允许通过 Runtime store API 代理受控能力。
+- [x] Gateway 不直接执行 source snapshot loader、KB SQLite/FTS 检索或 FTS 写入。
+- [x] Gateway 不直接读取 KB/domain SQLite 表；health、metrics、admin trace 和
+  prune 通过 Runtime stats/audit/prune API 访问 runtime store。
+- [x] Gateway 请求路径、dry-run、eval、health、search、metrics、admin trace/package
+  读取和 build/prune 管理路径通过 `TonglingyuRuntimeStore` 访问 runtime store，
+  不复用 Gateway `Connection`。
+- [x] Gateway 公共 `/v1/*` 入口已增加 per-subject rate limit，
+  `TONGLINGYU_RATE_LIMIT_PER_MINUTE` 可配置，`0` 表示关闭；health、JSON
+  metrics 和 Prometheus info 暴露有效配置，smoke 覆盖默认值。
+- [x] Gateway 请求体上限已显式配置为 `TONGLINGYU_MAX_BODY_BYTES`
+  默认 1 MiB，避免依赖框架隐式默认；health、JSON metrics 和 Prometheus
+  info 暴露有效配置，smoke 覆盖默认值。
+- [x] Gateway 启动时强制 admin API key 与 Gateway service key 集合隔离；
+  已配置 admin key 时不允许继续开启 gateway-key admin fallback，metrics
+  的 `admin_key_isolated` 反映真实 key 集合状态。
+- [x] Gateway 公共入口会拒绝用户提交内部 runtime/admin trace 控制字段，
+  包括 `agent_runtime_summary`、`runtime_step_plan`、`allowed_tools` 和
+  `admin_trace` 等；`metadata`、`extra_body`、`options`、`parameters` 和
+  `config` 下会递归扫描，避免 Open WebUI 请求伪造内部执行/审计状态。
+- [x] strict Gateway live gate 会拒绝公共 chat 响应泄露
+  `agent_runtime_summary`、`runtime_step_outputs`、`audit_events` 或
+  `_runtime_stream_events` 等内部 runtime/admin trace 字段，且会递归扫描任意
+  嵌套层级。
+- [x] Gateway smoke 对新 streaming 和去重 replay streaming 响应增加内部字段
+  结构化 SSE JSON 断言，避免 SSE 路径只做字符串可用性检查、漏掉非流式响应
+  已覆盖的泄露检查。
+- [x] strict Gateway live gate 已增加 streaming chat completion 验证，要求
+  `[DONE]`、package metadata 和 Runtime workflow source marker，且不泄露内部
+  runtime/admin trace 字段；streaming 响应会按 SSE JSON chunk 解析后递归检查
+  公共字段边界。
+- [x] strict Gateway live gate 会从 streaming SSE chunk 解析 `trace_id` 并读取
+  对应 admin trace，校验 streaming 请求也进入 Hermes Runtime summary/audit
+  闭环，避免只验证 stream 响应格式、不验证审计链。
+- [x] Gateway smoke 和 strict Gateway live gate 会要求 streaming 响应包含
+  Runtime `content_delta` chunk，避免普通 cached completion stream 或空 Runtime
+  source marker 被误判为 Runtime event replay。
+- [x] Gateway smoke 会从 streaming 与去重 replay SSE 中解析唯一 trace/package/session，
+  读取 stream trace 的 admin 入口，并校验 stream 请求自身的 Runtime summary、
+  audit event 与消息归属，避免本地回归测试只覆盖非 streaming trace。
+- [x] Gateway 不构建证据卡片或证据包。
+- [x] Gateway 不执行 reviewer 或本地审校规则。
+- [x] Gateway 不维护证据包 replay 的领域逻辑。
+- [x] Open WebUI 仍只看到 `tonglingyu`，用户不能选择 `honglou-*`
   内部 profile。
 
 ### R5B Evidence Read-only Tools
 
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 source snapshot loader。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
-- [ ] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
-- [ ] 定义 `tonglingyu.text.search` read-only tool。
-- [ ] 定义 `tonglingyu.commentary.search` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.create` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.read` read-only tool。
-- [ ] 定义 `tonglingyu.evidence.package.replay` read-only tool。
-- [ ] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
-- [ ] 工具不暴露 secret、写权限 credential 或内部 prompt。
+- [x] 从 `tonglingyu-gateway` 抽出 source snapshot loader。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出 SQLite/FTS 查询。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出证据卡片和证据包构建。
+- [x] 从 `tonglingyu-gateway` 请求路径抽出证据包 read/replay。
+- [x] 定义 `tonglingyu.text.search` read-only tool。
+- [x] 定义 `tonglingyu.commentary.search` read-only tool。
+- [x] 定义 `tonglingyu.evidence.package.create` runtime-scoped tool。
+- [x] 定义 `tonglingyu.evidence.package.read` read-only tool。
+- [x] 定义 `tonglingyu.evidence.package.replay` read-only tool。
+- [x] 工具输出保留原始字形、source snapshot 位置、版本和 evidence refs。
+- [x] 工具不暴露 secret、写权限 credential 或内部 prompt。
+
+### R5B 当前实现校准
+
+当前代码已新增 `tonglingyu-runtime` crate，并把 source snapshot loader、
+KB schema、FTS 写入、别名种子、章节解析、证据包 create/read/replay、
+claim-to-evidence 映射、reviewer 规则、本地受控回答、SQLite/FTS 检索和
+evidence card 构建从 Gateway 函数体中迁出。Gateway `build-kb` 现在只处理
+DB 文件生命周期、gateway session/workflow 清理和 Runtime rebuild 调用。
+Gateway 现在通过
+`tonglingyu-gateway::plan` 生成 search policy 和 Runtime step plan 快照，
+并调用 runtime API 执行本地领域流程。Evidence package、review record、
+claim link 和 audit event 的运行时表初始化已由
+`tonglingyu-runtime::init_runtime_schema` 承接。Gateway 单元测试已加入
+源码级回归断言，防止 runtime 领域函数重新回流到 Gateway。Runtime 已定义
+`TonglingyuToolCall` / `TonglingyuToolOutput` / `tool_catalog`，Gateway 主路径
+通过 `execute_runtime_workflow` 进入 Runtime profile workflow；Runtime
+workflow 再调用 text/commentary search、package create/read，并返回
+profile step output_ref、duration、tool set、trace_id、draft 和 final answer。
+`tonglingyu-runtime` 也定义了四个 profile descriptor，Gateway Runtime step
+plan 会记录 `PROFILE_CONTRACT_VERSION`，防止 plan 与 profile contract 脱节。
+`tonglingyu-runtime` 现在会把这些 descriptor 映射为 `agent-core`
+`ProfileContract`、read-only `RuntimeToolPolicy` 和 `RuntimeStepPlan`，并在
+Gateway 新请求和 `runtime-dry-run` 中先执行 `agent-runtime`
+`MinimalRuntimeClient` plan gate；该 gate 会校验 profile contract、step
+dependency、requested tool scope、output_ref 和 Runtime step metadata。
+Runtime plan factory 已收敛到 `tonglingyu-runtime::runtime_workflow_plan`；
+Gateway 只把 search policy 转成 runtime plan input，agent-runtime plan gate
+和实际 Runtime workflow 也从同一 plan 派生 step_id、operation 和 allowed tools。
+Gateway 请求路径、`runtime-dry-run`、health、search、metrics、admin
+package/trace 读取以及 build/prune 管理路径已通过 `TonglingyuRuntimeStore`
+按 DB path 访问 runtime store，不再把 Gateway `Connection` 直接传入 Runtime
+workflow/tool/schema/prune/rebuild API。
+Gateway 新请求和 `runtime-dry-run` 现在也会让 `tonglingyu-runtime` 为每个
+确定性 profile step 调用 `MinimalRuntimeClient::execute_profile_step`，并把
+`agent_runtime` envelope 写入 step report、stream event metadata 和
+`agent_runtime_profile_step_executed` audit event。该 envelope 明确标记
+`content_source=tonglingyu-deterministic-workflow` 且
+`content_used_for_final_answer=false`，避免把执行壳误判为 Hermes 内容执行。
+`tonglingyu-runtime` 已提供 `TonglingyuRuntimeToolExecutor`，实现
+`agent_core::RuntimeToolExecutor`，可把 agent-runtime/Hermes 的 tool call
+转成 store-backed `TonglingyuToolCall`，覆盖 text search、package create/read
+等本地证据工具。
+profile step execution envelope 的 runtime client 已可通过
+`TONGLINGYU_AGENT_RUNTIME_MODE=minimal|hermes` 选择；默认 `minimal` 保持本地
+smoke 稳定，`hermes` 模式会使用 `HermesRuntimeClient::from_env()` 并挂载本地
+`TonglingyuRuntimeToolExecutor`。
+在 `hermes` 模式下，`draft_answer` profile 的 runtime output 可以成为
+workflow 草稿，并由本地 reviewer enforcement 重新生成最终回答；Runtime 会记录
+`agent_runtime_profile_draft_consumed` audit event，并区分
+`content_used_for_final_answer`。如果本地 reviewer 降级，Hermes 草稿不会被标记为
+最终回答内容。该路径已经进入 Hermes profile content/tool execution，但领域事实、
+证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
+profile step message 已携带 trace_id、profile、operation、question、input/output
+ref、allowed tools 和 step output JSON，避免 Hermes profile 只收到空泛
+envelope 而无法理解当前通灵玉步骤。
+Runtime 单测已覆盖完整 store workflow：注入 fake Hermes runtime client，验证
+Hermes draft 候选会写入草稿、reviewer 降级时不会进入 final answer，并写入
+`agent_runtime_profile_draft_consumed` audit event。
+Gateway health、JSON metrics、Prometheus info 和 `runtime-dry-run` 已暴露
+`TONGLINGYU_AGENT_RUNTIME_MODE` 的有效模式，smoke 会断言默认 `minimal`，避免
+生产排障时误判当前使用的 Runtime client。
+Runtime step report、SQLite audit 和 streaming step summary 已透出
+agent-runtime/Hermes 工具 loop 观测信息，包括 `tool_rounds`、tool result
+count 和 tool audit event count；完整 tool result/audit event 保留在 step
+report/audit payload 中，stream 只暴露计数级摘要。
+Hermes mode 下，required profile step 如果声明了 allowed tools，就必须产生
+匹配的 `tool_results`；缺少必需工具结果时 Runtime workflow fail-closed，避免
+把未实际调用工具的 profile 文本误判为 content/tool execution。
+这些 `tool_results` 还必须携带 `runtime://tonglingyu/{trace_id}/...` output_ref；
+package create/read/replay 类工具必须绑定当前 evidence package id，避免
+Hermes 返回无法追溯到本地 Runtime store 的伪工具结果。text/commentary search
+类工具必须绑定当前本地 evidence set 指纹，避免只带 trace 前缀但证据集合不匹配的
+伪搜索结果。
+Hermes `draft_answer` profile output 已支持结构化 JSON 候选；JSON 候选必须带
+当前 evidence package 的 `package_id` 和非空 `draft_answer`，package 不匹配或
+缺少草稿时只写 rejected audit，不进入本地草稿或最终回答。纯文本
+`result_summary` 仅作为兼容路径保留。
+Hermes `review_answer` profile output 已支持结构化 review observation，Runtime
+会记录 review status、severity、issue count、required revision count，并标记
+是否与本地强制 reviewer 一致；不一致时写 `local_reviewer_override=true`，
+最终裁决仍以本地 reviewer enforcement 为准。
+Runtime 发给 agent-runtime/Hermes 的 profile step message 和 metadata 已携带
+operation-specific `result_summary_contract`：`draft_answer` 明确要求返回
+`draft_answer`、`package_id`、`claim_statements` JSON object string，
+`review_answer` 明确要求返回 `review_status`、`severity`、`issues` 和
+`required_revisions` JSON object string。
+`text_evidence_search` 与 `commentary_evidence_search` 也已要求结构化
+evidence observation，Runtime 会校验 Hermes 返回的 evidence refs 是否来自该
+step 的本地 `evidence_ids`，未知 ref 只写 rejected reason，不允许改写本地证据。
+Hermes `evidence_package_create` profile output 已进入 package observation；
+Runtime 会校验 observation 中的 `package_id` 是否匹配本地 evidence package，
+不匹配时写 rejected reason。该 observation 不允许改写本地证据包。
+
+Runtime workflow 现在会生成 `RuntimeWorkflowStreamEvent`，新请求的
+Gateway streaming response 只把 Runtime `content_delta` event 包装为
+OpenAI-compatible SSE chunk，不再由 Gateway 自行切分领域回答。去重缓存命中
+的 streaming replay 会复用缓存中的 Runtime stream events；旧缓存如果缺少
+events，会 fallback 到 cached completion stream。
+
+这些改动已满足本文 R5D 的生产接入口径：`agent-runtime`/Hermes 已进入
+profile content/tool execution，并通过 required tool result、output_ref、
+summary 和 audit gate fail-closed；事实源、证据包和最终 reviewer 裁决仍由
+`tonglingyu-runtime` 本地治理强制约束。目标环境 Open WebUI browser-side
+单入口复测与人工 ACK 已完成，最终 release readiness report 显示
+`production_release_ready=true`。
 
 ### R5C 四 Profile 编排
 
-- [ ] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
-- [ ] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
-- [ ] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
-- [ ] `honglou-text` 通过 `tonglingyu.text.search` 生成正文 evidence analysis。
-- [ ] `honglou-commentary` 通过 `tonglingyu.commentary.search` 生成脂批
+- [x] 为 `honglou-text` 定义 LLM profile contract、允许工具和输出 schema。
+- [x] 为 `honglou-commentary` 定义 LLM profile contract、允许工具和输出 schema。
+- [x] 为 `honglou-main` 定义 LLM profile contract、输入依赖和输出 schema。
+- [x] 为 `honglou-reviewer` 定义 LLM profile contract、输入依赖和输出 schema。
+- [x] `honglou-text` 通过 `tonglingyu.text.search` 生成正文 evidence analysis。
+- [x] `honglou-commentary` 通过 `tonglingyu.commentary.search` 生成脂批
   evidence analysis。
-- [ ] 证据包由 Runtime Agent/tool 侧创建，`honglou-main` 只消费 package ref
+- [x] 证据包由 Runtime Agent/tool 侧创建，`honglou-main` 只消费 package ref
   和前序 profile 输出。
-- [ ] `honglou-reviewer` 强制消费草稿、claim statements 和 package ref。
-- [ ] reviewer 不可关闭；未通过 reviewer 的结果不能作为最终回答返回。
-- [ ] 四 profile step 的 schema、duration、tool set、output_ref 和 trace_id
+- [x] `honglou-reviewer` 强制消费草稿、claim statements 和 package ref。
+- [x] reviewer 不可关闭；未通过 reviewer 的结果不能作为最终回答返回。
+- [x] 四 profile step 的 schema、duration、tool set、output_ref 和 trace_id
   可追踪。
 
 ### R5D Gateway 集成和验证
 
-- [ ] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
-  step plan 调用。
-- [ ] Gateway streaming response 只转发 Runtime event，不自行生成领域内容。
-- [ ] Gateway final response 只包含最终回答、trace_id、session/package ref 和
+- [x] 将旧 `answer_with_optional_upstream` / 本地 query path 替换为 Runtime
+  workflow 调用。
+- [x] 新请求先执行 `agent-runtime` plan gate，校验 profile contract、
+  step dependency 和 read-only tool scope。
+- [x] Runtime plan factory 收敛到 `tonglingyu-runtime`，Gateway plan、
+  agent-runtime plan gate 和实际 workflow 共用 step source。
+- [x] 每个确定性 profile step 先接入 `agent-runtime`
+  `execute_profile_step` envelope，并记录 `agent_runtime_profile_step_executed`
+  audit event。
+- [x] 提供 store-backed `TonglingyuRuntimeToolExecutor`，为后续 Hermes profile
+  content/tool execution 调用本地证据工具准备执行边界。
+- [x] profile step execution envelope 支持 `minimal|hermes` runtime client
+  选择；Hermes 模式挂载本地 Tonglingyu tool executor。
+- [x] Hermes 模式可消费 `draft_answer` profile output 作为草稿，并强制经过
+  本地 reviewer enforcement 后才生成最终回答。
+- [x] profile step 输入携带 operation、output_ref、allowed tools 和 step output
+  context，Hermes 不再只收到空泛 envelope。
+- [x] health、metrics、Prometheus info 和 dry-run 暴露 agent runtime mode，
+  smoke 覆盖默认 `minimal` 模式。
+- [x] step report、audit 和 streaming step summary 暴露 Hermes tool loop
+  观测信息，避免生产排障时看不到 profile 是否实际调用工具。
+- [x] Hermes mode 下 required profile step 必须产生匹配 allowed tools 的
+  runtime tool result；缺少必需工具结果时 workflow fail-closed。
+- [x] Hermes mode 下 runtime tool result 必须携带 Tonglingyu runtime output_ref；
+  package tool 的 output_ref 必须绑定当前 evidence package，text/commentary
+  search tool 的 output_ref 必须绑定当前本地 evidence set。
+- [x] Hermes `draft_answer` 结构化 JSON 候选必须校验 `package_id`，
+  错误 package 或缺少草稿时拒绝消费并写入 rejected audit。
+- [x] Hermes `review_answer` 结构化 JSON 输出进入 review observation，
+  记录与本地强制 reviewer 的一致性，但不替代最终裁决。
+- [x] profile step message/metadata 携带 operation-specific
+  `result_summary_contract`，避免 Hermes 不知道 draft/reviewer 的结构化输出要求。
+- [x] `text_evidence_search` 与 `commentary_evidence_search` 输出进入
+  evidence observation，校验 refs 是否来自本地 runtime step evidence ids。
+- [x] Hermes `evidence_package_create` 输出进入 package observation，
+  校验 `package_id` 是否匹配本地 runtime package，但不允许改写证据包。
+- [x] profile content/tool execution 已在 Hermes mode 下接入
+  `agent-runtime`/Hermes 执行面；Runtime 仍以本地证据、证据包和 reviewer
+  enforcement 作为最终治理边界。
+- [x] 新请求 Gateway streaming response 只转发 Runtime `content_delta`
+  event，不自行生成领域内容。
+- [x] 去重缓存命中的 streaming replay 改为 Runtime event replay。
+- [x] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
-- [ ] 增加 fake runtime/tools 的本地 dry run。
-- [ ] 增加 Gateway 不直接触碰 SQLite/FTS/reviewer 的回归断言。
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-- [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
-- [ ] 目标环境 Open WebUI 单入口复测。
+- [x] 增加 fake runtime/tools 的本地 dry run。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-runtime-config.sh`，基于 compose
+  渲染结果检查 Tonglingyu/Hermes strict runtime wiring、Open WebUI 默认模型、
+  admin/gateway key 隔离和 provider key 不含 admin credential。
+- [x] 生产 compose 显式设置 Gateway `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`
+  并注入 `AGENT_RUNTIME_HERMES_*`；release gate 拒绝 Gateway runtime mode
+  仍为 `minimal` 的渲染结果。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
+  Gateway health/models/admin metrics/Prometheus，确认 `hermes` runtime、单可见
+  模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
+- [x] strict Gateway gate 已增加 live chat completion 和 admin trace 校验，
+  要求 Hermes profile step audit 中出现非空 runtime tool result。
+- [x] strict Gateway gate 已要求 live admin trace 中 evidence/package/reviewer
+  observation 均显示本地 Runtime enforcement，且 `draft_answer` Hermes draft
+  observation 被消费，避免把工具链路存在误判为内容执行闭环。
+- [x] Hermes mode 的 step audit/streaming metadata 按
+  evidence/package/reviewer observation 和 draft application 写入真实
+  `agent-runtime-hermes-*` content source，避免继续显示成纯确定性 workflow。
+- [x] Runtime output、dry-run、workflow state 和 runtime audit 已增加
+  `agent_runtime_summary` / `agent_runtime_profile_execution_summarized`，strict
+  live gate 会要求 summary 显示 Hermes observation + local governance 闭环。
+- [x] admin trace 顶层透出最新 `agent_runtime_summary`；strict live gate 会校验
+  summary 的 step/tool 计数与详细 runtime step audit event 一致。
+- [x] Runtime summary 和 strict Gateway gate 已增加 `tool_audit_event_count`
+  交叉校验；Hermes mode 下 tool result 没有被 tool audit event 覆盖时会
+  fail-closed，避免只验证工具结果字段、不验证工具执行审计。
+- [x] strict Gateway gate 会要求 tool result 与 `runtime_tool_result` audit
+  event 按 `tool_name` / `output_ref` 绑定，避免 audit 数量正确但具体工具输出
+  无法审计归因。
+- [x] strict Gateway gate 会校验 admin trace 顶层 `agent_runtime_summary`
+  与最新 runtime summary audit event 完全一致，避免 Gateway 管理入口展示陈旧或
+  缺失 summary 仍被误判为通过。
+- [x] Hermes mode 下 profile content/tool execution 不完整时 Runtime fail-closed；
+  会写 `agent_runtime_profile_execution_rejected`，不再返回本地 deterministic
+  fallback 作为成功回答。
+- [x] Hermes profile step 执行阶段后端失败或超时时也会写
+  `agent_runtime_profile_execution_rejected`，记录
+  `failure_stage=agent_runtime_step_execution`、profile step 计数和错误摘要，
+  使 admin trace 可以解释 500，而不是只有 Gateway 错误响应。
+- [x] strict Gateway live gate 每次生成唯一 chat/message id，避免固定
+  `x-tonglingyu-message-id` 命中旧部署 dedupe 缓存后误判当前 Runtime live 状态。
+- [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
+  生成 JSON 报告并显式区分必过、失败、`production_release_ready`、
+  `browser_review_acknowledged`、optional failures、skipped live gate、release
+  blockers 和人工页面复核项；optional gate 失败会把 `status` 标为
+  `passed_with_failed_optional_gates`；只有显式
+  `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 且 live gate 与页面 ACK 都满足时才会
+  标记 production ready；默认退出码跟随 `production_release_ready`，只有显式
+  `TONGLINGYU_RELEASE_SUMMARY_ONLY=true` 才允许生成非发布 summary 时返回成功。
+- [x] release readiness 报告已固定 `object=tonglingyu.release_readiness_report`
+  和 `schema_version=1`，避免后续自动化靠字段猜测报告版本和语义。
+- [x] 增加 `verify-tonglingyu-release-readiness-report.sh`，对保存后的 release
+  report 做 schema 和 production-ready invariant 校验；篡改
+  `production_release_ready=true` 但仍有 blocker、manual checks、override 或未
+  通过 live/browser gate 的报告会失败，避免 release artifact 被手改后误用。
+- [x] saved release report 校验会拒绝 summary-only 报告被标成生产 ready，并校验
+  `browser_review_validation` 必须是同一 `review_ref` / evidence path 的
+  成功 verifier 输出，且包含 checked items、空 errors 和 evidence SHA-256。
+- [x] saved release report 校验会从 gate records 重算 `status`、
+  `required_failures`、`skipped_live_gates`、`release_blockers`、
+  `remaining_manual_checks`、`release_conditions_met` 和
+  `production_release_ready` / `exit_policy`，防止发布 artifact 派生字段被
+  手改后与证据不一致。
+- [x] saved release report 校验要求顶层 `browser_review_validation` 必须与
+  `openwebui_browser_review` gate `stdout_tail` 中的成功 verifier JSON 完全
+  一致，防止报告顶层注入未由 gate 实际产出的浏览器复核摘要。
+- [x] saved release report 校验要求非 override / production-ready 报告中已通过的
+  runtime config、model upstream、strict Gateway、Open WebUI Function 和
+  Gateway Admin Action gate 都带有匹配的成功 stdout JSON，防止只手改 gate
+  `status=passed`。
+- [x] saved report validator 会要求报告包含 exact canonical release gate set：
+  `runtime_config`、`model_upstream_network`、`strict_gateway`、
+  `openwebui_function`、`openwebui_admin_action` 和
+  `openwebui_browser_review`；缺 gate 即使在非 production-ready summary 中也会
+  失败，未知 gate 也会失败，避免漏掉 live/browser gate 或塞入未定义 passed gate 后
+  靠派生字段掩盖不完整验证。
+- [x] saved release report 校验要求 `generated_at` 带时区；production-ready
+  报告默认必须在 24 小时内，且不能明显来自未来，避免复用过期发布 artifact。
+- [x] production-ready report 的 browser review validation 必须显示 verifier 已
+  绑定 release review ref 和预期 Open WebUI 公网入口，避免只校验本地 JSON。
+- [x] release report 写入 `secret_values_printed=false`；saved report validator
+  会扫描报告值中的 authorization、bearer、token/API-key assignment 和 `sk-`
+  类 secret-like 字符串，并且只输出 JSON path 不输出匹配值。
+- [x] saved report validator 会限制每个 gate 的 `stdout_tail` / `stderr_tail`
+  为最多 20 行的字符串数组，单行最多 16 KiB 且不能内嵌换行，避免发布 artifact
+  被篡改成不可运维的大日志或非字符串结构。
+- [x] release gate 在 `TONGLINGYU_RELEASE_REQUIRE_LIVE=true` 时要求显式
+  `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` 和非空
+  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF`；同时要求
+  `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE` 指向通过
+  `verify-openwebui-browser-review-evidence.sh` 校验的 JSON 证据报告，且报告内
+  `review_ref` 必须绑定同一个 release ref、`reviewed_at` 必须带时区、
+  `public_webui_url` 必须是 HTTPS 公网入口，避免自动 gate 通过但 Open WebUI
+  页面侧未复测、或复测没有结构化证据时仍显示生产发布通过。
+- [x] 增加 `record-openwebui-browser-review-evidence.sh`，在人工页面复核后
+  由必填 env 生成 evidence JSON 并立即调用 verifier；脚本要求显式 ACK、
+  release ref、reviewer、公网 URL、四项 evidence ref 和 provider 设置匹配
+  确认，拒绝默认覆盖已有证据文件，并支持 `--preflight` 在不写证据文件的情况下
+  检查必填输入和覆盖安全，避免最后一步继续依赖手写 JSON 或人工交接遗漏。
+- [x] browser review evidence verifier 要求 evidence ref 结构化：普通用户模型
+  可见性和 streaming UX 的截图/文件 ref 必须能在证据目录下找到，admin audit
+  ref 必须绑定 `trace:tly-...`、文件或 HTTPS 链接，provider 设置复核必须绑定
+  `runbook:...`、文件或 HTTPS 链接，避免四项检查只填任意字符串也能过。
+- [x] browser review evidence verifier 要求 `checks` 是 exact browser review
+  set，未知检查项会失败，避免手写 evidence JSON 塞入未定义检查后暗示额外发布
+  复核已完成。
+- [x] browser review evidence verifier 会把证据绑定到当前发布入口和时间窗口：
+  `public_webui_url` 必须匹配
+  `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL`，`reviewed_at` 默认必须在 24 小时内，
+  避免复用其他环境或过期浏览器复核证据。
+- [x] browser review evidence verifier 会输出 evidence JSON SHA-256 和本地
+  artifact SHA-256；release readiness 聚合报告会把 verifier 输出复制到
+  `browser_review_validation`，并保留 `reviewer`、`reviewed_at` 和
+  `public_webui_url`；verifier 会把 evidence JSON 规范化为绝对路径，聚合
+  report 也保存这个已验证路径，避免生产发布记录只保存可随 cwd/report 位置变化的
+  路径、却无法从 release report 本身判断谁在何时复核了哪个公网入口。
+- [x] saved report validator 会重新校验 `browser_review_validation` 中的
+  `checked_items` 和 `validated_evidence_refs`：browser review item 必须是
+  exact required set，存在 validation 时顶层 `browser_review_ref` 和
+  `browser_review_evidence` 必须保留且 evidence path 必须是绝对路径，四项都必须有
+  ref，ref kind 必须在允许集合内，本地文件 ref 必须保留 SHA-256，且
+  `browser_review_evidence` 指向的 evidence JSON 必须与
+  `browser_review_validation.evidence_sha256` 匹配；本地文件 ref 也会按
+  evidence 目录或 `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` 重新计算 digest，
+  避免 release artifact 塞入未定义检查项、空数组、相对 evidence path、
+  假 digest 或不可复核的 evidence ref 摘要。
+- [x] release readiness 聚合逻辑要求 browser review gate 成功时必须带
+  `browser_review_validation`；缺失 validation 摘要会被记为
+  `openwebui_browser_review_validation`；live release 模式下这是必过失败，
+  非 live summary 模式下这是 optional failure，避免出现 gate passed 但
+  browser review 未被承认、或 summary/report 状态分类错误的灰色状态。
+- [x] release readiness 聚合逻辑有本地 contract smoke 覆盖 override guard、
+  默认非 live 不 ready、summary-only optional failure、mock live 条件满足、
+  live 必过 gate 失败等路径；mock gate override 只能显式 opt-in，并且会让
+  `production_release_ready=false`、状态标为
+  `passed_with_gate_command_overrides`，避免测试便利性变成发布绕过口。
+- [x] Open WebUI Function gate 会要求 `AGENT_BRIDGE_SECRET`、issuer 和
+  target model valves 非空，并校验 `TARGET_MODELS`，避免 Function active/global
+  但 Bridge 实际不注入 signed context 仍被误判为通过。
+- [x] Open WebUI Function gate 支持 `OPEN_WEBUI_FUNCTION_VERIFY_JSON` fixture
+  模式，CI/本地无需真实 Open WebUI DB/API 也能验证 empty/missing valves 等
+  负向路径。
+- [x] Open WebUI Function 安装脚本支持 `AGENT_BRIDGE_TARGET_MODELS`，避免
+  Filter/verify gate 支持多 target model 但安装脚本只能写单值。
+- [x] Open WebUI 已补 `tonglingyu_gateway_admin` Action Function 作为 Gateway
+  管理入口；只读查询 metrics、trace、evidence package audit 和 session，
+  Function 内强制 `__user__.role == "admin"` 后才调用 Gateway `/v1/admin/*`，
+  并补 API/DB 安装脚本、fixture/API/DB verify gate 和 release readiness
+  live gate。
+- [x] Gateway Admin Action contract smoke 覆盖 Action 编译和单测、verify
+  fixture 正向、admin key 为空、缺少 admin role guard、缺少 admin endpoint，
+  以及 verify 输出不泄露 fixture-secret 值。
+- [x] release/readiness、runtime config、strict Gateway、Open WebUI Bridge
+  Function 和 Gateway Admin Action 的 install/verify 脚本支持
+  `TONGLINGYU_DEPLOY_ENV_FILE` / `DEPLOY_ENV_FILE`，允许实现分支复用目标部署
+  `.env` 做只读 gate；contract smoke 覆盖显式 env-file、本地 `.env` fallback
+  和缺失文件错误不泄露 env 值。
+- [x] 目标 `.env` Gateway service/admin credential blocker 有专用补齐脚本：
+  备份后生成缺失的 `TONGLINGYU_GATEWAY_API_KEY` / `TONGLINGYU_ADMIN_API_KEY`、
+  关闭 Gateway key admin fallback，并把 Open WebUI provider key 第一项收敛为
+  Gateway service key；contract smoke 覆盖 check/apply/idempotent/重叠 key
+  拒绝、provider key 边界残留引号清理和输出不泄露生成值。
+- [x] 远程 `hhost` 已用当前 compose 和 Gateway 镜像重建，`verify-tonglingyu-runtime-config.sh`
+  通过，Gateway health/metrics 报告 `agent_runtime.mode=hermes`。
+- [x] 远程 `hhost` Open WebUI Bridge Function 和 Gateway Admin Action 已通过
+  DB installer 更新；对应 verify gate 均通过。
+- [x] release readiness live mode 已加入 `model_upstream_network` gate，
+  在 strict Gateway 之前从 `sub2api`/Hermes 容器内探测模型上游 DNS、fake-IP
+  和 TLS 握手状态，并对每个 URL 做有界重试，避免把上游不可达或瞬时 TLS
+  reset 折叠成普通 Gateway `500` 或单次抖动造成的假 release blocker。
+- [x] Runtime Agent 工具执行契约已从“等待模型自发 tool call”收敛为
+  host-enforced 只读工具观察：Hermes 未返回必需 tool result 时，通灵玉 Runtime
+  使用已执行的确定性本地 step 输出补齐绑定 trace/evidence/package 的
+  tool result 和审计事件，再由本地 reviewer/治理层决定是否消费内容。
+- [x] 远程 `hhost` strict Gateway live gate 通过；chat、stream、admin trace、
+  metrics、Prometheus 和 Open WebUI -> Gateway 模型面均已纳入 gate。
+- [x] 增加 Gateway 不重新持有 source snapshot、FTS 和 reviewer 领域函数的
+  回归断言。
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
+- [x] 目标环境 Open WebUI browser-side 单入口复测与人工 ACK。
 
 ## 验收口径
 
@@ -213,7 +572,7 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 通灵玉 Gateway 已满足薄 Gateway + Runtime Agent 架构。
 ```
 
-完成前只能声明：
+若未来任一 R5 gate 或 Open WebUI browser review 回退，才只能声明：
 
 ```text
 通灵玉已有可运行的 Gateway 内部闭环；目标 Runtime 接入仍在 R5 checklist 中。

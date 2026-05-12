@@ -12,11 +12,12 @@ fi
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
 load_optional_deploy_env_file
 
-FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
-FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
-FUNCTION_NAME="${FUNCTION_NAME:-Agent Identity Bridge}"
-TARGET_MODEL="${AGENT_BRIDGE_TARGET_MODEL:-hermes-agent}"
-TARGET_MODELS="${AGENT_BRIDGE_TARGET_MODELS:-${TARGET_MODEL}}"
+FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/tonglingyu_gateway_admin_action.py}"
+FUNCTION_ID="${FUNCTION_ID:-tonglingyu_gateway_admin}"
+FUNCTION_NAME="${FUNCTION_NAME:-Tonglingyu Gateway Admin}"
+TARGET_MODEL="${TONGLINGYU_GATEWAY_ADMIN_ACTION_TARGET_MODEL:-${TONGLINGYU_MODEL_ID:-tonglingyu}}"
+TARGET_MODELS="${TONGLINGYU_GATEWAY_ADMIN_ACTION_TARGET_MODELS:-${TARGET_MODEL}}"
+GATEWAY_BASE_URL="${TONGLINGYU_GATEWAY_ADMIN_BASE_URL:-http://tonglingyu-gateway:8090}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"
 
@@ -30,19 +31,28 @@ if [[ -z "${ADMIN_TOKEN}" ]]; then
   exit 1
 fi
 
-if [[ -z "${AGENT_BRIDGE_SECRET:-}" ]]; then
-  echo "AGENT_BRIDGE_SECRET is required" >&2
+if [[ -z "${TONGLINGYU_ADMIN_API_KEY:-}" ]]; then
+  echo "TONGLINGYU_ADMIN_API_KEY is required" >&2
   exit 1
 fi
 
-python3 - "$BASE_URL" "$ADMIN_TOKEN" "$FUNCTION_FILE" "$FUNCTION_ID" "$FUNCTION_NAME" "$TARGET_MODEL" "$TARGET_MODELS" <<'PY'
+python3 - "$BASE_URL" "$ADMIN_TOKEN" "$FUNCTION_FILE" "$FUNCTION_ID" "$FUNCTION_NAME" "$TARGET_MODEL" "$TARGET_MODELS" "$GATEWAY_BASE_URL" <<'PY'
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 
-base_url, token, function_file, function_id, function_name, target_model, target_models = sys.argv[1:8]
+(
+    base_url,
+    token,
+    function_file,
+    function_id,
+    function_name,
+    target_model,
+    target_models,
+    gateway_base_url,
+) = sys.argv[1:9]
 base_url = base_url.rstrip("/")
 with open(function_file, "r", encoding="utf-8") as handle:
     content = handle.read()
@@ -77,10 +87,10 @@ def request(method, path, body=None):
 payload = {
     "id": function_id,
     "name": function_name,
-    "type": "filter",
+    "type": "action",
     "content": content,
     "meta": {
-        "description": "Injects signed Agent Platform identity context for Hermes Agent requests.",
+        "description": "Read-only Tonglingyu Gateway admin entry for Open WebUI admins.",
     },
     "is_active": True,
     "is_global": True,
@@ -100,10 +110,16 @@ request(
     "POST",
     f"{api_prefix}/id/{function_id}/valves/update",
     {
-        "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
-        "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
+        "GATEWAY_BASE_URL": gateway_base_url,
+        "GATEWAY_ADMIN_API_KEY": os.environ["TONGLINGYU_ADMIN_API_KEY"],
         "TARGET_MODEL": target_model,
         "TARGET_MODELS": target_models,
+        "REQUEST_TIMEOUT_SECONDS": int(
+            os.environ.get("TONGLINGYU_GATEWAY_ADMIN_ACTION_TIMEOUT", "15")
+        ),
+        "RESPONSE_MAX_CHARS": int(
+            os.environ.get("TONGLINGYU_GATEWAY_ADMIN_ACTION_MAX_CHARS", "6000")
+        ),
     },
 )
 
@@ -113,6 +129,7 @@ print(json.dumps(
         "action": action,
         "target_model": target_model,
         "target_models": target_models,
+        "gateway_base_url": gateway_base_url,
     }
 ))
 PY
