@@ -42,6 +42,7 @@ required_browser_review_items = [
     "admin_audit_visibility",
     "persisted_provider_settings",
 ]
+required_browser_review_item_set = set(required_browser_review_items)
 browser_review_allowed_ref_kinds = {
     "ordinary_user_model_visibility": {"local_file", "url"},
     "streaming_chat_ux": {"local_file", "url"},
@@ -651,9 +652,17 @@ if isinstance(browser_review_validation, dict):
         "browser_review_validation_checked_items_must_be_array",
     )
     if isinstance(checked_items, list):
+        seen_checked_items = set()
+        for item in checked_items:
+            if item not in required_browser_review_item_set:
+                errors.append(f"browser_review_validation_unexpected_checked_item={item}")
+            elif item in seen_checked_items:
+                errors.append(f"browser_review_validation_duplicate_checked_item={item}")
+            else:
+                seen_checked_items.add(item)
         for item in required_browser_review_items:
             add_if(
-                item not in checked_items,
+                item not in seen_checked_items,
                 f"browser_review_validation_missing_checked_item={item}",
             )
     add_if(
