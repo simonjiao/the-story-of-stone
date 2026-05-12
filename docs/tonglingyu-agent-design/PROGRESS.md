@@ -465,11 +465,13 @@
   等负向路径。
 - Open WebUI Function API/DB 安装脚本已支持 `AGENT_BRIDGE_TARGET_MODELS`，
   避免 Filter 和 verify gate 已支持多 target model，但安装脚本仍覆盖成单值。
-- 当前不能宣布生产完成：Hermes profile content/tool execution 已通过
-  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；但目标
-  `hhost` 的 Hermes -> `sub2api` -> 模型链路仍返回 502/超时，strict live gate
-  不能通过；事实源、证据包和最终 reviewer 裁决也仍由 `tonglingyu-runtime`
-  本地治理强制约束，目标 Open WebUI live gate 和页面侧复测仍未完成。
+- 当前不能宣布 production-ready：Hermes profile content/tool execution 已通过
+  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；目标 `hhost`
+  runtime config、model upstream network、strict Gateway、Open WebUI Bridge
+  Function 和 Gateway Admin Action live gate 当前均已通过。剩余 release blocker
+  是 `openwebui_browser_review`，即目标 Open WebUI 登录态页面侧单入口复测尚未
+  完成人工 ACK；事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime`
+  本地治理强制约束。
 
 ## 下一步
 
