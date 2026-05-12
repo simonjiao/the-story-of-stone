@@ -443,10 +443,9 @@
   installer 更新并重启 `hermes-open-webui`；复测
   `verify-openwebui-function.sh` 与
   `verify-openwebui-gateway-admin-action.sh` 均通过。
-- 最新远端 release readiness summary 显示 runtime config、model upstream
-  network、strict Gateway、Open WebUI Bridge Function 和 Gateway Admin Action
-  均已通过；剩余必过失败 gate 只剩 `openwebui_browser_review`，即浏览器侧人工
-  单入口复测尚未 ACK。
+- 最新远端 production readiness 显示 runtime config、model upstream network、
+  strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
+  `openwebui_browser_review` 均已通过；`production_release_ready=true`。
 - 已新增 `deploy/scripts/verify-model-upstream-network.sh`，release readiness
   live mode 会在 strict Gateway 之前运行该 gate；它从 `sub2api`/Hermes 容器内
   检查模型上游 DNS、198.18.0.0/15 fake-IP 和 TLS 握手状态，只输出 host、
@@ -467,25 +466,18 @@
   等负向路径。
 - Open WebUI Function API/DB 安装脚本已支持 `AGENT_BRIDGE_TARGET_MODELS`，
   避免 Filter 和 verify gate 已支持多 target model，但安装脚本仍覆盖成单值。
-- 当前不能宣布 production-ready：Hermes profile content/tool execution 已通过
-  `agent-runtime`/Hermes 接入并由 summary/audit gate fail-closed；目标 `hhost`
-  runtime config、model upstream network、strict Gateway、Open WebUI Bridge
-  Function 和 Gateway Admin Action live gate 当前均已通过。剩余 release blocker
-  是 `openwebui_browser_review`，即目标 Open WebUI 登录态页面侧单入口复测尚未
-  完成人工 ACK；事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime`
-  本地治理强制约束。
+- 当前可以按本文 R5D 口径宣布 Gateway + Runtime Agent 接入 production-ready：
+  Hermes profile content/tool execution 已通过 `agent-runtime`/Hermes 接入并由
+  summary/audit gate fail-closed；目标 `hhost` runtime config、model upstream
+  network、strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
+  Open WebUI browser-side 单入口复测均已通过。最终 production report 为
+  `/home/simon/hermes-home-deploy/tonglingyu-release-readiness-production.json`，
+  browser review evidence 为
+  `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
+  事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
 
 ## 下一步
 
-1. 用真实 Open WebUI 账号做页面侧人工点击复核，并通过
-   `record-openwebui-browser-review-evidence.sh --preflight` 先检查必填输入，再生成
-   `openwebui-browser-review.json`，确认普通用户模型可见性、streaming 体验、
-   管理员审计入口和持久化 provider 设置都逐项带证据 ref。
-2. 在目标环境设置 browser review ACK、release ref 和 evidence path 后运行
-   release readiness live gate；只有无 command override 且
-   `production_release_ready=true` 时，才能关闭 R5D 最后一个 checklist 项。
-3. 关闭 R5D 后再声明“通灵玉四个内部 Agent 已真实 Runtime 化”和“通灵玉
-   Gateway 已满足薄 Gateway + Runtime Agent 架构”。
-4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-5. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
+1. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+2. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项。
