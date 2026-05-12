@@ -19,6 +19,10 @@ report_max_age_hours_raw = os.environ.get(
     "TONGLINGYU_RELEASE_REPORT_MAX_AGE_HOURS",
     "24",
 ).strip()
+browser_review_evidence_root = os.environ.get(
+    "TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT",
+    "",
+).strip()
 live_gate_names = [
     "model_upstream_network",
     "strict_gateway",
@@ -163,6 +167,27 @@ def resolve_artifact_path(value):
     if artifact_path.is_absolute():
         return artifact_path
     return path.parent / artifact_path
+
+
+def safe_relative_path(value):
+    candidate = Path(value)
+    if candidate.is_absolute():
+        return None
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        return None
+    return candidate
+
+
+def resolve_browser_evidence_ref(ref, evidence_path):
+    relative = safe_relative_path(ref)
+    if relative is None:
+        return None
+    base = (
+        Path(browser_review_evidence_root)
+        if browser_review_evidence_root
+        else evidence_path.parent
+    )
+    return base / relative
 
 
 def file_sha256(file_path):
@@ -663,6 +688,7 @@ if isinstance(browser_review_validation, dict):
         not is_sha256(evidence_sha256),
         "browser_review_validation_evidence_sha256_invalid",
     )
+    resolved_evidence_path = None
     if nonempty(browser_review_evidence):
         resolved_evidence_path = resolve_artifact_path(browser_review_evidence)
         if not resolved_evidence_path.is_file():
@@ -723,6 +749,21 @@ if isinstance(browser_review_validation, dict):
                     not is_sha256(sha256),
                     f"browser_review_validation_ref_{index}_sha256_invalid",
                 )
+                resolved_ref_path = (
+                    resolve_browser_evidence_ref(ref, resolved_evidence_path)
+                    if nonempty(ref) and resolved_evidence_path is not None
+                    else None
+                )
+                if resolved_ref_path is None:
+                    errors.append(f"browser_review_validation_ref_{index}_file_path_invalid")
+                elif not resolved_ref_path.is_file():
+                    errors.append(f"browser_review_validation_ref_{index}_file_not_found")
+                elif is_sha256(sha256):
+                    actual_ref_sha256 = file_sha256(resolved_ref_path)
+                    add_if(
+                        actual_ref_sha256 != sha256,
+                        f"browser_review_validation_ref_{index}_sha256_mismatch",
+                    )
             elif sha256 is not None:
                 add_if(
                     not is_sha256(sha256),

@@ -31,6 +31,7 @@ TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.jso
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 TAMPERED_BROWSER_CHECKED_ITEMS_REPORT="${WORK_DIR}/tampered-browser-checked-items-report.json"
 TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-hash-report.json"
+TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT="${WORK_DIR}/tampered-browser-local-ref-hash-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 mkdir -p "${WORK_DIR}/screenshots"
@@ -847,6 +848,38 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_browser_evidence_hash_stdout}" \
   '"browser_review_evidence_sha256_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+validation = dict(report["browser_review_validation"])
+validation["validated_evidence_refs"] = [
+    dict(item)
+    for item in validation["validated_evidence_refs"]
+]
+for item in validation["validated_evidence_refs"]:
+    if item.get("kind") == "local_file":
+        item["sha256"] = "0" * 64
+        break
+report["browser_review_validation"] = validation
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_browser_review":
+        gate["stdout_tail"] = [json.dumps(validation, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_local_ref_hash_stdout="${WORK_DIR}/tampered-browser-local-ref-hash.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT}" >"${tampered_browser_local_ref_hash_stdout}"; then
+  echo "saved browser validation must match local evidence file digests" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_local_ref_hash_stdout}" \
+  'any(error.endswith("_sha256_mismatch") for error in report["errors"])'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \
