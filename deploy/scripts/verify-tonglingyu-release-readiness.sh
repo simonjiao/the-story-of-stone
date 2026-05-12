@@ -248,6 +248,11 @@ browser_review_gate_passed = (
 browser_review_validation_missing = (
     browser_review_gate_passed and browser_review_validation is None
 )
+verified_browser_review_evidence = browser_review_evidence
+if isinstance(browser_review_validation, dict):
+    validation_evidence_path = browser_review_validation.get("evidence_path")
+    if isinstance(validation_evidence_path, str) and validation_evidence_path.strip():
+        verified_browser_review_evidence = validation_evidence_path.strip()
 
 live_gate_names = [
     "model_upstream_network",
@@ -339,7 +344,7 @@ report = {
     "gate_command_overrides_used": gate_cmd_overrides_used,
     "browser_review_acknowledged": browser_review_acknowledged,
     "browser_review_ref": browser_review_ref,
-    "browser_review_evidence": browser_review_evidence,
+    "browser_review_evidence": verified_browser_review_evidence,
     "browser_review_validation": browser_review_validation,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "secret_values_printed": False,

@@ -171,6 +171,16 @@ if report["secret_values_printed"] is not False:
     raise SystemExit(report)
 PY
 
+browser_evidence_relative_stdout="${WORK_DIR}/browser-evidence-relative.stdout"
+(
+  cd "${WORK_DIR}"
+  "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+    browser-review-evidence.json >"${browser_evidence_relative_stdout}"
+)
+assert_report "${browser_evidence_relative_stdout}" 'report["status"] == "ok"'
+assert_report "${browser_evidence_relative_stdout}" 'report["evidence_path"].startswith("/")'
+assert_report "${browser_evidence_relative_stdout}" 'report["evidence_path"].endswith("/browser-review-evidence.json")'
+
 browser_evidence_mismatch_stdout="${WORK_DIR}/browser-evidence-mismatch.stdout"
 if env TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=other-review \
   "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
@@ -581,6 +591,7 @@ assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_comm
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'
 assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-browser-review"'
 assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
+assert_report "${conditions_report}" 'report["browser_review_evidence"] == report["browser_review_validation"]["evidence_path"]'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_review_ref_bound"] is True'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_public_url_bound"] is True'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["reviewed_at"] == "'"${REVIEWED_AT}"'"'

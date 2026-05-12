@@ -360,8 +360,9 @@
 - browser review evidence verifier 已输出 evidence JSON SHA-256 和本地 artifact
   SHA-256；release readiness 聚合报告新增 `browser_review_validation`，保留
   `reviewer`、`reviewed_at`、`public_webui_url`、evidence digest 和本地 artifact
-  digest，确保发布报告自身能说明谁在何时复核了哪个 Open WebUI 公网入口，而不只
-  保存可变证据路径。
+  digest，并把 evidence JSON 规范化为绝对路径后写回顶层
+  `browser_review_evidence`，确保发布报告自身能说明谁在何时复核了哪个 Open
+  WebUI 公网入口，而不只保存会随 cwd/report 位置变化的证据路径。
 - Saved release report validator 现在会重新校验
   `browser_review_validation.checked_items` 和 `validated_evidence_refs`：
   browser review item 必须是 exact required set，存在 validation 时顶层

@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-evidence_path = sys.argv[1].strip()
+raw_evidence_path = sys.argv[1].strip()
+evidence_path = raw_evidence_path
 expected_review_ref = sys.argv[2].strip()
 evidence_root = os.environ.get("TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT", "").strip()
 expected_public_url = (
@@ -265,16 +266,19 @@ def validate_evidence_ref(check_name, value):
     return kind
 
 
-if not evidence_path:
+if not raw_evidence_path:
     errors.append("evidence_path_missing")
     report("failed")
     raise SystemExit(1)
 
-path = Path(evidence_path)
+path = Path(raw_evidence_path)
 if not path.is_file():
     errors.append("evidence_path_not_found")
     report("failed")
     raise SystemExit(1)
+
+path = path.resolve()
+evidence_path = str(path)
 
 try:
     evidence_bytes = path.read_bytes()
