@@ -29,6 +29,7 @@ TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.j
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
+TAMPERED_BROWSER_POINTERS_REPORT="${WORK_DIR}/tampered-browser-pointers-report.json"
 TAMPERED_BROWSER_CHECKED_ITEMS_REPORT="${WORK_DIR}/tampered-browser-checked-items-report.json"
 TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-hash-report.json"
 TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT="${WORK_DIR}/tampered-browser-local-ref-hash-report.json"
@@ -588,6 +589,29 @@ assert_report "${conditions_report}" 'report["browser_review_validation"]["publi
 assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
 assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
+
+python3 - "${conditions_report}" "${TAMPERED_BROWSER_POINTERS_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["browser_review_ref"] = ""
+report["browser_review_evidence"] = ""
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_pointers_stdout="${WORK_DIR}/tampered-browser-pointers.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_POINTERS_REPORT}" >"${tampered_browser_pointers_stdout}"; then
+  echo "saved browser validation must keep top-level evidence pointers" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_pointers_stdout}" \
+  '"browser_review_validation_requires_review_ref" in report["errors"]'
+assert_report "${tampered_browser_pointers_stdout}" \
+  '"browser_review_validation_requires_evidence" in report["errors"]'
 
 python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" <<'PY'
 import json

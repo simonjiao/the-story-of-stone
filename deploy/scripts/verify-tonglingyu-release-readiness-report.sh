@@ -653,6 +653,14 @@ if isinstance(browser_review_validation, dict):
         "production_ready_requires_browser_review_public_url_bound",
     )
     add_if(
+        not nonempty(browser_review_ref),
+        "browser_review_validation_requires_review_ref",
+    )
+    add_if(
+        not nonempty(browser_review_evidence),
+        "browser_review_validation_requires_evidence",
+    )
+    add_if(
         nonempty(browser_review_ref)
         and browser_review_validation.get("review_ref") != browser_review_ref,
         "browser_review_validation_review_ref_mismatch",

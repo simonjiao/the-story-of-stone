@@ -441,7 +441,9 @@ evidence files instead of only storing mutable paths. The validation summary
 also carries `reviewer`, `reviewed_at`, and `public_webui_url`, so the release
 report itself identifies who reviewed which public Open WebUI entrypoint and
 when. Saved release report validation rechecks that
-`checked_items` is the exact required browser review set, that
+any report carrying `browser_review_validation` also keeps top-level
+`browser_review_ref` and `browser_review_evidence`, that `checked_items` is the
+exact required browser review set, that
 `validated_evidence_refs` covers those items, that each ref uses an allowed
 kind, that local-file refs keep their SHA-256 digest, and that the referenced
 browser evidence JSON file still hashes to the recorded evidence SHA-256. For
