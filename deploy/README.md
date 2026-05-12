@@ -433,7 +433,10 @@ when that release URL is set.
 The verifier prints the evidence JSON SHA-256 and SHA-256 digests for local
 file refs; the aggregate release report copies this under
 `browser_review_validation` so a release record can identify the exact reviewed
-evidence files instead of only storing mutable paths.
+evidence files instead of only storing mutable paths. The validation summary
+also carries `reviewer`, `reviewed_at`, and `public_webui_url`, so the release
+report itself identifies who reviewed which public Open WebUI entrypoint and
+when.
 If the browser review gate exits successfully but does not emit this validation
 object, release readiness records `openwebui_browser_review_validation` as a
 required failure in live release mode, and as an optional failure in non-live

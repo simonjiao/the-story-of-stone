@@ -72,6 +72,18 @@ evidence_sha256 = ""
 validated_evidence_refs = []
 
 
+def report_string(field):
+    if not isinstance(evidence, dict):
+        return ""
+    value = evidence.get(field, "")
+    if not isinstance(value, str):
+        return ""
+    lowered = value.lower()
+    if any(needle in lowered for needle in secret_value_needles):
+        return "<redacted>"
+    return value
+
+
 def report(status):
     print(
         json.dumps(
@@ -80,7 +92,10 @@ def report(status):
                 "status": status,
                 "evidence_path": evidence_path,
                 "evidence_sha256": evidence_sha256,
-                "review_ref": evidence.get("review_ref", "") if isinstance(evidence, dict) else "",
+                "review_ref": report_string("review_ref"),
+                "reviewed_at": report_string("reviewed_at"),
+                "reviewer": report_string("reviewer"),
+                "public_webui_url": report_string("public_webui_url"),
                 "expected_review_ref_bound": bool(expected_review_ref),
                 "expected_public_url_bound": bool(expected_public_url),
                 "checked_items": required_checks,

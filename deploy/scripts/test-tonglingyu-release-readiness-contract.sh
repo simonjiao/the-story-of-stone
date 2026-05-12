@@ -125,15 +125,22 @@ fi
 browser_evidence_stdout="${WORK_DIR}/browser-evidence.stdout"
 "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
   "${BROWSER_EVIDENCE_JSON}" >"${browser_evidence_stdout}"
-python3 - "${browser_evidence_stdout}" <<'PY'
+python3 - "${browser_evidence_stdout}" "${REVIEWED_AT}" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
+reviewed_at = sys.argv[2]
 if report["status"] != "ok":
     raise SystemExit(report)
 if len(report.get("evidence_sha256", "")) != 64:
+    raise SystemExit(report)
+if report.get("reviewed_at") != reviewed_at:
+    raise SystemExit(report)
+if report.get("reviewer") != "release-reviewer":
+    raise SystemExit(report)
+if report.get("public_webui_url") != "https://example.invalid":
     raise SystemExit(report)
 local_refs = [
     item for item in report.get("validated_evidence_refs", [])
@@ -536,6 +543,9 @@ assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-brow
 assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_review_ref_bound"] is True'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_public_url_bound"] is True'
+assert_report "${conditions_report}" 'report["browser_review_validation"]["reviewed_at"] == "'"${REVIEWED_AT}"'"'
+assert_report "${conditions_report}" 'report["browser_review_validation"]["reviewer"] == "release-reviewer"'
+assert_report "${conditions_report}" 'report["browser_review_validation"]["public_webui_url"] == "https://example.invalid"'
 assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
 assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
@@ -741,6 +751,12 @@ assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_evidence_sha256_invalid" in report["errors"]'
 assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_stdout_mismatch" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_reviewed_at_missing" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_reviewer_missing" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_public_webui_url_missing" in report["errors"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \

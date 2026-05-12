@@ -9,6 +9,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 report_path = sys.argv[1].strip()
 errors = []
@@ -560,6 +561,9 @@ if isinstance(browser_review_validation, dict):
         errors.append("browser_review_validation_stdout_mismatch")
     validation_errors = browser_review_validation.get("errors")
     evidence_sha256 = browser_review_validation.get("evidence_sha256")
+    validation_reviewed_at = browser_review_validation.get("reviewed_at")
+    validation_reviewer = browser_review_validation.get("reviewer")
+    validation_public_webui_url = browser_review_validation.get("public_webui_url")
     checked_items = browser_review_validation.get("checked_items")
     validated_evidence_refs = browser_review_validation.get("validated_evidence_refs")
     add_if(
@@ -602,6 +606,28 @@ if isinstance(browser_review_validation, dict):
         and browser_review_validation.get("evidence_path") != browser_review_evidence,
         "browser_review_validation_evidence_path_mismatch",
     )
+    add_if(
+        not nonempty(validation_reviewer),
+        "browser_review_validation_reviewer_missing",
+    )
+    if not nonempty(validation_reviewed_at):
+        errors.append("browser_review_validation_reviewed_at_missing")
+    else:
+        validation_reviewed_at_dt = parse_timestamp(validation_reviewed_at)
+        if validation_reviewed_at_dt is None:
+            errors.append("browser_review_validation_reviewed_at_invalid")
+        elif generated_at_dt is not None:
+            future_skew_seconds = (
+                validation_reviewed_at_dt - generated_at_dt
+            ).total_seconds()
+            if future_skew_seconds > 300:
+                errors.append("browser_review_validation_reviewed_at_after_report")
+    if not nonempty(validation_public_webui_url):
+        errors.append("browser_review_validation_public_webui_url_missing")
+    else:
+        validation_public_url = urlparse(validation_public_webui_url.strip())
+        if validation_public_url.scheme != "https" or not validation_public_url.netloc:
+            errors.append("browser_review_validation_public_webui_url_invalid")
     add_if(
         not (
             isinstance(evidence_sha256, str)

@@ -356,7 +356,9 @@
   复核证据关闭 release gate。
 - browser review evidence verifier 已输出 evidence JSON SHA-256 和本地 artifact
   SHA-256；release readiness 聚合报告新增 `browser_review_validation`，保留
-  verifier 的结构化校验摘要，避免生产发布记录只留下可变 evidence 路径。
+  `reviewer`、`reviewed_at`、`public_webui_url`、evidence digest 和本地 artifact
+  digest，确保发布报告自身能说明谁在何时复核了哪个 Open WebUI 公网入口，而不只
+  保存可变证据路径。
 - release readiness 聚合逻辑现在要求 browser review gate 成功时必须解析出
   `browser_review_validation`；如果 gate 退出 0 但没有 validation 摘要，会记为
   `openwebui_browser_review_validation`；live release 模式下作为必过失败，
