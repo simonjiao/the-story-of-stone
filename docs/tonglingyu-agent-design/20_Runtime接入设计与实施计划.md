@@ -315,7 +315,7 @@ events，会 fallback 到 cached completion stream。
 content/tool execution，并通过 required tool result、output_ref、summary 和
 audit gate fail-closed；但事实源、证据包和最终 reviewer 裁决仍由
 `tonglingyu-runtime` 本地治理强制约束。R5D 的剩余发布 blocker 是目标环境
-Open WebUI 单入口 live gate 和页面侧复测，而不是继续把 Gateway 做厚。
+Open WebUI browser-side 单入口复测与人工 ACK，而不是继续把 Gateway 做厚。
 
 ### R5C 四 Profile 编排
 
