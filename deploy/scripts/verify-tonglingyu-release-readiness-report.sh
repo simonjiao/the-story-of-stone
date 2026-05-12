@@ -5,6 +5,7 @@ REPORT_PATH="${1:-${TONGLINGYU_RELEASE_REPORT_PATH:-}}"
 
 python3 - "${REPORT_PATH}" <<'PY'
 import json
+import hashlib
 import os
 import sys
 from datetime import datetime, timezone
@@ -155,6 +156,21 @@ def is_sha256(value):
         and len(value) == 64
         and all(char in hex_digits for char in value.lower())
     )
+
+
+def resolve_artifact_path(value):
+    artifact_path = Path(value)
+    if artifact_path.is_absolute():
+        return artifact_path
+    return path.parent / artifact_path
+
+
+def file_sha256(file_path):
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def secret_value_paths(value, prefix="$"):
@@ -647,6 +663,16 @@ if isinstance(browser_review_validation, dict):
         not is_sha256(evidence_sha256),
         "browser_review_validation_evidence_sha256_invalid",
     )
+    if nonempty(browser_review_evidence):
+        resolved_evidence_path = resolve_artifact_path(browser_review_evidence)
+        if not resolved_evidence_path.is_file():
+            errors.append("browser_review_evidence_file_not_found")
+        elif is_sha256(evidence_sha256):
+            actual_evidence_sha256 = file_sha256(resolved_evidence_path)
+            add_if(
+                actual_evidence_sha256 != evidence_sha256,
+                "browser_review_evidence_sha256_mismatch",
+            )
     add_if(
         not isinstance(checked_items, list),
         "browser_review_validation_checked_items_must_be_array",

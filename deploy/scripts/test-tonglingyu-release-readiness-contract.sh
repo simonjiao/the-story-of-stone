@@ -30,6 +30,7 @@ TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 TAMPERED_BROWSER_CHECKED_ITEMS_REPORT="${WORK_DIR}/tampered-browser-checked-items-report.json"
+TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-hash-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 mkdir -p "${WORK_DIR}/screenshots"
@@ -821,6 +822,31 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_browser_checked_items_stdout}" \
   '"browser_review_validation_unexpected_checked_item=phantom_browser_check" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BROWSER_EVIDENCE_HASH_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+validation = dict(report["browser_review_validation"])
+validation["evidence_sha256"] = "0" * 64
+report["browser_review_validation"] = validation
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_browser_review":
+        gate["stdout_tail"] = [json.dumps(validation, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_evidence_hash_stdout="${WORK_DIR}/tampered-browser-evidence-hash.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_EVIDENCE_HASH_REPORT}" >"${tampered_browser_evidence_hash_stdout}"; then
+  echo "saved browser validation must match the evidence file digest" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_evidence_hash_stdout}" \
+  '"browser_review_evidence_sha256_mismatch" in report["errors"]'
 
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \

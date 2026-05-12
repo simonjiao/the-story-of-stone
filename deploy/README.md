@@ -443,7 +443,8 @@ report itself identifies who reviewed which public Open WebUI entrypoint and
 when. Saved release report validation rechecks that
 `checked_items` is the exact required browser review set, that
 `validated_evidence_refs` covers those items, that each ref uses an allowed
-kind, and that local-file refs keep their SHA-256 digest.
+kind, that local-file refs keep their SHA-256 digest, and that the referenced
+browser evidence JSON file still hashes to the recorded evidence SHA-256.
 If the browser review gate exits successfully but does not emit this validation
 object, release readiness records `openwebui_browser_review_validation` as a
 required failure in live release mode, and as an optional failure in non-live

@@ -365,8 +365,10 @@
 - Saved release report validator 现在会重新校验
   `browser_review_validation.checked_items` 和 `validated_evidence_refs`：
   browser review item 必须是 exact required set，四项都必须有 ref，ref kind
-  必须合法，本地文件 ref 必须带 64 位 SHA-256，避免 production-ready artifact
-  用额外检查名、空 refs 或不可复核的 evidence 摘要通过。
+  必须合法，本地文件 ref 必须带 64 位 SHA-256，且 `browser_review_evidence`
+  指向的 JSON 必须与 `browser_review_validation.evidence_sha256` 匹配，避免
+  production-ready artifact 用额外检查名、空 refs、假 digest 或不可复核的
+  evidence 摘要通过。
 - release readiness 聚合逻辑现在要求 browser review gate 成功时必须解析出
   `browser_review_validation`；如果 gate 退出 0 但没有 validation 摘要，会记为
   `openwebui_browser_review_validation`；live release 模式下作为必过失败，
