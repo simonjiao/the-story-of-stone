@@ -359,6 +359,10 @@
   `reviewer`、`reviewed_at`、`public_webui_url`、evidence digest 和本地 artifact
   digest，确保发布报告自身能说明谁在何时复核了哪个 Open WebUI 公网入口，而不只
   保存可变证据路径。
+- Saved release report validator 现在会重新校验
+  `browser_review_validation.validated_evidence_refs`：四个 browser review item
+  必须都有 ref，ref kind 必须合法，本地文件 ref 必须带 64 位 SHA-256，避免
+  production-ready artifact 用空 refs 或不可复核的 evidence 摘要通过。
 - release readiness 聚合逻辑现在要求 browser review gate 成功时必须解析出
   `browser_review_validation`；如果 gate 退出 0 但没有 validation 摘要，会记为
   `openwebui_browser_review_validation`；live release 模式下作为必过失败，

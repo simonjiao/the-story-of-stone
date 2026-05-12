@@ -146,6 +146,18 @@ local_refs = [
     item for item in report.get("validated_evidence_refs", [])
     if item.get("kind") == "local_file"
 ]
+validated_ref_checks = {
+    item.get("check")
+    for item in report.get("validated_evidence_refs", [])
+}
+expected_ref_checks = {
+    "ordinary_user_model_visibility",
+    "streaming_chat_ux",
+    "admin_audit_visibility",
+    "persisted_provider_settings",
+}
+if validated_ref_checks != expected_ref_checks:
+    raise SystemExit(report)
 if len(local_refs) != 2:
     raise SystemExit(report)
 if any(len(item.get("sha256", "")) != 64 for item in local_refs):
@@ -751,6 +763,8 @@ assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_evidence_sha256_invalid" in report["errors"]'
 assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_stdout_mismatch" in report["errors"]'
+assert_report "${tampered_browser_validation_stdout}" \
+  '"browser_review_validation_missing_ref=ordinary_user_model_visibility" in report["errors"]'
 assert_report "${tampered_browser_validation_stdout}" \
   '"browser_review_validation_reviewed_at_missing" in report["errors"]'
 assert_report "${tampered_browser_validation_stdout}" \

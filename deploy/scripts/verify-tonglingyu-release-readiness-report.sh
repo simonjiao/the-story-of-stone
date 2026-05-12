@@ -42,6 +42,12 @@ required_browser_review_items = [
     "admin_audit_visibility",
     "persisted_provider_settings",
 ]
+browser_review_allowed_ref_kinds = {
+    "ordinary_user_model_visibility": {"local_file", "url"},
+    "streaming_chat_ux": {"local_file", "url"},
+    "admin_audit_visibility": {"trace", "local_file", "url"},
+    "persisted_provider_settings": {"runbook", "local_file", "url"},
+}
 allowed_report_statuses = {
     "failed",
     "passed",
@@ -140,6 +146,14 @@ def add_mismatch(field, expected, actual):
 
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in hex_digits for char in value.lower())
+    )
 
 
 def secret_value_paths(value, prefix="$"):
@@ -629,11 +643,7 @@ if isinstance(browser_review_validation, dict):
         if validation_public_url.scheme != "https" or not validation_public_url.netloc:
             errors.append("browser_review_validation_public_webui_url_invalid")
     add_if(
-        not (
-            isinstance(evidence_sha256, str)
-            and len(evidence_sha256) == 64
-            and all(char in hex_digits for char in evidence_sha256.lower())
-        ),
+        not is_sha256(evidence_sha256),
         "browser_review_validation_evidence_sha256_invalid",
     )
     add_if(
@@ -650,6 +660,44 @@ if isinstance(browser_review_validation, dict):
         not isinstance(validated_evidence_refs, list),
         "browser_review_validation_refs_must_be_array",
     )
+    if isinstance(validated_evidence_refs, list):
+        seen_ref_checks = set()
+        for index, ref_record in enumerate(validated_evidence_refs):
+            if not isinstance(ref_record, dict):
+                errors.append(f"browser_review_validation_ref_{index}_must_be_object")
+                continue
+            check_name = ref_record.get("check")
+            kind = ref_record.get("kind")
+            ref = ref_record.get("ref")
+            if check_name not in required_browser_review_items:
+                errors.append(f"browser_review_validation_ref_{index}_check_invalid")
+            elif check_name in seen_ref_checks:
+                errors.append(f"browser_review_validation_ref_duplicate={check_name}")
+            else:
+                seen_ref_checks.add(check_name)
+            allowed_kinds = browser_review_allowed_ref_kinds.get(check_name, set())
+            if kind not in allowed_kinds:
+                errors.append(f"browser_review_validation_ref_{index}_kind_invalid")
+            if not nonempty(ref):
+                errors.append(f"browser_review_validation_ref_{index}_ref_missing")
+            elif any(char in ref for char in "\r\n\t"):
+                errors.append(f"browser_review_validation_ref_{index}_ref_contains_control_char")
+            sha256 = ref_record.get("sha256")
+            if kind == "local_file":
+                add_if(
+                    not is_sha256(sha256),
+                    f"browser_review_validation_ref_{index}_sha256_invalid",
+                )
+            elif sha256 is not None:
+                add_if(
+                    not is_sha256(sha256),
+                    f"browser_review_validation_ref_{index}_sha256_invalid",
+                )
+        for item in required_browser_review_items:
+            add_if(
+                item not in seen_ref_checks,
+                f"browser_review_validation_missing_ref={item}",
+            )
 elif browser_review_validation is not None:
     errors.append("browser_review_validation_must_be_object")
 
