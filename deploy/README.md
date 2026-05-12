@@ -277,6 +277,9 @@ The probe runs from the deployed model-provider container when possible
 (`sub2api`, then `hermes-agent`) and reports only host names, DNS classes,
 HTTP/TLS status, and curl error summaries. It is intended to catch fake-IP DNS
 or TLS reset issues before they collapse into a generic Gateway `500`.
+Each URL is probed up to three times by default so transient TLS resets do not
+turn into a false release blocker; use `MODEL_UPSTREAM_PROBE_ATTEMPTS` and
+`MODEL_UPSTREAM_PROBE_RETRY_DELAY_SECONDS` to tune the bounded retry window.
 Override `MODEL_UPSTREAM_PROBE_URLS` if the target model provider is not the
 default ChatGPT/OpenAI-compatible upstream.
 
@@ -416,6 +419,11 @@ TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
   ./openwebui-browser-review.json
 ```
 <!-- markdownlint-enable MD013 -->
+
+Before recording, the same environment block can be checked without writing the
+evidence file by adding `--preflight` before the output path. The preflight
+prints only required-variable presence, overwrite safety, and the selected URL
+source; it does not print configured values.
 
 The helper writes the evidence file and immediately runs the verifier. It
 refuses to overwrite an existing file unless

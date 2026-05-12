@@ -344,7 +344,8 @@
 - 已新增 `record-openwebui-browser-review-evidence.sh`，人工页面复核完成后用
   env 填入 reviewer、公网 URL、四项 evidence ref 和 provider 设置匹配确认，
   由脚本生成 evidence JSON 并立即运行 verifier；脚本要求显式 ACK 且默认不
-  覆盖已有证据文件，减少手写 JSON 造成的发布误判。
+  覆盖已有证据文件，并支持 `--preflight` 在不写证据文件的情况下检查必填输入和
+  覆盖安全，减少手写 JSON 或人工交接遗漏造成的发布误判。
 - browser review evidence verifier 已继续收紧 evidence ref：截图/本地文件
   ref 必须能在证据目录或
   `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` 下找到，admin audit ref 需绑定
@@ -449,7 +450,8 @@
 - 已新增 `deploy/scripts/verify-model-upstream-network.sh`，release readiness
   live mode 会在 strict Gateway 之前运行该 gate；它从 `sub2api`/Hermes 容器内
   检查模型上游 DNS、198.18.0.0/15 fake-IP 和 TLS 握手状态，只输出 host、
-  DNS class、HTTP/TLS 状态和错误摘要，不输出 credential。
+  DNS class、HTTP/TLS 状态和错误摘要，不输出 credential；每个 URL 默认最多
+  探测 3 次，降低瞬时 TLS reset 造成的假 release blocker。
 - 远端 `hhost` 当前 model upstream gate 通过；`chatgpt.com` 仍可能解析到
   198.18.0.0/15 fake-IP，但 TLS/HTTP 可观测，因此该 gate 会作为网络层早期
   诊断，而不是替代 strict Gateway 的端到端契约。
@@ -476,7 +478,7 @@
 ## 下一步
 
 1. 用真实 Open WebUI 账号做页面侧人工点击复核，并通过
-   `record-openwebui-browser-review-evidence.sh` 生成
+   `record-openwebui-browser-review-evidence.sh --preflight` 先检查必填输入，再生成
    `openwebui-browser-review.json`，确认普通用户模型可见性、streaming 体验、
    管理员审计入口和持久化 provider 设置都逐项带证据 ref。
 2. 在目标环境设置 browser review ACK、release ref 和 evidence path 后运行

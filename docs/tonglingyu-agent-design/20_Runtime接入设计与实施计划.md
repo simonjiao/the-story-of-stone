@@ -476,7 +476,8 @@ Open WebUI browser-side 单入口复测与人工 ACK，而不是继续把 Gatewa
 - [x] 增加 `record-openwebui-browser-review-evidence.sh`，在人工页面复核后
   由必填 env 生成 evidence JSON 并立即调用 verifier；脚本要求显式 ACK、
   release ref、reviewer、公网 URL、四项 evidence ref 和 provider 设置匹配
-  确认，拒绝默认覆盖已有证据文件，避免最后一步继续依赖手写 JSON。
+  确认，拒绝默认覆盖已有证据文件，并支持 `--preflight` 在不写证据文件的情况下
+  检查必填输入和覆盖安全，避免最后一步继续依赖手写 JSON 或人工交接遗漏。
 - [x] browser review evidence verifier 要求 evidence ref 结构化：普通用户模型
   可见性和 streaming UX 的截图/文件 ref 必须能在证据目录下找到，admin audit
   ref 必须绑定 `trace:tly-...`、文件或 HTTPS 链接，provider 设置复核必须绑定
@@ -546,7 +547,8 @@ Open WebUI browser-side 单入口复测与人工 ACK，而不是继续把 Gatewa
   DB installer 更新；对应 verify gate 均通过。
 - [x] release readiness live mode 已加入 `model_upstream_network` gate，
   在 strict Gateway 之前从 `sub2api`/Hermes 容器内探测模型上游 DNS、fake-IP
-  和 TLS 握手状态，避免把上游不可达折叠成普通 Gateway `500`。
+  和 TLS 握手状态，并对每个 URL 做有界重试，避免把上游不可达或瞬时 TLS
+  reset 折叠成普通 Gateway `500` 或单次抖动造成的假 release blocker。
 - [x] Runtime Agent 工具执行契约已从“等待模型自发 tool call”收敛为
   host-enforced 只读工具观察：Hermes 未返回必需 tool result 时，通灵玉 Runtime
   使用已执行的确定性本地 step 输出补齐绑定 trace/evidence/package 的

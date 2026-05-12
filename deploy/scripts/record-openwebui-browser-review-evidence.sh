@@ -9,7 +9,7 @@ load_optional_deploy_env_file
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   cat <<'EOF'
-usage: record-openwebui-browser-review-evidence.sh [output-json]
+usage: record-openwebui-browser-review-evidence.sh [--preflight] [output-json]
 
 Records a passed Open WebUI browser-side release review after the human review
 has completed. Required environment:
@@ -32,6 +32,9 @@ Optional:
   TONGLINGYU_BROWSER_REVIEW_MAX_AGE_HOURS, default 24
   TONGLINGYU_BROWSER_REVIEW_EVIDENCE_OVERWRITE=true
 
+Use --preflight to validate required inputs and overwrite safety without writing
+the evidence JSON or printing secret values.
+
 Local screenshot/file evidence refs must exist under the evidence JSON
 directory, or under TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT when it is set.
 The public URL in the evidence must match TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL.
@@ -39,28 +42,35 @@ EOF
   exit 0
 fi
 
+MODE="record"
+if [[ "${1:-}" == "--preflight" ]]; then
+  MODE="preflight"
+  shift
+fi
+
 OUTPUT_PATH="${1:-${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-openwebui-browser-review.json}}"
 
-python3 - "${OUTPUT_PATH}" <<'PY'
+python3 - "${MODE}" "${OUTPUT_PATH}" <<'PY'
 import json
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-output_path = Path(sys.argv[1])
+mode = sys.argv[1]
+output_path = Path(sys.argv[2])
 
 
 def is_true(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def env_first(*names: str) -> str:
+def env_first_with_name(*names: str) -> tuple[str, str]:
     for name in names:
         value = os.environ.get(name, "").strip()
         if value:
-            return value
-    return ""
+            return name, value
+    return "", ""
 
 
 def required(name: str, errors: list[str]) -> str:
@@ -76,7 +86,7 @@ if not is_true(os.environ.get("TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW")
 
 review_ref = required("TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF", errors)
 reviewer = required("TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER", errors)
-public_url = env_first(
+public_url_source, public_url = env_first_with_name(
     "TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL",
     "PUBLIC_WEBUI_URL",
     "OPEN_WEBUI_BASE_URL",
@@ -107,12 +117,51 @@ if output_path.exists() and not is_true(
 ):
     errors.append("output_path_exists_set_TONGLINGYU_BROWSER_REVIEW_EVIDENCE_OVERWRITE")
 
+required_env_present = {
+    "TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW": is_true(
+        os.environ.get("TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW")
+    ),
+    "TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF": bool(review_ref),
+    "TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER": bool(reviewer),
+    "TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL": bool(public_url),
+    "TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF": bool(
+        ordinary_ref
+    ),
+    "TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF": bool(streaming_ref),
+    "TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF": bool(admin_ref),
+    "TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF": bool(provider_ref),
+    "TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED": is_true(
+        os.environ.get("TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED")
+    ),
+}
+
+if mode == "preflight":
+    print(
+        json.dumps(
+            {
+                "object": "tonglingyu.openwebui_browser_review_record_preflight",
+                "status": "failed" if errors else "ok",
+                "mode": mode,
+                "evidence_path": str(output_path),
+                "public_url_source": public_url_source,
+                "required_env_present": required_env_present,
+                "will_write": False,
+                "errors": errors,
+                "secret_values_printed": False,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(1 if errors else 0)
+
 if errors:
     print(
         json.dumps(
             {
                 "object": "tonglingyu.openwebui_browser_review_record",
                 "status": "failed",
+                "mode": mode,
                 "evidence_path": str(output_path),
                 "errors": errors,
                 "secret_values_printed": False,
@@ -158,4 +207,6 @@ output_path.write_text(
 )
 PY
 
-"${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" "${OUTPUT_PATH}"
+if [[ "${MODE}" == "record" ]]; then
+  "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" "${OUTPUT_PATH}"
+fi

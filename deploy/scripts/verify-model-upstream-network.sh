@@ -14,7 +14,10 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from urllib.parse import urlparse
+
+docker_binary = os.environ.get("MODEL_UPSTREAM_PROBE_DOCKER_BIN", "docker").strip() or "docker"
 
 
 def run(command: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -31,7 +34,7 @@ def run(command: list[str], timeout: int = 30) -> subprocess.CompletedProcess[st
 def docker_container_exists(name: str) -> bool:
     result = run(
         [
-            "docker",
+            docker_binary,
             "ps",
             "--filter",
             f"name=^{name}$",
@@ -75,14 +78,52 @@ def parse_probe_urls() -> list[str]:
     return [item for item in shlex.split(raw) if item]
 
 
+def parse_int_env(name: str, default: int, min_value: int, max_value: int, errors: list[str]) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        errors.append(f"invalid_{name}")
+        return default
+    if value < min_value or value > max_value:
+        errors.append(f"invalid_{name}")
+        return default
+    return value
+
+
+def parse_float_env(name: str, default: float, min_value: float, max_value: float, errors: list[str]) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        errors.append(f"invalid_{name}")
+        return default
+    if value < min_value or value > max_value:
+        errors.append(f"invalid_{name}")
+        return default
+    return value
+
+
 def exec_in_container(container: str, script: str, timeout: int = 35) -> subprocess.CompletedProcess[str]:
-    return run(["docker", "exec", container, "sh", "-lc", script], timeout=timeout)
+    return run([docker_binary, "exec", container, "sh", "-lc", script], timeout=timeout)
 
 
 container = choose_container()
 probe_urls = parse_probe_urls()
 errors: list[str] = []
 probes = []
+max_attempts = parse_int_env("MODEL_UPSTREAM_PROBE_ATTEMPTS", 3, 1, 5, errors)
+retry_delay_seconds = parse_float_env(
+    "MODEL_UPSTREAM_PROBE_RETRY_DELAY_SECONDS",
+    1.0,
+    0.0,
+    10.0,
+    errors,
+)
 
 if not container:
     errors.append("no_probe_container_found")
@@ -92,46 +133,58 @@ else:
         if not host:
             errors.append(f"invalid_probe_url={url}")
             continue
-        dns_result = exec_in_container(
-            container,
-            f"getent hosts {shlex.quote(host)} | awk '{{print $1}}' | head -5",
-            timeout=10,
-        )
-        ips = [line.strip() for line in dns_result.stdout.splitlines() if line.strip()]
-        ip_classes = [fake_ip_class(ip) for ip in ips]
-        curl_script = (
-            "rm -f /tmp/model-upstream-probe.out; "
-            f"curl -sS -o /tmp/model-upstream-probe.out "
-            "-w 'http=%{http_code} connect=%{time_connect} "
-            f"tls=%{{time_appconnect}} total=%{{time_total}}' {shlex.quote(url)}"
-        )
-        curl_result = exec_in_container(container, curl_script, timeout=35)
-        metrics = {}
-        for item in curl_result.stdout.strip().split():
-            if "=" in item:
-                key, value = item.split("=", 1)
-                metrics[key] = value
-        http_status = metrics.get("http", "000")
-        tls_seconds = float(metrics.get("tls") or 0)
-        curl_ok = curl_result.returncode == 0 and http_status != "000" and tls_seconds > 0
-        probe = {
-            "url_host": host,
-            "container": container,
-            "dns_ips": ips,
-            "dns_ip_classes": ip_classes,
-            "curl_exit": curl_result.returncode,
-            "http_status": http_status,
-            "tls_handshake_observed": tls_seconds > 0,
-            "connect_seconds": metrics.get("connect", ""),
-            "tls_seconds": metrics.get("tls", ""),
-            "total_seconds": metrics.get("total", ""),
-            "status": "ok" if curl_ok else "failed",
-        }
-        if curl_result.stderr.strip():
-            probe["curl_error"] = curl_result.stderr.strip().splitlines()[-1][:240]
-        if "benchmark_fake_ip" in ip_classes:
-            probe["dns_warning"] = "host resolves to 198.18.0.0/15 fake-IP range"
-        if not curl_ok:
+        attempts = []
+        probe = {}
+        for attempt in range(1, max_attempts + 1):
+            dns_result = exec_in_container(
+                container,
+                f"getent hosts {shlex.quote(host)} | awk '{{print $1}}' | head -5",
+                timeout=10,
+            )
+            ips = [line.strip() for line in dns_result.stdout.splitlines() if line.strip()]
+            ip_classes = [fake_ip_class(ip) for ip in ips]
+            curl_script = (
+                "rm -f /tmp/model-upstream-probe.out; "
+                f"curl -sS -o /tmp/model-upstream-probe.out "
+                "-w 'http=%{http_code} connect=%{time_connect} "
+                f"tls=%{{time_appconnect}} total=%{{time_total}}' {shlex.quote(url)}"
+            )
+            curl_result = exec_in_container(container, curl_script, timeout=35)
+            metrics = {}
+            for item in curl_result.stdout.strip().split():
+                if "=" in item:
+                    key, value = item.split("=", 1)
+                    metrics[key] = value
+            http_status = metrics.get("http", "000")
+            tls_seconds = float(metrics.get("tls") or 0)
+            curl_ok = curl_result.returncode == 0 and http_status != "000" and tls_seconds > 0
+            attempt_probe = {
+                "attempt": attempt,
+                "url_host": host,
+                "container": container,
+                "dns_ips": ips,
+                "dns_ip_classes": ip_classes,
+                "curl_exit": curl_result.returncode,
+                "http_status": http_status,
+                "tls_handshake_observed": tls_seconds > 0,
+                "connect_seconds": metrics.get("connect", ""),
+                "tls_seconds": metrics.get("tls", ""),
+                "total_seconds": metrics.get("total", ""),
+                "status": "ok" if curl_ok else "failed",
+            }
+            if curl_result.stderr.strip():
+                attempt_probe["curl_error"] = curl_result.stderr.strip().splitlines()[-1][:240]
+            if "benchmark_fake_ip" in ip_classes:
+                attempt_probe["dns_warning"] = "host resolves to 198.18.0.0/15 fake-IP range"
+            attempts.append(attempt_probe)
+            probe = dict(attempt_probe)
+            if curl_ok:
+                break
+            if attempt < max_attempts and retry_delay_seconds > 0:
+                time.sleep(retry_delay_seconds)
+        probe["attempt_count"] = len(attempts)
+        probe["attempts"] = attempts
+        if probe.get("status") != "ok":
             errors.append(f"probe_failed={host}")
         probes.append(probe)
 
@@ -140,6 +193,8 @@ report = {
     "object": "tonglingyu.model_upstream_network_gate",
     "probe_container": container,
     "probe_count": len(probes),
+    "max_attempts": max_attempts,
+    "retry_delay_seconds": retry_delay_seconds,
     "probes": probes,
     "errors": errors,
     "secret_values_printed": False,

@@ -8,12 +8,15 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_NO_VALIDATION_CMD="${WORK_DIR}/browser-gate-no-validation.sh"
+MODEL_UPSTREAM_FAKE_DOCKER="${WORK_DIR}/model-upstream-fake-docker.sh"
+MODEL_UPSTREAM_FAKE_COUNTER="${WORK_DIR}/model-upstream-fake-counter"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
 MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
 EXTRA_CHECK_EVIDENCE_JSON="${WORK_DIR}/extra-check-browser-review-evidence.json"
 STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
+BROWSER_PREFLIGHT_EVIDENCE_JSON="${WORK_DIR}/preflight-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
 TAMPERED_DERIVED_REPORT="${WORK_DIR}/tampered-derived-report.json"
 TAMPERED_EXIT_POLICY_REPORT="${WORK_DIR}/tampered-exit-policy-report.json"
@@ -61,6 +64,42 @@ set -euo pipefail
 echo '{"status":"ok","source":"mock-browser-without-validation"}'
 SH
 chmod +x "${BROWSER_NO_VALIDATION_CMD}"
+
+cat >"${MODEL_UPSTREAM_FAKE_DOCKER}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "ps" ]]; then
+  echo "sub2api"
+  exit 0
+fi
+
+if [[ "${1:-}" == "exec" ]]; then
+  script="${*: -1}"
+  if [[ "${script}" == getent\ hosts* ]]; then
+    echo "203.0.113.10"
+    exit 0
+  fi
+  : "${MODEL_UPSTREAM_FAKE_COUNTER:?}"
+  count=0
+  if [[ -f "${MODEL_UPSTREAM_FAKE_COUNTER}" ]]; then
+    read -r count <"${MODEL_UPSTREAM_FAKE_COUNTER}"
+  fi
+  count=$((count + 1))
+  echo "${count}" >"${MODEL_UPSTREAM_FAKE_COUNTER}"
+  if [[ "${count}" -eq 1 ]]; then
+    echo "http=000 connect=0.010 tls=0.000 total=0.020"
+    echo "curl: (35) TLS connect error" >&2
+    exit 35
+  fi
+  echo "http=401 connect=0.011 tls=0.200 total=0.300"
+  exit 0
+fi
+
+echo "unexpected fake docker invocation: $*" >&2
+exit 127
+SH
+chmod +x "${MODEL_UPSTREAM_FAKE_DOCKER}"
 
 cat >"${BROWSER_EVIDENCE_JSON}" <<JSON
 {
@@ -127,6 +166,22 @@ if ! grep -q "Production release readiness cannot be proven" "${override_guard_s
   echo "override guard did not explain production readiness boundary" >&2
   exit 1
 fi
+
+model_upstream_retry_stdout="${WORK_DIR}/model-upstream-retry.stdout"
+env \
+  MODEL_UPSTREAM_PROBE_DOCKER_BIN="${MODEL_UPSTREAM_FAKE_DOCKER}" \
+  MODEL_UPSTREAM_FAKE_COUNTER="${MODEL_UPSTREAM_FAKE_COUNTER}" \
+  MODEL_UPSTREAM_PROBE_ATTEMPTS=2 \
+  MODEL_UPSTREAM_PROBE_RETRY_DELAY_SECONDS=0 \
+  MODEL_UPSTREAM_PROBE_URLS=https://api.openai.test/v1/models \
+  "${SCRIPT_DIR}/verify-model-upstream-network.sh" >"${model_upstream_retry_stdout}"
+assert_report "${model_upstream_retry_stdout}" 'report["status"] == "ok"'
+assert_report "${model_upstream_retry_stdout}" 'report["max_attempts"] == 2'
+assert_report "${model_upstream_retry_stdout}" 'report["probes"][0]["attempt_count"] == 2'
+assert_report "${model_upstream_retry_stdout}" \
+  'report["probes"][0]["attempts"][0]["status"] == "failed"'
+assert_report "${model_upstream_retry_stdout}" \
+  'report["probes"][0]["attempts"][1]["status"] == "ok"'
 
 browser_evidence_stdout="${WORK_DIR}/browser-evidence.stdout"
 "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
@@ -292,6 +347,52 @@ if env \
 fi
 assert_report "${browser_record_missing_ack_stdout}" \
   '"browser_review_ack_must_be_true" in report["errors"]'
+
+browser_preflight_missing_ack_stdout="${WORK_DIR}/browser-preflight-missing-ack.stdout"
+if env \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER=release-reviewer \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
+  TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF=screenshots/models.png \
+  TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF=screenshots/streaming.png \
+  TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF=trace:tly-123 \
+  TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF=runbook:provider-settings \
+  TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
+  "${SCRIPT_DIR}/record-openwebui-browser-review-evidence.sh" \
+  --preflight "${BROWSER_PREFLIGHT_EVIDENCE_JSON}" >"${browser_preflight_missing_ack_stdout}"; then
+  echo "browser review evidence recorder preflight must require explicit ACK" >&2
+  exit 1
+fi
+assert_report "${browser_preflight_missing_ack_stdout}" \
+  'report["object"] == "tonglingyu.openwebui_browser_review_record_preflight"'
+assert_report "${browser_preflight_missing_ack_stdout}" \
+  '"browser_review_ack_must_be_true" in report["errors"]'
+assert_report "${browser_preflight_missing_ack_stdout}" \
+  'report["will_write"] is False'
+
+browser_preflight_stdout="${WORK_DIR}/browser-preflight.stdout"
+env \
+  TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEWER=release-reviewer \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
+  TONGLINGYU_BROWSER_REVIEW_ORDINARY_USER_MODEL_VISIBILITY_REF=screenshots/models.png \
+  TONGLINGYU_BROWSER_REVIEW_STREAMING_CHAT_UX_REF=screenshots/streaming.png \
+  TONGLINGYU_BROWSER_REVIEW_ADMIN_AUDIT_VISIBILITY_REF=trace:tly-123 \
+  TONGLINGYU_BROWSER_REVIEW_PERSISTED_PROVIDER_SETTINGS_REF=runbook:provider-settings \
+  TONGLINGYU_RELEASE_OPENWEBUI_PROVIDER_SETTINGS_MATCHED=true \
+  "${SCRIPT_DIR}/record-openwebui-browser-review-evidence.sh" \
+  --preflight "${BROWSER_PREFLIGHT_EVIDENCE_JSON}" >"${browser_preflight_stdout}"
+assert_report "${browser_preflight_stdout}" 'report["status"] == "ok"'
+assert_report "${browser_preflight_stdout}" 'report["will_write"] is False'
+assert_report "${browser_preflight_stdout}" \
+  'report["required_env_present"]["TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW"] is True'
+assert_report "${browser_preflight_stdout}" \
+  'report["public_url_source"] == "TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL"'
+if [[ -e "${BROWSER_PREFLIGHT_EVIDENCE_JSON}" ]]; then
+  echo "browser review evidence recorder preflight must not write evidence JSON" >&2
+  exit 1
+fi
 
 browser_record_stdout="${WORK_DIR}/browser-record.stdout"
 env \
