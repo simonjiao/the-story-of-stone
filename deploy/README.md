@@ -331,7 +331,8 @@ Saved reports can be checked for schema and production-ready invariants:
 The saved-report verifier also checks that a `production_release_ready=true`
 report was not generated in summary-only mode and that
 `browser_review_validation` is the successful browser evidence verifier output
-for the same review ref, evidence path, checked items, and evidence SHA-256.
+for the same review ref, absolute evidence path, checked items, and evidence
+SHA-256.
 It recomputes derived fields such as `status`, `required_failures`,
 `skipped_live_gates`, `release_blockers`, `remaining_manual_checks`,
 `release_conditions_met`, `production_release_ready`, and `exit_policy` from
@@ -447,7 +448,7 @@ report itself identifies who reviewed which public Open WebUI entrypoint and
 when. Saved release report validation rechecks that
 any report carrying `browser_review_validation` also keeps top-level
 `browser_review_ref` and `browser_review_evidence`, that `checked_items` is the
-exact required browser review set, that
+exact required browser review set, that the evidence path remains absolute, that
 `validated_evidence_refs` covers those items, that each ref uses an allowed
 kind, that local-file refs keep their SHA-256 digest, and that the referenced
 browser evidence JSON file still hashes to the recorded evidence SHA-256. For

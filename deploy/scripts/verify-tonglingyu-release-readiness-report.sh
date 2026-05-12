@@ -671,6 +671,16 @@ if isinstance(browser_review_validation, dict):
         "browser_review_validation_evidence_path_mismatch",
     )
     add_if(
+        nonempty(browser_review_evidence)
+        and not Path(browser_review_evidence).is_absolute(),
+        "browser_review_evidence_path_must_be_absolute",
+    )
+    add_if(
+        nonempty(browser_review_validation.get("evidence_path"))
+        and not Path(browser_review_validation.get("evidence_path")).is_absolute(),
+        "browser_review_validation_evidence_path_must_be_absolute",
+    )
+    add_if(
         not nonempty(validation_reviewer),
         "browser_review_validation_reviewer_missing",
     )

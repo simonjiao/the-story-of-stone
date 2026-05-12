@@ -30,6 +30,7 @@ TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
 TAMPERED_BROWSER_POINTERS_REPORT="${WORK_DIR}/tampered-browser-pointers-report.json"
+TAMPERED_BROWSER_RELATIVE_EVIDENCE_REPORT="${WORK_DIR}/tampered-browser-relative-evidence-report.json"
 TAMPERED_BROWSER_CHECKED_ITEMS_REPORT="${WORK_DIR}/tampered-browser-checked-items-report.json"
 TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-hash-report.json"
 TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT="${WORK_DIR}/tampered-browser-local-ref-hash-report.json"
@@ -591,6 +592,7 @@ assert_report "${conditions_report}" 'report["status"] == "passed_with_gate_comm
 assert_report "${conditions_report}" 'report["exit_policy"] == "summary_only"'
 assert_report "${conditions_report}" 'report["browser_review_ref"] == "mock-browser-review"'
 assert_report "${conditions_report}" 'report["browser_review_evidence"].endswith("browser-review-evidence.json")'
+assert_report "${conditions_report}" 'report["browser_review_evidence"].startswith("/")'
 assert_report "${conditions_report}" 'report["browser_review_evidence"] == report["browser_review_validation"]["evidence_path"]'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_review_ref_bound"] is True'
 assert_report "${conditions_report}" 'report["browser_review_validation"]["expected_public_url_bound"] is True'
@@ -623,6 +625,34 @@ assert_report "${tampered_browser_pointers_stdout}" \
   '"browser_review_validation_requires_review_ref" in report["errors"]'
 assert_report "${tampered_browser_pointers_stdout}" \
   '"browser_review_validation_requires_evidence" in report["errors"]'
+
+python3 - "${conditions_report}" "${TAMPERED_BROWSER_RELATIVE_EVIDENCE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+validation = dict(report["browser_review_validation"])
+validation["evidence_path"] = "browser-review-evidence.json"
+report["browser_review_evidence"] = "browser-review-evidence.json"
+report["browser_review_validation"] = validation
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_browser_review":
+        gate["stdout_tail"] = [json.dumps(validation, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_browser_relative_evidence_stdout="${WORK_DIR}/tampered-browser-relative-evidence.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BROWSER_RELATIVE_EVIDENCE_REPORT}" >"${tampered_browser_relative_evidence_stdout}"; then
+  echo "saved browser validation must reject relative evidence paths" >&2
+  exit 1
+fi
+assert_report "${tampered_browser_relative_evidence_stdout}" \
+  '"browser_review_evidence_path_must_be_absolute" in report["errors"]'
+assert_report "${tampered_browser_relative_evidence_stdout}" \
+  '"browser_review_validation_evidence_path_must_be_absolute" in report["errors"]'
 
 python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" <<'PY'
 import json
