@@ -426,6 +426,10 @@ Screenshot or local-file refs must be relative paths under the evidence JSON
 directory. Set `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` when the artifacts live
 in a separate directory. Admin audit refs should use `trace:tly-...`, and
 provider-setting refs should use `runbook:...` or a checked file/link.
+The verifier requires the evidence `checks` object to be the exact browser
+review set: ordinary-user model visibility, streaming chat UX, admin audit
+visibility, and persisted provider settings. Unknown checks fail validation so
+manual evidence cannot imply extra undefined release review coverage.
 The verifier also rejects stale browser evidence older than
 `TONGLINGYU_BROWSER_REVIEW_MAX_AGE_HOURS` (default `24`) and rejects evidence
 whose `public_webui_url` does not match `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL`

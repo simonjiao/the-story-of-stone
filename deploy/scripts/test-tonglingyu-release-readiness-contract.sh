@@ -11,6 +11,7 @@ BROWSER_NO_VALIDATION_CMD="${WORK_DIR}/browser-gate-no-validation.sh"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
 MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
+EXTRA_CHECK_EVIDENCE_JSON="${WORK_DIR}/extra-check-browser-review-evidence.json"
 STALE_BROWSER_EVIDENCE_JSON="${WORK_DIR}/stale-browser-review-evidence.json"
 GENERATED_BROWSER_EVIDENCE_JSON="${WORK_DIR}/generated-browser-review-evidence.json"
 TAMPERED_READY_REPORT="${WORK_DIR}/tampered-ready-report.json"
@@ -216,6 +217,29 @@ if env TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://other.invalid \
 fi
 assert_report "${browser_evidence_public_url_mismatch_stdout}" \
   '"public_webui_url_mismatch" in report["errors"]'
+
+python3 - "${BROWSER_EVIDENCE_JSON}" "${EXTRA_CHECK_EVIDENCE_JSON}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["checks"]["phantom_browser_check"] = {
+    "status": "passed",
+    "evidence_ref": "runbook:phantom",
+}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+browser_evidence_extra_check_stdout="${WORK_DIR}/browser-evidence-extra-check.stdout"
+if "${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh" \
+  "${EXTRA_CHECK_EVIDENCE_JSON}" >"${browser_evidence_extra_check_stdout}"; then
+  echo "browser review evidence must reject non-canonical checks" >&2
+  exit 1
+fi
+assert_report "${browser_evidence_extra_check_stdout}" \
+  '"unexpected_check=phantom_browser_check" in report["errors"]'
 
 python3 - "${BROWSER_EVIDENCE_JSON}" "${STALE_BROWSER_EVIDENCE_JSON}" <<'PY'
 import json

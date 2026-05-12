@@ -35,6 +35,7 @@ required_checks = [
     "admin_audit_visibility",
     "persisted_provider_settings",
 ]
+required_check_set = set(required_checks)
 secret_key_terms = [
     "api_key",
     "api_keys",
@@ -347,6 +348,10 @@ checks = evidence.get("checks") or {}
 if not isinstance(checks, dict):
     errors.append("checks_must_be_object")
     checks = {}
+
+for check_name in checks:
+    if check_name not in required_check_set:
+        errors.append(f"unexpected_check={check_name}")
 
 for check_name in required_checks:
     check = checks.get(check_name)

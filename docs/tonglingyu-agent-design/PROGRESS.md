@@ -350,6 +350,9 @@
   `TONGLINGYU_BROWSER_REVIEW_EVIDENCE_ROOT` 下找到，admin audit ref 需绑定
   `trace:tly-...`、文件或 HTTPS 链接，provider 设置复核需绑定 `runbook:...`、
   文件或 HTTPS 链接。
+- browser review evidence verifier 现在要求 `checks` 是 exact browser review
+  set；未知检查项会失败，避免手写 evidence JSON 塞入未定义检查后暗示额外发布
+  复核已完成。
 - browser review evidence verifier 也会校验发布入口和时间窗口：设置
   `TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL` 后，证据中的 `public_webui_url`
   必须匹配该入口；`reviewed_at` 默认必须在 24 小时内，避免用其他环境或过期
