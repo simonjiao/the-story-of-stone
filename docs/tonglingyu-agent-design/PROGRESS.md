@@ -697,6 +697,11 @@
   retrieval failure / governance task list 响应保留 `schema_version`、`limit`、
   `offset` 和 `next_offset`；saved report validator 会拒绝缺少该 Action 响应契约
   check 的 production-ready report。
+- RQA Milestone K 的本地 contract / release gate 切片已闭合：隐私 schema、
+  API 兼容策略、稳定分页、metrics 低基数、Open WebUI admin Action source/fixture
+  contract 和性能预算 fail-closed gate 均已纳入本地验证。但这仍不是整体
+  production-ready，因为 live Action、目标环境 live/load 性能和 operator handoff
+  证据尚未闭合。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
