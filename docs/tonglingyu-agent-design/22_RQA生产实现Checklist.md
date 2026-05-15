@@ -19,7 +19,7 @@ RetrievalQualityReport
 ## 实施原则
 
 1. 不降低现有 Gateway + Runtime Agent production-ready 入口标准；
-2. 不把召回质量阈值长期停留在“只报告不阻塞”；
+2. 不允许本轮验收停留在“只报告不阻塞”；
 3. 不把 Agent 诊断或用户反馈直接写入事实层；
 4. 不让普通用户响应暴露 RetrievalQualityReport 或 admin trace 内部字段；
 5. 所有新增 schema 采用 additive migration，不重写既有 package/audit 数据；
@@ -31,11 +31,28 @@ RetrievalQualityReport
 | --- | --- |
 | 第一轮范围 | RQA-1 到 RQA-12 均纳入生产闭环 |
 | release gate | 本轮必须支持质量 gate 作为 blocker |
-| 阈值初始值 | 保守默认，后续可配置 |
+| 阈值初始值 | 本轮实现必须内置 production 默认值，并支持配置覆盖 |
 | expected evidence | 有标注的 case 进入 hit@k 分母，无标注 case 仍计普通 eval |
 | failure 表 | 独立 `retrieval_failures` 表 |
 | report 落点 | 完整 report 进入 audit/admin，普通响应只出安全摘要 |
 | 人工状态 | retrieval failure 必须有人工处理状态字段 |
+
+## Production 默认阈值
+
+本轮默认阈值必须先按严格 production gate 实现。后续可以配置覆盖，但覆盖值必须进入
+release report 和 saved report validator，不能只存在于运行环境中。
+
+| 指标 | 默认要求 |
+| --- | --- |
+| quality report coverage | 100% eval case 生成 report |
+| expected_evidence_hit@8 | 有 expected evidence 标注的 case 必须 100% 命中 |
+| required_type_coverage | 100% |
+| exact_term_coverage | 有 protected term 的 case 必须 100% |
+| forbidden_conclusion_avoided | 100% |
+| reviewer_status_matched | 100% |
+| open P0 retrieval failures | 0 |
+| public_response_boundary_passed | 100% |
+| admin_trace_quality_summary | 100% |
 
 ## Milestone A：Runtime 质量报告
 
@@ -137,10 +154,13 @@ RetrievalQualityReport
 - [ ] admin package audit 可看到 quality issue 摘要。
 - [ ] JSON metrics 暴露 retrieval failure count by status/type。
 - [ ] Prometheus 暴露有界指标，不暴露 query 原文和 secret。
+- [ ] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
+- [ ] retrieval failure 人工状态更新写入 audit event。
+- [ ] 普通用户不能读取或更新 retrieval failure。
 - [ ] 普通 chat response 不暴露完整 quality report 或 failure 内部字段。
 - [ ] streaming response 同样不泄露内部字段。
 - [ ] strict Gateway gate 增加 admin trace quality summary 校验。
-- [ ] 单测覆盖 admin 可见、普通响应不可见。
+- [ ] 单测覆盖 admin 可见、admin update、普通响应不可见、普通用户不可更新。
 
 节点总结：
 
@@ -159,11 +179,14 @@ RetrievalQualityReport
 - [ ] gate 校验 forbidden_conclusion_avoided。
 - [ ] gate 校验 reviewer_status_matched。
 - [ ] gate 校验 open P0 retrieval failures 为 0。
-- [ ] gate 支持阈值配置，但默认值保守。
+- [ ] gate 校验 quality report coverage 为 100%。
+- [ ] gate 支持阈值配置，默认值采用本文 Production 默认阈值。
+- [ ] gate report 记录实际阈值来源和有效阈值。
+- [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
 - [ ] release readiness report 包含 quality gate record。
 - [ ] production-ready 时 quality gate 必须 passed。
-- [ ] contract smoke 覆盖 passed、threshold failed、open P0 failure。
+- [ ] contract smoke 覆盖 passed、threshold failed、open P0 failure、missing report。
 
 节点总结：
 
@@ -180,6 +203,7 @@ RetrievalQualityReport
 - [ ] validator 校验 production-ready report 必须 quality gate passed。
 - [ ] validator 校验 quality gate stdout JSON schema。
 - [ ] validator 校验 threshold / blocker / ready flag 不漂移。
+- [ ] validator 校验 effective thresholds 与 report 中 gate 输出一致。
 - [ ] validator 继续扫描 secret-like values。
 - [ ] contract smoke 覆盖删除 gate、篡改 passed、篡改 ready flag。
 
@@ -201,7 +225,9 @@ RetrievalQualityReport
 <!-- markdownlint-enable MD013 -->
 - [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 - [ ] `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
+- [ ] `deploy/scripts/verify-tonglingyu-release-readiness.sh`
 - [ ] `deploy/scripts/verify-tonglingyu-release-readiness-report.sh` fixture path
+- [ ] production-ready report 不允许依赖 mock gate command override。
 - [ ] `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 节点总结：
