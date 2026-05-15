@@ -28,13 +28,13 @@ use tonglingyu_runtime::{
     KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
     KnowledgeGovernanceTaskUpdateInput, KnowledgePatchProposalCreateInput,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
-    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
-    RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
-    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
+    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
     RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, append_runtime_audit_event, execute_agent_runtime_plan_gate,
-    package_json,
+    TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
+    execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -1258,36 +1258,240 @@ fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("runtime prune report missing cutoff"))?
         .to_string();
-    let gateway_counts = json!({
-        "gateway_messages": count_where(&conn, "gateway_messages", "created_at < ?1", &cutoff)?,
-        "workflow_states": count_where(&conn, "workflow_states", "created_at < ?1", &cutoff)?,
-    });
-    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
-        counts.insert(
-            "gateway_messages".to_string(),
-            gateway_counts["gateway_messages"].clone(),
-        );
-        counts.insert(
-            "workflow_states".to_string(),
-            gateway_counts["workflow_states"].clone(),
-        );
-    }
     if dry_run {
+        let plan = build_gateway_prune_plan(&conn, &cutoff)?;
+        merge_gateway_prune_counts(&mut report, &plan, 0);
         return Ok(report);
     }
-    conn.execute(
-        "DELETE FROM gateway_messages WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
-        "DELETE FROM workflow_states WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
-        "DELETE FROM gateway_sessions WHERE updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM gateway_messages WHERE gateway_messages.session_id = gateway_sessions.session_id)",
-        params![&cutoff],
-    )?;
+    let (plan, gateway_tombstones) = run_immediate_transaction(&conn, |tx| {
+        let plan = build_gateway_prune_plan(tx, &cutoff)?;
+        let mut gateway_tombstones = 0_i64;
+        if plan.prunable_messages > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "gateway_message_batch",
+                &format!("gateway_messages:{}:{}", cutoff, plan.prunable_messages),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "gateway_message_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_messages,
+                    "protected_row_count": plan.message_candidates - plan.prunable_messages,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_question_included": false,
+                    "raw_response_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM gateway_messages WHERE {}",
+                plan.message_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        if plan.prunable_workflow_states > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "workflow_state_batch",
+                &format!(
+                    "workflow_states:{}:{}",
+                    cutoff, plan.prunable_workflow_states
+                ),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "workflow_state_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_workflow_states,
+                    "protected_row_count": plan.workflow_candidates - plan.prunable_workflow_states,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_detail_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM workflow_states WHERE {}",
+                plan.workflow_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        if plan.prunable_sessions > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "gateway_session_batch",
+                &format!("gateway_sessions:{}:{}", cutoff, plan.prunable_sessions),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "gateway_session_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_sessions,
+                    "protected_row_count": plan.session_candidates - plan.prunable_sessions,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_user_ref_included": false,
+                    "raw_chat_ref_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM gateway_sessions WHERE {}",
+                plan.session_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        Ok((plan, gateway_tombstones))
+    })?;
+    merge_gateway_prune_counts(&mut report, &plan, gateway_tombstones);
     Ok(report)
+}
+
+#[derive(Debug)]
+struct GatewayPrunePlan {
+    message_prune_predicate: String,
+    workflow_prune_predicate: String,
+    session_prune_predicate: String,
+    message_candidates: i64,
+    prunable_messages: i64,
+    workflow_candidates: i64,
+    prunable_workflow_states: i64,
+    session_candidates: i64,
+    prunable_sessions: i64,
+}
+
+fn build_gateway_prune_plan(conn: &Connection, cutoff: &str) -> Result<GatewayPrunePlan> {
+    let message_prune_predicate = format!(
+        "created_at < ?1 AND NOT ({})",
+        gateway_rqa_protection_predicate("gateway_messages")
+    );
+    let workflow_prune_predicate = format!(
+        "created_at < ?1 AND NOT ({})",
+        gateway_rqa_protection_predicate("workflow_states")
+    );
+    let session_prune_predicate = gateway_session_prune_predicate();
+    let message_candidates = count_where(conn, "gateway_messages", "created_at < ?1", cutoff)?;
+    let prunable_messages =
+        count_where(conn, "gateway_messages", &message_prune_predicate, cutoff)?;
+    let workflow_candidates = count_where(conn, "workflow_states", "created_at < ?1", cutoff)?;
+    let prunable_workflow_states =
+        count_where(conn, "workflow_states", &workflow_prune_predicate, cutoff)?;
+    let session_candidates = count_where(conn, "gateway_sessions", "updated_at < ?1", cutoff)?;
+    let prunable_sessions =
+        count_where(conn, "gateway_sessions", &session_prune_predicate, cutoff)?;
+    Ok(GatewayPrunePlan {
+        message_prune_predicate,
+        workflow_prune_predicate,
+        session_prune_predicate,
+        message_candidates,
+        prunable_messages,
+        workflow_candidates,
+        prunable_workflow_states,
+        session_candidates,
+        prunable_sessions,
+    })
+}
+
+fn merge_gateway_prune_counts(
+    report: &mut Value,
+    plan: &GatewayPrunePlan,
+    gateway_tombstones: i64,
+) {
+    let gateway_counts = json!({
+        "gateway_message_candidates": plan.message_candidates,
+        "gateway_messages": plan.prunable_messages,
+        "protected_gateway_messages": plan.message_candidates - plan.prunable_messages,
+        "workflow_state_candidates": plan.workflow_candidates,
+        "workflow_states": plan.prunable_workflow_states,
+        "protected_workflow_states": plan.workflow_candidates - plan.prunable_workflow_states,
+        "gateway_session_candidates": plan.session_candidates,
+        "gateway_sessions": plan.prunable_sessions,
+        "protected_gateway_sessions": plan.session_candidates - plan.prunable_sessions,
+        "gateway_tombstone_candidates": i64::from(plan.prunable_messages > 0)
+            + i64::from(plan.prunable_workflow_states > 0)
+            + i64::from(plan.prunable_sessions > 0),
+        "gateway_tombstones": gateway_tombstones,
+    });
+    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
+        for (key, value) in gateway_counts.as_object().expect("gateway counts object") {
+            counts.insert(key.to_string(), value.clone());
+        }
+        if let Some(existing) = counts.get("tombstones").and_then(Value::as_i64) {
+            counts.insert(
+                "tombstones".to_string(),
+                json!(existing + gateway_tombstones),
+            );
+        }
+    }
+}
+
+fn run_immediate_transaction<T>(
+    conn: &Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match work(conn) {
+        Ok(value) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            } else {
+                Ok(value)
+            }
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn gateway_rqa_protection_predicate(table_alias: &str) -> String {
+    format!(
+        r#"
+        EXISTS (
+            SELECT 1 FROM retrieval_failures AS rf
+            WHERE rf.human_review_status IN ('open', 'in_review')
+              AND (rf.trace_id = {table_alias}.trace_id OR rf.package_id = {table_alias}.package_id)
+        )
+        OR EXISTS (
+            SELECT 1 FROM knowledge_governance_tasks AS kgt
+            WHERE kgt.status IN ('open', 'in_review', 'accepted')
+              AND (kgt.trace_id = {table_alias}.trace_id OR kgt.package_id = {table_alias}.package_id)
+        )
+        "#
+    )
+}
+
+fn gateway_session_prune_predicate() -> String {
+    let message_protection = gateway_rqa_protection_predicate("gm");
+    let workflow_protection = gateway_rqa_protection_predicate("ws");
+    format!(
+        r#"
+        updated_at < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM gateway_messages AS gm
+            WHERE gm.session_id = gateway_sessions.session_id
+              AND NOT (gm.created_at < ?1 AND NOT ({message_protection}))
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM workflow_states AS ws
+            WHERE ws.session_id = gateway_sessions.session_id
+              AND NOT (ws.created_at < ?1 AND NOT ({workflow_protection}))
+        )
+        "#
+    )
 }
 
 fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
@@ -5912,8 +6116,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\"}} 1",
+        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
         bounded_metric_enum_label(agent_runtime_mode.as_str(), &["minimal", "hermes"]),
+        state.rate_limit_per_minute,
+        state.max_body_bytes,
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -6032,6 +6238,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "retrieval_failures_clustered",
             "knowledge_patch_proposal_created",
             "knowledge_patch_proposal_admin_create",
+            "rqa_retention_pruned",
             "governance_task_created",
             "governance_task_status_updated",
             "governance_task_admin_list",
@@ -6394,6 +6601,213 @@ mod tests {
         package
     }
 
+    #[test]
+    fn prune_gateway_and_runtime_data_preserves_active_rqa_gateway_rows() {
+        let db_path = temp_gateway_db_path("gateway-prune-rqa-protect");
+        let old = "2020-01-01T00:00:00Z";
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let active_package = runtime_store
+            .create_package(
+                "trace-gateway-prune-active",
+                "active gateway retention question",
+                vec![eval_test_card("block-gateway-prune-active")],
+            )
+            .expect("active package creates");
+        let runtime_conn = runtime_store.open_connection().expect("runtime db opens");
+        for table in ["evidence_packages", "evidence_cards", "review_records"] {
+            runtime_conn
+                .execute(
+                    &format!("UPDATE {table} SET created_at = ?1 WHERE package_id = ?2"),
+                    params![old, &active_package.package_id],
+                )
+                .expect("runtime package rows old");
+        }
+        runtime_conn
+            .execute(
+                "UPDATE audit_events SET created_at = ?1 WHERE trace_id = ?2",
+                params![old, &active_package.trace_id],
+            )
+            .expect("runtime audit rows old");
+        runtime_conn
+            .execute(
+                r#"
+                INSERT INTO retrieval_failures (
+                    failure_id, trace_id, package_id, question_sha256,
+                    question_char_count, question_summary, kb_schema_version,
+                    kb_version_id, failure_type, redacted_query_terms_json,
+                    required_evidence_types_json, actual_evidence_types_json,
+                    expected_evidence_ids_json, selected_evidence_ids_json,
+                    missing_evidence_types_json, quality_issues_json,
+                    agent_diagnosis, proposed_fix, human_review_status, reviewer,
+                    review_note, created_at, updated_at, resolved_at
+                ) VALUES (
+                    'rf-gateway-prune-active', ?1, ?2, ?3, 33,
+                    'sha256:gateway-prune-active', ?4, NULL,
+                    'expected_evidence_missing', '[]', '["base_text"]', '[]',
+                    '["ev-missing"]', '[]', '["base_text"]',
+                    '["expected_evidence_missing"]', NULL,
+                    'protect gateway rows while RQA failure is open',
+                    'open', NULL, NULL, ?5, ?5, NULL
+                )
+                "#,
+                params![
+                    &active_package.trace_id,
+                    &active_package.package_id,
+                    hash_text("active gateway retention question"),
+                    KNOWLEDGE_BASE_SCHEMA_VERSION,
+                    old,
+                ],
+            )
+            .expect("active retrieval failure inserts");
+        drop(runtime_conn);
+
+        let conn = open_db(&db_path).expect("gateway db opens");
+        seed_gateway_retention_row(
+            &conn,
+            "active",
+            &active_package.trace_id,
+            Some(&active_package.package_id),
+            "active gateway retention question",
+            old,
+        );
+        seed_gateway_retention_row(
+            &conn,
+            "expired",
+            "trace-gateway-prune-expired",
+            Some("pkg-gateway-prune-expired"),
+            "expired gateway retention question",
+            old,
+        );
+        drop(conn);
+
+        let dry_run =
+            prune_gateway_and_runtime_data(&db_path, 1, true).expect("gateway dry run prune");
+        assert_eq!(dry_run["counts"]["gateway_message_candidates"], json!(2));
+        assert_eq!(dry_run["counts"]["gateway_messages"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_gateway_messages"], json!(1));
+        assert_eq!(dry_run["counts"]["workflow_state_candidates"], json!(2));
+        assert_eq!(dry_run["counts"]["workflow_states"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_workflow_states"], json!(1));
+        assert_eq!(dry_run["counts"]["gateway_sessions"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_gateway_sessions"], json!(1));
+
+        let report = prune_gateway_and_runtime_data(&db_path, 1, false).expect("gateway prune");
+        assert_eq!(report["counts"]["gateway_messages"], json!(1));
+        assert_eq!(report["counts"]["workflow_states"], json!(1));
+        assert_eq!(report["counts"]["gateway_sessions"], json!(1));
+        assert_eq!(report["counts"]["gateway_tombstones"], json!(3));
+        let conn = open_db(&db_path).expect("gateway db reopens");
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_messages", "message_id", "msg-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_messages", "message_id", "msg-expired"),
+            0
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "workflow_states", "state_id", "state-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "workflow_states", "state_id", "state-expired"),
+            0
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_sessions", "session_id", "session-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_sessions", "session_id", "session-expired"),
+            0
+        );
+        let gateway_tombstones: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rqa_lifecycle_tombstones WHERE object_type LIKE 'gateway_%' OR object_type = 'workflow_state_batch'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("gateway tombstone count");
+        assert_eq!(gateway_tombstones, 3);
+        let tombstone_payloads = load_gateway_tombstone_payloads(&conn);
+        assert!(tombstone_payloads.iter().all(|payload| {
+            !payload.contains("active gateway retention question")
+                && !payload.contains("expired gateway retention question")
+        }));
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    fn seed_gateway_retention_row(
+        conn: &Connection,
+        suffix: &str,
+        trace_id: &str,
+        package_id: Option<&str>,
+        question: &str,
+        created_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO gateway_sessions (session_id, user_ref, chat_ref, model_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                format!("session-{suffix}"),
+                format!("user-{suffix}"),
+                format!("chat-{suffix}"),
+                DEFAULT_MODEL_ID,
+                created_at,
+            ],
+        )
+        .expect("gateway session inserts");
+        conn.execute(
+            "INSERT INTO gateway_messages (message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                format!("msg-{suffix}"),
+                format!("session-{suffix}"),
+                format!("external-{suffix}"),
+                trace_id,
+                package_id,
+                hash_text(question),
+                question,
+                json!({"object": "chat.completion", "id": format!("cmpl-{suffix}")}).to_string(),
+                created_at,
+            ],
+        )
+        .expect("gateway message inserts");
+        conn.execute(
+            "INSERT INTO workflow_states (state_id, trace_id, session_id, package_id, state, status, detail_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                format!("state-{suffix}"),
+                trace_id,
+                format!("session-{suffix}"),
+                package_id,
+                "rqa_retention_test",
+                "completed",
+                json!({"suffix": suffix}).to_string(),
+                created_at,
+            ],
+        )
+        .expect("workflow state inserts");
+    }
+
+    fn gateway_row_count(conn: &Connection, table: &str, id_column: &str, id: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {id_column} = ?1"),
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("gateway row count")
+    }
+
+    fn load_gateway_tombstone_payloads(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT payload_json FROM rqa_lifecycle_tombstones ORDER BY created_at")
+            .expect("prepare tombstone payloads")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tombstone payloads")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect tombstone payloads")
+    }
+
     fn audit_event_count(db_path: &Path, event_type: &str) -> i64 {
         let conn = open_db(db_path).expect("db opens");
         count_where(&conn, "audit_events", "event_type = ?1", event_type).expect("audit count")
@@ -6654,6 +7068,8 @@ mod tests {
             prometheus.contains("tonglingyu_governance_tasks_by_status_total{status=\"open\"} 1")
         );
         assert!(prometheus.contains("tonglingyu_gateway_info{agent_runtime_mode="));
+        assert!(prometheus.contains("rate_limit_per_minute=\"120\""));
+        assert!(prometheus.contains("max_body_bytes=\"1048576\""));
         assert!(!prometheus.contains("main_profile="));
         assert!(!prometheus.contains("reviewer_profile="));
         assert!(!prometheus.contains("trace-admin-metrics-test"));

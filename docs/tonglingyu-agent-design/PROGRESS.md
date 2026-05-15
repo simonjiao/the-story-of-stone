@@ -627,6 +627,17 @@
   自动化、retention/restore、用户数据 lifecycle、性能预算、live release 证据和安全
   扫描仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
   application、diff report 和 eval gate。
+- RQA retention/prune 已完成第一批 production 保护切片：Runtime 新增
+  `tonglingyu-rqa-lifecycle-v1` 和 `rqa_lifecycle_tombstones`，prune 会保护仍被
+  open retrieval failure、open/in_review/accepted governance task 引用的
+  trace/package 数据；Gateway prune 同步保护对应 `gateway_messages`、
+  `workflow_states` 和 session。实际删除前写 tombstone，完成后写
+  `rqa_retention_pruned` audit；actual prune 会在写事务内重新判定候选集合再删除，
+  避免判定后新增活动 RQA 引用造成误删。单测覆盖 dry-run、实际 prune、active
+  RQA 引用保护和 tombstone payload 不含原始 question/secret。
+- Gateway Prometheus `tonglingyu_gateway_info` 已恢复低基数运行边界标签：
+  `agent_runtime_mode`、`rate_limit_per_minute` 和 `max_body_bytes`，使 gateway
+  smoke 能复核限流与请求体边界没有从指标中丢失。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
@@ -640,8 +651,8 @@
 
 1. 清理或分派当前 open retrieval failures / open governance tasks，使 quality
    gate 的 blocker 能由真实治理状态关闭，而不是绕过阈值。
-2. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
-   retention/prune、runbook/alert/rollback 和 production report 运维证据。
+2. 实现 RQA Milestone I-J：端到端自动化、backup/restore、production report
+   引用保留、RTO/RPO、runbook/alert/rollback 和 live production report 运维证据。
 3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、性能预算、发布值守、
    回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。

@@ -211,6 +211,7 @@ pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failure
 pub const RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION: &str =
     "tonglingyu-retrieval-failure-clusters-v1";
 pub const RETRIEVAL_FAILURE_DEDUPE_MIGRATION: &str = "tonglingyu-retrieval-failure-dedupe-v1";
+pub const RQA_LIFECYCLE_POLICY_VERSION: &str = "tonglingyu-rqa-lifecycle-v1";
 pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
 pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
 pub const RETRIEVAL_FAILURE_CLUSTER_DEFAULT_LIMIT: usize = 200;
@@ -3777,6 +3778,17 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rqa_lifecycle_tombstones (
+            tombstone_id TEXT PRIMARY KEY,
+            object_type TEXT NOT NULL,
+            object_id_sha256 TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS retrieval_failures (
             failure_id TEXT PRIMARY KEY,
             trace_id TEXT NOT NULL,
@@ -3806,6 +3818,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
         CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_rqa_lifecycle_tombstones_object
+            ON rqa_lifecycle_tombstones(object_type, action, created_at);
+        CREATE INDEX IF NOT EXISTS idx_rqa_lifecycle_tombstones_hash
+            ON rqa_lifecycle_tombstones(object_id_sha256);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_trace ON retrieval_failures(trace_id);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_package ON retrieval_failures(package_id);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_status ON retrieval_failures(human_review_status);
@@ -3894,6 +3910,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![RQA_LIFECYCLE_POLICY_VERSION, now_rfc3339()],
     )?;
     Ok(())
 }
@@ -4103,6 +4123,7 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         RETRIEVAL_FAILURE_DEDUPE_MIGRATION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION.to_string(),
+        RQA_LIFECYCLE_POLICY_VERSION.to_string(),
     ]
 }
 
@@ -6386,61 +6407,334 @@ pub fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool)
     if retention_days == 0 {
         return Ok(json!({
             "object": "tonglingyu.runtime_prune_report",
+            "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
             "status": "disabled",
             "retention_days": retention_days,
             "dry_run": dry_run,
+            "secret_values_printed": false,
         }));
     }
     let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(retention_days as i64))
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-    let old_packages = collect_string_column(
-        conn,
-        "SELECT package_id FROM evidence_packages WHERE created_at < ?1",
-        &cutoff,
-    )?;
-    let counts = json!({
-        "packages": old_packages.len(),
-        "audit_events": count_where(conn, "audit_events", "created_at < ?1", &cutoff)?,
-    });
     if dry_run {
+        let plan = build_rqa_prune_plan(conn, &cutoff)?;
         return Ok(json!({
             "object": "tonglingyu.runtime_prune_report",
+            "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
             "status": "dry_run",
             "retention_days": retention_days,
             "cutoff": cutoff,
-            "counts": counts,
+            "counts": rqa_prune_counts(&plan, 0),
+            "protected_refs": {
+                "active_trace_refs": plan.active_refs.trace_ids.len(),
+                "active_package_refs": plan.active_refs.package_ids.len(),
+            },
+            "secret_values_printed": false,
         }));
     }
-    for package_id in &old_packages {
-        conn.execute(
-            "DELETE FROM evidence_claim_links WHERE package_id = ?1",
-            params![package_id],
+    run_immediate_transaction(conn, |tx| {
+        let plan = build_rqa_prune_plan(tx, &cutoff)?;
+        let mut tombstones = 0_usize;
+        for package in &plan.prunable_packages {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "evidence_package",
+                &package.package_id,
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "evidence_package",
+                    "object_id_sha256": hash_text(&package.package_id),
+                    "trace_id_sha256": hash_text(&package.trace_id),
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "deleted_child_tables": [
+                        "evidence_claim_links",
+                        "review_records",
+                        "evidence_cards",
+                        "evidence_packages",
+                    ],
+                    "raw_question_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            tombstones += 1;
+            tx.execute(
+                "DELETE FROM evidence_claim_links WHERE package_id = ?1",
+                params![&package.package_id],
+            )?;
+            tx.execute(
+                "DELETE FROM review_records WHERE package_id = ?1",
+                params![&package.package_id],
+            )?;
+            tx.execute(
+                "DELETE FROM evidence_cards WHERE package_id = ?1",
+                params![&package.package_id],
+            )?;
+            tx.execute(
+                "DELETE FROM evidence_packages WHERE package_id = ?1",
+                params![&package.package_id],
+            )?;
+        }
+        if !plan.prunable_audit_events.is_empty() {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "audit_event_batch",
+                &format!(
+                    "audit_events:{}:{}",
+                    cutoff,
+                    plan.prunable_audit_events.len()
+                ),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "audit_event_batch",
+                    "event_count": plan.prunable_audit_events.len(),
+                    "protected_event_count": plan.protected_audit_events.len(),
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_payload_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            tombstones += 1;
+            for event in &plan.prunable_audit_events {
+                tx.execute(
+                    "DELETE FROM audit_events WHERE event_id = ?1",
+                    params![&event.event_id],
+                )?;
+            }
+        }
+        append_runtime_audit_event(
+            tx,
+            "retention-prune",
+            "rqa_retention_pruned",
+            &json!({
+                "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                "retention_days": retention_days,
+                "cutoff": cutoff,
+                "counts": {
+                    "packages": plan.prunable_packages.len(),
+                    "protected_packages": plan.protected_packages.len(),
+                    "audit_events": plan.prunable_audit_events.len(),
+                    "protected_audit_events": plan.protected_audit_events.len(),
+                    "tombstones": tombstones,
+                },
+                "secret_values_printed": false,
+            }),
         )?;
-        conn.execute(
-            "DELETE FROM review_records WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_cards WHERE package_id = ?1",
-            params![package_id],
-        )?;
-        conn.execute(
-            "DELETE FROM evidence_packages WHERE package_id = ?1",
-            params![package_id],
-        )?;
+        Ok(json!({
+            "object": "tonglingyu.runtime_prune_report",
+            "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+            "status": "pruned",
+            "retention_days": retention_days,
+            "cutoff": cutoff,
+            "counts": rqa_prune_counts(&plan, tombstones),
+            "protected_refs": {
+                "active_trace_refs": plan.active_refs.trace_ids.len(),
+                "active_package_refs": plan.active_refs.package_ids.len(),
+            },
+            "secret_values_printed": false,
+        }))
+    })
+}
+
+#[derive(Debug)]
+struct RqaPrunePlan {
+    active_refs: RqaRetentionRefs,
+    prunable_packages: Vec<EvidencePackageRetentionRef>,
+    protected_packages: Vec<EvidencePackageRetentionRef>,
+    prunable_audit_events: Vec<AuditEventRetentionRef>,
+    protected_audit_events: Vec<AuditEventRetentionRef>,
+}
+
+fn build_rqa_prune_plan(conn: &Connection, cutoff: &str) -> Result<RqaPrunePlan> {
+    let active_refs = active_rqa_retention_refs(conn)?;
+    let old_packages = old_evidence_package_refs(conn, cutoff)?;
+    let mut prunable_packages = Vec::new();
+    let mut protected_packages = Vec::new();
+    for package in old_packages {
+        if active_refs.package_ids.contains(&package.package_id)
+            || active_refs.trace_ids.contains(&package.trace_id)
+        {
+            protected_packages.push(package);
+        } else {
+            prunable_packages.push(package);
+        }
     }
-    conn.execute(
-        "DELETE FROM audit_events WHERE created_at < ?1",
-        params![&cutoff],
+    let old_audit_events = old_audit_event_refs(conn, cutoff)?;
+    let mut prunable_audit_events = Vec::new();
+    let mut protected_audit_events = Vec::new();
+    for event in old_audit_events {
+        if active_refs.trace_ids.contains(&event.trace_id) {
+            protected_audit_events.push(event);
+        } else {
+            prunable_audit_events.push(event);
+        }
+    }
+    Ok(RqaPrunePlan {
+        active_refs,
+        prunable_packages,
+        protected_packages,
+        prunable_audit_events,
+        protected_audit_events,
+    })
+}
+
+fn rqa_prune_counts(plan: &RqaPrunePlan, tombstones: usize) -> Value {
+    json!({
+        "package_candidates": plan.prunable_packages.len() + plan.protected_packages.len(),
+        "packages": plan.prunable_packages.len(),
+        "protected_packages": plan.protected_packages.len(),
+        "audit_event_candidates": plan.prunable_audit_events.len() + plan.protected_audit_events.len(),
+        "audit_events": plan.prunable_audit_events.len(),
+        "protected_audit_events": plan.protected_audit_events.len(),
+        "tombstone_candidates": plan.prunable_packages.len()
+            + usize::from(!plan.prunable_audit_events.is_empty()),
+        "tombstones": tombstones,
+    })
+}
+
+fn run_immediate_transaction<T>(
+    conn: &Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match work(conn) {
+        Ok(value) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            } else {
+                Ok(value)
+            }
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RqaRetentionRefs {
+    trace_ids: BTreeSet<String>,
+    package_ids: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+struct EvidencePackageRetentionRef {
+    package_id: String,
+    trace_id: String,
+}
+
+#[derive(Debug)]
+struct AuditEventRetentionRef {
+    event_id: String,
+    trace_id: String,
+}
+
+fn active_rqa_retention_refs(conn: &Connection) -> Result<RqaRetentionRefs> {
+    let mut refs = RqaRetentionRefs {
+        trace_ids: BTreeSet::new(),
+        package_ids: BTreeSet::new(),
+    };
+    collect_rqa_trace_package_refs(
+        conn,
+        r#"
+        SELECT trace_id, package_id
+        FROM retrieval_failures
+        WHERE human_review_status IN ('open', 'in_review')
+        "#,
+        &mut refs,
     )?;
-    Ok(json!({
-        "object": "tonglingyu.runtime_prune_report",
-        "status": "pruned",
-        "retention_days": retention_days,
-        "cutoff": cutoff,
-        "counts": counts,
-    }))
+    collect_rqa_trace_package_refs(
+        conn,
+        r#"
+        SELECT trace_id, package_id
+        FROM knowledge_governance_tasks
+        WHERE status IN ('open', 'in_review', 'accepted')
+        "#,
+        &mut refs,
+    )?;
+    Ok(refs)
+}
+
+fn collect_rqa_trace_package_refs(
+    conn: &Connection,
+    sql: &str,
+    refs: &mut RqaRetentionRefs,
+) -> Result<()> {
+    let mut stmt = conn.prepare(sql)?;
+    for row in stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })? {
+        let (trace_id, package_id) = row?;
+        refs.trace_ids.insert(trace_id);
+        if let Some(package_id) = package_id.filter(|value| !value.is_empty()) {
+            refs.package_ids.insert(package_id);
+        }
+    }
+    Ok(())
+}
+
+fn old_evidence_package_refs(
+    conn: &Connection,
+    cutoff: &str,
+) -> Result<Vec<EvidencePackageRetentionRef>> {
+    let mut stmt =
+        conn.prepare("SELECT package_id, trace_id FROM evidence_packages WHERE created_at < ?1")?;
+    stmt.query_map(params![cutoff], |row| {
+        Ok(EvidencePackageRetentionRef {
+            package_id: row.get(0)?,
+            trace_id: row.get(1)?,
+        })
+    })?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
+
+fn old_audit_event_refs(conn: &Connection, cutoff: &str) -> Result<Vec<AuditEventRetentionRef>> {
+    let mut stmt =
+        conn.prepare("SELECT event_id, trace_id FROM audit_events WHERE created_at < ?1")?;
+    stmt.query_map(params![cutoff], |row| {
+        Ok(AuditEventRetentionRef {
+            event_id: row.get(0)?,
+            trace_id: row.get(1)?,
+        })
+    })?
+    .collect::<std::result::Result<Vec<_>, _>>()
+    .map_err(Into::into)
+}
+
+pub fn append_rqa_lifecycle_tombstone(
+    conn: &Connection,
+    object_type: &str,
+    object_id: &str,
+    action: &str,
+    reason: &str,
+    payload: &Value,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO rqa_lifecycle_tombstones (
+            tombstone_id, object_type, object_id_sha256, action, reason,
+            policy_version, payload_json, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "#,
+        params![
+            format!("rqa-tombstone-{}", uuid::Uuid::now_v7().simple()),
+            object_type,
+            hash_text(object_id),
+            action,
+            reason,
+            RQA_LIFECYCLE_POLICY_VERSION,
+            serde_json::to_string(payload)?,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
@@ -7738,19 +8032,6 @@ fn hash_text(input: &str) -> String {
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
     conn.query_row(&sql, [], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
-    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {predicate}");
-    conn.query_row(&sql, params![value], |row| row.get(0))
-        .map_err(Into::into)
-}
-
-fn collect_string_column(conn: &Connection, sql: &str, value: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(sql)?;
-    stmt.query_map(params![value], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
@@ -11382,6 +11663,221 @@ mod tests {
             event["event_type"] == "knowledge_patch_proposals_applied"
                 && event["payload"]["direct_agent_fact_mutation"] == json!(false)
         }));
+    }
+
+    #[test]
+    fn prune_runtime_data_preserves_active_rqa_refs_and_writes_tombstones() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let old = "2020-01-01T00:00:00Z";
+        let active_failure_package = create_evidence_package(
+            &conn,
+            "trace-active-failure-retention",
+            "active failure question",
+            vec![retention_test_card("active-failure")],
+        )
+        .expect("active failure package");
+        let active_task_package = create_evidence_package(
+            &conn,
+            "trace-active-task-retention",
+            "active task question",
+            vec![retention_test_card("active-task")],
+        )
+        .expect("active task package");
+        let expired_package = create_evidence_package(
+            &conn,
+            "trace-expired-retention",
+            "expired question",
+            vec![retention_test_card("expired")],
+        )
+        .expect("expired package");
+        conn.execute(
+            "UPDATE evidence_packages SET created_at = ?1 WHERE package_id IN (?2, ?3, ?4)",
+            params![
+                old,
+                &active_failure_package.package_id,
+                &active_task_package.package_id,
+                &expired_package.package_id
+            ],
+        )
+        .expect("packages old");
+        conn.execute(
+            "UPDATE evidence_cards SET created_at = ?1 WHERE package_id IN (?2, ?3, ?4)",
+            params![
+                old,
+                &active_failure_package.package_id,
+                &active_task_package.package_id,
+                &expired_package.package_id
+            ],
+        )
+        .expect("cards old");
+        conn.execute(
+            "UPDATE review_records SET created_at = ?1 WHERE package_id IN (?2, ?3, ?4)",
+            params![
+                old,
+                &active_failure_package.package_id,
+                &active_task_package.package_id,
+                &expired_package.package_id
+            ],
+        )
+        .expect("reviews old");
+        conn.execute("UPDATE audit_events SET created_at = ?1", params![old])
+            .expect("audit old");
+        conn.execute(
+            r#"
+            INSERT INTO retrieval_failures (
+                failure_id, trace_id, package_id, question_sha256,
+                question_char_count, question_summary, kb_schema_version,
+                kb_version_id, failure_type, redacted_query_terms_json,
+                required_evidence_types_json, actual_evidence_types_json,
+                expected_evidence_ids_json, selected_evidence_ids_json,
+                missing_evidence_types_json, quality_issues_json,
+                agent_diagnosis, proposed_fix, human_review_status, reviewer,
+                review_note, created_at, updated_at, resolved_at
+            ) VALUES (
+                'rf-active-retention', ?1, ?2, ?3, 23, 'sha256:active',
+                ?4, NULL, 'expected_evidence_missing', '[]', '["base_text"]',
+                '[]', '["ev-missing"]', '[]', '["base_text"]',
+                '["expected_evidence_missing"]', NULL,
+                'review expected evidence', 'open', NULL, NULL, ?5, ?5, NULL
+            )
+            "#,
+            params![
+                &active_failure_package.trace_id,
+                &active_failure_package.package_id,
+                hash_text("active failure question"),
+                KNOWLEDGE_BASE_SCHEMA_VERSION,
+                old,
+            ],
+        )
+        .expect("active failure inserts");
+        conn.execute(
+            r#"
+            INSERT INTO knowledge_governance_tasks (
+                task_id, source_failure_id, source_entity_type, source_entity_id,
+                trace_id, package_id, task_type, status, priority,
+                agent_cluster_key, proposed_fix, reviewer, review_note,
+                evidence_ref, created_at, updated_at, accepted_at, closed_at
+            ) VALUES (
+                'kgt-active-retention', NULL, 'lifecycle_test',
+                'active-retention-task', ?1, ?2, 'expected_evidence_fix',
+                'accepted', 'p1', 'lifecycle:active-retention-task',
+                'rebuild after accepted governance task', 'reviewer',
+                'accepted for lifecycle protection', 'source://review/retention',
+                ?3, ?3, ?3, NULL
+            )
+            "#,
+            params![
+                &active_task_package.trace_id,
+                &active_task_package.package_id,
+                old
+            ],
+        )
+        .expect("active task inserts");
+        conn.execute(
+            "INSERT INTO audit_events (event_id, trace_id, event_type, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "audit-old-unrelated-retention",
+                "trace-unrelated-retention",
+                "old_unrelated",
+                "{}",
+                old,
+            ],
+        )
+        .expect("old unrelated audit inserts");
+
+        let dry_run = prune_runtime_data(&conn, 1, true).expect("dry run prune");
+        assert_eq!(
+            dry_run["lifecycle_policy_version"],
+            json!(RQA_LIFECYCLE_POLICY_VERSION)
+        );
+        assert_eq!(dry_run["counts"]["package_candidates"], json!(3));
+        assert_eq!(dry_run["counts"]["packages"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_packages"], json!(2));
+        assert!(
+            dry_run["counts"]["protected_audit_events"]
+                .as_i64()
+                .is_some_and(|count| count >= 4)
+        );
+
+        let report = prune_runtime_data(&conn, 1, false).expect("runtime prune");
+        assert_eq!(report["status"], json!("pruned"));
+        assert_eq!(report["counts"]["packages"], json!(1));
+        assert_eq!(report["counts"]["protected_packages"], json!(2));
+        assert!(
+            report["counts"]["tombstones"]
+                .as_i64()
+                .is_some_and(|count| count >= 2)
+        );
+        assert_eq!(
+            table_count_where_package(
+                &conn,
+                "evidence_packages",
+                &active_failure_package.package_id
+            ),
+            1
+        );
+        assert_eq!(
+            table_count_where_package(&conn, "evidence_packages", &active_task_package.package_id),
+            1
+        );
+        assert_eq!(
+            table_count_where_package(&conn, "evidence_packages", &expired_package.package_id),
+            0
+        );
+        let active_audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE trace_id = ?1",
+                params![&active_failure_package.trace_id],
+                |row| row.get(0),
+            )
+            .expect("active audit count");
+        assert!(active_audit_count > 0);
+        let expired_audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE trace_id = ?1",
+                params![&expired_package.trace_id],
+                |row| row.get(0),
+            )
+            .expect("expired audit count");
+        assert_eq!(expired_audit_count, 0);
+        let prune_audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'rqa_retention_pruned'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retention audit count");
+        assert_eq!(prune_audit_count, 1);
+        let tombstone_payloads = tombstone_payloads(&conn);
+        assert!(tombstone_payloads.iter().all(|payload| {
+            !payload.contains("active failure question") && !payload.contains("expired question")
+        }));
+    }
+
+    fn retention_test_card(suffix: &str) -> EvidenceCard {
+        let mut card = sample_card("base_text");
+        card.evidence_id = format!("ev-retention-{suffix}");
+        card.block_id = format!("block-retention-{suffix}");
+        card
+    }
+
+    fn table_count_where_package(conn: &Connection, table: &str, package_id: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE package_id = ?1"),
+            params![package_id],
+            |row| row.get(0),
+        )
+        .expect("package count")
+    }
+
+    fn tombstone_payloads(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT payload_json FROM rqa_lifecycle_tombstones ORDER BY created_at")
+            .expect("prepare tombstones")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tombstones")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect tombstones")
     }
 
     #[test]
