@@ -1,14 +1,14 @@
 name: hermes-home
 
 x-agent-platform-image: &agent-platform-image
-  image: hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-formal}
+  image: "${AGENT_PLATFORM_IMAGE_REF:-hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-formal}}"
   build:
     context: "${AGENT_PLATFORM_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: Dockerfile
   restart: unless-stopped
 
 x-tonglingyu-gateway-image: &tonglingyu-gateway-image
-  image: tonglingyu-gateway:${TONGLINGYU_GATEWAY_IMAGE_TAG:-formal}
+  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:${TONGLINGYU_GATEWAY_IMAGE_TAG:-formal}}"
   build:
     context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: crates/tonglingyu-gateway/Dockerfile
@@ -16,7 +16,7 @@ x-tonglingyu-gateway-image: &tonglingyu-gateway-image
 
 services:
   hermes:
-    image: nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}
+    image: "${HERMES_IMAGE_REF:-nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}}"
     container_name: hermes-agent
     restart: unless-stopped
     command: gateway run
@@ -52,7 +52,7 @@ services:
       start_period: 30s
 
   open-webui:
-    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_IMAGE_TAG:-main}
+    image: "${OPEN_WEBUI_IMAGE_REF:-ghcr.io/open-webui/open-webui:${OPEN_WEBUI_IMAGE_TAG:-main}}"
     container_name: hermes-open-webui
     restart: unless-stopped
     depends_on:
@@ -149,7 +149,7 @@ services:
       start_period: 30s
 
   cloudflared:
-    image: cloudflare/cloudflared:${CLOUDFLARED_IMAGE_TAG:-latest}
+    image: "${CLOUDFLARED_IMAGE_REF:-cloudflare/cloudflared:${CLOUDFLARED_IMAGE_TAG:-latest}}"
     container_name: hermes-cloudflared
     restart: unless-stopped
     network_mode: host
@@ -163,7 +163,7 @@ services:
         condition: service_started
 
   agent-platform-postgres:
-    image: postgres:${AGENT_PLATFORM_POSTGRES_IMAGE_TAG:-18-alpine}
+    image: "${AGENT_PLATFORM_POSTGRES_IMAGE_REF:-postgres:${AGENT_PLATFORM_POSTGRES_IMAGE_TAG:-18-alpine}}"
     container_name: agent-platform-postgres
     restart: unless-stopped
     environment:

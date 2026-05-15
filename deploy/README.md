@@ -57,6 +57,13 @@ Required changes:
   The local default is `../agent-platform`.
 - `TONGLINGYU_GATEWAY_IMAGE_TAG`: standalone gateway image tag. Default is
   `formal`.
+- `*_IMAGE_REF`: production release image references with immutable digests.
+  Set `AGENT_PLATFORM_IMAGE_REF`, `TONGLINGYU_GATEWAY_IMAGE_REF`,
+  `HERMES_IMAGE_REF`, `OPEN_WEBUI_IMAGE_REF`, `CLOUDFLARED_IMAGE_REF`, and
+  `AGENT_PLATFORM_POSTGRES_IMAGE_REF` to `name@sha256:<digest>` or
+  `name:tag@sha256:<digest>` before running production security gates. The
+  older `*_IMAGE_TAG` values are local build defaults and are not sufficient
+  for production-ready evidence.
 - `OPEN_WEBUI_OPENAI_API_BASE_URLS`: optional semicolon-separated
   OpenAI-compatible endpoints for Open WebUI. The compose default is
   `http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1`.
@@ -384,6 +391,11 @@ is set, and any report generated with overrides keeps
 `production_release_ready=false` with `status=passed_with_gate_command_overrides`
 when the mocked release conditions otherwise pass; use the reported
 `release_conditions_met` field only to verify local aggregation semantics.
+The security gate also reads `TONGLINGYU_DEPLOY_ENV_FILE` / `DEPLOY_ENV_FILE`
+and resolves compose image references before checking mutable tags and missing
+digests. Production-ready reports require real dependency and image scan
+artifacts, plus digest-pinned image refs, or an approved risk acceptance with
+owner and expiry.
 When `TONGLINGYU_RELEASE_REQUIRE_LIVE=true`, the aggregate gate also requires
 `TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true` and a non-empty
 `TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF` after a human has checked

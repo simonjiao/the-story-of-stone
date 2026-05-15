@@ -12,6 +12,10 @@ RISK_ACCEPTANCE_PATH="${TONGLINGYU_RELEASE_SECURITY_RISK_ACCEPTANCE_PATH:-}"
 RUN_TRIVY="${TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY:-false}"
 REPORT_PATH="${TONGLINGYU_RELEASE_SECURITY_REPORT_PATH:-}"
 
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
+
 is_true() {
   case "${1:-}" in
     1 | true | TRUE | yes | YES | on | ON) return 0 ;;
@@ -282,6 +286,27 @@ def scan_release_scripts():
     }
 
 
+def resolve_compose_var(token):
+    name = token
+    default = ""
+    if ":-" in token:
+        name, default = token.split(":-", 1)
+    value = os.environ.get(name)
+    if value is None or value == "":
+        value = default
+    return resolve_compose_image_ref(value)
+
+
+def resolve_compose_image_ref(raw_ref):
+    value = str(raw_ref or "").strip().strip('"').strip("'")
+    pattern = re.compile(r"\$\{([^{}]+)\}")
+    previous = None
+    while previous != value:
+        previous = value
+        value = pattern.sub(lambda match: resolve_compose_var(match.group(1)), value)
+    return value.strip()
+
+
 def compose_image_policy():
     compose_path = repo_dir / "deploy" / "docker-compose.yml"
     text = compose_path.read_text(encoding="utf-8")
@@ -289,7 +314,7 @@ def compose_image_policy():
     for raw_line in text.splitlines():
         match = re.match(r"\s*image:\s+(.+?)\s*$", raw_line)
         if match:
-            refs.append(match.group(1).strip().strip('"').strip("'"))
+            refs.append(resolve_compose_image_ref(match.group(1)))
     mutable = []
     digest_missing = []
     for ref in refs:

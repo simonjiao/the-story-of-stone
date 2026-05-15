@@ -755,6 +755,12 @@
 - 2026-05-16 重新运行 preflight release readiness 后，`retrieval_quality` 和
   `rqa_backup_restore_drill` 已通过；剩余 required failures 为 `runtime_config`
   和 `security_scan`。live gates 仍未执行，因此仍不能声明 production-ready。
+- Security gate 已支持生产 digest-pinned image refs：compose 可通过
+  `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
+  `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
+  `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
+  deploy env 后解析 image refs 并检查 mutable tag / digest missing。当前只用
+  fixture scan 验证了静态策略，真实 dependency/image scan 仍未生成。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
