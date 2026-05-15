@@ -37,6 +37,7 @@ required_gate_names = [
     "rqa_api_contract",
     "rqa_user_lifecycle",
     "security_scan",
+    "release_ops_readiness",
     "openwebui_admin_action_contract",
     *live_gate_names,
     "openwebui_browser_review",
@@ -244,6 +245,23 @@ gate_stdout_requirements = {
             "unaccepted_error_count",
         ],
     },
+    "release_ops_readiness": {
+        "object": "tonglingyu.release_ops_readiness_gate",
+        "required_fields": [
+            "alert_policy",
+            "checks",
+            "evidence",
+            "generated_at",
+            "mode",
+            "ops_policy_version",
+            "post_release_monitor",
+            "release_ops_ready",
+            "reproduction",
+            "rollback",
+            "rto_rpo",
+            "runbook",
+        ],
+    },
     "openwebui_admin_action_contract": {
         "object": "tonglingyu.openwebui_admin_action_contract_gate",
         "required_fields": [
@@ -320,6 +338,23 @@ def add_mismatch(field, expected, actual):
 
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def release_ops_ref_valid(value):
+    if not nonempty(value):
+        return False
+    lowered = value.lower()
+    if any(needle in lowered for needle in secret_value_needles):
+        return False
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return True
+    return (
+        value.startswith("runbook:")
+        or value.startswith("artifact:")
+        or value.startswith("file:")
+        or value.startswith("/")
+    )
 
 
 def is_sha256(value):
@@ -1196,6 +1231,272 @@ def validate_security_scan_gate_stdout():
                 errors.append(f"security_scan_without_risk_acceptance_requires_{field}")
 
 
+def validate_release_ops_ref(prefix, value):
+    if not isinstance(value, dict):
+        errors.append(f"{prefix}_ref_missing")
+        return None
+    ref = value.get("ref")
+    if nonempty(ref) and not release_ops_ref_valid(ref):
+        errors.append(f"{prefix}_ref_invalid")
+    if nonempty(ref) and value.get("valid") is not True:
+        errors.append(f"{prefix}_ref_valid_flag_invalid")
+    if nonempty(ref) and not nonempty(value.get("kind")):
+        errors.append(f"{prefix}_ref_kind_missing")
+    return ref
+
+
+def validate_release_ops_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("release_ops_readiness"),
+        "tonglingyu.release_ops_readiness_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("release_ops_ready") is not True:
+        errors.append("release_ops_not_ready")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("release_ops_secret_values_printed_must_be_false")
+    if gate_json.get("ops_policy_version") != "tonglingyu-rqa-release-ops-v1":
+        errors.append("release_ops_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("release_ops_generated_at_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("release_ops_mode_invalid")
+
+    runbook = gate_json.get("runbook")
+    if not isinstance(runbook, dict):
+        errors.append("release_ops_runbook_missing")
+    else:
+        runbook_path = runbook.get("path")
+        if not nonempty(runbook_path):
+            errors.append("release_ops_runbook_path_missing")
+        else:
+            candidate = Path(runbook_path)
+            if not candidate.is_absolute():
+                errors.append("release_ops_runbook_path_must_be_absolute")
+            elif production_ready:
+                if not candidate.is_file():
+                    errors.append("release_ops_runbook_file_not_found")
+                elif is_sha256(runbook.get("sha256")) and file_sha256(candidate) != runbook.get("sha256"):
+                    errors.append("release_ops_runbook_sha256_mismatch")
+        if not is_sha256(runbook.get("sha256")):
+            errors.append("release_ops_runbook_sha256_invalid")
+        if not isinstance(runbook.get("required_sections"), list) or not runbook.get("required_sections"):
+            errors.append("release_ops_runbook_required_sections_missing")
+        if runbook.get("missing_sections") not in ([], None):
+            errors.append("release_ops_runbook_missing_sections_present")
+        if not nonempty(runbook.get("ref")):
+            errors.append("release_ops_runbook_ref_missing")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "runbook_exists",
+        "runbook_sections_complete",
+        "rollback_steps_defined",
+        "db_restore_or_additive_downgrade_defined",
+        "post_rollback_release_readiness_required",
+        "non_production_marker_required",
+        "alerts_defined",
+        "alert_labels_low_cardinality",
+        "post_release_monitor_defined",
+        "release_report_reproduction_defined",
+    }
+    if not isinstance(checks, dict):
+        errors.append("release_ops_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"release_ops_check_failed={check}")
+
+    rollback = gate_json.get("rollback")
+    if not isinstance(rollback, dict):
+        errors.append("release_ops_rollback_missing")
+    else:
+        rollback_ref = validate_release_ops_ref(
+            "release_ops_rollback_evidence",
+            rollback.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(rollback_ref):
+            errors.append("release_ops_rollback_evidence_ref_missing")
+        if rollback.get("post_rollback_release_readiness_required") is not True:
+            errors.append("release_ops_post_rollback_readiness_not_required")
+        if rollback.get("non_production_marker_required") is not True:
+            errors.append("release_ops_non_production_marker_not_required")
+        if rollback.get("db_restore_or_additive_downgrade_defined") is not True:
+            errors.append("release_ops_db_restore_or_additive_downgrade_missing")
+
+    rto_rpo = gate_json.get("rto_rpo")
+    if not isinstance(rto_rpo, dict):
+        errors.append("release_ops_rto_rpo_missing")
+    else:
+        for field in ("rto_target_seconds", "rpo_target_seconds"):
+            if not isinstance(rto_rpo.get(field), int) or rto_rpo.get(field) <= 0:
+                errors.append(f"release_ops_{field}_invalid")
+        rto_rpo_ref = validate_release_ops_ref(
+            "release_ops_rto_rpo_evidence",
+            rto_rpo.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(rto_rpo_ref):
+            errors.append("release_ops_rto_rpo_evidence_ref_missing")
+
+    alert_policy = gate_json.get("alert_policy")
+    required_alerts = {
+        "rqa_write_failure_rate",
+        "admin_api_5xx_rate",
+        "admin_api_latency_p95",
+        "open_p0_retrieval_failure",
+        "open_p0_governance_task",
+        "rqa_quality_gate_failure",
+        "release_gate_failure",
+        "openwebui_admin_action_failure",
+    }
+    allowed_labels = {
+        "status",
+        "failure_type",
+        "task_type",
+        "priority",
+        "event_type",
+        "agent_runtime_mode",
+        "rate_limit_per_minute",
+        "max_body_bytes",
+    }
+    forbidden_labels = {
+        "query",
+        "question",
+        "trace",
+        "trace_id",
+        "package",
+        "package_id",
+        "user",
+        "user_id",
+        "session",
+        "session_id",
+        "message",
+        "message_id",
+    }
+    if not isinstance(alert_policy, dict):
+        errors.append("release_ops_alert_policy_missing")
+    else:
+        if alert_policy.get("policy_version") != "tonglingyu-rqa-release-alerts-v1":
+            errors.append("release_ops_alert_policy_version_invalid")
+        if alert_policy.get("low_cardinality_labels_only") is not True:
+            errors.append("release_ops_alert_labels_not_low_cardinality")
+        if alert_policy.get("missing_conditions") not in ([], None):
+            errors.append("release_ops_alert_missing_conditions_present")
+        conditions = alert_policy.get("conditions")
+        if not isinstance(conditions, dict):
+            errors.append("release_ops_alert_conditions_missing")
+            conditions = {}
+        missing_alerts = sorted(required_alerts - set(conditions))
+        for alert in missing_alerts:
+            errors.append(f"release_ops_alert_missing={alert}")
+        for alert_name, condition in conditions.items():
+            if alert_name not in required_alerts:
+                errors.append(f"release_ops_alert_unexpected={alert_name}")
+            if not isinstance(condition, dict):
+                errors.append(f"release_ops_alert_{alert_name}_invalid")
+                continue
+            for field in ("severity", "owner", "metric", "threshold"):
+                if not nonempty(condition.get(field)):
+                    errors.append(f"release_ops_alert_{alert_name}_{field}_missing")
+            labels = condition.get("labels")
+            if not isinstance(labels, list) or not labels:
+                errors.append(f"release_ops_alert_{alert_name}_labels_missing")
+                labels = []
+            for label in labels:
+                if label in forbidden_labels:
+                    errors.append(f"release_ops_alert_{alert_name}_forbidden_label={label}")
+                if label not in allowed_labels:
+                    errors.append(f"release_ops_alert_{alert_name}_label_not_allowed={label}")
+        alert_ref = validate_release_ops_ref(
+            "release_ops_alert_evidence",
+            alert_policy.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(alert_ref):
+            errors.append("release_ops_alert_evidence_ref_missing")
+
+    monitor = gate_json.get("post_release_monitor")
+    if not isinstance(monitor, dict):
+        errors.append("release_ops_post_release_monitor_missing")
+    else:
+        if monitor.get("required") is not True:
+            errors.append("release_ops_post_release_monitor_not_required")
+        if not isinstance(monitor.get("window_minutes"), int) or monitor.get("window_minutes") < 60:
+            errors.append("release_ops_post_release_window_too_short")
+        if monitor.get("requires_live_gate_evidence") is not True:
+            errors.append("release_ops_post_release_live_gate_not_required")
+        if monitor.get("requires_admin_action_or_api_evidence") is not True:
+            errors.append("release_ops_post_release_admin_action_not_required")
+        monitor_ref = validate_release_ops_ref(
+            "release_ops_post_release_monitor",
+            monitor.get("monitor_ref"),
+        )
+        live_gate_ref = validate_release_ops_ref(
+            "release_ops_post_release_live_gate",
+            monitor.get("live_gate_evidence_ref"),
+        )
+        admin_action_ref = validate_release_ops_ref(
+            "release_ops_post_release_admin_action",
+            monitor.get("admin_action_or_api_evidence_ref"),
+        )
+        if production_ready:
+            if gate_json.get("mode") != "live":
+                errors.append("production_ready_requires_release_ops_live_mode")
+            if gate_json.get("require_live") is not True:
+                errors.append("production_ready_requires_release_ops_require_live")
+            for field in ("operator", "environment", "release_report_path"):
+                if not nonempty(monitor.get(field)):
+                    errors.append(f"release_ops_post_release_{field}_missing")
+            if monitor.get("conclusion") != "passed":
+                errors.append("release_ops_post_release_conclusion_not_passed")
+            if not release_ops_ref_valid(monitor_ref):
+                errors.append("release_ops_post_release_monitor_ref_missing")
+            if not release_ops_ref_valid(live_gate_ref):
+                errors.append("release_ops_post_release_live_gate_ref_missing")
+            if not release_ops_ref_valid(admin_action_ref):
+                errors.append("release_ops_post_release_admin_action_ref_missing")
+
+    reproduction = gate_json.get("reproduction")
+    required_reproduction_inputs = {
+        "git_commit",
+        "image_digest",
+        "config_digest",
+        "source_snapshot_digest",
+        "kb_build_hash",
+        "security_scan_summary",
+        "runtime_profile_digest",
+        "prompt_digest",
+        "tool_policy_digest",
+    }
+    if not isinstance(reproduction, dict):
+        errors.append("release_ops_reproduction_missing")
+    else:
+        if not nonempty(reproduction.get("runbook_ref")):
+            errors.append("release_ops_reproduction_runbook_ref_missing")
+        inputs = reproduction.get("required_inputs")
+        if not isinstance(inputs, list):
+            errors.append("release_ops_reproduction_inputs_missing")
+        else:
+            missing_inputs = sorted(required_reproduction_inputs - set(inputs))
+            for item in missing_inputs:
+                errors.append(f"release_ops_reproduction_input_missing={item}")
+
+    evidence = gate_json.get("evidence")
+    if not isinstance(evidence, dict):
+        errors.append("release_ops_evidence_missing")
+    elif production_ready:
+        if evidence.get("production_evidence_complete") is not True:
+            errors.append("release_ops_production_evidence_incomplete")
+        for field in (
+            "rollback_evidence_ref",
+            "rto_rpo_evidence_ref",
+            "alert_evidence_ref",
+            "post_release_monitor_ref",
+        ):
+            if not release_ops_ref_valid(evidence.get(field)):
+                errors.append(f"release_ops_{field}_missing")
+
+
 def validate_performance_budget_gate_stdout():
     gate_json = success_json_from_gate_stdout(
         gates_by_name.get("rqa_performance_budget"),
@@ -1862,6 +2163,7 @@ validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()
+validate_release_ops_gate_stdout()
 validate_performance_budget_gate_stdout()
 validate_api_contract_gate_stdout()
 validate_user_lifecycle_gate_stdout()
@@ -1921,7 +2223,13 @@ for name in live_gate_names:
             f"production_ready_requires_{name}_required",
         )
 
-for name in ("runtime_config", "retrieval_quality", "rqa_backup_restore_drill", "security_scan"):
+for name in (
+    "runtime_config",
+    "retrieval_quality",
+    "rqa_backup_restore_drill",
+    "security_scan",
+    "release_ops_readiness",
+):
     gate = gates_by_name.get(name)
     add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
     if isinstance(gate, dict):

@@ -702,6 +702,18 @@
   contract 和性能预算 fail-closed gate 均已纳入本地验证。但这仍不是整体
   production-ready，因为 live Action、目标环境 live/load 性能和 operator handoff
   证据尚未闭合。
+- RQA Milestone L 已新增发布值守 gate：
+  `deploy/runbooks/tonglingyu-rqa-release-runbook.md` 记录 release flow、
+  migration preflight、backup、deploy、live gate、saved report validation、
+  rollback、DB restore/additive downgrade、RTO/RPO、alert policy、incident
+  response、post-release monitor 和 release report reproduction；
+  `deploy/scripts/verify-tonglingyu-release-ops-readiness.sh` 接入
+  `verify-tonglingyu-release-readiness.sh` 的 required gate
+  `release_ops_readiness`。preflight 模式可验证 runbook/alert/rollback 结构；
+  live 模式缺 rollback/RTO-RPO/alert/post-release/operator/environment/report
+  evidence 会 fail-closed。saved report validator 会拒绝缺
+  `release_ops_readiness` stdout、缺 post-release live gate ref 或高基数告警标签
+  的 production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
@@ -720,11 +732,10 @@
 
 1. 清理或分派当前 open retrieval failures / open governance tasks，使 quality
    gate 的 blocker 能由真实治理状态关闭，而不是绕过阈值。
-2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
-   live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
-   运维证据。
-3. 补齐 RQA Milestone K-M：live Open WebUI admin Action、发布值守、回滚、
-   事故响应、容量和审计完整性。
+2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留和
+   live existing_refs 恢复演练。
+3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
+   post-release monitor、目标环境容量/负载、事故响应和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

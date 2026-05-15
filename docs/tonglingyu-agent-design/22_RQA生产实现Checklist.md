@@ -807,34 +807,52 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 
 ## Milestone L：发布值守、告警和回滚
 
-状态：未开始
+状态：进行中（2026-05-16；runbook、static ops gate、saved report validator
+门禁已落地；真实 post-release monitor/live evidence 尚未完成）
 
 目标：RQA production-ready 必须能被 operator 接住，而不是只在发布瞬间通过。
 
-- [ ] 在 deploy runbook 或专门文档中写明 RQA release 流程。
-- [ ] runbook 覆盖 migration preflight、backup、deploy、live gate、saved report
+- [x] 在 deploy runbook 或专门文档中写明 RQA release 流程。
+- [x] runbook 覆盖 migration preflight、backup、deploy、live gate、saved report
       validation。
-- [ ] runbook 覆盖回滚到上一镜像/配置的步骤。
-- [ ] runbook 覆盖 DB restore 或 additive schema 保留后的降级处理。
-- [ ] runbook 覆盖 RTO/RPO 目标、恢复步骤、恢复后 RQA gate 和 validator 复核。
-- [ ] rollback 后必须重新运行 release readiness 或明确标记 non-production。
-- [ ] 定义 RQA 写入失败率、admin API 5xx、admin API latency、open P0 failure、
+- [x] runbook 覆盖回滚到上一镜像/配置的步骤。
+- [x] runbook 覆盖 DB restore 或 additive schema 保留后的降级处理。
+- [x] runbook 覆盖 RTO/RPO 目标、恢复步骤、恢复后 RQA gate 和 validator 复核。
+- [x] rollback 后必须重新运行 release readiness 或明确标记 non-production。
+- [x] 定义 RQA 写入失败率、admin API 5xx、admin API latency、open P0 failure、
       quality gate failure 的告警条件。
-- [ ] 告警指标必须低基数且不包含 query、question、trace 或 package id。
+- [x] 告警指标必须低基数且不包含 query、question、trace 或 package id。
 - [ ] post-release 监控窗口至少覆盖一次真实 live gate 和一次 admin Action/API
       查询。
 - [ ] post-release 监控记录 operator、时间、环境、报告路径和结论。
-- [ ] production-ready report 必须引用 runbook / rollback / post-release 证据。
-- [ ] runbook 必须说明如何按 release report 的 commit/image/config/KB/security
+- [x] production-ready report 必须引用 runbook / rollback / post-release 证据。
+- [x] runbook 必须说明如何按 release report 的 commit/image/config/KB/security
       摘要复现本次发布。
-- [ ] release gate 或 saved report validator 缺少值守证据时不能
+- [x] release gate 或 saved report validator 缺少值守证据时不能
       production-ready。
-- [ ] smoke 覆盖告警字段存在性、runbook ref、rollback evidence ref 和
+- [x] smoke 覆盖告警字段存在性、runbook ref、rollback evidence ref 和
       post-release monitor ref、RTO/RPO evidence ref、安全扫描 evidence ref。
 
 节点总结：
 
-- 待实现。
+- 新增 `deploy/runbooks/tonglingyu-rqa-release-runbook.md`，覆盖 RQA release
+  flow、migration preflight、backup、deploy、live gate、saved report validation、
+  rollback、DB restore/additive downgrade、RTO/RPO、alert policy、incident
+  response、post-release monitor 和 release report reproduction。
+- 新增 `deploy/scripts/verify-tonglingyu-release-ops-readiness.sh`，并接入
+  `verify-tonglingyu-release-readiness.sh` 的 required gate
+  `release_ops_readiness`。preflight 模式只证明 runbook/alert/rollback 结构
+  就绪；live 模式缺 rollback evidence、RTO/RPO evidence、alert evidence、
+  post-release monitor、operator、environment、report path 或 `passed` 结论会
+  fail-closed。
+- Saved report validator 已要求 production-ready report 绑定
+  `release_ops_readiness` stdout，并验证 runbook sha、低基数告警标签、rollback
+  evidence、RTO/RPO evidence、post-release live gate/admin Action 证据和
+  reproduction inputs。contract smoke 覆盖缺 gate stdout、缺 post-release live
+  gate ref 和高基数告警标签篡改。
+- 仍不能宣布 L 完成或整体 RQA production-ready：真实 post-release monitor 尚未
+  执行，live gate evidence 和 live admin Action/API 查询证据尚未绑定到目标环境
+  release report。
 
 ## Milestone M：事故响应、容量和审计完整性
 

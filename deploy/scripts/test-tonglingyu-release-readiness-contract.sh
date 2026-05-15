@@ -36,6 +36,9 @@ TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.jso
 TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-report.json"
 TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
 TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
+TAMPERED_RELEASE_OPS_STDOUT_REPORT="${WORK_DIR}/tampered-release-ops-stdout-report.json"
+TAMPERED_RELEASE_OPS_MONITOR_REPORT="${WORK_DIR}/tampered-release-ops-monitor-report.json"
+TAMPERED_RELEASE_OPS_ALERT_REPORT="${WORK_DIR}/tampered-release-ops-alert-report.json"
 TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-performance-gate-stdout-report.json"
 TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT="${WORK_DIR}/tampered-rqa-performance-budget-report.json"
 TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-check-report.json"
@@ -183,6 +186,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
@@ -703,6 +707,7 @@ TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
@@ -798,13 +803,15 @@ assert_report "${tampered_browser_relative_evidence_stdout}" \
   '"browser_review_validation_evidence_path_must_be_absolute" in report["errors"]'
 
 python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" \
-  "${SYNTHETIC_RQA_EVAL_REPORT}" "${SYNTHETIC_RQA_DB}" <<'PY'
+  "${SYNTHETIC_RQA_EVAL_REPORT}" "${SYNTHETIC_RQA_DB}" \
+  "${SCRIPT_DIR}/../runbooks/tonglingyu-rqa-release-runbook.md" <<'PY'
 import hashlib
 import json
 import sqlite3
 import sys
+from pathlib import Path
 
-source, target, eval_report_path, db_path = sys.argv[1:5]
+source, target, eval_report_path, db_path, runbook_path = sys.argv[1:6]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
 report["production_release_ready"] = True
@@ -1008,6 +1015,7 @@ behavior_config["behavior_config_digest"] = hashlib.sha256(
         separators=(",", ":"),
     ).encode("utf-8")
 ).hexdigest()
+runbook_sha256 = hashlib.sha256(Path(runbook_path).read_bytes()).hexdigest()
 production_default_thresholds = {
     "eval_case_classification": 1.0,
     "exact_term_coverage": 1.0,
@@ -1439,6 +1447,194 @@ gate_stdout = {
         "status": "ok",
         "unaccepted_error_count": 0,
     },
+    "release_ops_readiness": {
+        "alert_policy": {
+            "conditions": {
+                "admin_api_5xx_rate": {
+                    "labels": ["status"],
+                    "metric": "tonglingyu_admin_api_5xx_total",
+                    "owner": "rqa-oncall",
+                    "severity": "page",
+                    "threshold": "> 0 for 5m",
+                },
+                "admin_api_latency_p95": {
+                    "labels": ["status"],
+                    "metric": "tonglingyu_admin_api_latency_ms",
+                    "owner": "rqa-oncall",
+                    "severity": "ticket",
+                    "threshold": "p95 > 2000ms for 10m",
+                },
+                "open_p0_governance_task": {
+                    "labels": ["status", "task_type", "priority"],
+                    "metric": "tonglingyu_governance_tasks_total",
+                    "owner": "rqa-oncall",
+                    "severity": "page",
+                    "threshold": "open P0 > 0",
+                },
+                "open_p0_retrieval_failure": {
+                    "labels": ["status", "failure_type"],
+                    "metric": "tonglingyu_retrieval_failures_total",
+                    "owner": "rqa-oncall",
+                    "severity": "page",
+                    "threshold": "open P0 > 0",
+                },
+                "openwebui_admin_action_failure": {
+                    "labels": ["status"],
+                    "metric": "tonglingyu_openwebui_admin_action_failures_total",
+                    "owner": "rqa-oncall",
+                    "severity": "ticket",
+                    "threshold": "> 0",
+                },
+                "release_gate_failure": {
+                    "labels": ["status"],
+                    "metric": "tonglingyu_release_gate_failures_total",
+                    "owner": "release-oncall",
+                    "severity": "page",
+                    "threshold": "> 0",
+                },
+                "rqa_quality_gate_failure": {
+                    "labels": ["status"],
+                    "metric": "tonglingyu_rqa_quality_gate_failures_total",
+                    "owner": "rqa-oncall",
+                    "severity": "page",
+                    "threshold": "> 0",
+                },
+                "rqa_write_failure_rate": {
+                    "labels": ["status", "failure_type"],
+                    "metric": "tonglingyu_rqa_write_failures_total",
+                    "owner": "rqa-oncall",
+                    "severity": "page",
+                    "threshold": "> 0 for 5m",
+                },
+            },
+            "evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:release-alert-config",
+                "valid": True,
+            },
+            "low_cardinality_labels_only": True,
+            "missing_conditions": [],
+            "policy_version": "tonglingyu-rqa-release-alerts-v1",
+            "required_conditions": [
+                "rqa_write_failure_rate",
+                "admin_api_5xx_rate",
+                "admin_api_latency_p95",
+                "open_p0_retrieval_failure",
+                "open_p0_governance_task",
+                "rqa_quality_gate_failure",
+                "release_gate_failure",
+                "openwebui_admin_action_failure",
+            ],
+        },
+        "checks": {
+            "alert_labels_low_cardinality": True,
+            "alerts_defined": True,
+            "db_restore_or_additive_downgrade_defined": True,
+            "non_production_marker_required": True,
+            "post_release_monitor_defined": True,
+            "post_rollback_release_readiness_required": True,
+            "release_report_reproduction_defined": True,
+            "rollback_steps_defined": True,
+            "runbook_exists": True,
+            "runbook_sections_complete": True,
+        },
+        "errors": [],
+        "evidence": {
+            "alert_evidence_ref": "artifact:release-alert-config",
+            "post_release_monitor_ref": "artifact:post-release-monitor",
+            "production_evidence_complete": True,
+            "rollback_evidence_ref": "artifact:rollback-drill",
+            "rto_rpo_evidence_ref": "artifact:rto-rpo-drill",
+        },
+        "generated_at": "2026-05-15T00:00:10+00:00",
+        "mode": "live",
+        "object": "tonglingyu.release_ops_readiness_gate",
+        "ops_policy_version": "tonglingyu-rqa-release-ops-v1",
+        "post_release_monitor": {
+            "admin_action_or_api_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:live-admin-action-query",
+                "valid": True,
+            },
+            "conclusion": "passed",
+            "environment": "production",
+            "live_gate_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:live-release-gate",
+                "valid": True,
+            },
+            "monitor_ref": {
+                "kind": "artifact",
+                "ref": "artifact:post-release-monitor",
+                "valid": True,
+            },
+            "operator": "release-reviewer",
+            "release_report_path": target,
+            "required": True,
+            "requires_admin_action_or_api_evidence": True,
+            "requires_live_gate_evidence": True,
+            "window_minutes": 60,
+        },
+        "release_ops_ready": True,
+        "reproduction": {
+            "required_inputs": [
+                "git_commit",
+                "image_digest",
+                "config_digest",
+                "source_snapshot_digest",
+                "kb_build_hash",
+                "security_scan_summary",
+                "runtime_profile_digest",
+                "prompt_digest",
+                "tool_policy_digest",
+            ],
+            "runbook_ref": "runbook:tonglingyu-rqa-release-runbook#release-report-reproduction",
+        },
+        "require_live": True,
+        "rollback": {
+            "db_restore_or_additive_downgrade_defined": True,
+            "evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:rollback-drill",
+                "valid": True,
+            },
+            "non_production_marker_required": True,
+            "post_rollback_release_readiness_required": True,
+        },
+        "rto_rpo": {
+            "evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:rto-rpo-drill",
+                "valid": True,
+            },
+            "rpo_target_seconds": 3600,
+            "rto_target_seconds": 900,
+        },
+        "runbook": {
+            "missing_sections": [],
+            "path": runbook_path,
+            "ref": "runbook:tonglingyu-rqa-release-runbook",
+            "required_sections": [
+                "release_flow",
+                "migration_preflight",
+                "backup",
+                "deploy",
+                "live_gate",
+                "saved_report_validation",
+                "rollback_image_config",
+                "db_restore_or_additive_downgrade",
+                "rto_rpo_restore",
+                "alert_policy",
+                "incident_response",
+                "post_release_monitor",
+                "release_report_reproduction",
+            ],
+            "sha256": runbook_sha256,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+    },
     "openwebui_admin_action_contract": {
         "action": {
             "function_id": "tonglingyu_gateway_admin",
@@ -1768,6 +1964,83 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_security_gate_script_stdout}" \
   '"security_scan_release_scripts_not_passed" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "release_ops_readiness":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_ops_stdout="${WORK_DIR}/tampered-release-ops-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_OPS_STDOUT_REPORT}" >"${tampered_release_ops_stdout}"; then
+  echo "production-ready reports must bind release ops status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_release_ops_stdout}" \
+  '"release_ops_readiness_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_MONITOR_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "release_ops_readiness":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["evidence"]["production_evidence_complete"] = False
+        gate_json["post_release_monitor"]["live_gate_evidence_ref"] = {
+            "kind": "",
+            "ref": "",
+            "valid": False,
+        }
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_ops_monitor_stdout="${WORK_DIR}/tampered-release-ops-monitor.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_OPS_MONITOR_REPORT}" >"${tampered_release_ops_monitor_stdout}"; then
+  echo "production-ready reports must reject missing post-release monitor evidence" >&2
+  exit 1
+fi
+assert_report "${tampered_release_ops_monitor_stdout}" \
+  '"release_ops_production_evidence_incomplete" in report["errors"]'
+assert_report "${tampered_release_ops_monitor_stdout}" \
+  '"release_ops_post_release_live_gate_ref_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_ALERT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "release_ops_readiness":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["alert_policy"]["conditions"]["rqa_write_failure_rate"]["labels"].append("trace_id")
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_ops_alert_stdout="${WORK_DIR}/tampered-release-ops-alert.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_OPS_ALERT_REPORT}" >"${tampered_release_ops_alert_stdout}"; then
+  echo "production-ready reports must reject high-cardinality alert labels" >&2
+  exit 1
+fi
+assert_report "${tampered_release_ops_alert_stdout}" \
+  '"release_ops_alert_rqa_write_failure_rate_forbidden_label=trace_id" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" <<'PY'
 import json
@@ -2474,6 +2747,7 @@ if env \
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \

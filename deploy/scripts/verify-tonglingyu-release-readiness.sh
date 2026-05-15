@@ -21,6 +21,7 @@ if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_SECURITY_SCAN_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_OPS_READINESS_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
@@ -36,6 +37,7 @@ RQA_PERFORMANCE_CMD="${TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD:-${SCRIPT_DIR}/ver
 RQA_API_CONTRACT_CMD="${TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-api-contract.sh}"
 RQA_USER_LIFECYCLE_CMD="${TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-user-lifecycle.sh}"
 SECURITY_SCAN_CMD="${TONGLINGYU_RELEASE_SECURITY_SCAN_CMD:-${SCRIPT_DIR}/verify-tonglingyu-release-security.sh}"
+OPS_READINESS_CMD="${TONGLINGYU_RELEASE_OPS_READINESS_CMD:-${SCRIPT_DIR}/verify-tonglingyu-release-ops-readiness.sh}"
 OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD:-${SCRIPT_DIR}/test-openwebui-gateway-admin-action-contract.sh}"
 MODEL_UPSTREAM_CMD="${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-${SCRIPT_DIR}/verify-model-upstream-network.sh}"
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
@@ -171,6 +173,9 @@ run_gate "rqa_performance_budget" "true" "${RQA_PERFORMANCE_CMD}" || failed=1
 run_gate "rqa_api_contract" "true" "${RQA_API_CONTRACT_CMD}" || failed=1
 run_gate "rqa_user_lifecycle" "true" "${RQA_USER_LIFECYCLE_CMD}" || failed=1
 run_gate "security_scan" "true" "${SECURITY_SCAN_CMD}" || failed=1
+run_gate "release_ops_readiness" "true" env \
+  "TONGLINGYU_RELEASE_OPS_REQUIRE_LIVE=${require_live}" \
+  "${OPS_READINESS_CMD}" || failed=1
 run_gate "openwebui_admin_action_contract" "true" \
   "${OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD}" || failed=1
 
