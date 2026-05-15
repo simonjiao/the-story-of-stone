@@ -14,7 +14,8 @@ RetrievalQualityReport
   -> saved report validator
 ```
 
-完成前不能声明 RQA production-ready。
+完成前不能声明 RQA production-ready，也不能把既有 R5D 生产入口基线当作本轮
+production-ready 的替代验收。
 
 ## 实施原则
 

@@ -467,7 +467,8 @@
   等负向路径。
 - Open WebUI Function API/DB 安装脚本已支持 `AGENT_BRIDGE_TARGET_MODELS`，
   避免 Filter 和 verify gate 已支持多 target model，但安装脚本仍覆盖成单值。
-- 当前可以按本文 R5D 口径宣布 Gateway + Runtime Agent 接入 production-ready：
+- 当前 R5D 生产入口基线已通过，但不能据此宣布本轮 RQA 或完整通灵玉
+  production-ready：
   Hermes profile content/tool execution 已通过 `agent-runtime`/Hermes 接入并由
   summary/audit gate fail-closed；目标 `hhost` runtime config、model upstream
   network、strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
