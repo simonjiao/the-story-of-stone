@@ -502,8 +502,8 @@ RQA quality gate 正确 fail-closed）
 ## Milestone H：治理任务和反馈闭环
 
 状态：进行中（2026-05-16；治理任务 schema、通用 source entity、failure-to-task、
-普通用户反馈、retrieval failure 聚类、admin API/Action 和 release gate blocker 已
-完成第一批代码切片）
+普通用户反馈、retrieval failure 聚类、knowledge patch proposal、admin API/Action
+和 release gate blocker 已完成第一批代码切片）
 
 目标：RQA-6 到 RQA-12 不停留在报告层，必须进入可审计的治理任务流。
 
@@ -513,7 +513,7 @@ RQA quality gate 正确 fail-closed）
 - [x] 支持普通用户反馈生成 retrieval failure 候选或治理任务。
 - [x] 普通用户反馈不能直接修改 source、alias、term、commentary link 或事实层。
 - [x] Agent 聚类 retrieval failures，并只生成 proposed fix。
-- [ ] proposed alias / term / commentary link / version note 必须进入人工状态流转。
+- [x] proposed alias / term / commentary link / version note 必须进入人工状态流转。
 - [x] accepted fix 必须绑定 reviewer、note、source 或 evidence ref。
 - [ ] KB rebuild 后生成 kb_version diff report。
 - [ ] kb_version diff report 对比前后 eval quality summary。
@@ -547,11 +547,20 @@ RQA quality gate 正确 fail-closed）
   commentary/fact 表。Gateway admin API 和 Open WebUI admin Action 新增
   retrieval failure cluster 触发入口，并写 `retrieval_failures_clustered` 与
   `retrieval_failure_admin_cluster` audit。
+- Runtime 新增 `tonglingyu-knowledge-patch-proposals-v1`：alias、term、
+  commentary link 和 version note 建议先写入 `knowledge_patch_proposals`，
+  再生成 `source_entity_type=knowledge_patch_proposal` 的 governance task。
+  proposal payload 有类型化必填字段、大小上限、payload hash、source ref 和
+  trace/package 绑定；Gateway admin API 与 Open WebUI admin Action 新增创建
+  入口，并写 `knowledge_patch_proposal_created` 与
+  `knowledge_patch_proposal_admin_create` audit。accepted/rejected 仍只更新人工
+  状态，不直接写 source、alias、term、commentary link、version note 或事实层。
 - RQA quality gate 新增 `open_p0_governance_tasks` Production 默认阈值 0；saved
   report validator 和 release contract smoke 会拒绝 open P0 governance task tamper。
-- 仍不能宣布 H 或整体 RQA production-ready：proposed alias / term / commentary
-  link / version note 的人工状态流转、KB diff report、eval 前后对比、
-  retention/restore 和 lifecycle contract 仍未完成。
+- 仍不能宣布 H 或整体 RQA production-ready：KB diff report、eval 前后对比、
+  retention/restore 和 lifecycle contract 仍未完成；accepted proposal 后续如何进入
+  KB rebuild 输入也必须由 diff/eval gate 证明，不能由 accepted 状态直接等同为事实
+  层已更新。
 
 ## Milestone I：端到端验证
 

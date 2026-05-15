@@ -189,6 +189,7 @@ pub struct RuntimeStoreStats {
     pub evidence_cards: i64,
     pub retrieval_failures: i64,
     pub governance_tasks: i64,
+    pub knowledge_patch_proposals: i64,
     pub audit_events: i64,
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
@@ -212,6 +213,7 @@ pub const KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION: &str =
     "tonglingyu-knowledge-governance-tasks-v2";
 pub const KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION: &str =
     "tonglingyu-knowledge-governance-tasks-backfill-v1";
+pub const KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION: &str = "tonglingyu-knowledge-patch-proposals-v1";
 pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
 pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
 
@@ -375,6 +377,32 @@ pub struct KnowledgeGovernanceTaskListResult {
     pub offset: usize,
     pub next_offset: Option<usize>,
     pub items: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgePatchProposalCreateInput {
+    pub proposal_type: String,
+    pub trace_id: String,
+    pub package_id: Option<String>,
+    pub source_ref: Option<String>,
+    pub payload: Value,
+    pub created_by: Option<String>,
+    pub priority: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgePatchProposalRecord {
+    pub proposal_id: String,
+    pub proposal_type: String,
+    pub trace_id: String,
+    pub package_id: Option<String>,
+    pub source_ref: String,
+    pub payload: Value,
+    pub payload_sha256: String,
+    pub task_id: String,
+    pub created_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -842,6 +870,14 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
         let conn = self.open_connection()?;
         update_governance_task(&conn, task_id, input)
+    }
+
+    pub fn create_knowledge_patch_proposal(
+        &self,
+        input: KnowledgePatchProposalCreateInput,
+    ) -> Result<Value> {
+        let conn = self.open_connection()?;
+        create_knowledge_patch_proposal(&conn, input)
     }
 
     pub fn rebuild_knowledge_base_from_snapshots(
@@ -3761,6 +3797,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(knowledge_governance_task_create_table_sql())?;
     migrate_knowledge_governance_task_source_entity_schema(conn)?;
     conn.execute_batch(knowledge_governance_task_indexes_sql())?;
+    conn.execute_batch(knowledge_patch_proposal_schema_sql())?;
     let backfilled_governance_tasks = conn.execute(
         r#"
         INSERT OR IGNORE INTO knowledge_governance_tasks (
@@ -3833,6 +3870,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION, now_rfc3339()],
     )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, now_rfc3339()],
+    )?;
     Ok(())
 }
 
@@ -3881,6 +3922,35 @@ fn knowledge_governance_task_indexes_sql() -> &'static str {
         ON knowledge_governance_tasks(priority);
     CREATE INDEX IF NOT EXISTS idx_governance_tasks_updated
         ON knowledge_governance_tasks(updated_at);
+    "#
+}
+
+fn knowledge_patch_proposal_schema_sql() -> &'static str {
+    r#"
+    CREATE TABLE IF NOT EXISTS knowledge_patch_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        proposal_type TEXT NOT NULL,
+        trace_id TEXT NOT NULL,
+        package_id TEXT,
+        source_ref TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES knowledge_governance_tasks(task_id),
+        created_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(proposal_type, source_ref, payload_sha256)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_type
+        ON knowledge_patch_proposals(proposal_type);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_trace
+        ON knowledge_patch_proposals(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_package
+        ON knowledge_patch_proposals(package_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_task
+        ON knowledge_patch_proposals(task_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_updated
+        ON knowledge_patch_proposals(updated_at);
     "#
 }
 
@@ -4053,6 +4123,7 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         evidence_cards: table_count(conn, "evidence_cards")?,
         retrieval_failures: table_count(conn, "retrieval_failures")?,
         governance_tasks: table_count(conn, "knowledge_governance_tasks")?,
+        knowledge_patch_proposals: table_count(conn, "knowledge_patch_proposals")?,
         audit_events: table_count(conn, "audit_events")?,
         review_status: grouped_count_map(
             conn,
@@ -5034,6 +5105,150 @@ pub fn update_governance_task(
     Ok(Some(record))
 }
 
+pub fn create_knowledge_patch_proposal(
+    conn: &Connection,
+    input: KnowledgePatchProposalCreateInput,
+) -> Result<Value> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = create_knowledge_patch_proposal_inner(conn, input);
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        create_knowledge_patch_proposal_inner(conn, input)
+    }
+}
+
+fn create_knowledge_patch_proposal_inner(
+    conn: &Connection,
+    input: KnowledgePatchProposalCreateInput,
+) -> Result<Value> {
+    let proposal_type = normalize_knowledge_patch_proposal_type(&input.proposal_type)?;
+    let trace_id = input.trace_id.trim();
+    if trace_id.is_empty() {
+        return Err(anyhow!("knowledge patch proposal trace_id is required"));
+    }
+    let package_id = input
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let source_ref = input
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            package_id
+                .as_ref()
+                .map(|package_id| format!("package:{package_id}"))
+        })
+        .unwrap_or_else(|| format!("trace:{trace_id}"));
+    let payload = canonical_json_value(&input.payload);
+    validate_knowledge_patch_proposal_payload(&proposal_type, &payload)?;
+    let payload_json = serde_json::to_string(&payload)?;
+    if payload_json.len() > 8_192 {
+        return Err(anyhow!(
+            "knowledge patch proposal payload exceeds 8192 byte limit"
+        ));
+    }
+    let payload_sha256 = hash_text(&payload_json);
+    if let Some(existing) = load_knowledge_patch_proposal_by_identity(
+        conn,
+        &proposal_type,
+        &source_ref,
+        &payload_sha256,
+    )? {
+        let task = load_governance_task(conn, &existing.task_id)?
+            .ok_or_else(|| anyhow!("knowledge patch proposal task is missing"))?;
+        return Ok(knowledge_patch_proposal_create_json(&existing, &task));
+    }
+
+    let proposal_id = format!("kpp-{}", uuid::Uuid::now_v7().simple());
+    let task_type = knowledge_patch_proposal_task_type(&proposal_type);
+    let priority = input.priority.unwrap_or_else(|| "p1".to_string());
+    validate_governance_task_priority(&priority)?;
+    let proposed_fix = format!(
+        "knowledge_patch_proposal; proposal_type={}; payload_sha256={}; no_direct_fact_mutation=true",
+        proposal_type, payload_sha256
+    );
+    let task = create_governance_task_inner(
+        conn,
+        KnowledgeGovernanceTaskCreateInput {
+            source_entity_type: "knowledge_patch_proposal".to_string(),
+            source_entity_id: proposal_id.clone(),
+            trace_id: trace_id.to_string(),
+            package_id: package_id.clone(),
+            source_failure_id: None,
+            task_type: task_type.to_string(),
+            priority: Some(priority),
+            proposed_fix: Some(proposed_fix),
+            agent_cluster_key: Some(format!(
+                "knowledge_patch_proposal:{}:{}",
+                proposal_type,
+                &payload_sha256[..12]
+            )),
+        },
+    )?;
+    let created_by = input
+        .created_by
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 80));
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_patch_proposals (
+            proposal_id, proposal_type, trace_id, package_id, source_ref,
+            payload_json, payload_sha256, task_id, created_by, created_at,
+            updated_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10
+        )
+        "#,
+        params![
+            &proposal_id,
+            &proposal_type,
+            trace_id,
+            &package_id,
+            &source_ref,
+            &payload_json,
+            &payload_sha256,
+            &task.task_id,
+            &created_by,
+            &now,
+        ],
+    )?;
+    let proposal = load_knowledge_patch_proposal(conn, &proposal_id)?
+        .ok_or_else(|| anyhow!("knowledge patch proposal was not readable after insert"))?;
+    append_runtime_audit_event(
+        conn,
+        &proposal.trace_id,
+        "knowledge_patch_proposal_created",
+        &json!({
+            "proposal_id": &proposal.proposal_id,
+            "proposal_type": &proposal.proposal_type,
+            "source_ref_sha256": hash_text(&proposal.source_ref),
+            "payload_sha256": &proposal.payload_sha256,
+            "task_id": &proposal.task_id,
+            "task_type": &task.task_type,
+            "package_id": &proposal.package_id,
+            "created_by": &proposal.created_by,
+            "direct_fact_mutation": false,
+        }),
+    )?;
+    Ok(knowledge_patch_proposal_create_json(&proposal, &task))
+}
+
 fn record_retrieval_failure_if_needed(
     conn: &Connection,
     trace_id: &str,
@@ -5754,7 +5969,12 @@ fn validate_governance_task_priority(priority: &str) -> Result<()> {
 fn validate_governance_source_entity_type(source_entity_type: &str) -> Result<()> {
     if matches!(
         source_entity_type,
-        "retrieval_failure" | "retrieval_failure_cluster" | "trace" | "package" | "user_feedback"
+        "retrieval_failure"
+            | "retrieval_failure_cluster"
+            | "trace"
+            | "package"
+            | "user_feedback"
+            | "knowledge_patch_proposal"
     ) {
         Ok(())
     } else {
@@ -5923,6 +6143,221 @@ fn governance_task_record_json(record: &KnowledgeGovernanceTaskRecord) -> Value 
         "updated_at": &record.updated_at,
         "accepted_at": &record.accepted_at,
         "closed_at": &record.closed_at,
+    })
+}
+
+fn normalize_knowledge_patch_proposal_type(proposal_type: &str) -> Result<String> {
+    let normalized = proposal_type.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "alias" | "term" | "commentary_link" | "version_note"
+    ) {
+        Ok(normalized)
+    } else {
+        Err(anyhow!(
+            "invalid knowledge patch proposal_type {proposal_type}"
+        ))
+    }
+}
+
+fn knowledge_patch_proposal_task_type(proposal_type: &str) -> &'static str {
+    match proposal_type {
+        "alias" | "term" => "alias_term_review",
+        "commentary_link" => "commentary_link_review",
+        "version_note" => "version_note_review",
+        _ => "expert_review",
+    }
+}
+
+fn validate_knowledge_patch_proposal_payload(proposal_type: &str, payload: &Value) -> Result<()> {
+    if !payload.is_object() {
+        return Err(anyhow!(
+            "knowledge patch proposal payload must be a JSON object"
+        ));
+    }
+    match proposal_type {
+        "alias" => {
+            required_payload_string(payload, "alias")?;
+            required_payload_string(payload, "target_ref")?;
+        }
+        "term" => {
+            required_payload_string(payload, "term")?;
+            required_payload_string(payload, "usage_boundary")?;
+        }
+        "commentary_link" => {
+            required_payload_string(payload, "commentary_ref")?;
+            required_payload_string(payload, "block_id")?;
+        }
+        "version_note" => {
+            required_payload_string(payload, "source_id")?;
+            required_payload_string(payload, "note")?;
+        }
+        _ => {
+            return Err(anyhow!(
+                "invalid knowledge patch proposal_type {proposal_type}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn required_payload_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str> {
+    let value = payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("knowledge patch proposal payload requires {field}"))?;
+    if value.chars().count() > 1_000 {
+        return Err(anyhow!(
+            "knowledge patch proposal payload field {field} exceeds 1000 chars"
+        ));
+    }
+    Ok(value)
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_json_value).collect()),
+        Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            for key in map.keys().collect::<BTreeSet<_>>() {
+                if let Some(value) = map.get(key) {
+                    sorted.insert(key.clone(), canonical_json_value(value));
+                }
+            }
+            Value::Object(sorted)
+        }
+        other => other.clone(),
+    }
+}
+
+fn knowledge_patch_proposal_select_sql() -> &'static str {
+    r#"
+    SELECT
+        proposal_id, proposal_type, trace_id, package_id, source_ref,
+        payload_json, payload_sha256, task_id, created_by, created_at,
+        updated_at
+    FROM knowledge_patch_proposals
+    "#
+}
+
+fn load_knowledge_patch_proposal(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Option<KnowledgePatchProposalRecord>> {
+    let sql = format!(
+        "{} WHERE proposal_id = ?1",
+        knowledge_patch_proposal_select_sql()
+    );
+    let mut records = query_knowledge_patch_proposal_records(conn, &sql, &[&proposal_id])?;
+    Ok(records.pop())
+}
+
+fn load_knowledge_patch_proposal_by_identity(
+    conn: &Connection,
+    proposal_type: &str,
+    source_ref: &str,
+    payload_sha256: &str,
+) -> Result<Option<KnowledgePatchProposalRecord>> {
+    let sql = format!(
+        "{} WHERE proposal_type = ?1 AND source_ref = ?2 AND payload_sha256 = ?3 LIMIT 1",
+        knowledge_patch_proposal_select_sql()
+    );
+    let mut records = query_knowledge_patch_proposal_records(
+        conn,
+        &sql,
+        &[&proposal_type, &source_ref, &payload_sha256],
+    )?;
+    Ok(records.pop())
+}
+
+fn query_knowledge_patch_proposal_records(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+) -> Result<Vec<KnowledgePatchProposalRecord>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(
+            |(
+                proposal_id,
+                proposal_type,
+                trace_id,
+                package_id,
+                source_ref,
+                payload_json,
+                payload_sha256,
+                task_id,
+                created_by,
+                created_at,
+                updated_at,
+            )| {
+                let payload = serde_json::from_str(&payload_json)
+                    .with_context(|| format!("parse payload_json for {proposal_id}"))?;
+                Ok(KnowledgePatchProposalRecord {
+                    proposal_id,
+                    proposal_type,
+                    trace_id,
+                    package_id,
+                    source_ref,
+                    payload,
+                    payload_sha256,
+                    task_id,
+                    created_by,
+                    created_at,
+                    updated_at,
+                })
+            },
+        )
+        .collect()
+}
+
+fn knowledge_patch_proposal_record_json(record: &KnowledgePatchProposalRecord) -> Value {
+    json!({
+        "object": "tonglingyu.knowledge_patch_proposal",
+        "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+        "proposal_id": &record.proposal_id,
+        "proposal_type": &record.proposal_type,
+        "trace_id": &record.trace_id,
+        "package_id": &record.package_id,
+        "source_ref": &record.source_ref,
+        "payload": &record.payload,
+        "payload_sha256": &record.payload_sha256,
+        "task_id": &record.task_id,
+        "created_by": &record.created_by,
+        "created_at": &record.created_at,
+        "updated_at": &record.updated_at,
+        "direct_fact_mutation": false,
+    })
+}
+
+fn knowledge_patch_proposal_create_json(
+    proposal: &KnowledgePatchProposalRecord,
+    task: &KnowledgeGovernanceTaskRecord,
+) -> Value {
+    json!({
+        "object": "tonglingyu.knowledge_patch_proposal_create",
+        "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+        "proposal": knowledge_patch_proposal_record_json(proposal),
+        "task": governance_task_record_json(task),
+        "direct_fact_mutation": false,
     })
 }
 
@@ -9358,6 +9793,7 @@ mod tests {
         assert_eq!(migration_count, 1);
         assert!(sqlite_table_exists(&conn, "retrieval_failures").expect("table check"));
         assert!(sqlite_table_exists(&conn, "knowledge_governance_tasks").expect("table check"));
+        assert!(sqlite_table_exists(&conn, "knowledge_patch_proposals").expect("table check"));
     }
 
     #[test]
@@ -9848,6 +10284,128 @@ mod tests {
             )
             .expect("cluster audit count");
         assert_eq!(cluster_audit_count, 1);
+    }
+
+    #[test]
+    fn knowledge_patch_proposal_creates_human_review_task_without_fact_mutation() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let alias_count_before =
+            table_count(&conn, "aliases").expect("alias count before proposal");
+        let version_note_count_before =
+            table_count(&conn, "version_notes").expect("version note count before proposal");
+
+        let result = create_knowledge_patch_proposal(
+            &conn,
+            KnowledgePatchProposalCreateInput {
+                proposal_type: "alias".to_string(),
+                trace_id: "trace-knowledge-patch-proposal".to_string(),
+                package_id: None,
+                source_ref: Some("trace:trace-knowledge-patch-proposal".to_string()),
+                payload: json!({
+                    "alias": "灵玉",
+                    "target_ref": "person:baoyu",
+                    "rationale": "专家建议进入人工复核，不直接写入别名表。",
+                }),
+                created_by: Some("agent-rqa".to_string()),
+                priority: Some("p1".to_string()),
+            },
+        )
+        .expect("proposal creates");
+
+        assert_eq!(
+            result["object"],
+            json!("tonglingyu.knowledge_patch_proposal_create")
+        );
+        assert_eq!(
+            result["schema_version"],
+            json!(KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION)
+        );
+        assert_eq!(result["direct_fact_mutation"], json!(false));
+        assert_eq!(result["proposal"]["proposal_type"], json!("alias"));
+        assert_eq!(
+            result["task"]["source_entity_type"],
+            json!("knowledge_patch_proposal")
+        );
+        assert_eq!(result["task"]["task_type"], json!("alias_term_review"));
+        assert_eq!(result["task"]["status"], json!("open"));
+        assert!(
+            result["task"]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("no_direct_fact_mutation=true"))
+        );
+
+        let duplicate = create_knowledge_patch_proposal(
+            &conn,
+            KnowledgePatchProposalCreateInput {
+                proposal_type: "alias".to_string(),
+                trace_id: "trace-knowledge-patch-proposal".to_string(),
+                package_id: None,
+                source_ref: Some("trace:trace-knowledge-patch-proposal".to_string()),
+                payload: json!({
+                    "target_ref": "person:baoyu",
+                    "rationale": "专家建议进入人工复核，不直接写入别名表。",
+                    "alias": "灵玉",
+                }),
+                created_by: Some("agent-rqa".to_string()),
+                priority: Some("p1".to_string()),
+            },
+        )
+        .expect("duplicate proposal returns existing");
+        assert_eq!(
+            duplicate["proposal"]["proposal_id"],
+            result["proposal"]["proposal_id"]
+        );
+        assert_eq!(duplicate["task"]["task_id"], result["task"]["task_id"]);
+
+        let task_id = result["task"]["task_id"].as_str().expect("task id");
+        update_governance_task(
+            &conn,
+            task_id,
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "accepted".to_string(),
+                reviewer: Some("expert-reviewer".to_string()),
+                review_note: Some("accept proposal for later KB rebuild input".to_string()),
+                evidence_ref: Some("source://expert-review/alias/001".to_string()),
+                expected_updated_at: Some(
+                    result["task"]["updated_at"]
+                        .as_str()
+                        .expect("task updated_at")
+                        .to_string(),
+                ),
+            },
+        )
+        .expect("proposal task accepts")
+        .expect("proposal task exists");
+
+        assert_eq!(
+            table_count(&conn, "aliases").expect("alias count after proposal"),
+            alias_count_before
+        );
+        assert_eq!(
+            table_count(&conn, "version_notes").expect("version note count after proposal"),
+            version_note_count_before
+        );
+        let proposal_task_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_governance_tasks WHERE source_entity_type = 'knowledge_patch_proposal'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("proposal task count");
+        assert_eq!(proposal_task_count, 1);
+        let events = runtime_audit_events_for_trace(&conn, "trace-knowledge-patch-proposal")
+            .expect("proposal audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_patch_proposal_created"
+                && event["payload"]["payload_sha256"].as_str().is_some()
+                && event["payload"].get("payload").is_none()
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "governance_task_status_updated"
+                && event["payload"]["evidence_ref_sha256"].as_str().is_some()
+        }));
     }
 
     #[test]

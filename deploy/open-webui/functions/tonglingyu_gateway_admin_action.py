@@ -45,6 +45,7 @@ class Action:
         {"id": "governance_task_create", "name": "Create governance task"},
         {"id": "governance_task_from_failure", "name": "Create governance task"},
         {"id": "governance_task_update", "name": "Update governance task"},
+        {"id": "knowledge_patch_proposal", "name": "Create knowledge proposal"},
     ]
 
     class Valves(BaseModel):
@@ -311,6 +312,33 @@ class Action:
                 )
                 return _json_message(
                     "RQA governance task update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "knowledge_patch_proposal":
+                proposal_type = str(_deep_get(body, "proposal_type") or "").strip()
+                payload = _deep_get(body, "payload") or _deep_get(body, "proposal_payload")
+                if not proposal_type:
+                    raise GatewayAdminError("Knowledge proposal type is required.")
+                if not isinstance(payload, dict):
+                    raise GatewayAdminError("Knowledge proposal payload must be a JSON object.")
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/governance/proposals",
+                    {
+                        "proposal_type": proposal_type,
+                        "trace_id": _deep_get(body, "trace_id"),
+                        "package_id": _deep_get(body, "package_id"),
+                        "source_ref": _deep_get(body, "source_ref"),
+                        "payload": payload,
+                        "priority": _deep_get(body, "priority"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA knowledge patch proposal",
                     result,
                     self.valves.RESPONSE_MAX_CHARS,
                 )

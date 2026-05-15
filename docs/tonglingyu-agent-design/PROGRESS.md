@@ -603,9 +603,19 @@
   `source_entity_type=retrieval_failure_cluster` 的 governance task proposed fix，
   并写 `retrieval_failures_clustered` / `retrieval_failure_admin_cluster` audit；
   不改 retrieval failure 状态或 source/alias/term/commentary/fact 表。
-- 该 H 切片仍不等于 H 完成或 production-ready：proposed alias / term /
-  commentary link / version note 的人工状态流转、KB diff report、eval 前后对比、
-  retention/restore 和用户数据 lifecycle contract 仍未完成。
+- proposed alias / term / commentary link / version note 的人工状态流转已完成第一批
+  代码切片：Runtime 新增 `tonglingyu-knowledge-patch-proposals-v1` 和
+  `knowledge_patch_proposals`，proposal 必须有类型化 payload、payload hash、
+  source ref、trace/package 绑定，并创建
+  `source_entity_type=knowledge_patch_proposal` 的 governance task；Gateway admin
+  API 和 Open WebUI admin Action 可创建 proposal，并写
+  `knowledge_patch_proposal_created` / `knowledge_patch_proposal_admin_create` audit。
+  accepted/rejected 仍只更新人工状态，不直接写 source、alias、term、commentary
+  link、version note 或事实层。
+- 该 H 切片仍不等于 H 完成或 production-ready：KB diff report、eval 前后对比、
+  retention/restore 和用户数据 lifecycle contract 仍未完成；accepted proposal 后续
+  进入 KB rebuild 输入时还必须由 diff/eval gate 证明，不能把 accepted 状态直接等同
+  为事实层已更新。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和

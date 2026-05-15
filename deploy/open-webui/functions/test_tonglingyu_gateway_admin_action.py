@@ -353,6 +353,46 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         self.assertEqual(payload["priority"], "p0")
         self.assertIn("tonglingyu.governance_task_admin_create", result["content"])
 
+    def test_knowledge_patch_proposal_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                '{"object":"tonglingyu.knowledge_patch_proposal_admin_create"}'
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "proposal_type": "alias",
+                        "trace_id": "trace-1",
+                        "package_id": "pkg-1",
+                        "source_ref": "package:pkg-1",
+                        "payload": {
+                            "alias": "灵玉",
+                            "target_ref": "person:baoyu",
+                        },
+                        "priority": "p1",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="knowledge_patch_proposal",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/proposals",
+        )
+        self.assertEqual(payload["proposal_type"], "alias")
+        self.assertEqual(payload["payload"]["target_ref"], "person:baoyu")
+        self.assertIn(
+            "tonglingyu.knowledge_patch_proposal_admin_create", result["content"]
+        )
+
     def test_governance_task_update_uses_patch_json(self) -> None:
         action = self.action_with_key()
         with patch(

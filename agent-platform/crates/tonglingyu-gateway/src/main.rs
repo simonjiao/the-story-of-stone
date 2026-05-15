@@ -23,9 +23,10 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
-    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
-    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
-    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
+    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
+    KnowledgeGovernanceTaskUpdateInput, KnowledgePatchProposalCreateInput,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
     RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
@@ -469,6 +470,16 @@ struct GovernanceTaskManualCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct KnowledgePatchProposalCreateRequest {
+    proposal_type: String,
+    trace_id: Option<String>,
+    package_id: Option<String>,
+    source_ref: Option<String>,
+    payload: Value,
+    priority: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct GovernanceTaskUpdateRequest {
     status: String,
     reviewer: Option<String>,
@@ -492,6 +503,12 @@ struct PackageAccessContext {
 
 #[derive(Debug, Clone)]
 struct UserFeedbackSource {
+    trace_id: String,
+    package_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgePatchProposalSource {
     trace_id: String,
     package_id: Option<String>,
 }
@@ -1078,6 +1095,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/governance/tasks",
             get(governance_tasks_endpoint).post(create_governance_task_endpoint),
+        )
+        .route(
+            "/v1/admin/governance/proposals",
+            post(create_knowledge_patch_proposal_endpoint),
         )
         .route(
             "/v1/admin/governance/tasks/{task_id}",
@@ -3975,6 +3996,123 @@ async fn create_governance_task_endpoint(
     }
 }
 
+async fn create_knowledge_patch_proposal_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<KnowledgePatchProposalCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_patch_proposal_create")
+    {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let proposal_type = payload.proposal_type.trim().to_string();
+    let source = match resolve_knowledge_patch_proposal_source(
+        &state,
+        payload.trace_id.as_deref(),
+        payload.package_id.as_deref(),
+    ) {
+        Ok(source) => source,
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_patch_proposal_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "proposal_type": proposal_type,
+                    "trace_id_sha256": payload.trace_id.as_deref().map(hash_text),
+                    "package_id_sha256": payload.package_id.as_deref().map(hash_text),
+                    "result_count": 0,
+                    "direct_fact_mutation": false,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge patch proposal admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response();
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge patch proposal source resolution failed");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_patch_proposal_source_failed",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let create_result =
+        state
+            .runtime_store
+            .create_knowledge_patch_proposal(KnowledgePatchProposalCreateInput {
+                proposal_type,
+                trace_id: source.trace_id.clone(),
+                package_id: source.package_id.clone(),
+                source_ref: payload
+                    .source_ref
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+                payload: payload.payload,
+                created_by: Some(actor.clone()),
+                priority: payload.priority,
+            });
+    match create_result {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_patch_proposal_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "proposal_type": result["proposal"]["proposal_type"].as_str(),
+                    "proposal_id": result["proposal"]["proposal_id"].as_str(),
+                    "payload_sha256": result["proposal"]["payload_sha256"].as_str(),
+                    "source_ref_sha256": result["proposal"]["source_ref"].as_str().map(hash_text),
+                    "task_id": result["task"]["task_id"].as_str(),
+                    "task_type": result["task"]["task_type"].as_str(),
+                    "trace_id": result["proposal"]["trace_id"].as_str(),
+                    "package_id": result["proposal"]["package_id"].as_str(),
+                    "direct_fact_mutation": false,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge patch proposal admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_patch_proposal_admin_create",
+                "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge patch proposal create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_patch_proposal_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn create_governance_task_from_failure_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5150,6 +5288,42 @@ fn resolve_user_feedback_source(
     }))
 }
 
+fn resolve_knowledge_patch_proposal_source(
+    state: &AppState,
+    trace_id: Option<&str>,
+    package_id: Option<&str>,
+) -> Result<KnowledgePatchProposalSource> {
+    let requested_trace_id = trace_id.map(str::trim).filter(|value| !value.is_empty());
+    let requested_package_id = package_id.map(str::trim).filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return Err(anyhow!(
+            "knowledge patch proposal trace_id or package_id is required"
+        ));
+    }
+    if let Some(package_id) = requested_package_id {
+        let Some(package) = state.runtime_store.read_package(package_id)? else {
+            return Err(anyhow!("knowledge patch proposal source package not found"));
+        };
+        if requested_trace_id.is_some_and(|trace_id| trace_id != package.trace_id.as_str()) {
+            return Err(anyhow!(
+                "knowledge patch proposal source trace/package mismatch"
+            ));
+        }
+        return Ok(KnowledgePatchProposalSource {
+            trace_id: package.trace_id,
+            package_id: Some(package.package_id),
+        });
+    }
+    let trace_id = requested_trace_id.expect("checked trace_id presence");
+    if load_trace(&state.db, trace_id)?.is_none() {
+        return Err(anyhow!("knowledge patch proposal source trace not found"));
+    }
+    Ok(KnowledgePatchProposalSource {
+        trace_id: trace_id.to_string(),
+        package_id: None,
+    })
+}
+
 fn normalize_user_feedback_type(value: Option<&str>) -> Result<String> {
     let feedback_type = value
         .map(str::trim)
@@ -5621,6 +5795,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "evidence_cards": runtime_stats.evidence_cards,
             "retrieval_failures": runtime_stats.retrieval_failures,
             "governance_tasks": runtime_stats.governance_tasks,
+            "knowledge_patch_proposals": runtime_stats.knowledge_patch_proposals,
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
@@ -5639,6 +5814,10 @@ fn load_metrics(state: &AppState) -> Result<Value> {
                 "by_status": runtime_stats.governance_task_status,
                 "by_type": runtime_stats.governance_task_type,
                 "by_priority": runtime_stats.governance_task_priority,
+            },
+            "knowledge_patch_proposals": {
+                "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+                "total": runtime_stats.knowledge_patch_proposals,
             },
         },
         "workflow_status": workflow_status_counts,
@@ -5678,6 +5857,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         (
             "tonglingyu_governance_tasks_total",
             runtime_stats.governance_tasks,
+        ),
+        (
+            "tonglingyu_knowledge_patch_proposals_total",
+            runtime_stats.knowledge_patch_proposals,
         ),
         ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
@@ -5767,6 +5950,8 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "retrieval_failure_admin_update",
             "retrieval_failure_admin_cluster",
             "retrieval_failures_clustered",
+            "knowledge_patch_proposal_created",
+            "knowledge_patch_proposal_admin_create",
             "governance_task_created",
             "governance_task_status_updated",
             "governance_task_admin_list",
@@ -6794,6 +6979,80 @@ mod tests {
             audit_event_count(&db_path, "governance_task_status_updated"),
             1
         );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_patch_proposal_endpoint_creates_review_task_without_fact_mutation() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-patch-proposal");
+        let package = seed_owned_gateway_package(&db_path, "user-1");
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema");
+        let alias_count_before = table_count(&conn, "aliases").expect("alias count before");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = create_knowledge_patch_proposal_endpoint(
+            State(state),
+            admin_headers(),
+            Json(KnowledgePatchProposalCreateRequest {
+                proposal_type: "alias".to_string(),
+                trace_id: Some(package.trace_id.clone()),
+                package_id: Some(package.package_id.clone()),
+                source_ref: Some(format!("package:{}", package.package_id)),
+                payload: json!({
+                    "alias": "灵玉",
+                    "target_ref": "person:baoyu",
+                    "rationale": "admin proposed alias must be human reviewed",
+                }),
+                priority: Some("p1".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("proposal response json");
+        assert_eq!(
+            body["object"],
+            json!("tonglingyu.knowledge_patch_proposal_admin_create")
+        );
+        assert_eq!(
+            body["schema_version"],
+            json!(KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION)
+        );
+        assert_eq!(body["result"]["direct_fact_mutation"], json!(false));
+        assert_eq!(body["result"]["proposal"]["proposal_type"], json!("alias"));
+        assert_eq!(
+            body["result"]["task"]["source_entity_type"],
+            json!("knowledge_patch_proposal")
+        );
+        assert_eq!(
+            body["result"]["task"]["task_type"],
+            json!("alias_term_review")
+        );
+        assert_eq!(
+            table_count(&conn, "aliases").expect("alias count after"),
+            alias_count_before
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_patch_proposal_admin_create"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_patch_proposal_created"),
+            1
+        );
+        assert_eq!(audit_event_count(&db_path, "governance_task_created"), 1);
+        let runtime_audit_payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM audit_events WHERE event_type = 'knowledge_patch_proposal_created' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("runtime proposal audit payload");
+        assert!(!runtime_audit_payload.contains("灵玉"));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
