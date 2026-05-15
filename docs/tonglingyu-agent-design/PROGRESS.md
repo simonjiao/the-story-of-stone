@@ -778,6 +778,15 @@
   preflight 或 pending migration 未清零的报告。2026-05-16 contract smoke、
   fixture preflight gate、非 live readiness saved report validation 和
   `cargo check -p tonglingyu-gateway` 已通过。
+- Release readiness report 已新增 `tonglingyu.release_context` 和
+  `release_context_digest`：报告会绑定 environment、target、generated_at、
+  valid_until、validity_hours、require_live 和 context source；artifact registry
+  记录 release context digest。saved report validator 会拒绝缺 context、context
+  digest 漂移、generated_at 不一致、无效有效期、production-ready 过期、live
+  模式未显式绑定目标环境或使用 local/preflight/test/fixture 环境名的报告；
+  contract smoke 已覆盖缺 context 和无效 validity window；默认非 live readiness
+  失败报告已通过 saved report validator 结构校验。该机制已闭合，但目标
+  production-ready 仍必须由真实 live release run 生成并保存仍有效的报告 artifact。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
@@ -826,9 +835,8 @@
 1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
    本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
 2. 实现 RQA Milestone J 剩余项：目标 production DB pre-migration
-   backup/preflight artifact、live existing_refs 恢复演练、live report freshness、
-   目标 release run artifact 留存，以及当前运行镜像/代码/migration 状态的 live
-   绑定。
+   backup/preflight artifact、live existing_refs 恢复演练、目标 live release
+   report artifact 留存，以及当前运行镜像/代码/migration 状态的 live 绑定。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
    post-release monitor、目标环境 capacity/load、incident response drill 和
    audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。

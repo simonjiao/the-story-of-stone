@@ -948,6 +948,15 @@ def validate_release_artifact_registry():
             "digest": report.get("release_manifest_digest"),
             "source_gate": "release_readiness",
         },
+        "release_context": {
+            "digest": report.get("release_context_digest"),
+            "source_gate": "release_readiness",
+            "ref": (
+                report.get("release_context", {}).get("environment")
+                if isinstance(report.get("release_context"), dict)
+                else ""
+            ),
+        },
         "runtime_config": {
             "digest": manifest_runtime.get("config_digest"),
             "source_gate": "runtime_config",
@@ -2809,6 +2818,8 @@ browser_review_ref = report.get("browser_review_ref")
 browser_review_evidence = report.get("browser_review_evidence")
 browser_review_validation = report.get("browser_review_validation")
 generated_at = report.get("generated_at")
+release_context = report.get("release_context")
+release_context_digest = report.get("release_context_digest")
 
 generated_at_dt = None
 if not nonempty(generated_at):
@@ -2822,6 +2833,80 @@ else:
         future_skew_seconds = (generated_at_dt - now).total_seconds()
         if future_skew_seconds > 300:
             errors.append("generated_at_must_not_be_in_future")
+
+computed_release_context_errors = []
+release_context_ready = False
+release_context_valid_until_dt = None
+if not isinstance(release_context, dict):
+    errors.append("release_context_missing")
+    computed_release_context_errors.append("release context missing")
+else:
+    if release_context.get("object") != "tonglingyu.release_context":
+        errors.append("release_context_object_invalid")
+    if release_context.get("schema_version") != 1:
+        errors.append("release_context_schema_version_invalid")
+    if release_context.get("policy_version") != "tonglingyu-release-context-v1":
+        errors.append("release_context_policy_version_invalid")
+    if release_context.get("secret_values_printed") is not False:
+        errors.append("release_context_secret_values_printed_must_be_false")
+    if not is_sha256(release_context_digest):
+        errors.append("release_context_digest_invalid")
+    elif release_context_digest != canonical_digest(release_context):
+        errors.append("release_context_digest_mismatch")
+    context_generated_at = release_context.get("generated_at")
+    context_generated_at_dt = parse_timestamp(context_generated_at)
+    if context_generated_at_dt is None:
+        errors.append("release_context_generated_at_invalid")
+    elif generated_at_dt is not None and context_generated_at != generated_at:
+        errors.append("release_context_generated_at_mismatch")
+    release_context_valid_until_dt = parse_timestamp(release_context.get("valid_until"))
+    if release_context_valid_until_dt is None:
+        errors.append("release_context_valid_until_invalid")
+    elif context_generated_at_dt is not None:
+        if release_context_valid_until_dt <= context_generated_at_dt:
+            errors.append("release_context_valid_until_not_after_generated_at")
+    validity_hours = release_context.get("validity_hours")
+    if not isinstance(validity_hours, (int, float)) or validity_hours <= 0:
+        errors.append("release_context_validity_hours_invalid")
+        computed_release_context_errors.append("release report validity hours must be positive")
+    elif context_generated_at_dt is not None and release_context_valid_until_dt is not None:
+        expected_seconds = float(validity_hours) * 3600
+        actual_seconds = (
+            release_context_valid_until_dt - context_generated_at_dt
+        ).total_seconds()
+        if abs(actual_seconds - expected_seconds) > 1:
+            errors.append("release_context_valid_until_mismatch")
+    environment = release_context.get("environment")
+    if not nonempty(environment):
+        errors.append("release_context_environment_missing")
+    if not isinstance(release_context.get("environment_explicit"), bool):
+        errors.append("release_context_environment_explicit_must_be_bool")
+    if release_context.get("require_live") is not require_live:
+        errors.append("release_context_require_live_mismatch")
+    if release_context.get("context_source") != "env":
+        errors.append("release_context_source_invalid")
+    if not isinstance(release_context.get("errors"), list):
+        errors.append("release_context_errors_must_be_array")
+    if require_live and release_context.get("environment_explicit") is not True:
+        computed_release_context_errors.append("live release environment was not provided")
+    if (
+        require_live
+        and isinstance(environment, str)
+        and environment.lower() in {"local", "preflight", "test", "fixture"}
+    ):
+        computed_release_context_errors.append(
+            "live release environment must identify target environment"
+        )
+    if release_context.get("errors") != computed_release_context_errors:
+        errors.append("release_context_errors_mismatch")
+    if release_context.get("valid") != (not computed_release_context_errors):
+        errors.append("release_context_valid_mismatch")
+    release_context_ready = (
+        release_context.get("valid") is True
+        and not computed_release_context_errors
+        and context_generated_at_dt is not None
+        and release_context_valid_until_dt is not None
+    )
 
 computed_required_failures = [
     gate["name"]
@@ -2897,11 +2982,14 @@ if not computed_browser_review_acknowledged:
     computed_release_blockers.append("Open WebUI browser-side review was not acknowledged")
 if summary_only:
     computed_release_blockers.append("summary-only mode was used")
+for error in computed_release_context_errors:
+    computed_release_blockers.append(error)
 computed_release_conditions_met = (
     require_live
     and not computed_required_failures
     and not computed_skipped_live_gates
     and computed_browser_review_acknowledged
+    and release_context_ready
 )
 if gate_overrides_used:
     computed_release_blockers.append("gate command overrides were used")
@@ -2961,6 +3049,12 @@ if production_ready:
         age_seconds = (datetime.now(timezone.utc) - generated_at_dt).total_seconds()
         if age_seconds > report_max_age_hours * 3600:
             errors.append("production_ready_report_too_old")
+    if release_context_valid_until_dt is None:
+        errors.append("production_ready_requires_release_context_valid_until")
+    elif release_context_valid_until_dt <= datetime.now(timezone.utc):
+        errors.append("production_ready_report_expired")
+    if not release_context_ready:
+        errors.append("production_ready_requires_valid_release_context")
 add_if(
     production_ready and report.get("status") != "passed",
     "production_ready_requires_passed_status",

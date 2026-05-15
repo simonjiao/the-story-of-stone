@@ -32,6 +32,8 @@ TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_RELEASE_MANIFEST_REPORT="${WORK_DIR}/tampered-release-manifest-report.json"
 TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-digest-report.json"
+TAMPERED_RELEASE_CONTEXT_REPORT="${WORK_DIR}/tampered-release-context-report.json"
+TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT="${WORK_DIR}/tampered-release-context-validity-report.json"
 TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
 TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
@@ -229,6 +231,8 @@ PY
 
 common_env=(
   "TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true"
+  "TONGLINGYU_RELEASE_ENVIRONMENT=contract-live"
+  "TONGLINGYU_RELEASE_TARGET=contract-target"
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
@@ -775,6 +779,8 @@ env_file="${WORK_DIR}/release-readiness.env"
 env_file_report="${WORK_DIR}/env-file-report.json"
 cat >"${env_file}" <<EOF
 TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
+TONGLINGYU_RELEASE_ENVIRONMENT=contract-live
+TONGLINGYU_RELEASE_TARGET=contract-target
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
@@ -2116,6 +2122,14 @@ registry_entries = [
         retention_class="release_manifest",
     ),
     artifact_entry(
+        "release_context",
+        "inline_json",
+        report["release_context_digest"],
+        "release_readiness",
+        ref=report["release_context"]["environment"],
+        retention_class="release_manifest",
+    ),
+    artifact_entry(
         "runtime_config",
         "gate_stdout",
         release_manifest["runtime_config"]["config_digest"],
@@ -2343,6 +2357,7 @@ assert_report "${rqa_gate_low_threshold_stdout}" \
   '"expected_evidence_hit_at_8" in report["threshold_config"]["less_strict_overrides"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_STALE_READY_REPORT}" <<'PY'
+import hashlib
 import json
 import sys
 
@@ -2350,6 +2365,28 @@ source, target = sys.argv[1:3]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
 report["generated_at"] = "2000-01-01T00:00:00Z"
+report["release_context"]["generated_at"] = "2000-01-01T00:00:00Z"
+report["release_context"]["valid_until"] = "2000-01-02T00:00:00Z"
+context_digest = hashlib.sha256(
+    json.dumps(
+        report["release_context"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+report["release_context_digest"] = context_digest
+for entry in report["release_artifact_registry"]["entries"]:
+    if entry.get("name") == "release_context":
+        entry["digest_sha256"] = context_digest
+report["release_artifact_registry_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_artifact_registry"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
 PY
@@ -2361,6 +2398,71 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_stale_ready_stdout}" \
   '"production_ready_report_too_old" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_CONTEXT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report.pop("release_context", None)
+report.pop("release_context_digest", None)
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_context_stdout="${WORK_DIR}/tampered-release-context.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_CONTEXT_REPORT}" >"${tampered_release_context_stdout}"; then
+  echo "production-ready reports must bind release context" >&2
+  exit 1
+fi
+assert_report "${tampered_release_context_stdout}" \
+  '"release_context_missing" in report["errors"]'
+assert_report "${tampered_release_context_stdout}" \
+  '"production_ready_requires_valid_release_context" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["release_context"]["valid_until"] = report["release_context"]["generated_at"]
+context_digest = hashlib.sha256(
+    json.dumps(
+        report["release_context"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+report["release_context_digest"] = context_digest
+for entry in report["release_artifact_registry"]["entries"]:
+    if entry.get("name") == "release_context":
+        entry["digest_sha256"] = context_digest
+report["release_artifact_registry_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_artifact_registry"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_context_validity_stdout="${WORK_DIR}/tampered-release-context-validity.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT}" \
+  >"${tampered_release_context_validity_stdout}"; then
+  echo "production-ready reports must bind a future validity window" >&2
+  exit 1
+fi
+assert_report "${tampered_release_context_validity_stdout}" \
+  '"release_context_valid_until_not_after_generated_at" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
 import json
@@ -3501,6 +3603,8 @@ assert_report "${tampered_browser_local_ref_hash_stdout}" \
 failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \
   TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true \
+  TONGLINGYU_RELEASE_ENVIRONMENT=contract-live \
+  TONGLINGYU_RELEASE_TARGET=contract-target \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \

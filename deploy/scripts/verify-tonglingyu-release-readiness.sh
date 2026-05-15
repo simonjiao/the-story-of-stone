@@ -162,6 +162,9 @@ if is_true "${TONGLINGYU_RELEASE_SUMMARY_ONLY:-false}"; then
   summary_only="true"
 fi
 browser_review_ref="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
+release_environment="${TONGLINGYU_RELEASE_ENVIRONMENT:-}"
+release_target="${TONGLINGYU_RELEASE_TARGET:-}"
+release_report_validity_hours="${TONGLINGYU_RELEASE_REPORT_VALIDITY_HOURS:-24}"
 
 failed=0
 run_gate "runtime_config" "true" env \
@@ -277,12 +280,13 @@ fi
 python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" \
   "${require_live}" "${summary_only}" "${browser_review_ref}" \
   "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}" \
-  "${GATE_CMD_OVERRIDES_USED}" "${REPO_DIR}" <<'PY'
+  "${GATE_CMD_OVERRIDES_USED}" "${REPO_DIR}" "${release_environment}" \
+  "${release_target}" "${release_report_validity_hours}" <<'PY'
 import json
 import hashlib
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 (
     results_path,
@@ -294,12 +298,49 @@ from datetime import datetime, timezone
     browser_review_evidence,
     gate_cmd_overrides_raw,
     repo_dir,
-) = sys.argv[1:10]
+    release_environment_raw,
+    release_target_raw,
+    release_report_validity_hours_raw,
+) = sys.argv[1:13]
 require_live = require_live_raw == "true"
 summary_only = summary_only_raw == "true"
 browser_review_ref = browser_review_ref.strip()
 browser_review_evidence = browser_review_evidence.strip()
 gate_cmd_overrides_used = gate_cmd_overrides_raw == "true"
+release_generated_at = datetime.now(timezone.utc)
+release_environment_raw = release_environment_raw.strip()
+release_environment = release_environment_raw or ("live" if require_live else "local")
+release_target = release_target_raw.strip()
+release_context_errors = []
+try:
+    release_report_validity_hours = float(release_report_validity_hours_raw)
+except ValueError:
+    release_report_validity_hours = 0.0
+if release_report_validity_hours <= 0:
+    release_context_errors.append("release report validity hours must be positive")
+if require_live and not release_environment_raw:
+    release_context_errors.append("live release environment was not provided")
+if require_live and release_environment.lower() in {"local", "preflight", "test", "fixture"}:
+    release_context_errors.append("live release environment must identify target environment")
+release_valid_until = release_generated_at + timedelta(
+    hours=max(release_report_validity_hours, 0.0),
+)
+release_context = {
+    "object": "tonglingyu.release_context",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-release-context-v1",
+    "environment": release_environment,
+    "environment_explicit": bool(release_environment_raw),
+    "target": release_target,
+    "require_live": require_live,
+    "generated_at": release_generated_at.isoformat(),
+    "valid_until": release_valid_until.isoformat(),
+    "validity_hours": release_report_validity_hours,
+    "context_source": "env",
+    "valid": not release_context_errors,
+    "errors": release_context_errors,
+    "secret_values_printed": False,
+}
 with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
@@ -447,6 +488,7 @@ def build_release_manifest():
 
 release_manifest = build_release_manifest()
 release_manifest_digest = canonical_digest(release_manifest)
+release_context_digest = canonical_digest(release_context)
 browser_review_validation = None
 browser_review_gate = gates_by_name.get("openwebui_browser_review") or {}
 for line in reversed(browser_review_gate.get("stdout_tail") or []):
@@ -515,6 +557,14 @@ def build_release_artifact_registry():
         release_manifest_digest,
         "release_readiness",
         ref="release_manifest",
+        retention_class="release_manifest",
+    )
+    add_entry(
+        "release_context",
+        "inline_json",
+        release_context_digest,
+        "release_readiness",
+        ref=release_context.get("environment"),
         retention_class="release_manifest",
     )
     add_entry(
@@ -673,11 +723,14 @@ if not browser_review_acknowledged:
     release_blockers.append("Open WebUI browser-side review was not acknowledged")
 if summary_only:
     release_blockers.append("summary-only mode was used")
+for error in release_context_errors:
+    release_blockers.append(error)
 release_conditions_met = (
     require_live
     and not required_failures
     and not skipped_live_gates
     and browser_review_acknowledged
+    and release_context["valid"]
 )
 if gate_cmd_overrides_used:
     release_blockers.append("gate command overrides were used")
@@ -699,7 +752,9 @@ report = {
     "browser_review_ref": browser_review_ref,
     "browser_review_evidence": verified_browser_review_evidence,
     "browser_review_validation": browser_review_validation,
-    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "generated_at": release_context["generated_at"],
+    "release_context": release_context,
+    "release_context_digest": release_context_digest,
     "secret_values_printed": False,
     "release_manifest": release_manifest,
     "release_manifest_digest": release_manifest_digest,
