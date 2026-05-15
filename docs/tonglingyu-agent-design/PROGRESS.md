@@ -756,6 +756,14 @@
   saved report validator 会重算 manifest digest，并反查 manifest 与
   `runtime_config`、`retrieval_quality` 和 `security_scan` gate stdout 一致；
   contract smoke 已覆盖 manifest source snapshot 篡改和 manifest digest 篡改。
+- Release readiness report 已新增 `tonglingyu.release_artifact_registry` 和
+  `release_artifact_registry_digest`：registry 按
+  `tonglingyu-release-artifact-registry-v1` 记录 release manifest、runtime
+  config、RQA eval report、source license summary、behavior config、dependency
+  scan、image inventory、image scan reports 和 browser review evidence 的
+  digest/source gate/ref/path、365 天保留策略与 legal hold 支持。saved report
+  validator 会重算 registry digest，并拒绝 production-ready report 缺关键 registry
+  entry；release automation artifact 已记录 registry digest 和 entry count。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
@@ -803,8 +811,9 @@
 
 1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
    本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
-2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留和
-   live existing_refs 恢复演练。
+2. 实现 RQA Milestone I-J 剩余项：生产 DB migration 备份/preflight、
+   live existing_refs 恢复演练、live report freshness 和目标 release run
+   artifact 留存。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
    post-release monitor、目标环境 capacity/load、incident response drill 和
    audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。

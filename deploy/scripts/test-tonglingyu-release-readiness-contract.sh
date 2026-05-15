@@ -32,6 +32,8 @@ TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_RELEASE_MANIFEST_REPORT="${WORK_DIR}/tampered-release-manifest-report.json"
 TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-digest-report.json"
+TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
+TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
@@ -1987,6 +1989,113 @@ release_manifest = {
 }
 report["release_manifest"] = release_manifest
 report["release_manifest_digest"] = canonical_digest(release_manifest)
+
+
+def artifact_entry(
+    name,
+    artifact_type,
+    digest,
+    source_gate,
+    *,
+    ref="",
+    path="",
+    retention_class="release_evidence",
+    required_for_production=True,
+):
+    return {
+        "name": name,
+        "artifact_type": artifact_type,
+        "digest_sha256": digest,
+        "source_gate": source_gate,
+        "ref": ref,
+        "path": path,
+        "retention_class": retention_class,
+        "required_for_production": required_for_production,
+    }
+
+
+registry_entries = [
+    artifact_entry(
+        "release_manifest",
+        "inline_json",
+        report["release_manifest_digest"],
+        "release_readiness",
+        ref="release_manifest",
+        retention_class="release_manifest",
+    ),
+    artifact_entry(
+        "runtime_config",
+        "gate_stdout",
+        release_manifest["runtime_config"]["config_digest"],
+        "runtime_config",
+        ref="runtime_config",
+    ),
+    artifact_entry(
+        "rqa_eval_report",
+        "local_file",
+        release_manifest["rqa"]["eval_report_sha256"],
+        "retrieval_quality",
+        ref=release_manifest["rqa"]["eval_run_id"],
+        path=rqa_gate["eval_report_path"],
+    ),
+    artifact_entry(
+        "source_license_summary",
+        "inline_json",
+        release_manifest["rqa"]["source_license_summary_digest"],
+        "retrieval_quality",
+        ref=release_manifest["rqa"]["source_snapshot_digest"],
+    ),
+    artifact_entry(
+        "behavior_config",
+        "inline_json",
+        release_manifest["behavior_config"]["behavior_config_digest"],
+        "retrieval_quality",
+        ref=release_manifest["behavior_config"]["model_upstream_id"],
+    ),
+    artifact_entry(
+        "dependency_scan",
+        "scan_report",
+        release_manifest["security"]["dependency_scan_sha256"],
+        "security_scan",
+        ref="cargo-audit",
+    ),
+    artifact_entry(
+        "image_inventory",
+        "inline_json",
+        release_manifest["security"]["image_refs_sha256"],
+        "security_scan",
+        ref=f"images:{release_manifest['security']['image_count']}",
+    ),
+    artifact_entry(
+        "image_scan_reports",
+        "scan_report_collection",
+        release_manifest["security"]["scanned_reports_sha256"],
+        "security_scan",
+        ref=f"reports:{release_manifest['security']['scanned_report_count']}",
+    ),
+]
+browser_validation = report.get("browser_review_validation")
+if isinstance(browser_validation, dict):
+    registry_entries.append(artifact_entry(
+        "browser_review_evidence",
+        "local_file",
+        browser_validation["evidence_sha256"],
+        "openwebui_browser_review",
+        ref=report["browser_review_ref"],
+        path=report["browser_review_evidence"],
+    ))
+release_artifact_registry = {
+    "object": "tonglingyu.release_artifact_registry",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-release-artifact-registry-v1",
+    "generated_at": "2026-05-15T00:00:11+00:00",
+    "retention_days": 365,
+    "legal_hold_supported": True,
+    "entries": registry_entries,
+    "secret_values_printed": False,
+}
+report["release_artifact_registry"] = release_artifact_registry
+report["release_artifact_registry_digest"] = canonical_digest(release_artifact_registry)
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
 PY
@@ -2042,6 +2151,61 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_release_manifest_digest_stdout}" \
   '"release_manifest_digest_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_ARTIFACT_REGISTRY_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+registry = report["release_artifact_registry"]
+registry["entries"] = [
+    entry
+    for entry in registry["entries"]
+    if entry.get("name") != "rqa_eval_report"
+]
+report["release_artifact_registry_digest"] = hashlib.sha256(
+    json.dumps(
+        registry,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_artifact_registry_stdout="${WORK_DIR}/tampered-artifact-registry.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_ARTIFACT_REGISTRY_REPORT}" >"${tampered_artifact_registry_stdout}"; then
+  echo "production-ready reports must keep RQA eval artifact in the registry" >&2
+  exit 1
+fi
+assert_report "${tampered_artifact_registry_stdout}" \
+  '"production_ready_missing_artifact_registry_entry=rqa_eval_report" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["release_artifact_registry_digest"] = "0" * 64
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_artifact_registry_digest_stdout="${WORK_DIR}/tampered-artifact-registry-digest.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT}" \
+  >"${tampered_artifact_registry_digest_stdout}"; then
+  echo "production-ready reports must bind release artifact registry digest" >&2
+  exit 1
+fi
+assert_report "${tampered_artifact_registry_digest_stdout}" \
+  '"release_artifact_registry_digest_mismatch" in report["errors"]'
 
 rqa_gate_default_stdout="${WORK_DIR}/rqa-gate-default-thresholds.stdout"
 env \

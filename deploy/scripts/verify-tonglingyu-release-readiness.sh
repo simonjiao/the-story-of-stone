@@ -445,6 +445,123 @@ if isinstance(browser_review_validation, dict):
     if isinstance(validation_evidence_path, str) and validation_evidence_path.strip():
         verified_browser_review_evidence = validation_evidence_path.strip()
 
+
+def build_release_artifact_registry():
+    rqa_gate = success_json_from_gate_stdout(
+        "retrieval_quality",
+        "tonglingyu.rqa_quality_gate",
+    ) or {}
+    manifest_rqa = release_manifest.get("rqa") or {}
+    manifest_runtime = release_manifest.get("runtime_config") or {}
+    manifest_behavior = release_manifest.get("behavior_config") or {}
+    manifest_security = release_manifest.get("security") or {}
+    entries = []
+
+    def add_entry(
+        name,
+        artifact_type,
+        digest,
+        source_gate,
+        *,
+        ref="",
+        path="",
+        retention_class="release_evidence",
+        required_for_production=True,
+    ):
+        entries.append({
+            "name": name,
+            "artifact_type": artifact_type,
+            "digest_sha256": digest or "",
+            "source_gate": source_gate,
+            "ref": ref or "",
+            "path": path or "",
+            "retention_class": retention_class,
+            "required_for_production": required_for_production,
+        })
+
+    add_entry(
+        "release_manifest",
+        "inline_json",
+        release_manifest_digest,
+        "release_readiness",
+        ref="release_manifest",
+        retention_class="release_manifest",
+    )
+    add_entry(
+        "runtime_config",
+        "gate_stdout",
+        manifest_runtime.get("config_digest"),
+        "runtime_config",
+        ref="runtime_config",
+    )
+    add_entry(
+        "rqa_eval_report",
+        "local_file",
+        manifest_rqa.get("eval_report_sha256"),
+        "retrieval_quality",
+        ref=manifest_rqa.get("eval_run_id"),
+        path=rqa_gate.get("eval_report_path") or "",
+    )
+    add_entry(
+        "source_license_summary",
+        "inline_json",
+        manifest_rqa.get("source_license_summary_digest"),
+        "retrieval_quality",
+        ref=manifest_rqa.get("source_snapshot_digest"),
+    )
+    add_entry(
+        "behavior_config",
+        "inline_json",
+        manifest_behavior.get("behavior_config_digest"),
+        "retrieval_quality",
+        ref=manifest_behavior.get("model_upstream_id"),
+    )
+    add_entry(
+        "dependency_scan",
+        "scan_report",
+        manifest_security.get("dependency_scan_sha256"),
+        "security_scan",
+        ref="cargo-audit",
+    )
+    add_entry(
+        "image_inventory",
+        "inline_json",
+        manifest_security.get("image_refs_sha256"),
+        "security_scan",
+        ref=f"images:{manifest_security.get('image_count') or 0}",
+    )
+    add_entry(
+        "image_scan_reports",
+        "scan_report_collection",
+        manifest_security.get("scanned_reports_sha256"),
+        "security_scan",
+        ref=f"reports:{manifest_security.get('scanned_report_count') or 0}",
+    )
+    if isinstance(browser_review_validation, dict):
+        add_entry(
+            "browser_review_evidence",
+            "local_file",
+            browser_review_validation.get("evidence_sha256"),
+            "openwebui_browser_review",
+            ref=browser_review_ref,
+            path=verified_browser_review_evidence,
+        )
+
+    return {
+        "object": "tonglingyu.release_artifact_registry",
+        "schema_version": 1,
+        "policy_version": "tonglingyu-release-artifact-registry-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "retention_days": 365,
+        "legal_hold_supported": True,
+        "entries": entries,
+        "secret_values_printed": False,
+    }
+
+
+release_artifact_registry = build_release_artifact_registry()
+release_artifact_registry_digest = canonical_digest(release_artifact_registry)
+
 live_gate_names = [
     "model_upstream_network",
     "strict_gateway",
@@ -541,6 +658,8 @@ report = {
     "secret_values_printed": False,
     "release_manifest": release_manifest,
     "release_manifest_digest": release_manifest_digest,
+    "release_artifact_registry": release_artifact_registry,
+    "release_artifact_registry_digest": release_artifact_registry_digest,
     "gates": gates,
     "required_failures": required_failures,
     "optional_failures": optional_failures,

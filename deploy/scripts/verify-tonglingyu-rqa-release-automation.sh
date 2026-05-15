@@ -164,6 +164,28 @@ payload = {
     "artifacts": {
         "release_report_path": str(Path(release_report_path_raw)),
         "release_report_sha256": file_sha256(release_report_path_raw),
+        "release_manifest_digest": (
+            release_report.get("release_manifest_digest")
+            if isinstance(release_report, dict)
+            else ""
+        ),
+        "release_artifact_registry_digest": (
+            release_report.get("release_artifact_registry_digest")
+            if isinstance(release_report, dict)
+            else ""
+        ),
+        "release_artifact_registry_entry_count": (
+            len(
+                (
+                    (
+                        release_report.get("release_artifact_registry")
+                        if isinstance(release_report, dict)
+                        else {}
+                    )
+                    or {}
+                ).get("entries") or []
+            )
+        ),
         "validator_stdout_sha256": file_sha256(validator_stdout_raw),
         "contract_stdout_sha256": file_sha256(contract_stdout_raw),
         "readiness_stdout_sha256": file_sha256(readiness_stdout_raw),

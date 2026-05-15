@@ -785,6 +785,151 @@ def validate_release_manifest():
             errors.append("production_ready_release_manifest_image_report_count_mismatch")
 
 
+def validate_release_artifact_registry():
+    registry = report.get("release_artifact_registry")
+    registry_digest = report.get("release_artifact_registry_digest")
+    if not isinstance(registry, dict):
+        if production_ready:
+            errors.append("production_ready_requires_release_artifact_registry")
+        return
+    if registry.get("object") != "tonglingyu.release_artifact_registry":
+        errors.append("release_artifact_registry_object_invalid")
+    if registry.get("schema_version") != 1:
+        errors.append("release_artifact_registry_schema_version_invalid")
+    if registry.get("policy_version") != "tonglingyu-release-artifact-registry-v1":
+        errors.append("release_artifact_registry_policy_version_invalid")
+    if registry.get("secret_values_printed") is not False:
+        errors.append("release_artifact_registry_secret_values_printed_must_be_false")
+    if not is_sha256(registry_digest):
+        errors.append("release_artifact_registry_digest_invalid")
+    elif registry_digest != canonical_digest(registry):
+        errors.append("release_artifact_registry_digest_mismatch")
+    retention_days = registry.get("retention_days")
+    if not isinstance(retention_days, int) or retention_days < 365:
+        errors.append("release_artifact_registry_retention_days_invalid")
+    if registry.get("legal_hold_supported") is not True:
+        errors.append("release_artifact_registry_legal_hold_missing")
+    if parse_timestamp(registry.get("generated_at")) is None:
+        errors.append("release_artifact_registry_generated_at_invalid")
+
+    entries = registry.get("entries")
+    if not isinstance(entries, list) or not entries:
+        errors.append("release_artifact_registry_entries_missing")
+        entries = []
+    entries_by_name = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"release_artifact_registry_entry_{index}_must_be_object")
+            continue
+        name = entry.get("name")
+        if not nonempty(name):
+            errors.append(f"release_artifact_registry_entry_{index}_name_missing")
+            continue
+        if name in entries_by_name:
+            errors.append(f"release_artifact_registry_duplicate_entry={name}")
+        entries_by_name[name] = entry
+        for field in ("artifact_type", "source_gate", "retention_class"):
+            if not nonempty(entry.get(field)):
+                errors.append(f"release_artifact_registry_{name}_{field}_missing")
+        if not isinstance(entry.get("required_for_production"), bool):
+            errors.append(f"release_artifact_registry_{name}_required_flag_invalid")
+        if not is_sha256(entry.get("digest_sha256")) and (
+            production_ready or nonempty(entry.get("digest_sha256"))
+        ):
+            errors.append(f"release_artifact_registry_{name}_digest_invalid")
+        for field in ("ref", "path"):
+            value = entry.get(field)
+            if value not in ("", None) and not isinstance(value, str):
+                errors.append(f"release_artifact_registry_{name}_{field}_invalid")
+
+    manifest = report.get("release_manifest") if isinstance(report.get("release_manifest"), dict) else {}
+    manifest_rqa = manifest.get("rqa") if isinstance(manifest.get("rqa"), dict) else {}
+    manifest_runtime = (
+        manifest.get("runtime_config")
+        if isinstance(manifest.get("runtime_config"), dict)
+        else {}
+    )
+    manifest_behavior = (
+        manifest.get("behavior_config")
+        if isinstance(manifest.get("behavior_config"), dict)
+        else {}
+    )
+    manifest_security = (
+        manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
+    )
+    rqa_gate = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    ) or {}
+    expected_entries = {
+        "release_manifest": {
+            "digest": report.get("release_manifest_digest"),
+            "source_gate": "release_readiness",
+        },
+        "runtime_config": {
+            "digest": manifest_runtime.get("config_digest"),
+            "source_gate": "runtime_config",
+        },
+        "rqa_eval_report": {
+            "digest": manifest_rqa.get("eval_report_sha256"),
+            "source_gate": "retrieval_quality",
+            "path": rqa_gate.get("eval_report_path") or "",
+            "ref": manifest_rqa.get("eval_run_id") or "",
+        },
+        "source_license_summary": {
+            "digest": manifest_rqa.get("source_license_summary_digest"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_rqa.get("source_snapshot_digest") or "",
+        },
+        "behavior_config": {
+            "digest": manifest_behavior.get("behavior_config_digest"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_behavior.get("model_upstream_id") or "",
+        },
+        "dependency_scan": {
+            "digest": manifest_security.get("dependency_scan_sha256"),
+            "source_gate": "security_scan",
+        },
+        "image_inventory": {
+            "digest": manifest_security.get("image_refs_sha256"),
+            "source_gate": "security_scan",
+        },
+        "image_scan_reports": {
+            "digest": manifest_security.get("scanned_reports_sha256"),
+            "source_gate": "security_scan",
+        },
+    }
+    if isinstance(browser_review_validation, dict):
+        expected_entries["browser_review_evidence"] = {
+            "digest": browser_review_validation.get("evidence_sha256"),
+            "source_gate": "openwebui_browser_review",
+            "path": browser_review_evidence or "",
+            "ref": browser_review_ref or "",
+        }
+
+    required_names = set(expected_entries)
+    if not production_ready:
+        required_names.discard("browser_review_evidence")
+    for name in sorted(required_names):
+        entry = entries_by_name.get(name)
+        if entry is None:
+            if production_ready:
+                errors.append(f"production_ready_missing_artifact_registry_entry={name}")
+            continue
+        expected = expected_entries[name]
+        expected_digest = expected.get("digest") or ""
+        if (production_ready or expected_digest) and entry.get("digest_sha256") != expected_digest:
+            errors.append(f"release_artifact_registry_{name}_digest_mismatch")
+        if entry.get("source_gate") != expected.get("source_gate"):
+            errors.append(f"release_artifact_registry_{name}_source_gate_mismatch")
+        if expected.get("path") is not None and entry.get("path") != expected.get("path", ""):
+            errors.append(f"release_artifact_registry_{name}_path_mismatch")
+        if expected.get("ref") is not None and entry.get("ref") != expected.get("ref", ""):
+            errors.append(f"release_artifact_registry_{name}_ref_mismatch")
+        if production_ready and entry.get("required_for_production") is not True:
+            errors.append(f"production_ready_artifact_registry_entry_not_required={name}")
+
+
 def ratio_json(passed, total):
     return {
         "passed": passed,
@@ -2570,6 +2715,7 @@ add_mismatch(
 add_mismatch("production_release_ready", computed_production_ready, production_ready)
 add_mismatch("exit_policy", computed_exit_policy, exit_policy)
 validate_release_manifest()
+validate_release_artifact_registry()
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()
