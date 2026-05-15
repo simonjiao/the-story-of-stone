@@ -46,6 +46,8 @@ RetrievalQualityReport
     等高基数字段。
 13. 没有 operator runbook、告警规则、回滚步骤和 post-release 监控窗口，却声明
     RQA production-ready。
+14. 事故期间通过关闭 RQA、跳过持久化、使用无界队列或删除审计历史来维持
+    production-ready。
 
 ## 决策基线
 
@@ -64,6 +66,7 @@ RetrievalQualityReport
 | 隐私边界 | RQA 默认只保存脱敏摘要、hash、枚举和 bounded excerpt |
 | API 契约 | admin API / Action 必须分页、限长、schema version 和兼容校验 |
 | 发布值守 | runbook、alert、rollback、post-release monitor 都是 production blocker |
+| 发布安全 | emergency disable / degraded mode 只能产生 non-production 状态 |
 
 ## Production 默认阈值
 
@@ -390,6 +393,34 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 - 待实现。
 
+## Milestone M：事故响应、容量和审计完整性
+
+状态：未开始
+
+目标：事故或压力场景下仍保持可追责、可降级、可恢复，不能用关闭治理来伪装可用。
+
+- [ ] 提供 RQA emergency disable 或 degraded mode 配置时，release report 必须标记
+      non-production。
+- [ ] RQA persistence degraded 时，公共响应必须暴露稳定错误/降级状态和 trace id，
+      不能伪装成完整成功。
+- [ ] RQA 写入不能使用无界内存队列；队列、batch 或 retry 必须有容量上限。
+- [ ] RQA retry 必须可幂等，且不会重复创建 failure、governance task 或 audit event。
+- [ ] 管理员状态更新必须保留历史记录：actor、reason、previous status、new status、
+      timestamp。
+- [ ] 不允许硬删除 open failure、open governance task 或相关 audit history。
+- [ ] 事故 runbook 定义 severity、owner、first response、mitigation、rollback、
+      recovery validation。
+- [ ] capacity smoke 覆盖代表性 eval report 数量、failure 数量和 admin list 翻页。
+- [ ] load / soak smoke 覆盖 RQA 写入、admin 查询、metrics 和 release gate 在默认预算内。
+- [ ] release gate 缺少 capacity / incident / audit-history 证据时不能
+      production-ready。
+- [ ] saved report validator 校验 emergency disabled、capacity missing、audit history
+      missing 不能 production-ready。
+
+节点总结：
+
+- 待实现。
+
 ## 提交节奏
 
 1. Checklist 基线单独提交。
@@ -401,6 +432,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 7. Milestone I 完成后提交端到端验证。
 8. Milestone J 完成后提交运维恢复和真实发布。
 9. Milestone K 完成后提交隐私契约和性能预算。
-10. Milestone L 通过后提交最终 production-ready 验证更新。
+10. Milestone L 完成后提交发布值守和回滚。
+11. Milestone M 通过后提交最终 production-ready 验证更新。
 
 每次提交前必须更新本 checklist 的状态和节点总结。
