@@ -55,6 +55,8 @@ production-ready 的替代验收。
 17. public response、RQA report 或 release report 没有声明 source coverage
     boundary，却把当前 Wikisource snapshot 包装成影印件、权威校注或专家校勘
     已完成。
+18. RQA release gate、saved report validator 或 contract smoke 只在人工本地命令中
+    执行，没有进入 CI 或 release automation 的强制路径。
 
 ## 决策基线
 
@@ -77,6 +79,7 @@ production-ready 的替代验收。
 | Admin 访问 | RQA read/list/update 都必须鉴权、限流、审计和防枚举 |
 | 发布溯源 | git commit、image digest、schema/eval/config digest 必须进入 release report |
 | 资料覆盖 | source coverage boundary 必须进入 report、公共回答边界和 release gate |
+| 强制执行 | CI 或 release automation 必须运行 RQA gate、validator 和 contract smoke |
 
 ## Production 默认阈值
 
@@ -341,6 +344,10 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] production-ready report 必须包含 RQA quality gate 和治理任务 gate。
 - [ ] production-ready report 必须包含 git commit、image digest、RQA schema version、
       eval suite version 和有效配置摘要。
+- [ ] CI 或 release automation 必须强制运行 RQA quality gate、saved report
+      validator 和 contract smoke；失败时不能生成 production-ready artifact。
+- [ ] 自动化产物必须记录 workflow/job id 或 release run id、触发 commit 和 gate
+      结果摘要。
 - [ ] `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 节点总结：

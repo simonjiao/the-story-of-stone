@@ -479,6 +479,9 @@
   browser review evidence 为
   `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
   事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
+- 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
+  contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
+  作为最终发布证据。
 
 ## 下一步
 
