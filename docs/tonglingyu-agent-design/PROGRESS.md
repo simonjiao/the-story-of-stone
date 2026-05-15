@@ -624,8 +624,8 @@
   `knowledge_patch_proposals_applied` audit；不满足目标表约束或引用不存在时
   rebuild fail-closed。
 - RQA Milestone H 已完成，但不等于整体 production-ready：Milestone I-J-K 的端到端
-  自动化、retention/restore、用户数据 lifecycle、性能预算、live release 证据和安全
-  扫描仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
+  自动化、用户数据 lifecycle、live release 证据、真实安全扫描 artifact 和容量/值守
+  仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
   application、diff report 和 eval gate。
 - RQA retention/prune 已完成第一批 production 保护切片：Runtime 新增
   `tonglingyu-rqa-lifecycle-v1` 和 `rqa_lifecycle_tombstones`，prune 会保护仍被
@@ -656,9 +656,20 @@
   risk exception 必须包含 risk owner、accepted risk id、approved/expires 时间和
   accepted findings。saved report validator 会拒绝缺 `security_scan` gate stdout、
   缺 scan 且无 risk acceptance、release script finding 等篡改。
+- RQA performance budget gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-performance-budget.sh` 会启动本地 Gateway，
+  真实执行 chat 写入 RQA failure/governance task、admin trace/list、admin 状态
+  关闭和 RQA quality gate 复跑；默认预算覆盖 RQA 写入、admin 查询、状态更新和
+  quality gate，curl、KB build、eval 和 quality gate 都有可配置 timeout。saved
+  report validator 会拒绝缺 `rqa_performance_budget` gate stdout、缺 timeout
+  边界、预算超限、budget/measurement 不一致和关键 checks 未通过的
+  production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
+- 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
+  budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
+  与值守验证。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -673,8 +684,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
    live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
    运维证据。
-3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、性能预算、发布值守、
-   回滚、事故响应、容量和审计完整性。
+3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、发布值守、回滚、事故响应、
+   容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

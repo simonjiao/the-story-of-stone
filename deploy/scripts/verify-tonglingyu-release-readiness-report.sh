@@ -33,6 +33,7 @@ required_gate_names = [
     "runtime_config",
     "retrieval_quality",
     "rqa_backup_restore_drill",
+    "rqa_performance_budget",
     "security_scan",
     *live_gate_names,
     "openwebui_browser_review",
@@ -184,6 +185,20 @@ gate_stdout_requirements = {
             "rto",
             "source_mode",
             "started_at",
+        ],
+    },
+    "rqa_performance_budget": {
+        "object": "tonglingyu.rqa_performance_budget_gate",
+        "required_fields": [
+            "budget_policy_version",
+            "budget_results",
+            "budgets",
+            "checks",
+            "generated_at",
+            "measurements",
+            "performance_budget_passed",
+            "refs",
+            "timeouts_seconds",
         ],
     },
     "security_scan": {
@@ -1142,6 +1157,111 @@ def validate_security_scan_gate_stdout():
                 errors.append(f"security_scan_without_risk_acceptance_requires_{field}")
 
 
+def validate_performance_budget_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_performance_budget"),
+        "tonglingyu.rqa_performance_budget_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("performance_budget_passed") is not True:
+        errors.append("rqa_performance_budget_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_performance_budget_secret_values_printed_must_be_false")
+    if gate_json.get("budget_policy_version") != "tonglingyu-rqa-performance-budget-v1":
+        errors.append("rqa_performance_budget_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_performance_budget_generated_at_invalid")
+    budgets = gate_json.get("budgets")
+    measurements = gate_json.get("measurements")
+    budget_results = gate_json.get("budget_results")
+    timeouts = gate_json.get("timeouts_seconds")
+    required_budget_fields = (
+        "rqa_write_ms",
+        "admin_trace_read_ms",
+        "admin_failure_list_ms",
+        "admin_governance_task_list_ms",
+        "admin_status_update_ms",
+        "rqa_quality_gate_ms",
+    )
+    if not isinstance(budgets, dict):
+        errors.append("rqa_performance_budget_budgets_missing")
+        budgets = {}
+    if not isinstance(measurements, dict):
+        errors.append("rqa_performance_budget_measurements_missing")
+        measurements = {}
+    if not isinstance(budget_results, dict):
+        errors.append("rqa_performance_budget_results_missing")
+        budget_results = {}
+    if not isinstance(timeouts, dict):
+        errors.append("rqa_performance_budget_timeouts_missing")
+        timeouts = {}
+    for field in required_budget_fields:
+        budget_value = budgets.get(field)
+        actual_value = measurements.get(field)
+        result = budget_results.get(field)
+        if not isinstance(budget_value, int) or budget_value <= 0:
+            errors.append(f"rqa_performance_budget_{field}_budget_invalid")
+        if not isinstance(actual_value, int) or actual_value < 0:
+            errors.append(f"rqa_performance_budget_{field}_measurement_invalid")
+        if not isinstance(result, dict):
+            errors.append(f"rqa_performance_budget_{field}_result_missing")
+            continue
+        if result.get("met") is not True:
+            errors.append(f"rqa_performance_budget_{field}_not_met")
+        if result.get("actual_ms") != actual_value:
+            errors.append(f"rqa_performance_budget_{field}_actual_mismatch")
+        if result.get("budget_ms") != budget_value:
+            errors.append(f"rqa_performance_budget_{field}_budget_mismatch")
+        if (
+            isinstance(budget_value, int)
+            and isinstance(actual_value, int)
+            and actual_value > budget_value
+        ):
+            errors.append(f"rqa_performance_budget_{field}_exceeded")
+
+    for field in (
+        "curl_connect",
+        "curl_max_time",
+        "eval",
+        "gateway_build",
+        "kb_build",
+        "rqa_quality_gate",
+    ):
+        value = timeouts.get(field)
+        if not isinstance(value, (int, float)) or value <= 0:
+            errors.append(f"rqa_performance_budget_timeout_{field}_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "rqa_write_created_failure",
+        "rqa_write_created_governance_task",
+        "admin_trace_readable",
+        "admin_lists_readable",
+        "admin_status_updates_closed_open_p0",
+        "rqa_quality_gate_reran",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_performance_budget_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_performance_budget_check_failed={check}")
+    refs = gate_json.get("refs")
+    required_refs = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_performance_budget_refs_missing")
+    else:
+        for field in required_refs:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_performance_budget_{field}_invalid")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -1382,6 +1502,7 @@ validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()
+validate_performance_budget_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

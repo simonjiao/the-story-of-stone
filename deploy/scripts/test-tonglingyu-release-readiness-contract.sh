@@ -36,6 +36,9 @@ TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.jso
 TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-report.json"
 TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
 TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
+TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-performance-gate-stdout-report.json"
+TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT="${WORK_DIR}/tampered-rqa-performance-budget-report.json"
+TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-check-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -166,6 +169,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
@@ -682,6 +686,7 @@ TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
@@ -1134,6 +1139,86 @@ gate_stdout = {
         "started_at": "2026-05-15T00:00:00+00:00",
         "status": "ok",
     },
+    "rqa_performance_budget": {
+        "budget_policy_version": "tonglingyu-rqa-performance-budget-v1",
+        "budget_results": {
+            "admin_failure_list_ms": {
+                "actual_ms": 80,
+                "budget_ms": 2000,
+                "met": True,
+            },
+            "admin_governance_task_list_ms": {
+                "actual_ms": 90,
+                "budget_ms": 2000,
+                "met": True,
+            },
+            "admin_status_update_ms": {
+                "actual_ms": 150,
+                "budget_ms": 3000,
+                "met": True,
+            },
+            "admin_trace_read_ms": {
+                "actual_ms": 70,
+                "budget_ms": 2000,
+                "met": True,
+            },
+            "rqa_quality_gate_ms": {
+                "actual_ms": 3000,
+                "budget_ms": 90000,
+                "met": True,
+            },
+            "rqa_write_ms": {
+                "actual_ms": 900,
+                "budget_ms": 10000,
+                "met": True,
+            },
+        },
+        "budgets": {
+            "admin_failure_list_ms": 2000,
+            "admin_governance_task_list_ms": 2000,
+            "admin_status_update_ms": 3000,
+            "admin_trace_read_ms": 2000,
+            "rqa_quality_gate_ms": 90000,
+            "rqa_write_ms": 10000,
+        },
+        "checks": {
+            "admin_lists_readable": True,
+            "admin_status_updates_closed_open_p0": True,
+            "admin_trace_readable": True,
+            "rqa_quality_gate_reran": True,
+            "rqa_write_created_failure": True,
+            "rqa_write_created_governance_task": True,
+        },
+        "errors": [],
+        "generated_at": "2026-05-15T00:00:06+00:00",
+        "measurements": {
+            "admin_failure_list_ms": 80,
+            "admin_governance_task_list_ms": 90,
+            "admin_status_update_ms": 150,
+            "admin_trace_read_ms": 70,
+            "rqa_quality_gate_ms": 3000,
+            "rqa_write_ms": 900,
+        },
+        "object": "tonglingyu.rqa_performance_budget_gate",
+        "performance_budget_passed": True,
+        "refs": {
+            "failure_sha256": "5" * 64,
+            "governance_task_sha256": "6" * 64,
+            "package_sha256": "7" * 64,
+            "trace_sha256": "8" * 64,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+        "timeouts_seconds": {
+            "curl_connect": 3.0,
+            "curl_max_time": 15.0,
+            "eval": 180.0,
+            "gateway_build": 300.0,
+            "kb_build": 180.0,
+            "rqa_quality_gate": 180.0,
+        },
+    },
     "security_scan": {
         "accepted_error_count": 0,
         "dependency_scan": {
@@ -1450,6 +1535,83 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_security_gate_script_stdout}" \
   '"security_scan_release_scripts_not_passed" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_performance_budget":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_performance_gate_stdout="${WORK_DIR}/tampered-rqa-performance-gate-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" >"${tampered_rqa_performance_gate_stdout}"; then
+  echo "production-ready reports must bind RQA performance gate status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_performance_gate_stdout}" \
+  '"rqa_performance_budget_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_performance_budget":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["measurements"]["rqa_write_ms"] = 10001
+        gate_json["budget_results"]["rqa_write_ms"]["actual_ms"] = 10001
+        gate_json["budget_results"]["rqa_write_ms"]["met"] = False
+        gate_json["performance_budget_passed"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_performance_budget_stdout="${WORK_DIR}/tampered-rqa-performance-budget.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT}" >"${tampered_rqa_performance_budget_stdout}"; then
+  echo "production-ready reports must reject exceeded RQA performance budgets" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_performance_budget_stdout}" \
+  '"rqa_performance_budget_not_passed" in report["errors"]'
+assert_report "${tampered_rqa_performance_budget_stdout}" \
+  '"rqa_performance_budget_rqa_write_ms_not_met" in report["errors"]'
+assert_report "${tampered_rqa_performance_budget_stdout}" \
+  '"rqa_performance_budget_rqa_write_ms_exceeded" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_CHECK_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_performance_budget":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["checks"]["admin_status_updates_closed_open_p0"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_performance_check_stdout="${WORK_DIR}/tampered-rqa-performance-check.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_PERFORMANCE_CHECK_REPORT}" >"${tampered_rqa_performance_check_stdout}"; then
+  echo "production-ready reports must reject incomplete RQA performance checks" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_performance_check_stdout}" \
+  '"rqa_performance_budget_check_failed=admin_status_updates_closed_open_p0" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
@@ -1823,6 +1985,7 @@ if env \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
