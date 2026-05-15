@@ -45,6 +45,9 @@ TAMPERED_RQA_API_CONTRACT_STATUS_REPORT="${WORK_DIR}/tampered-rqa-api-contract-s
 TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-stdout-report.json"
 TAMPERED_RQA_USER_LIFECYCLE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-check-report.json"
 TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-action-report.json"
+TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_STDOUT_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-stdout-report.json"
+TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_CHECK_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-check-report.json"
+TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_ACTION_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-action-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -179,6 +182,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
@@ -698,6 +702,7 @@ TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}
@@ -1398,6 +1403,63 @@ gate_stdout = {
         "status": "ok",
         "unaccepted_error_count": 0,
     },
+    "openwebui_admin_action_contract": {
+        "action": {
+            "function_id": "tonglingyu_gateway_admin",
+            "required_actions": [
+                "metrics",
+                "trace",
+                "package",
+                "session",
+                "retrieval_failures",
+                "retrieval_failure",
+                "retrieval_failure_update",
+                "retrieval_failure_cluster",
+                "governance_tasks",
+                "governance_task",
+                "governance_task_create",
+                "governance_task_from_failure",
+                "governance_task_update",
+                "knowledge_patch_proposal",
+            ],
+            "source_sha256": "1" * 64,
+            "test_sha256": "2" * 64,
+            "type": "action",
+        },
+        "checks": {
+            "admin_actions_required": True,
+            "admin_key_not_printed": True,
+            "admin_role_guard_required": True,
+            "empty_admin_key_rejected": True,
+            "py_compile_passed": True,
+            "required_valves_present": True,
+            "unit_tests_passed": True,
+            "valid_fixture_passed": True,
+        },
+        "contract_version": "tonglingyu-openwebui-admin-action-contract-v1",
+        "errors": [],
+        "feedback_action": {
+            "function_id": "tonglingyu_gateway_feedback",
+            "source_sha256": "3" * 64,
+            "test_sha256": "4" * 64,
+            "type": "action",
+        },
+        "fixture_validation": {
+            "negative_fixture_count": 2,
+            "source": "fixture-json",
+            "valve_keys": [
+                "GATEWAY_ADMIN_API_KEY",
+                "GATEWAY_BASE_URL",
+                "TARGET_MODEL",
+                "TARGET_MODELS",
+            ],
+        },
+        "generated_at": "2026-05-15T00:00:09+00:00",
+        "object": "tonglingyu.openwebui_admin_action_contract_gate",
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+    },
     "model_upstream_network": {
         "errors": [],
         "object": "tonglingyu.model_upstream_network_gate",
@@ -1893,6 +1955,76 @@ fi
 assert_report "${tampered_rqa_user_lifecycle_action_stdout}" \
   '"rqa_user_lifecycle_blocked_anonymize_status_invalid" in report["errors"]'
 
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_admin_action_contract":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_openwebui_admin_action_contract_stdout="${WORK_DIR}/tampered-openwebui-admin-action-contract-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_STDOUT_REPORT}" >"${tampered_openwebui_admin_action_contract_stdout}"; then
+  echo "production-ready reports must bind Open WebUI admin Action contract status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_openwebui_admin_action_contract_stdout}" \
+  '"openwebui_admin_action_contract_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_CHECK_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_admin_action_contract":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["checks"]["admin_role_guard_required"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_openwebui_admin_action_contract_check_stdout="${WORK_DIR}/tampered-openwebui-admin-action-contract-check.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_CHECK_REPORT}" >"${tampered_openwebui_admin_action_contract_check_stdout}"; then
+  echo "production-ready reports must reject failed Open WebUI admin Action contract checks" >&2
+  exit 1
+fi
+assert_report "${tampered_openwebui_admin_action_contract_check_stdout}" \
+  '"openwebui_admin_action_contract_check_failed=admin_role_guard_required" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_ACTION_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_admin_action_contract":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["action"]["required_actions"].remove("knowledge_patch_proposal")
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_openwebui_admin_action_contract_action_stdout="${WORK_DIR}/tampered-openwebui-admin-action-contract-action.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_ACTION_REPORT}" >"${tampered_openwebui_admin_action_contract_action_stdout}"; then
+  echo "production-ready reports must reject missing Open WebUI admin Action coverage" >&2
+  exit 1
+fi
+assert_report "${tampered_openwebui_admin_action_contract_action_stdout}" \
+  '"openwebui_admin_action_contract_required_actions_mismatch" in report["errors"]'
+
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
 import sys
@@ -2269,6 +2401,7 @@ if env \
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}" \

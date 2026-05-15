@@ -402,10 +402,12 @@
   触发 `/v1/admin/access-denials` 写脱敏拒绝审计，不会读取或修改 admin 资源。
   已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入 release
   readiness live gate。
-- `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已补 Gateway
-  Admin Action contract smoke，覆盖 Action 编译和单测、verify fixture 正向、
-  admin key 为空、缺少 admin role guard、缺少 admin action endpoint，以及
-  verify 输出不泄露 fixture-secret 值。
+- `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已升级为结构化
+  release gate `openwebui_admin_action_contract`：编译 Open WebUI Admin/Feedback
+  Action，运行 21 个 Action 单测，验证 fixture 正向、admin key 为空、缺少
+  admin role guard、缺少 admin action endpoint、required Action 列表和 verify
+  输出不泄露 fixture-secret 值；saved report validator 会拒绝缺 gate stdout、
+  guard check 失败或 required Action 覆盖被篡改的 production-ready report。
 - release/readiness、runtime config、strict Gateway、Open WebUI Bridge Function
   和 Gateway Admin Action 的 install/verify 脚本已支持
   `TONGLINGYU_DEPLOY_ENV_FILE` / `DEPLOY_ENV_FILE`，实现分支可以复用目标部署
@@ -690,8 +692,9 @@
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
 - RQA 用户数据生命周期已具备本地 contract smoke 和策略版本；后续
-  production-ready 仍必须补齐 live/Open WebUI admin Action、旧/新字段兼容、
-  目标环境 live/load 性能和值守证据。
+  production-ready 仍必须补齐 live Open WebUI admin Action、旧/新字段兼容、
+  目标环境 live/load 性能和值守证据；Open WebUI admin Action source/fixture
+  contract 已接入 release readiness 必跑 gate，不能替代真实 live Action 验证。
 
 ## 下一步
 
@@ -700,8 +703,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
    live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
    运维证据。
-3. 补齐 RQA Milestone K-M：Open WebUI admin Action contract、旧/新字段兼容、
-   发布值守、回滚、事故响应、容量和审计完整性。
+3. 补齐 RQA Milestone K-M：live Open WebUI admin Action、旧/新字段兼容、发布
+   值守、回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

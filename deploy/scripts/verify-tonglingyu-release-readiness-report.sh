@@ -37,6 +37,7 @@ required_gate_names = [
     "rqa_api_contract",
     "rqa_user_lifecycle",
     "security_scan",
+    "openwebui_admin_action_contract",
     *live_gate_names,
     "openwebui_browser_review",
 ]
@@ -240,6 +241,17 @@ gate_stdout_requirements = {
             "scan_coverage",
             "security_scan_passed",
             "unaccepted_error_count",
+        ],
+    },
+    "openwebui_admin_action_contract": {
+        "object": "tonglingyu.openwebui_admin_action_contract_gate",
+        "required_fields": [
+            "action",
+            "checks",
+            "contract_version",
+            "feedback_action",
+            "fixture_validation",
+            "generated_at",
         ],
     },
     "model_upstream_network": {
@@ -1448,6 +1460,106 @@ def validate_user_lifecycle_gate_stdout():
                 errors.append(f"rqa_user_lifecycle_{field}_invalid")
 
 
+def validate_openwebui_admin_action_contract_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("openwebui_admin_action_contract"),
+        "tonglingyu.openwebui_admin_action_contract_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("status") != "ok":
+        errors.append("openwebui_admin_action_contract_status_invalid")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("openwebui_admin_action_contract_secret_values_printed_must_be_false")
+    if (
+        gate_json.get("contract_version")
+        != "tonglingyu-openwebui-admin-action-contract-v1"
+    ):
+        errors.append("openwebui_admin_action_contract_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("openwebui_admin_action_contract_generated_at_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "py_compile_passed",
+        "unit_tests_passed",
+        "valid_fixture_passed",
+        "admin_key_not_printed",
+        "empty_admin_key_rejected",
+        "admin_role_guard_required",
+        "admin_actions_required",
+        "required_valves_present",
+    )
+    if not isinstance(checks, dict):
+        errors.append("openwebui_admin_action_contract_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"openwebui_admin_action_contract_check_failed={check}")
+
+    action = gate_json.get("action")
+    required_actions = {
+        "metrics",
+        "trace",
+        "package",
+        "session",
+        "retrieval_failures",
+        "retrieval_failure",
+        "retrieval_failure_update",
+        "retrieval_failure_cluster",
+        "governance_tasks",
+        "governance_task",
+        "governance_task_create",
+        "governance_task_from_failure",
+        "governance_task_update",
+        "knowledge_patch_proposal",
+    }
+    if not isinstance(action, dict):
+        errors.append("openwebui_admin_action_contract_action_missing")
+    else:
+        if action.get("function_id") != "tonglingyu_gateway_admin":
+            errors.append("openwebui_admin_action_contract_function_id_invalid")
+        if action.get("type") != "action":
+            errors.append("openwebui_admin_action_contract_type_invalid")
+        for field in ("source_sha256", "test_sha256"):
+            if not is_sha256(action.get(field)):
+                errors.append(f"openwebui_admin_action_contract_{field}_invalid")
+        action_names = action.get("required_actions")
+        if not isinstance(action_names, list):
+            errors.append("openwebui_admin_action_contract_required_actions_missing")
+        elif set(action_names) != required_actions:
+            errors.append("openwebui_admin_action_contract_required_actions_mismatch")
+
+    feedback_action = gate_json.get("feedback_action")
+    if not isinstance(feedback_action, dict):
+        errors.append("openwebui_admin_action_contract_feedback_action_missing")
+    else:
+        if feedback_action.get("function_id") != "tonglingyu_gateway_feedback":
+            errors.append("openwebui_admin_action_contract_feedback_function_id_invalid")
+        if feedback_action.get("type") != "action":
+            errors.append("openwebui_admin_action_contract_feedback_type_invalid")
+        for field in ("source_sha256", "test_sha256"):
+            if not is_sha256(feedback_action.get(field)):
+                errors.append(f"openwebui_admin_action_contract_feedback_{field}_invalid")
+
+    fixture_validation = gate_json.get("fixture_validation")
+    if not isinstance(fixture_validation, dict):
+        errors.append("openwebui_admin_action_contract_fixture_validation_missing")
+    else:
+        if fixture_validation.get("source") != "fixture-json":
+            errors.append("openwebui_admin_action_contract_fixture_source_invalid")
+        if fixture_validation.get("negative_fixture_count") != 2:
+            errors.append("openwebui_admin_action_contract_negative_fixture_count_invalid")
+        valve_keys = fixture_validation.get("valve_keys")
+        if not isinstance(valve_keys, list) or not set(valve_keys) >= {
+            "GATEWAY_BASE_URL",
+            "GATEWAY_ADMIN_API_KEY",
+            "TARGET_MODEL",
+            "TARGET_MODELS",
+        }:
+            errors.append("openwebui_admin_action_contract_valve_keys_invalid")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -1691,6 +1803,7 @@ validate_security_scan_gate_stdout()
 validate_performance_budget_gate_stdout()
 validate_api_contract_gate_stdout()
 validate_user_lifecycle_gate_stdout()
+validate_openwebui_admin_action_contract_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,
