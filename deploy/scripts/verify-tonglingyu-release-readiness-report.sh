@@ -32,6 +32,7 @@ live_gate_names = [
 required_gate_names = [
     "runtime_config",
     "retrieval_quality",
+    "rqa_backup_restore_drill",
     *live_gate_names,
     "openwebui_browser_review",
 ]
@@ -162,6 +163,26 @@ gate_stdout_requirements = {
             "source_license_summary",
             "source_snapshot_digest",
             "threshold_config",
+        ],
+    },
+    "rqa_backup_restore_drill": {
+        "object": "tonglingyu.rqa_backup_restore_drill",
+        "required_fields": [
+            "artifacts",
+            "backup",
+            "checks",
+            "drill_result",
+            "duration_ms",
+            "environment",
+            "finished_at",
+            "operator",
+            "policy_version",
+            "refs",
+            "restore",
+            "rpo",
+            "rto",
+            "source_mode",
+            "started_at",
         ],
     },
     "model_upstream_network": {
@@ -676,9 +697,16 @@ def validate_retrieval_quality_eval_report_artifact(gate_json):
         "reviewer_status_matched",
         "eval_failure_records",
         "source_coverage_boundary",
-        "source_diversity",
     ):
         add_eval_summary_mismatch(field, eval_summary.get(field), gate_summary.get(field))
+    eval_source_diversity = eval_summary.get("source_diversity")
+    gate_source_diversity = gate_summary.get("source_diversity")
+    if not isinstance(eval_source_diversity, dict) or not isinstance(gate_source_diversity, dict):
+        errors.append("retrieval_quality_eval_report_source_diversity_missing")
+    else:
+        for field in ("count", "source_ids"):
+            if eval_source_diversity.get(field) != gate_source_diversity.get(field):
+                errors.append(f"retrieval_quality_eval_report_source_diversity_{field}_mismatch")
 
     recomputed = recompute_eval_quality_from_cases(eval_report.get("cases"))
     if recomputed is None:
@@ -884,6 +912,119 @@ def validate_retrieval_quality_gate_stdout():
             if behavior_config != strict_behavior_config:
                 errors.append("retrieval_quality_behavior_config_strict_gateway_mismatch")
     validate_retrieval_quality_eval_report_artifact(gate_json)
+
+
+def validate_restore_drill_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_backup_restore_drill"),
+        "tonglingyu.rqa_backup_restore_drill",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("drill_result") != "passed":
+        errors.append("rqa_backup_restore_drill_result_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_backup_restore_drill_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-backup-restore-drill-v1":
+        errors.append("rqa_backup_restore_drill_policy_version_invalid")
+    if gate_json.get("source_mode") not in {"existing_refs", "fixture"}:
+        errors.append("rqa_backup_restore_drill_source_mode_invalid")
+    if production_ready and gate_json.get("source_mode") != "existing_refs":
+        errors.append("production_ready_requires_live_rqa_restore_drill_refs")
+    if parse_timestamp(gate_json.get("started_at")) is None:
+        errors.append("rqa_backup_restore_drill_started_at_invalid")
+    if parse_timestamp(gate_json.get("finished_at")) is None:
+        errors.append("rqa_backup_restore_drill_finished_at_invalid")
+    if not isinstance(gate_json.get("duration_ms"), int) or gate_json.get("duration_ms") < 0:
+        errors.append("rqa_backup_restore_drill_duration_ms_invalid")
+    if not nonempty(gate_json.get("environment")):
+        errors.append("rqa_backup_restore_drill_environment_missing")
+    if not nonempty(gate_json.get("operator")):
+        errors.append("rqa_backup_restore_drill_operator_missing")
+
+    for field in ("rto", "rpo"):
+        value = gate_json.get(field)
+        if not isinstance(value, dict):
+            errors.append(f"rqa_backup_restore_drill_{field}_missing")
+            continue
+        if not isinstance(value.get("target_seconds"), int) or value.get("target_seconds") <= 0:
+            errors.append(f"rqa_backup_restore_drill_{field}_target_seconds_invalid")
+        if not isinstance(value.get("actual_seconds"), (int, float)) or value.get("actual_seconds") < 0:
+            errors.append(f"rqa_backup_restore_drill_{field}_actual_seconds_invalid")
+        if value.get("met") is not True:
+            errors.append(f"rqa_backup_restore_drill_{field}_not_met")
+
+    backup = gate_json.get("backup")
+    if not isinstance(backup, dict):
+        errors.append("rqa_backup_restore_drill_backup_missing")
+    else:
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(backup.get(field)) is None:
+                errors.append(f"rqa_backup_restore_drill_backup_{field}_invalid")
+        if not is_sha256(backup.get("artifact_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_artifact_sha256_invalid")
+        if not is_sha256(backup.get("source_db_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_source_db_sha256_invalid")
+        if not isinstance(backup.get("size_bytes"), int) or backup.get("size_bytes") <= 0:
+            errors.append("rqa_backup_restore_drill_backup_size_bytes_invalid")
+
+    restore = gate_json.get("restore")
+    if not isinstance(restore, dict):
+        errors.append("rqa_backup_restore_drill_restore_missing")
+    else:
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(restore.get(field)) is None:
+                errors.append(f"rqa_backup_restore_drill_restore_{field}_invalid")
+        if restore.get("db_integrity_check") != "ok":
+            errors.append("rqa_backup_restore_drill_restore_integrity_check_invalid")
+        if not is_sha256(restore.get("restored_db_sha256")):
+            errors.append("rqa_backup_restore_drill_restore_db_sha256_invalid")
+        if restore.get("schema_migrations_verified") is not True:
+            errors.append("rqa_backup_restore_drill_schema_migrations_not_verified")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "admin_trace_readable",
+        "retrieval_failure_readable",
+        "governance_task_readable",
+        "admin_package_readable",
+        "package_replay_readable",
+        "rqa_quality_gate_reran",
+        "saved_report_validator_reran",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_backup_restore_drill_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_backup_restore_drill_check_failed={check}")
+
+    refs = gate_json.get("refs")
+    required_ref_hashes = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_backup_restore_drill_refs_missing")
+    else:
+        for field in required_ref_hashes:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_backup_restore_drill_{field}_invalid")
+
+    artifacts = gate_json.get("artifacts")
+    required_artifact_hashes = (
+        "rqa_quality_gate_sha256",
+        "saved_release_report_sha256",
+        "saved_report_validator_sha256",
+    )
+    if not isinstance(artifacts, dict):
+        errors.append("rqa_backup_restore_drill_artifacts_missing")
+    else:
+        for field in required_artifact_hashes:
+            if not is_sha256(artifacts.get(field)):
+                errors.append(f"rqa_backup_restore_drill_{field}_invalid")
 
 
 if not report_path:
@@ -1124,6 +1265,7 @@ add_mismatch("exit_policy", computed_exit_policy, exit_policy)
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()
+validate_restore_drill_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,
@@ -1167,6 +1309,19 @@ add_if(
 )
 
 for name in live_gate_names:
+    gate = gates_by_name.get(name)
+    add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
+    if isinstance(gate, dict):
+        add_if(
+            production_ready and gate.get("status") != "passed",
+            f"production_ready_requires_{name}_passed",
+        )
+        add_if(
+            production_ready and gate.get("required") is not True,
+            f"production_ready_requires_{name}_required",
+        )
+
+for name in ("runtime_config", "retrieval_quality", "rqa_backup_restore_drill"):
     gate = gates_by_name.get(name)
     add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
     if isinstance(gate, dict):

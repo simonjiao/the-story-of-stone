@@ -638,8 +638,19 @@
 - Gateway Prometheus `tonglingyu_gateway_info` 已恢复低基数运行边界标签：
   `agent_runtime_mode`、`rate_limit_per_minute` 和 `max_body_bytes`，使 gateway
   smoke 能复核限流与请求体边界没有从指标中丢失。
-- 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
-  复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
+- RQA backup/restore drill 已接入 release readiness 必跑 gate：
+  `deploy/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh` 会执行 DB backup、
+  restored DB integrity check、restored Gateway admin trace/failure/governance
+  task/package 读取、package replay、恢复后 RQA quality gate 和 saved report
+  validator 复跑。默认 RTO/RPO 为 900s / 3600s，gate stdout 写入
+  started_at、finished_at、operator、environment、RTO/RPO、artifact hash 和
+  post-restore checks。
+- saved report validator 已要求 `rqa_backup_restore_drill` gate 存在并校验
+  RTO/RPO、backup/restore hash、恢复后 checks；production-ready report 若使用
+  fixture-only restore drill 会失败，live release 必须提供真实 trace/package/failure/
+  governance task restore refs。
+- 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据、依赖/镜像/
+  发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -651,8 +662,9 @@
 
 1. 清理或分派当前 open retrieval failures / open governance tasks，使 quality
    gate 的 blocker 能由真实治理状态关闭，而不是绕过阈值。
-2. 实现 RQA Milestone I-J：端到端自动化、backup/restore、production report
-   引用保留、RTO/RPO、runbook/alert/rollback 和 live production report 运维证据。
+2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
+   live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
+   运维证据。
 3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、性能预算、发布值守、
    回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。

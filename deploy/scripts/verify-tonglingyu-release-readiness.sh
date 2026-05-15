@@ -16,6 +16,7 @@ RQA_EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-}" ]] \
@@ -25,6 +26,7 @@ if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
 fi
 RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
 RQA_QUALITY_CMD="${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-quality-gate.sh}"
+RQA_RESTORE_DRILL_CMD="${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-backup-restore-drill.sh}"
 MODEL_UPSTREAM_CMD="${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-${SCRIPT_DIR}/verify-model-upstream-network.sh}"
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
 OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DIR}/verify-openwebui-function.sh}"
@@ -133,16 +135,6 @@ skip_gate() {
   append_result "$1" "skipped" "$2" "$3"
 }
 
-failed=0
-run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
-if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
-  run_gate "retrieval_quality" "true" env \
-    "TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH=${RQA_EVAL_REPORT_OUTPUT_PATH}" \
-    "${RQA_QUALITY_CMD}" || failed=1
-else
-  run_gate "retrieval_quality" "true" "${RQA_QUALITY_CMD}" || failed=1
-fi
-
 require_live="false"
 if is_true "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}"; then
   require_live="true"
@@ -152,6 +144,19 @@ if is_true "${TONGLINGYU_RELEASE_SUMMARY_ONLY:-false}"; then
   summary_only="true"
 fi
 browser_review_ref="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
+
+failed=0
+run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
+if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
+  run_gate "retrieval_quality" "true" env \
+    "TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH=${RQA_EVAL_REPORT_OUTPUT_PATH}" \
+    "${RQA_QUALITY_CMD}" || failed=1
+else
+  run_gate "retrieval_quality" "true" "${RQA_QUALITY_CMD}" || failed=1
+fi
+run_gate "rqa_backup_restore_drill" "true" env \
+  "TONGLINGYU_RQA_RESTORE_DRILL_REQUIRE_LIVE=${require_live}" \
+  "${RQA_RESTORE_DRILL_CMD}" || failed=1
 
 verify_strict_gateway="false"
 if [[ "${require_live}" == "true" ]] || is_true "${TONGLINGYU_RELEASE_VERIFY_STRICT_GATEWAY:-false}"; then

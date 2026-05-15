@@ -30,6 +30,9 @@ TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
+TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
+TAMPERED_RQA_RESTORE_FIXTURE_REPORT="${WORK_DIR}/tampered-rqa-restore-fixture-report.json"
+TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -159,6 +162,7 @@ common_env=(
   "TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true"
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
@@ -673,6 +677,7 @@ cat >"${env_file}" <<EOF
 TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}
@@ -1065,6 +1070,65 @@ gate_stdout = {
             "source": "production_defaults",
         },
     },
+    "rqa_backup_restore_drill": {
+        "artifacts": {
+            "rqa_quality_gate_sha256": "b" * 64,
+            "saved_release_report_sha256": "c" * 64,
+            "saved_report_validator_sha256": "d" * 64,
+        },
+        "backup": {
+            "artifact_sha256": "e" * 64,
+            "finished_at": "2026-05-15T00:00:02+00:00",
+            "size_bytes": 4096,
+            "source_db_sha256": "f" * 64,
+            "started_at": "2026-05-15T00:00:01+00:00",
+        },
+        "checks": {
+            "admin_package_readable": True,
+            "admin_trace_readable": True,
+            "governance_task_readable": True,
+            "package_replay_readable": True,
+            "retrieval_failure_readable": True,
+            "rqa_quality_gate_reran": True,
+            "saved_report_validator_reran": True,
+        },
+        "drill_result": "passed",
+        "duration_ms": 4000,
+        "environment": "production",
+        "errors": [],
+        "finished_at": "2026-05-15T00:00:04+00:00",
+        "object": "tonglingyu.rqa_backup_restore_drill",
+        "operator": "release-reviewer",
+        "policy_version": "tonglingyu-rqa-backup-restore-drill-v1",
+        "refs": {
+            "failure_sha256": "1" * 64,
+            "governance_task_sha256": "2" * 64,
+            "package_sha256": "3" * 64,
+            "trace_sha256": "4" * 64,
+        },
+        "restore": {
+            "db_integrity_check": "ok",
+            "finished_at": "2026-05-15T00:00:04+00:00",
+            "restored_db_sha256": "5" * 64,
+            "schema_migrations_verified": True,
+            "started_at": "2026-05-15T00:00:02+00:00",
+        },
+        "rpo": {
+            "actual_seconds": 2.0,
+            "met": True,
+            "target_seconds": 3600,
+        },
+        "rto": {
+            "actual_seconds": 2.0,
+            "met": True,
+            "target_seconds": 900,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "source_mode": "existing_refs",
+        "started_at": "2026-05-15T00:00:00+00:00",
+        "status": "ok",
+    },
     "model_upstream_network": {
         "errors": [],
         "object": "tonglingyu.model_upstream_network_gate",
@@ -1193,6 +1257,76 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_gate_stdout}" \
   '"retrieval_quality_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_backup_restore_drill":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_restore_gate_stdout="${WORK_DIR}/tampered-rqa-restore-gate-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT}" >"${tampered_rqa_restore_gate_stdout}"; then
+  echo "production-ready reports must bind RQA restore drill status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_restore_gate_stdout}" \
+  '"rqa_backup_restore_drill_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_RESTORE_FIXTURE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_backup_restore_drill":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["source_mode"] = "fixture"
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_restore_fixture_stdout="${WORK_DIR}/tampered-rqa-restore-fixture.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_RESTORE_FIXTURE_REPORT}" >"${tampered_rqa_restore_fixture_stdout}"; then
+  echo "production-ready reports must reject fixture-only RQA restore drill evidence" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_restore_fixture_stdout}" \
+  '"production_ready_requires_live_rqa_restore_drill_refs" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_RESTORE_RTO_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_backup_restore_drill":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["rto"]["met"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_restore_rto_stdout="${WORK_DIR}/tampered-rqa-restore-rto.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_RESTORE_RTO_REPORT}" >"${tampered_rqa_restore_rto_stdout}"; then
+  echo "production-ready reports must reject unmet RQA restore RTO" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_restore_rto_stdout}" \
+  '"rqa_backup_restore_drill_rto_not_met" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
@@ -1565,6 +1699,7 @@ if env \
   TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}" \
