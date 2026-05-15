@@ -39,6 +39,7 @@ class Action:
         {"id": "retrieval_failures", "name": "RQA retrieval failures"},
         {"id": "retrieval_failure", "name": "RQA retrieval failure"},
         {"id": "retrieval_failure_update", "name": "Update RQA failure status"},
+        {"id": "retrieval_failure_cluster", "name": "Cluster RQA failures"},
         {"id": "governance_tasks", "name": "RQA governance tasks"},
         {"id": "governance_task", "name": "RQA governance task"},
         {"id": "governance_task_create", "name": "Create governance task"},
@@ -189,6 +190,27 @@ class Action:
                 )
                 return _json_message(
                     "RQA retrieval failure update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "retrieval_failure_cluster":
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/retrieval-failures/cluster",
+                    {
+                        "human_review_status": _deep_get(body, "human_review_status")
+                        or _deep_get(body, "status"),
+                        "failure_type": _deep_get(body, "failure_type"),
+                        "min_cluster_size": _deep_get(body, "min_cluster_size"),
+                        "limit": _deep_get(body, "limit"),
+                        "create_tasks": _deep_get(body, "create_tasks"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA retrieval failure cluster",
                     result,
                     self.valves.RESPONSE_MAX_CHARS,
                 )

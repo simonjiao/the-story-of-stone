@@ -257,6 +257,41 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         )
         self.assertIn("tonglingyu.governance_task_admin_list", result["content"])
 
+    def test_retrieval_failure_cluster_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_cluster_admin_result"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "failure_type": "quality_report_not_passed",
+                        "min_cluster_size": 2,
+                        "limit": 20,
+                        "create_tasks": True,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure_cluster",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/cluster",
+        )
+        self.assertEqual(payload["human_review_status"], "open")
+        self.assertEqual(payload["failure_type"], "quality_report_not_passed")
+        self.assertEqual(payload["min_cluster_size"], 2)
+        self.assertEqual(payload["limit"], 20)
+        self.assertTrue(payload["create_tasks"])
+        self.assertIn("tonglingyu.retrieval_failure_cluster_admin_result", result["content"])
+
     def test_governance_task_manual_create_uses_post_json(self) -> None:
         action = self.action_with_key()
         with patch(

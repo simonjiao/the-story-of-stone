@@ -201,9 +201,13 @@ pub struct RuntimeStoreStats {
 }
 
 pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failures-v1";
+pub const RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION: &str =
+    "tonglingyu-retrieval-failure-clusters-v1";
 pub const RETRIEVAL_FAILURE_DEDUPE_MIGRATION: &str = "tonglingyu-retrieval-failure-dedupe-v1";
 pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
 pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
+pub const RETRIEVAL_FAILURE_CLUSTER_DEFAULT_LIMIT: usize = 200;
+pub const RETRIEVAL_FAILURE_CLUSTER_MAX_LIMIT: usize = 500;
 pub const KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION: &str =
     "tonglingyu-knowledge-governance-tasks-v2";
 pub const KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION: &str =
@@ -274,6 +278,28 @@ pub struct RetrievalFailureListResult {
     pub offset: usize,
     pub next_offset: Option<usize>,
     pub items: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalFailureClusterInput {
+    pub human_review_status: Option<String>,
+    pub failure_type: Option<String>,
+    pub min_cluster_size: usize,
+    pub limit: usize,
+    pub create_tasks: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalFailureClusterResult {
+    pub object: String,
+    pub schema_version: String,
+    pub scanned_failure_count: usize,
+    pub cluster_count: usize,
+    pub task_count: usize,
+    pub min_cluster_size: usize,
+    pub limit: usize,
+    pub create_tasks: bool,
+    pub clusters: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +713,14 @@ impl TonglingyuRuntimeStore {
     ) -> Result<RetrievalFailureListResult> {
         let conn = self.open_connection()?;
         list_retrieval_failures(&conn, input)
+    }
+
+    pub fn cluster_retrieval_failures(
+        &self,
+        input: RetrievalFailureClusterInput,
+    ) -> Result<RetrievalFailureClusterResult> {
+        let conn = self.open_connection()?;
+        cluster_retrieval_failures(&conn, input)
     }
 
     pub fn list_retrieval_failures_for_trace(
@@ -4273,6 +4307,115 @@ pub fn list_retrieval_failures(
     })
 }
 
+pub fn cluster_retrieval_failures(
+    conn: &Connection,
+    input: RetrievalFailureClusterInput,
+) -> Result<RetrievalFailureClusterResult> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = cluster_retrieval_failures_inner(conn, input);
+        match result {
+            Ok(result) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        cluster_retrieval_failures_inner(conn, input)
+    }
+}
+
+fn cluster_retrieval_failures_inner(
+    conn: &Connection,
+    input: RetrievalFailureClusterInput,
+) -> Result<RetrievalFailureClusterResult> {
+    if let Some(status) = input.human_review_status.as_ref() {
+        validate_human_review_status(status)?;
+    }
+    let limit = retrieval_failure_cluster_limit(input.limit);
+    let min_cluster_size = input.min_cluster_size.max(2);
+    let failures = query_retrieval_failures_for_clustering(
+        conn,
+        input.human_review_status.as_deref(),
+        input.failure_type.as_deref(),
+        limit,
+    )?;
+    let scanned_failure_count = failures.len();
+    let mut grouped = BTreeMap::<String, Vec<RetrievalFailureRecord>>::new();
+    for failure in failures {
+        let cluster_key = retrieval_failure_cluster_key(&failure);
+        grouped.entry(cluster_key).or_default().push(failure);
+    }
+
+    let mut clusters = Vec::new();
+    let mut task_count = 0_usize;
+    for (cluster_key, mut failures) in grouped {
+        if failures.len() < min_cluster_size {
+            continue;
+        }
+        failures.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.failure_id.cmp(&right.failure_id))
+        });
+        let proposed_fix = retrieval_failure_cluster_proposed_fix(&failures);
+        let task = if input.create_tasks {
+            let task = create_governance_task(
+                conn,
+                KnowledgeGovernanceTaskCreateInput {
+                    source_entity_type: "retrieval_failure_cluster".to_string(),
+                    source_entity_id: cluster_key.clone(),
+                    trace_id: format!("cluster-{}", &hash_text(&cluster_key)[..16]),
+                    package_id: None,
+                    source_failure_id: None,
+                    task_type: default_governance_task_type(&failures[0]),
+                    priority: Some("p0".to_string()),
+                    proposed_fix: Some(proposed_fix.clone()),
+                    agent_cluster_key: Some(cluster_key.clone()),
+                },
+            )?;
+            task_count += 1;
+            Some(task)
+        } else {
+            None
+        };
+        let cluster_value =
+            retrieval_failure_cluster_json(&cluster_key, &failures, &proposed_fix, task.as_ref());
+        append_runtime_audit_event(
+            conn,
+            &format!("cluster-{}", &hash_text(&cluster_key)[..16]),
+            "retrieval_failures_clustered",
+            &json!({
+                "cluster_key": &cluster_key,
+                "failure_type": &failures[0].failure_type,
+                "failure_count": failures.len(),
+                "task_id": task.as_ref().map(|task| &task.task_id),
+                "task_attached": task.is_some(),
+                "direct_fact_mutation": false,
+                "proposed_fix_sha256": hash_text(&proposed_fix),
+                "representative_failure_id_sha256": hash_text(&failures[0].failure_id),
+            }),
+        )?;
+        clusters.push(cluster_value);
+    }
+    let cluster_count = clusters.len();
+    Ok(RetrievalFailureClusterResult {
+        object: "tonglingyu.retrieval_failure_cluster_result".to_string(),
+        schema_version: RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION.to_string(),
+        scanned_failure_count,
+        cluster_count,
+        task_count,
+        min_cluster_size,
+        limit,
+        create_tasks: input.create_tasks,
+        clusters,
+    })
+}
+
 pub fn read_retrieval_failure(
     conn: &Connection,
     failure_id: &str,
@@ -5348,6 +5491,198 @@ fn retrieval_failure_record_json(
     }
 }
 
+fn query_retrieval_failures_for_clustering(
+    conn: &Connection,
+    human_review_status: Option<&str>,
+    failure_type: Option<&str>,
+    limit: usize,
+) -> Result<Vec<RetrievalFailureRecord>> {
+    let limit_i64 = retrieval_failure_cluster_limit(limit) as i64;
+    match (human_review_status, failure_type) {
+        (Some(status), Some(failure_type)) => {
+            validate_human_review_status(status)?;
+            query_retrieval_failure_records(
+                conn,
+                &format!(
+                    "{} WHERE human_review_status = ?1 AND failure_type = ?2 ORDER BY updated_at DESC, failure_id DESC LIMIT ?3",
+                    retrieval_failure_select_sql()
+                ),
+                &[&status, &failure_type, &limit_i64],
+            )
+        }
+        (Some(status), None) => {
+            validate_human_review_status(status)?;
+            query_retrieval_failure_records(
+                conn,
+                &format!(
+                    "{} WHERE human_review_status = ?1 ORDER BY updated_at DESC, failure_id DESC LIMIT ?2",
+                    retrieval_failure_select_sql()
+                ),
+                &[&status, &limit_i64],
+            )
+        }
+        (None, Some(failure_type)) => query_retrieval_failure_records(
+            conn,
+            &format!(
+                "{} WHERE human_review_status IN ('open', 'in_review') AND failure_type = ?1 ORDER BY updated_at DESC, failure_id DESC LIMIT ?2",
+                retrieval_failure_select_sql()
+            ),
+            &[&failure_type, &limit_i64],
+        ),
+        (None, None) => query_retrieval_failure_records(
+            conn,
+            &format!(
+                "{} WHERE human_review_status IN ('open', 'in_review') ORDER BY updated_at DESC, failure_id DESC LIMIT ?1",
+                retrieval_failure_select_sql()
+            ),
+            &[&limit_i64],
+        ),
+    }
+}
+
+fn retrieval_failure_cluster_key(failure: &RetrievalFailureRecord) -> String {
+    let missing = normalized_list_digest(&failure.missing_evidence_types);
+    let required = normalized_list_digest(&failure.required_evidence_types);
+    let quality = normalized_list_digest(&retrieval_failure_quality_issue_families(failure));
+    let kb = failure.kb_version_id.as_deref().unwrap_or("unknown-kb");
+    format!(
+        "rfc:{}:kb:{}:missing:{}:required:{}:issues:{}",
+        failure.failure_type,
+        &hash_text(kb)[..12],
+        &missing[..12],
+        &required[..12],
+        &quality[..12]
+    )
+}
+
+fn retrieval_failure_quality_issue_families(failure: &RetrievalFailureRecord) -> Vec<String> {
+    let mut families = failure
+        .quality_issues
+        .iter()
+        .map(|issue| {
+            issue
+                .split_once(':')
+                .map(|(family, _)| family)
+                .unwrap_or(issue)
+                .trim()
+                .to_string()
+        })
+        .filter(|issue| !issue.is_empty())
+        .collect::<Vec<_>>();
+    families.sort();
+    families.dedup();
+    families
+}
+
+fn normalized_list_digest(values: &[String]) -> String {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    hash_text(&normalized.join("|"))
+}
+
+fn retrieval_failure_cluster_limit(requested: usize) -> usize {
+    if requested == 0 {
+        RETRIEVAL_FAILURE_CLUSTER_DEFAULT_LIMIT
+    } else {
+        requested.min(RETRIEVAL_FAILURE_CLUSTER_MAX_LIMIT)
+    }
+}
+
+fn retrieval_failure_cluster_proposed_fix(failures: &[RetrievalFailureRecord]) -> String {
+    let representative = &failures[0];
+    let missing = normalized_display_list(&representative.missing_evidence_types, 6);
+    let required = normalized_display_list(&representative.required_evidence_types, 6);
+    let issue_families =
+        normalized_display_list(&retrieval_failure_quality_issue_families(representative), 6);
+    let recommendation = match representative.failure_type.as_str() {
+        "source_usage_metadata_incomplete" => {
+            "complete source usage metadata and attribution before accepting affected answers"
+        }
+        "expected_evidence_missing" => {
+            "review expected evidence coverage and adjust retrieval policy or source coverage"
+        }
+        "reviewer_evidence_insufficient" => {
+            "route representative packages to expert review and revise evidence mapping"
+        }
+        _ => "review retrieval policy, exact-term handling, and source selection for this cluster",
+    };
+    format!(
+        "agent_cluster_proposed_fix; no_direct_fact_mutation=true; failure_type={}; failure_count={}; missing_evidence_types={}; required_evidence_types={}; issue_families={}; recommended_action={}",
+        representative.failure_type,
+        failures.len(),
+        missing,
+        required,
+        issue_families,
+        recommendation
+    )
+}
+
+fn normalized_display_list(values: &[String], limit: usize) -> String {
+    let mut normalized = values
+        .iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.is_empty() {
+        "none".to_string()
+    } else {
+        normalized
+            .into_iter()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+fn retrieval_failure_cluster_json(
+    cluster_key: &str,
+    failures: &[RetrievalFailureRecord],
+    proposed_fix: &str,
+    task: Option<&KnowledgeGovernanceTaskRecord>,
+) -> Value {
+    let representative = &failures[0];
+    let failure_ids = failures
+        .iter()
+        .take(25)
+        .map(|failure| failure.failure_id.clone())
+        .collect::<Vec<_>>();
+    let trace_ids = failures
+        .iter()
+        .take(25)
+        .map(|failure| failure.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let package_ids = failures
+        .iter()
+        .filter_map(|failure| failure.package_id.clone())
+        .take(25)
+        .collect::<BTreeSet<_>>();
+    json!({
+        "object": "tonglingyu.retrieval_failure_cluster",
+        "schema_version": RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
+        "cluster_key": cluster_key,
+        "failure_type": &representative.failure_type,
+        "failure_count": failures.len(),
+        "failure_ids": failure_ids,
+        "failure_ids_truncated": failures.len() > 25,
+        "trace_ids": trace_ids.into_iter().collect::<Vec<_>>(),
+        "package_ids": package_ids.into_iter().collect::<Vec<_>>(),
+        "kb_version_id": &representative.kb_version_id,
+        "missing_evidence_types": &representative.missing_evidence_types,
+        "required_evidence_types": &representative.required_evidence_types,
+        "quality_issue_families": retrieval_failure_quality_issue_families(representative),
+        "proposed_fix": proposed_fix,
+        "direct_fact_mutation": false,
+        "task": task.map(governance_task_record_json),
+    })
+}
+
 fn governance_task_required_for_failure(failure: &RetrievalFailureRecord) -> bool {
     matches!(failure.human_review_status.as_str(), "open" | "in_review")
 }
@@ -5419,7 +5754,7 @@ fn validate_governance_task_priority(priority: &str) -> Result<()> {
 fn validate_governance_source_entity_type(source_entity_type: &str) -> Result<()> {
     if matches!(
         source_entity_type,
-        "retrieval_failure" | "trace" | "package" | "user_feedback"
+        "retrieval_failure" | "retrieval_failure_cluster" | "trace" | "package" | "user_feedback"
     ) {
         Ok(())
     } else {
@@ -9388,6 +9723,131 @@ mod tests {
             governance_tasks.items[0]["task_type"],
             json!("expected_evidence_fix")
         );
+    }
+
+    #[test]
+    fn retrieval_failure_cluster_creates_proposed_fix_task_without_fact_mutation() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        let question = "通灵玉是什么？";
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        let selected_evidence_ids = evidence_ids(&cards);
+        for index in 1..=2 {
+            create_retrieval_failure(
+                &conn,
+                RetrievalFailureCreateInput {
+                    trace_id: format!("trace-cluster-{index}"),
+                    package_id: Some(format!("pkg-cluster-{index}")),
+                    question: question.to_string(),
+                    quality_report: (*quality_report).clone(),
+                    selected_evidence_ids: selected_evidence_ids.clone(),
+                    expected_evidence_ids: vec![format!("ev-expected-missing-{index}")],
+                    agent_diagnosis: None,
+                    proposed_fix: None,
+                },
+            )
+            .expect("expected evidence failure records");
+        }
+
+        let result = cluster_retrieval_failures(
+            &conn,
+            RetrievalFailureClusterInput {
+                human_review_status: Some("open".to_string()),
+                failure_type: Some("expected_evidence_missing".to_string()),
+                min_cluster_size: 2,
+                limit: 20,
+                create_tasks: true,
+            },
+        )
+        .expect("failures cluster");
+
+        assert_eq!(result.scanned_failure_count, 2);
+        assert_eq!(result.cluster_count, 1);
+        assert_eq!(result.task_count, 1);
+        assert_eq!(result.clusters[0]["direct_fact_mutation"], json!(false));
+        assert!(
+            result.clusters[0]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("no_direct_fact_mutation=true"))
+        );
+        assert_eq!(
+            result.clusters[0]["task"]["source_entity_type"],
+            json!("retrieval_failure_cluster")
+        );
+        assert_eq!(
+            result.clusters[0]["task"]["task_type"],
+            json!("expected_evidence_fix")
+        );
+        let cluster_key = result.clusters[0]["cluster_key"]
+            .as_str()
+            .expect("cluster key");
+        let tasks = list_governance_tasks(
+            &conn,
+            KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: Some("expected_evidence_fix".to_string()),
+                priority: Some("p0".to_string()),
+                source_failure_id: None,
+                source_entity_type: Some("retrieval_failure_cluster".to_string()),
+                source_entity_id: Some(cluster_key.to_string()),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list cluster governance task");
+        assert_eq!(tasks.items.len(), 1);
+        assert!(
+            tasks.items[0]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("agent_cluster_proposed_fix"))
+        );
+        let open_failures = list_retrieval_failures(
+            &conn,
+            RetrievalFailureListInput {
+                human_review_status: Some("open".to_string()),
+                failure_type: Some("expected_evidence_missing".to_string()),
+                limit: 10,
+                offset: 0,
+                view: RetrievalFailureView::AdminDetail,
+            },
+        )
+        .expect("list open failures");
+        assert_eq!(open_failures.items.len(), 2);
+        let cluster_audit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'retrieval_failures_clustered'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cluster audit count");
+        assert_eq!(cluster_audit_count, 1);
     }
 
     #[test]

@@ -26,8 +26,9 @@ use tonglingyu_runtime::{
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
     KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
     KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
-    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
-    RetrievalEvidenceTypeCoverage, RetrievalFailureCreateInput, RetrievalFailureListInput,
+    RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
+    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
+    RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
     RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
     RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
@@ -438,6 +439,15 @@ struct RetrievalFailureUpdateRequest {
     reviewer: Option<String>,
     review_note: Option<String>,
     if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetrievalFailureClusterRequest {
+    human_review_status: Option<String>,
+    failure_type: Option<String>,
+    min_cluster_size: Option<usize>,
+    limit: Option<usize>,
+    create_tasks: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1052,6 +1062,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/retrieval-failures",
             get(retrieval_failures_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/cluster",
+            post(cluster_retrieval_failures_endpoint),
         )
         .route(
             "/v1/admin/retrieval-failures/{failure_id}",
@@ -3602,6 +3616,80 @@ async fn update_retrieval_failure_endpoint(
     }
 }
 
+async fn cluster_retrieval_failures_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RetrievalFailureClusterRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_cluster") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = RetrievalFailureClusterInput {
+        human_review_status: payload
+            .human_review_status
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        failure_type: payload
+            .failure_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        min_cluster_size: payload.min_cluster_size.unwrap_or(2),
+        limit: payload.limit.unwrap_or(0),
+        create_tasks: payload.create_tasks.unwrap_or(true),
+    };
+    match state.runtime_store.cluster_retrieval_failures(input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_cluster",
+                &actor,
+                json!({
+                    "action": "cluster",
+                    "human_review_status": payload.human_review_status.as_deref(),
+                    "failure_type": payload.failure_type.as_deref(),
+                    "min_cluster_size": payload.min_cluster_size,
+                    "limit": payload.limit,
+                    "create_tasks": payload.create_tasks.unwrap_or(true),
+                    "scanned_failure_count": result.scanned_failure_count,
+                    "cluster_count": result.cluster_count,
+                    "task_count": result.task_count,
+                    "direct_fact_mutation": false,
+                    "trace_id": Value::Null,
+                    "result": "clustered",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure cluster admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_cluster_admin_result",
+                "schema_version": RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "retrieval failure clustering failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "retrieval_failure_cluster_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn governance_tasks_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5677,6 +5765,8 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "retrieval_failure_admin_list",
             "retrieval_failure_admin_read",
             "retrieval_failure_admin_update",
+            "retrieval_failure_admin_cluster",
+            "retrieval_failures_clustered",
             "governance_task_created",
             "governance_task_status_updated",
             "governance_task_admin_list",
@@ -6702,6 +6792,61 @@ mod tests {
         );
         assert_eq!(
             audit_event_count(&db_path, "governance_task_status_updated"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_cluster_endpoint_creates_proposed_fix_task() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-cluster");
+        seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cluster-1");
+        seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cluster-2");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = cluster_retrieval_failures_endpoint(
+            State(state),
+            admin_headers(),
+            Json(RetrievalFailureClusterRequest {
+                human_review_status: Some("open".to_string()),
+                failure_type: Some("quality_report_not_passed".to_string()),
+                min_cluster_size: Some(2),
+                limit: Some(20),
+                create_tasks: Some(true),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("cluster response json");
+        assert_eq!(
+            body["schema_version"],
+            json!(RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION)
+        );
+        assert_eq!(body["result"]["cluster_count"], json!(1));
+        assert_eq!(body["result"]["task_count"], json!(1));
+        assert_eq!(
+            body["result"]["clusters"][0]["direct_fact_mutation"],
+            json!(false)
+        );
+        assert_eq!(
+            body["result"]["clusters"][0]["task"]["source_entity_type"],
+            json!("retrieval_failure_cluster")
+        );
+        assert!(
+            body["result"]["clusters"][0]["task"]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("agent_cluster_proposed_fix"))
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_cluster"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failures_clustered"),
             1
         );
         let _ = std::fs::remove_file(&db_path);

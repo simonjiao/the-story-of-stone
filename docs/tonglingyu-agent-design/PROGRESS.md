@@ -596,8 +596,16 @@
   WebUI 新增 feedback Action；反馈必须绑定用户可访问的 trace/package，只生成
   `source_entity_type=user_feedback` 的 `expert_review` governance task，并写
   `user_feedback_received` audit，不接受事实层 mutation 字段。
-- 该 H 切片仍不等于 H 完成或 production-ready：真实 Agent 聚类、KB diff
-  report、eval 前后对比、retention/restore 和用户数据 lifecycle contract 仍未完成。
+- retrieval failure 聚类已完成第一批代码切片：Runtime 新增
+  `tonglingyu-retrieval-failure-clusters-v1` 聚类结果，按 failure type、KB、
+  missing/required evidence types 和 issue family 聚合 open/in_review failures；
+  Gateway admin API 和 Open WebUI admin Action 可触发聚类，只生成
+  `source_entity_type=retrieval_failure_cluster` 的 governance task proposed fix，
+  并写 `retrieval_failures_clustered` / `retrieval_failure_admin_cluster` audit；
+  不改 retrieval failure 状态或 source/alias/term/commentary/fact 表。
+- 该 H 切片仍不等于 H 完成或 production-ready：proposed alias / term /
+  commentary link / version note 的人工状态流转、KB diff report、eval 前后对比、
+  retention/restore 和用户数据 lifecycle contract 仍未完成。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
