@@ -734,6 +734,9 @@
   仍有 182 个 open P0 retrieval failures 和 182 个 open P0 governance tasks；
   `model_upstream_id` 未绑定；security gate 缺真实 dependency/image scan 且 compose
   image 存在 mutable tag / digest missing；live gates 和 browser review 尚未执行。
+- 2026-05-16 全量 `docs/tonglingyu-agent-design/*.md` markdownlint 已通过：
+  历史表格分隔行已规范化，重复标题规则改为同一父级内不重复，未改变通灵玉
+  设计文档的正文语义。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
