@@ -6,7 +6,14 @@
   "work": "红楼梦",
   "edition": "程乙本；维基文库数字化文本",
   "language": "zh",
+  "source_url": "https://zh.wikisource.org/wiki/紅樓夢（程乙本）",
   "api_url": "https://zh.wikisource.org/w/api.php",
+  "license": "CC-BY-SA-4.0",
+  "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+  "license_note": "Wikisource policy requires hosted texts to be public domain or CC BY-SA; this snapshot retains Wikisource contribution attribution and per-block revision metadata.",
+  "attribution": "Wikisource contributors; cite source_url plus per-block source_url and revision_id when displaying evidence.",
+  "usage_boundary": "可作为程乙本版本对照证据候选；必须保留 Wikisource attribution 和 CC BY-SA 4.0 许可说明；关键引文仍需后续影印或权威校注本复核。",
   "requested_pages": [
     "紅樓夢（程乙本）"
   ],

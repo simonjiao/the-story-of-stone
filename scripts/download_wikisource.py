@@ -785,7 +785,13 @@ def run(args: argparse.Namespace) -> int:
         "work": args.work or args.title or source_id,
         "edition": args.edition,
         "language": args.language,
+        "source_url": args.source_url or (fetched_pages[0].get("fullurl", "") if fetched_pages else ""),
         "api_url": args.api_url,
+        "license": args.license,
+        "license_url": args.license_url,
+        "license_source_url": args.license_source_url,
+        "attribution": args.attribution,
+        "usage_boundary": args.usage_boundary,
         "requested_pages": args.page,
         "requested_prefixes": args.prefix,
         "fetched_at": fetched_at,
@@ -846,6 +852,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--work", default="")
     parser.add_argument("--edition", default="")
     parser.add_argument("--language", default="zh")
+    parser.add_argument("--source-url", default="", help="Canonical source landing page URL.")
+    parser.add_argument("--license", default="", help="Machine-readable source license id.")
+    parser.add_argument("--license-url", default="", help="Canonical license URL.")
+    parser.add_argument(
+        "--license-source-url",
+        default="",
+        help="URL proving or explaining the source license.",
+    )
+    parser.add_argument("--attribution", default="", help="Required attribution text.")
+    parser.add_argument("--usage-boundary", default="", help="Production usage boundary.")
     parser.add_argument("--notes", default="")
     parser.add_argument("--page", action="append", default=[], help="MediaWiki page title. May be repeated.")
     parser.add_argument("--prefix", action="append", default=[], help="Download namespace-0 pages with this prefix.")

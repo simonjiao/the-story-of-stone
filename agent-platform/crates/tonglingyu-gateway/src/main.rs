@@ -1327,6 +1327,7 @@ struct EvalCase {
 struct EvalQualityAccumulator {
     total_cases: usize,
     quality_report_cases: usize,
+    quality_report_production_ready_required_cases: usize,
     quality_report_production_ready_cases: usize,
     classified_cases: usize,
     expected_evidence_cases: usize,
@@ -1449,12 +1450,17 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             failures.push("non-empty evidence package is missing claim_evidence_map".to_string());
         }
         let quality_reports = quality_reports_from_workflow(&workflow)?;
+        let requires_production_ready_quality_report = case.expected_review_status == "passed";
+        if requires_production_ready_quality_report {
+            quality.quality_report_production_ready_required_cases += 1;
+        }
         if !quality_reports.is_empty() {
             quality.quality_report_cases += 1;
         } else {
             failures.push("missing retrieval quality report".to_string());
         }
-        if !quality_reports.is_empty()
+        if requires_production_ready_quality_report
+            && !quality_reports.is_empty()
             && quality_reports
                 .iter()
                 .all(|report| report.production_ready && report.quality_status == "passed")
@@ -1466,23 +1472,41 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             .filter(|report| !report.production_ready || report.quality_status != "passed")
             .flat_map(|report| {
                 if report.issues.is_empty() {
-                    vec![format!(
-                        "{}:quality_status={}",
-                        report.tool_name, report.quality_status
+                    vec![(
+                        format!("quality_status={}", report.quality_status),
+                        format!(
+                            "{}:quality_status={}",
+                            report.tool_name, report.quality_status
+                        ),
                     )]
                 } else {
                     report
                         .issues
                         .iter()
-                        .map(|issue| format!("{}:{}", report.tool_name, trim_eval_text(issue, 160)))
+                        .map(|issue| {
+                            (
+                                issue.clone(),
+                                format!("{}:{}", report.tool_name, trim_eval_text(issue, 160)),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 }
             })
             .collect::<Vec<_>>();
-        if !non_production_quality_issues.is_empty() {
+        let unallowed_non_production_quality_issues = non_production_quality_issues
+            .iter()
+            .filter_map(|(raw_issue, formatted_issue)| {
+                if eval_allows_non_production_quality_issue(&case, raw_issue) {
+                    None
+                } else {
+                    Some(formatted_issue.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        if !unallowed_non_production_quality_issues.is_empty() {
             failures.push(format!(
                 "retrieval quality report not production-ready: {}",
-                trim_eval_text(&non_production_quality_issues.join("; "), 480)
+                trim_eval_text(&unallowed_non_production_quality_issues.join("; "), 480)
             ));
         }
         let selected_evidence_ids = package
@@ -1625,6 +1649,8 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             "quality": {
                 "classification": case_classification,
                 "quality_report_count": quality_reports.len(),
+                "quality_report_production_ready_required": requires_production_ready_quality_report,
+                "quality_report_unallowed_non_production_issues": unallowed_non_production_quality_issues,
                 "expected_evidence_hit_at_1": expected_hit_at_1,
                 "expected_evidence_hit_at_3": expected_hit_at_3,
                 "expected_evidence_hit_at_8": expected_hit_at_8,
@@ -1689,6 +1715,11 @@ fn quality_reports_from_workflow(
         .filter_map(|step| step.output.get("quality_report").cloned())
         .map(|value| serde_json::from_value(value).map_err(Into::into))
         .collect()
+}
+
+fn eval_allows_non_production_quality_issue(case: &EvalCase, issue: &str) -> bool {
+    case.expected_review_status == "needs_revision"
+        && (issue == "no_evidence_selected" || issue.starts_with("missing_required_evidence_type:"))
 }
 
 fn expected_eval_refs(case: &EvalCase) -> Vec<EvalExpectedRef> {
@@ -1877,7 +1908,12 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     if quality.quality_report_cases != quality.total_cases {
         blockers.insert("quality_report_coverage_below_100_percent".to_string());
     }
-    if quality.quality_report_production_ready_cases != quality.total_cases {
+    if quality.quality_report_production_ready_required_cases == 0 {
+        blockers.insert("quality_report_production_ready_denominator_zero".to_string());
+    }
+    if quality.quality_report_production_ready_cases
+        != quality.quality_report_production_ready_required_cases
+    {
         blockers.insert("quality_report_production_ready_below_100_percent".to_string());
     }
     if quality.classified_cases != quality.total_cases {
@@ -1912,7 +1948,7 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
         "quality_report_coverage": ratio_json(quality.quality_report_cases, quality.total_cases),
         "quality_report_production_ready": ratio_json(
             quality.quality_report_production_ready_cases,
-            quality.total_cases,
+            quality.quality_report_production_ready_required_cases,
         ),
         "eval_case_classification": ratio_json(quality.classified_cases, quality.total_cases),
         "expected_evidence_denominator": quality.expected_evidence_cases,
@@ -4224,6 +4260,7 @@ mod tests {
         let mut quality = EvalQualityAccumulator {
             total_cases: 1,
             quality_report_cases: 1,
+            quality_report_production_ready_required_cases: 1,
             quality_report_production_ready_cases: 1,
             classified_cases: 1,
             expected_evidence_cases: 1,
@@ -4249,6 +4286,33 @@ mod tests {
         assert_eq!(summary["status"], json!("passed"));
         assert_eq!(summary["expected_evidence_hit_at_8"]["ratio"], json!(1.0));
         assert_eq!(summary["source_diversity"]["count"], json!(1));
+    }
+
+    #[test]
+    fn eval_allows_expected_downgrade_quality_issues_only_for_negative_cases() {
+        let mut negative = eval_case_fixture("unsupported-modern-topic");
+        negative.expected_review_status = "needs_revision";
+        negative.required_evidence_type = None;
+        negative.min_cards = 0;
+
+        assert!(eval_allows_non_production_quality_issue(
+            &negative,
+            "no_evidence_selected"
+        ));
+        assert!(eval_allows_non_production_quality_issue(
+            &negative,
+            "missing_required_evidence_type:base_text"
+        ));
+        assert!(!eval_allows_non_production_quality_issue(
+            &negative,
+            "source_usage_metadata_incomplete:source:missing_license_metadata"
+        ));
+
+        let positive = eval_case_fixture("baoyu-alias-retrieval");
+        assert!(!eval_allows_non_production_quality_issue(
+            &positive,
+            "no_evidence_selected"
+        ));
     }
 
     #[test]

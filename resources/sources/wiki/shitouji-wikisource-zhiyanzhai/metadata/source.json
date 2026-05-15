@@ -6,7 +6,14 @@
   "work": "红楼梦",
   "edition": "脂硯齋重評石頭記；维基文库整理文本",
   "language": "zh",
+  "source_url": "https://zh.wikisource.org/wiki/脂硯齋重評石頭記",
   "api_url": "https://zh.wikisource.org/w/api.php",
+  "license": "CC-BY-SA-4.0",
+  "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+  "license_note": "Wikisource policy requires hosted texts to be public domain or CC BY-SA; this snapshot retains Wikisource contribution attribution and per-block revision metadata.",
+  "attribution": "Wikisource contributors; cite source_url plus per-block source_url and revision_id when displaying evidence.",
+  "usage_boundary": "只能作为脂批、版本或评语证据候选；必须保留 Wikisource attribution 和 CC BY-SA 4.0 许可说明；不能单独证明正文事实。",
   "requested_pages": [
     "脂硯齋重評石頭記"
   ],

@@ -109,7 +109,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 | 指标 | 默认要求 |
 | --- | --- |
 | quality report coverage | 100% eval case 生成 report |
-| quality_report_production_ready | 100% report production-ready |
+| quality_report_production_ready | 100% expected-passed |
 | eval case classification | 100% release case 标记 expected / not-applicable |
 | expected evidence denominator | release suite 中必须大于 0 |
 | expected_evidence_hit@8 | 有 expected evidence 标注的 case 必须 100% 命中 |
@@ -121,6 +121,11 @@ release report 和 saved report validator，不能只存在于运行环境中。
 | public_response_boundary_passed | 100% |
 | source_coverage_boundary_passed | 100% |
 | admin_trace_quality_summary | 100% |
+
+`quality_report_production_ready` 的分母是 expected-passed / evidence-bearing
+eval report。expected downgrade case 只允许预期内 no-evidence 或
+missing-required-type issue；source metadata、license、attribution 或其他非预期
+quality issue 仍然 fail-closed。
 
 ## Milestone A：Runtime 质量报告
 
@@ -199,7 +204,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - workflow 会在 `RetrievalQualityReport.production_ready=false` 时写入
   retrieval failure，并追加 `retrieval_failure_recorded` audit event；状态更新会
   写 `retrieval_failure_status_updated`，audit 中只记录 review note hash。
-- 验证命令：`cargo test -p tonglingyu-runtime`，35 个测试通过。
+- 验证命令：`cargo test -p tonglingyu-runtime`；当前 runtime 回归套件已扩展到
+  42 个测试并通过。
 - 仍不能宣布整体 RQA production-ready：Milestone C 的完整触发矩阵、去重、
   eval expected evidence、release gate 和 saved report validator 仍未完成。
 
@@ -233,7 +239,8 @@ Milestone D）
   package 无法支持关键 claim 的本地 reviewer 结论。
 - 相同 trace/package/failure type 通过 dedupe 查询和唯一索引去重；failure insert
   与 audit append 在同一事务中完成，audit append 失败会 rollback failure。
-- 验证命令：`cargo test -p tonglingyu-runtime`，38 个测试通过。
+- 验证命令：`cargo test -p tonglingyu-runtime`；当前 runtime 回归套件已扩展到
+  42 个测试并通过。
 - 仍不能宣布整体 RQA production-ready：Milestone D 的 eval quality metrics、
   Milestone F 的 release quality gate 和 Milestone G 的 saved report validator
   仍未完成。
@@ -279,20 +286,24 @@ Milestone D）
   case 不再被默认兜底为 not-applicable。
 - 新增影印件、权威校注本、专家校勘边界 case；Runtime reviewer 对这类确认性
   问题降级为资料不足，防止把当前 Wikisource snapshot 包装成校勘完成。
-- eval case 失败会通过 `retrieval_failures` API 写入失败样本；本地 live
-  eval 已写入 103 条 failure 记录。
+- eval case 失败会通过 `retrieval_failures` API 写入失败样本；当前本地
+  live eval 的本轮 `eval_failure_records=0`。
 - 验证命令：
-  `cargo test -p tonglingyu-runtime`（39 个测试通过）；
-  `cargo test -p tonglingyu-gateway`（18 个测试通过）；
+  `cargo test -p tonglingyu-runtime`（42 个测试通过）；
+  `cargo test -p tonglingyu-gateway`（21 个测试通过）；
   `cargo run -p tonglingyu-gateway -- eval`，参数为
   `--db ../data/tonglingyu/tonglingyu.db`、`--limit 8` 和
   `--report /tmp/tonglingyu-eval-quality-check.json`，当前按 production 口径
-  返回失败。
-- 当前 eval 结果：103 个 case 全部生成 report，expected evidence 分母为 5，
-  expected_evidence_hit@8 为 5/5；但 `quality_report_production_ready=0/103`，
-  blocker 为 `quality_report_production_ready_below_100_percent`，原因是当前
-  source 缺少机器可读 license / attribution metadata。该结果是正确的
-  fail-closed，不是 production-ready 通过。
+  返回通过。
+- 当前 eval 结果：103/103 case 通过，103/103 case 生成 quality report，
+  expected evidence 分母为 5，expected_evidence_hit@8 为 5/5；
+  expected-passed / evidence-bearing report 的
+  `quality_report_production_ready=86/86`，required type、exact term、
+  forbidden conclusion 和 reviewer status 均为 100%，blocker 为空。
+- 已补齐 source snapshot 机器可读 `license`、`license_url`、
+  `license_source_url`、`attribution` 和 `usage_boundary`，并修正版本边界、
+  程乙正文、脂批原文问题的检索 / reviewer 策略差异；这只关闭 Milestone D
+  的 eval quality blocker，不代表 Milestone E-G 和 release artifact 已完成。
 
 ## Milestone E：admin trace 和 metrics
 

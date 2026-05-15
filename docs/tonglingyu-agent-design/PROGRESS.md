@@ -32,7 +32,9 @@
   校验；本计划不设置独立“M1.5”。若影印件、权威校注本或评测题库要阻塞
   M2，必须先提升为 M1 P0。
 - 当前 `python3 scripts/validate_source_snapshots.py` 已通过：5 个来源和
-  19 个抽样点满足 M1 source snapshot 闸门。
+  19 个抽样点满足 M1 source snapshot 闸门；validator 同时要求每个来源
+  具备机器可读 `source_url`、`license`、`license_url`、
+  `license_source_url`、`attribution` 和 `usage_boundary`。
 - Rust `tonglingyu-gateway` + `tonglingyu-runtime` 已实现 M2-M6 最小工程闭环：
   source snapshot loader、SQLite/FTS、别名种子、证据卡片、证据包、
   reviewer、OpenAI-compatible `/v1/models` 和 `/v1/chat/completions`。
@@ -87,7 +89,7 @@
   便于后续按 trace ID 回放与审计。
 - 已补内置评测入口 `eval`，当前覆盖正文、脂批、版本边界、人物别名、
   诗词判词、字形读音、证据不足、prompt injection、预期证据 ID 和禁止
-  结论等 102 个发布回归 case；评测报告可落盘到
+  结论等 103 个发布回归 case；评测报告可落盘到
   `data/tonglingyu/reports/`。
 - 已新增 `agent-platform/scripts/tonglingyu-gateway-smoke.sh`，可临时建库并
   验证 Gateway 鉴权、单可见模型、会话映射、消息去重、内部字段拒绝、
@@ -500,24 +502,25 @@
   无法支持关键 claim 登记 failure；expected evidence miss 可由 eval/gate 调用方
   通过 expected/selected evidence ids 写入；相同 trace/package/failure type 会
   去重；failure insert 与 audit append 在同一事务中完成，audit append 失败会
-  rollback。`cargo test -p tonglingyu-runtime` 已通过 38 个测试。该结果仍不等于
+  rollback。当前 runtime 回归套件已扩展到 42 个测试并通过。该结果仍不等于
   完整 production-ready，因为 eval quality metrics、release quality gate 和 saved
   report validator 尚未完成。
-- RQA Milestone D 已完成代码切片：
+- RQA Milestone D 已完成代码切片并关闭当前 eval quality blocker：
   `tonglingyu-gateway eval` 已输出 `tonglingyu-eval-quality-v1` quality summary
   和 case-level quality details，覆盖 expected evidence classification、hit@1/@3/@8、
   required type、exact term、source/edition diversity、source coverage boundary、
   forbidden conclusion、reviewer status 和 eval failure 写入
   `retrieval_failures`。expected evidence 分母当前为 5，hit@8 为 5/5；新增
   影印件、权威校注本、专家校勘边界 case，并由 Runtime reviewer 降级为资料不足。
-  `cargo test -p tonglingyu-runtime` 已通过 39 个测试，
-  `cargo test -p tonglingyu-gateway` 已通过 18 个测试。
-- 当前 RQA eval 的 production blocker 已被明确暴露：
-  本地 live eval 生成 103 个 case report，但
-  `quality_report_production_ready=0/103`，`quality_summary.status=failed`，
-  blocker 为 `quality_report_production_ready_below_100_percent`；主要原因是当前
-  source 缺少机器可读 license / attribution metadata。该失败是正确的
-  fail-closed，不允许被解释为 RQA production-ready 已通过。
+  `cargo test -p tonglingyu-runtime` 已通过 42 个测试，
+  `cargo test -p tonglingyu-gateway` 已通过 21 个测试。
+- 当前 RQA eval 按 production 口径通过：
+  本地 live eval 生成 103/103 个 case report，103/103 case 通过，
+  expected-passed / evidence-bearing report 的
+  `quality_report_production_ready=86/86`，`quality_summary.status=passed`，
+  blocker 为空，`eval_failure_records=0`。本轮修复包含 source license /
+  usage / attribution metadata 入库与校验、version boundary 与程乙正文检索
+  策略校准，以及脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -538,11 +541,9 @@
 
 ## 下一步
 
-1. 补齐当前 live KB 的 source license / usage / attribution metadata，并重建后
-   重跑 RQA eval，目标是 `quality_report_production_ready=100%`。
-2. 实现 RQA Milestone E/F/G：admin trace / metrics、release quality gate 和
+1. 实现 RQA Milestone E/F/G：admin trace / metrics、release quality gate 和
    saved report validator，使
    production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
-3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+2. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+3. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

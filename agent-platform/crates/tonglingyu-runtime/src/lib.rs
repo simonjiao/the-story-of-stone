@@ -103,9 +103,12 @@ pub struct RetrievalSourceUsageRef {
     pub source_category: Option<String>,
     pub title: Option<String>,
     pub edition: Option<String>,
+    pub source_url: Option<String>,
     pub fetched_at: Option<String>,
     pub source_hash: Option<String>,
     pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub license_source_url: Option<String>,
     pub attribution: Option<String>,
     pub usage_boundary: String,
     pub metadata_status: String,
@@ -920,8 +923,14 @@ struct SourceMetadata {
     work: Option<String>,
     edition: Option<String>,
     language: Option<String>,
+    source_url: Option<String>,
     api_url: Option<String>,
     fetched_at: Option<String>,
+    license: Option<String>,
+    license_url: Option<String>,
+    license_source_url: Option<String>,
+    attribution: Option<String>,
+    usage_boundary: Option<String>,
     notes: Option<String>,
     #[serde(default)]
     snapshot_contract: Value,
@@ -1636,15 +1645,7 @@ pub fn execute_runtime_workflow(
     let mut steps = Vec::new();
     let mut cards = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
-    let mut text_required_types = input
-        .required_evidence_types
-        .iter()
-        .filter(|item| item.as_str() != "commentary")
-        .cloned()
-        .collect::<Vec<_>>();
-    if !text_required_types.iter().any(|item| item == "base_text") {
-        text_required_types.push("base_text".to_string());
-    }
+    let text_required_types = text_search_required_evidence_types(&input.required_evidence_types);
     let text_started = Instant::now();
     let (text_cards, text_quality_report) = match execute_tool(
         conn,
@@ -4446,8 +4447,14 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
             work TEXT,
             edition TEXT,
             language TEXT,
+            source_url TEXT,
             api_url TEXT,
             fetched_at TEXT,
+            license TEXT,
+            license_url TEXT,
+            license_source_url TEXT,
+            attribution TEXT,
+            usage_boundary TEXT,
             notes TEXT,
             snapshot_contract_json TEXT NOT NULL,
             source_hash TEXT NOT NULL
@@ -4594,6 +4601,27 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
         "#,
     )?;
+    ensure_source_metadata_columns(conn)?;
+    Ok(())
+}
+
+fn ensure_source_metadata_columns(conn: &Connection) -> Result<()> {
+    let existing = conn
+        .prepare("PRAGMA table_info(sources)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    for column in [
+        "source_url",
+        "license",
+        "license_url",
+        "license_source_url",
+        "attribution",
+        "usage_boundary",
+    ] {
+        if !existing.contains(column) {
+            conn.execute(&format!("ALTER TABLE sources ADD COLUMN {column} TEXT"), [])?;
+        }
+    }
     Ok(())
 }
 
@@ -4677,12 +4705,21 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
         ));
     }
     let source_hash = hash_files([&source_path, &report_path, &documents_path, &blocks_path])?;
+    let source_usage_boundary = source
+        .usage_boundary
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| usage_limit(&source.source_category).to_string());
     conn.execute(
         r#"
         INSERT INTO sources (
             source_id, source_category, format, title, work, edition, language,
-            api_url, fetched_at, notes, snapshot_contract_json, source_hash
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            source_url, api_url, fetched_at, license, license_url,
+            license_source_url, attribution, usage_boundary, notes,
+            snapshot_contract_json, source_hash
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         "#,
         params![
             source.source_id,
@@ -4692,8 +4729,14 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
             source.work,
             source.edition,
             source.language,
+            source.source_url,
             source.api_url,
             source.fetched_at,
+            source.license,
+            source.license_url,
+            source.license_source_url,
+            source.attribution,
+            source_usage_boundary,
             source.notes,
             serde_json::to_string(&source.snapshot_contract)?,
             source_hash
@@ -4707,7 +4750,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
             source.source_id,
             source.edition.unwrap_or_else(|| "未标注版本".to_string()),
             version_system(&source.source_id),
-            usage_limit(&source.source_category),
+            source_usage_boundary,
         ],
     )?;
     conn.execute(
@@ -4717,7 +4760,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
             source.source_id,
             source.notes.unwrap_or_else(|| "第一批 Wikisource source snapshot".to_string()),
             "source_snapshot_ready",
-            usage_limit(&source.source_category),
+            source_usage_boundary,
         ],
     )?;
 
@@ -5362,6 +5405,14 @@ fn search_evidence_result(
     })
 }
 
+fn text_search_required_evidence_types(required_evidence_types: &[String]) -> Vec<String> {
+    required_evidence_types
+        .iter()
+        .filter(|item| item.as_str() != "commentary")
+        .cloned()
+        .collect()
+}
+
 fn retrieval_quality_report(
     conn: &Connection,
     tool_name: &str,
@@ -5532,9 +5583,15 @@ fn retrieval_source_usage_ref(
                 s.source_category,
                 s.title,
                 s.edition,
+                s.source_url,
                 s.fetched_at,
                 s.snapshot_contract_json,
                 s.source_hash,
+                s.license,
+                s.license_url,
+                s.license_source_url,
+                s.attribution,
+                s.usage_boundary,
                 vn.usage_limit
             FROM sources s
             LEFT JOIN version_notes vn ON vn.source_id = s.source_id
@@ -5548,9 +5605,15 @@ fn retrieval_source_usage_ref(
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             },
         )
@@ -5559,9 +5622,15 @@ fn retrieval_source_usage_ref(
         source_category,
         title,
         edition,
+        source_url,
         fetched_at,
         snapshot_contract_json,
         source_hash,
+        source_license,
+        source_license_url,
+        source_license_source_url,
+        source_attribution,
+        source_usage_boundary,
         usage_limit,
     )) = row
     else {
@@ -5570,9 +5639,12 @@ fn retrieval_source_usage_ref(
             source_category: None,
             title: None,
             edition: None,
+            source_url: None,
             fetched_at: None,
             source_hash: None,
             license: None,
+            license_url: None,
+            license_source_url: None,
             attribution: None,
             usage_boundary: "source metadata missing; cannot enter production evidence chain"
                 .to_string(),
@@ -5581,32 +5653,98 @@ fn retrieval_source_usage_ref(
     };
     let snapshot_contract =
         serde_json::from_str::<Value>(&snapshot_contract_json).unwrap_or_else(|_| json!({}));
-    let license = snapshot_text_field(
-        &snapshot_contract,
-        &["license", "license_note", "licence", "rights"],
-    );
-    let attribution = snapshot_text_field(
-        &snapshot_contract,
-        &["attribution", "attribution_note", "citation"],
-    );
-    let metadata_status = match (license.is_some(), attribution.is_some()) {
-        (true, true) => "complete",
-        (false, true) => "missing_license_metadata",
-        (true, false) => "missing_attribution_metadata",
-        (false, false) => "missing_license_and_attribution_metadata",
+    let license = source_license.or_else(|| {
+        snapshot_text_field(
+            &snapshot_contract,
+            &["license", "license_id", "license_note", "licence", "rights"],
+        )
+    });
+    let license_url = source_license_url.or_else(|| {
+        snapshot_text_field(
+            &snapshot_contract,
+            &["license_url", "license_uri", "rights_url"],
+        )
+    });
+    let license_source_url = source_license_source_url.or_else(|| {
+        snapshot_text_field(
+            &snapshot_contract,
+            &[
+                "license_source_url",
+                "rights_source_url",
+                "copyright_policy_url",
+            ],
+        )
+    });
+    let attribution = source_attribution.or_else(|| {
+        snapshot_text_field(
+            &snapshot_contract,
+            &["attribution", "attribution_note", "citation"],
+        )
+    });
+    let metadata_usage_boundary = source_usage_boundary.or_else(|| {
+        snapshot_text_field(
+            &snapshot_contract,
+            &["usage_boundary", "usage_limit", "source_usage_boundary"],
+        )
+    });
+    let mut missing = Vec::new();
+    if license.is_none() {
+        missing.push("license");
+    }
+    if license_url.is_none() {
+        missing.push("license_url");
+    }
+    if attribution.is_none() {
+        missing.push("attribution");
+    }
+    if metadata_usage_boundary.is_none() {
+        missing.push("usage_boundary");
+    }
+    let metadata_status = if missing.is_empty() {
+        "complete".to_string()
+    } else {
+        format!("missing_{}_metadata", missing.join("_and_"))
     };
     Ok(RetrievalSourceUsageRef {
         source_id: source_id.to_string(),
         source_category: Some(source_category),
         title,
         edition,
+        source_url,
         fetched_at,
         source_hash: Some(source_hash),
         license,
+        license_url,
+        license_source_url,
         attribution,
-        usage_boundary: usage_limit.unwrap_or_else(|| usage_limit_for_unknown_source(source_id)),
-        metadata_status: metadata_status.to_string(),
+        usage_boundary: metadata_usage_boundary
+            .or(usage_limit)
+            .unwrap_or_else(|| usage_limit_for_unknown_source(source_id)),
+        metadata_status,
     })
+}
+
+fn snapshot_text_field(snapshot_contract: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| {
+            snapshot_contract
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            keys.iter().find_map(|key| {
+                snapshot_contract
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get(*key))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+        })
 }
 
 fn retrieval_source_coverage_boundary(
@@ -5704,29 +5842,6 @@ fn retrieval_recommended_follow_up(issues: &[String]) -> Vec<String> {
     follow_up.into_iter().collect()
 }
 
-fn snapshot_text_field(snapshot_contract: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| {
-            snapshot_contract
-                .get(*key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            keys.iter().find_map(|key| {
-                snapshot_contract
-                    .get("metadata")
-                    .and_then(|metadata| metadata.get(*key))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-            })
-        })
-}
-
 fn usage_limit_for_unknown_source(source_id: &str) -> String {
     if source_id.contains("zhiyanzhai") || source_id.contains("jiaxu") {
         "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。".to_string()
@@ -5822,9 +5937,12 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     if cards.is_empty() {
         issues.push("未命中可追溯证据，必须返回证据不足。".to_string());
     }
-    if cards.iter().all(|card| card.evidence_type == "commentary")
-        && (question.contains("原文") || question.contains("正文"))
-    {
+    let asks_commentary_material =
+        question.contains("脂批") || question.contains("脂評") || question.contains("甲戌");
+    let asks_body_text_fact = question.contains("正文")
+        || question.contains("情节")
+        || (!asks_commentary_material && question.contains("原文"));
+    if cards.iter().all(|card| card.evidence_type == "commentary") && asks_body_text_fact {
         issues.push("当前证据全为脂批，不能回答为正文直接事实。".to_string());
     }
     if (question.contains("结局") || question.contains("命运"))
@@ -5860,9 +5978,7 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     {
         issues.push("请求涉及内部配置或系统提示词，必须拒绝泄露。".to_string());
     }
-    if (question.contains("脂批") || question.contains("脂評") || question.contains("甲戌"))
-        && !cards.iter().any(|card| card.evidence_type == "commentary")
-    {
+    if asks_commentary_material && !cards.iter().any(|card| card.evidence_type == "commentary") {
         issues.push("脂批或甲戌相关问题缺少脂批证据，必须标注限制。".to_string());
     }
     if (question.contains("程甲")
@@ -7265,12 +7381,38 @@ mod tests {
     }
 
     fn seed_retrieval_quality_source(conn: &Connection, snapshot_contract: Value) {
+        let license = snapshot_text_field(
+            &snapshot_contract,
+            &["license", "license_id", "license_note", "licence", "rights"],
+        );
+        let license_url = snapshot_text_field(
+            &snapshot_contract,
+            &["license_url", "license_uri", "rights_url"],
+        );
+        let license_source_url = snapshot_text_field(
+            &snapshot_contract,
+            &[
+                "license_source_url",
+                "rights_source_url",
+                "copyright_policy_url",
+            ],
+        );
+        let attribution = snapshot_text_field(
+            &snapshot_contract,
+            &["attribution", "attribution_note", "citation"],
+        );
+        let usage_boundary = snapshot_text_field(
+            &snapshot_contract,
+            &["usage_boundary", "usage_limit", "source_usage_boundary"],
+        );
         conn.execute(
             r#"
             INSERT INTO sources (
                 source_id, source_category, format, title, work, edition, language,
-                api_url, fetched_at, notes, snapshot_contract_json, source_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                source_url, api_url, fetched_at, license, license_url,
+                license_source_url, attribution, usage_boundary, notes,
+                snapshot_contract_json, source_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 "quality-source",
@@ -7280,8 +7422,14 @@ mod tests {
                 "红楼梦",
                 "测试底本；仅用于 RQA 单元测试",
                 "zh",
+                "https://example.test/source",
                 "https://example.test/api",
                 "2026-05-15T00:00:00Z",
+                license,
+                license_url,
+                license_source_url,
+                attribution,
+                usage_boundary,
                 "测试 source snapshot",
                 serde_json::to_string(&snapshot_contract).expect("snapshot serializes"),
                 "hash-quality-source",
@@ -7326,6 +7474,60 @@ mod tests {
     }
 
     #[test]
+    fn kb_schema_adds_source_usage_metadata_columns_to_existing_sources_table() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                source_category TEXT NOT NULL,
+                format TEXT,
+                title TEXT,
+                work TEXT,
+                edition TEXT,
+                language TEXT,
+                api_url TEXT,
+                fetched_at TEXT,
+                notes TEXT,
+                snapshot_contract_json TEXT NOT NULL,
+                source_hash TEXT NOT NULL
+            );
+            "#,
+        )
+        .expect("old sources table");
+
+        init_knowledge_base_schema(&conn).expect("kb schema upgrades source metadata");
+
+        let columns = conn
+            .prepare("PRAGMA table_info(sources)")
+            .expect("table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect columns");
+        for column in [
+            "source_url",
+            "license",
+            "license_url",
+            "license_source_url",
+            "attribution",
+            "usage_boundary",
+        ] {
+            assert!(columns.contains(column), "missing column {column}");
+        }
+    }
+
+    #[test]
+    fn text_search_required_types_respect_explicit_version_boundary_without_default_base() {
+        let required = vec!["version_note".to_string()];
+
+        let text_required = text_search_required_evidence_types(&required);
+
+        assert_eq!(text_required, vec!["version_note".to_string()]);
+        assert!(!text_required.contains(&"base_text".to_string()));
+    }
+
+    #[test]
     fn text_search_returns_production_ready_retrieval_quality_report() {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
         init_runtime_schema(&conn).expect("runtime schema");
@@ -7333,8 +7535,11 @@ mod tests {
         seed_retrieval_quality_source(
             &conn,
             json!({
-                "license": "CC BY-SA 4.0",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
                 "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
         conn.execute(
@@ -7400,7 +7605,11 @@ mod tests {
         );
         assert_eq!(
             quality_report.source_usage_refs[0].license.as_deref(),
-            Some("CC BY-SA 4.0")
+            Some("CC-BY-SA-4.0")
+        );
+        assert_eq!(
+            quality_report.source_usage_refs[0].license_url.as_deref(),
+            Some("https://creativecommons.org/licenses/by-sa/4.0/")
         );
         let report_json = serde_json::to_string(&quality_report).expect("report serializes");
         assert!(!report_json.contains(question));
@@ -7436,7 +7645,7 @@ mod tests {
         assert!(!quality_report.production_ready);
         assert!(quality_report.issues.iter().any(|issue| {
             issue
-                == "source_usage_metadata_incomplete:quality-source:missing_license_and_attribution_metadata"
+                == "source_usage_metadata_incomplete:quality-source:missing_license_and_license_url_and_attribution_and_usage_boundary_metadata"
         }));
         assert!(quality_report.recommended_follow_up.iter().any(|item| {
             item == "add_machine_readable_source_license_usage_attribution_metadata"
@@ -7451,8 +7660,11 @@ mod tests {
         seed_retrieval_quality_source(
             &conn,
             json!({
-                "license": "CC BY-SA 4.0",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
                 "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
 
@@ -7528,8 +7740,11 @@ mod tests {
         seed_retrieval_quality_source(
             &conn,
             json!({
-                "license": "CC BY-SA 4.0",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
                 "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
 
@@ -7706,8 +7921,11 @@ mod tests {
         seed_retrieval_quality_source(
             &conn,
             json!({
-                "license": "CC BY-SA 4.0",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
                 "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
         let question = "通灵玉是什么？";
@@ -7838,8 +8056,11 @@ mod tests {
         seed_retrieval_quality_source(
             &conn,
             json!({
-                "license": "CC BY-SA 4.0",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
                 "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
         let question = "通灵玉是什么？";
@@ -7911,8 +8132,9 @@ mod tests {
     #[test]
     fn reviewer_blocks_commentary_only_body_claim() {
         let cards = vec![sample_card("commentary")];
-        let claims = claims_from_cards("脂批原文如何评价石头？", &cards);
-        let review = review("脂批原文如何评价石头？", &cards, &claims);
+        let question = "只根据脂批原文说明正文事实可以吗？";
+        let claims = claims_from_cards(question, &cards);
+        let review = review(question, &cards, &claims);
         assert_eq!(review.status, "needs_revision");
         assert_eq!(review.severity, "medium");
         assert!(
@@ -7921,6 +8143,17 @@ mod tests {
                 .iter()
                 .any(|issue| issue.contains("当前证据全为脂批"))
         );
+    }
+
+    #[test]
+    fn reviewer_allows_commentary_original_text_question() {
+        let cards = vec![sample_card("commentary")];
+        let question = "脂批原文如何评价石头？";
+        let claims = claims_from_cards(question, &cards);
+        let review = review(question, &cards, &claims);
+
+        assert_eq!(review.status, "passed");
+        assert!(review.issues.is_empty());
     }
 
     #[test]
