@@ -1202,12 +1202,18 @@ def validate_security_scan_gate_stdout():
             "image_count",
             "mutable_tag_count",
             "digest_missing_count",
+            "failed_image_count",
             "scanned_image_count",
+            "scanned_report_count",
         ):
             count_value = image_scan.get(count_field)
             if not isinstance(count_value, int) or count_value < 0:
                 errors.append(f"security_scan_image_{count_field}_invalid")
-        for digest_field in ("image_refs_sha256", "scanned_image_refs_sha256"):
+        for digest_field in (
+            "image_refs_sha256",
+            "scanned_image_refs_sha256",
+            "scanned_reports_sha256",
+        ):
             if not is_sha256(image_scan.get(digest_field)):
                 errors.append(f"security_scan_image_{digest_field}_invalid")
         if (
@@ -1223,6 +1229,16 @@ def validate_security_scan_gate_stdout():
             and image_scan["image_count"] != image_scan["scanned_image_count"]
         ):
             errors.append("security_scan_image_count_mismatch")
+        if isinstance(image_scan.get("failed_image_count"), int) and image_scan[
+            "failed_image_count"
+        ] > 0:
+            errors.append("security_scan_image_failed_images_present")
+        if (
+            isinstance(image_scan.get("image_count"), int)
+            and isinstance(image_scan.get("scanned_report_count"), int)
+            and image_scan["image_count"] != image_scan["scanned_report_count"]
+        ):
+            errors.append("security_scan_image_report_count_mismatch")
 
     script_scan = gate_json.get("release_script_scan")
     if not isinstance(script_scan, dict):

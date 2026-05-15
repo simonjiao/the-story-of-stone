@@ -10,6 +10,8 @@ FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_NO_VALIDATION_CMD="${WORK_DIR}/browser-gate-no-validation.sh"
 MODEL_UPSTREAM_FAKE_DOCKER="${WORK_DIR}/model-upstream-fake-docker.sh"
 MODEL_UPSTREAM_FAKE_COUNTER="${WORK_DIR}/model-upstream-fake-counter"
+FAKE_TRIVY_DIR="${WORK_DIR}/fake-trivy-bin"
+SECURITY_DEPENDENCY_SCAN_JSON="${WORK_DIR}/security-dependency-scan.json"
 BROWSER_EVIDENCE_JSON="${WORK_DIR}/browser-review-evidence.json"
 MISSING_ARTIFACT_EVIDENCE_JSON="${WORK_DIR}/missing-artifact-browser-review-evidence.json"
 MISMATCH_PUBLIC_URL_EVIDENCE_JSON="${WORK_DIR}/mismatch-public-url-browser-review-evidence.json"
@@ -75,6 +77,7 @@ SYNTHETIC_RQA_EVAL_REPORT="${WORK_DIR}/synthetic-rqa-eval-report.json"
 SYNTHETIC_RQA_DB="${WORK_DIR}/synthetic-rqa.db"
 
 mkdir -p "${WORK_DIR}/screenshots"
+mkdir -p "${FAKE_TRIVY_DIR}"
 : >"${WORK_DIR}/screenshots/models.png"
 : >"${WORK_DIR}/screenshots/streaming.png"
 
@@ -92,6 +95,43 @@ echo 'mock gate failed' >&2
 exit 42
 SH
 chmod +x "${FAIL_CMD}"
+
+cat >"${SECURITY_DEPENDENCY_SCAN_JSON}" <<'JSON'
+{
+  "critical_count": 0,
+  "high_count": 0,
+  "object": "tonglingyu.security_scan_result",
+  "scan_type": "dependency",
+  "scanner": "cargo-audit",
+  "secret_values_printed": false,
+  "status": "passed"
+}
+JSON
+
+cat >"${FAKE_TRIVY_DIR}/trivy" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "image" ]]; then
+  echo "unexpected fake trivy invocation: $*" >&2
+  exit 2
+fi
+cat <<'JSON'
+{
+  "Results": [
+    {
+      "Target": "fake-image",
+      "Vulnerabilities": [
+        {
+          "Severity": "HIGH",
+          "VulnerabilityID": "CVE-FAKE-HIGH"
+        }
+      ]
+    }
+  ]
+}
+JSON
+SH
+chmod +x "${FAKE_TRIVY_DIR}/trivy"
 
 cat >"${BROWSER_NO_VALIDATION_CMD}" <<'SH'
 #!/usr/bin/env bash
@@ -198,6 +238,29 @@ common_env=(
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD=${PASS_CMD}"
 )
+security_digest_env=(
+  "AGENT_PLATFORM_IMAGE_REF=registry.invalid/hermes-agent-platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "TONGLINGYU_GATEWAY_IMAGE_REF=registry.invalid/tonglingyu-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "HERMES_IMAGE_REF=registry.invalid/hermes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  "OPEN_WEBUI_IMAGE_REF=registry.invalid/open-webui@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  "CLOUDFLARED_IMAGE_REF=registry.invalid/cloudflared@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  "AGENT_PLATFORM_POSTGRES_IMAGE_REF=registry.invalid/postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+)
+
+trivy_high_stdout="${WORK_DIR}/trivy-high-security.stdout"
+if env \
+  "${security_digest_env[@]}" \
+  "PATH=${FAKE_TRIVY_DIR}:${PATH}" \
+  "TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH=${SECURITY_DEPENDENCY_SCAN_JSON}" \
+  "TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY=true" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-security.sh" >"${trivy_high_stdout}"; then
+  echo "security gate must fail when real Trivy JSON contains high findings" >&2
+  exit 1
+fi
+assert_report "${trivy_high_stdout}" 'report["status"] == "failed"'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["high_count"] == report["image_scan"]["image_count"]'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["scanned_report_count"] == report["image_scan"]["image_count"]'
+assert_report "${trivy_high_stdout}" '"image_high_findings_present" in report["errors"]'
 
 override_guard_stderr="${WORK_DIR}/override-guard.stderr"
 if env \
@@ -1422,6 +1485,7 @@ gate_stdout = {
         "image_scan": {
             "critical_count": 0,
             "digest_missing_count": 0,
+            "failed_image_count": 0,
             "high_count": 0,
             "image_count": 6,
             "image_refs_sha256": "c" * 64,
@@ -1430,6 +1494,8 @@ gate_stdout = {
             "scanner": "trivy",
             "scanned_image_count": 6,
             "scanned_image_refs_sha256": "c" * 64,
+            "scanned_report_count": 6,
+            "scanned_reports_sha256": "d" * 64,
             "status": "passed",
         },
         "object": "tonglingyu.release_security_gate",

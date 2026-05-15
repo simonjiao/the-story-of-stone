@@ -80,8 +80,7 @@ for raw_line in compose.read_text(encoding="utf-8").splitlines():
 target.write_text("\n".join(images) + "\n", encoding="utf-8")
 PY
   trivy_status="passed"
-  critical_count=0
-  high_count=0
+  failed_image_count=0
   while IFS= read -r image_ref; do
     [[ -n "${image_ref}" ]] || continue
     image_hash="$(
@@ -96,19 +95,47 @@ PY
       >"${WORK_DIR}/trivy-${image_hash}.json" \
       2>"${WORK_DIR}/trivy-${image_hash}.stderr"; then
       trivy_status="failed"
-      critical_count=$((critical_count + 1))
+      failed_image_count=$((failed_image_count + 1))
     fi
   done <"${WORK_DIR}/images.txt"
-  python3 - "${IMAGE_SCAN_REPORT}" "${trivy_status}" "${critical_count}" "${high_count}" \
-    "${WORK_DIR}/images.txt" <<'PY'
+  python3 - "${IMAGE_SCAN_REPORT}" "${trivy_status}" "${failed_image_count}" \
+    "${WORK_DIR}/images.txt" "${WORK_DIR}" <<'PY'
 import hashlib
 import json
 import sys
+from pathlib import Path
 
-target, status, critical_count, high_count, image_refs_path = sys.argv[1:6]
-Path = __import__("pathlib").Path
+target, status, failed_image_count, image_refs_path, work_dir = sys.argv[1:6]
 image_refs_raw = Path(image_refs_path).read_text(encoding="utf-8")
 image_refs = [line for line in image_refs_raw.splitlines() if line.strip()]
+critical_count = 0
+high_count = 0
+failed_image_count = int(failed_image_count)
+report_digests = []
+for image_ref in image_refs:
+    image_hash = hashlib.sha256(image_ref.encode("utf-8")).hexdigest()
+    report_path = Path(work_dir) / f"trivy-{image_hash}.json"
+    if not report_path.is_file():
+        status = "failed"
+        failed_image_count += 1
+        continue
+    raw_report = report_path.read_bytes()
+    report_digests.append(hashlib.sha256(raw_report).hexdigest())
+    try:
+        report = json.loads(raw_report.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        status = "failed"
+        failed_image_count += 1
+        continue
+    for result in report.get("Results") or []:
+        for vulnerability in result.get("Vulnerabilities") or []:
+            severity = str(vulnerability.get("Severity") or "").upper()
+            if severity == "CRITICAL":
+                critical_count += 1
+            elif severity == "HIGH":
+                high_count += 1
+if critical_count > 0 or high_count > 0 or failed_image_count > 0:
+    status = "failed"
 Path(target).write_text(
     json.dumps(
         {
@@ -116,11 +143,16 @@ Path(target).write_text(
             "scan_type": "image",
             "status": status,
             "scanner": "trivy",
-            "critical_count": int(critical_count),
-            "high_count": int(high_count),
+            "critical_count": critical_count,
+            "high_count": high_count,
+            "failed_image_count": failed_image_count,
             "scanned_image_count": len(image_refs),
             "scanned_image_refs_sha256": hashlib.sha256(
                 image_refs_raw.encode("utf-8")
+            ).hexdigest(),
+            "scanned_report_count": len(report_digests),
+            "scanned_reports_sha256": hashlib.sha256(
+                ("\n".join(sorted(report_digests)) + "\n").encode("utf-8")
             ).hexdigest(),
             "secret_values_printed": False,
         },
@@ -249,9 +281,14 @@ def safe_scan_result(path, scan_type):
         "report_sha256": file_sha256(path),
     }
     if scan_type == "image":
+        result["failed_image_count"] = value.get("failed_image_count")
         result["scanned_image_count"] = value.get("scanned_image_count")
         result["scanned_image_refs_sha256"] = str(
             value.get("scanned_image_refs_sha256") or ""
+        )
+        result["scanned_report_count"] = value.get("scanned_report_count")
+        result["scanned_reports_sha256"] = str(
+            value.get("scanned_reports_sha256") or ""
         )
     result_errors = []
     if value.get("secret_values_printed") is True:
@@ -435,6 +472,11 @@ if image_policy["digest_missing_count"] > 0:
     image_errors.append("image_digest_missing")
 image_scan.update(image_policy)
 if image_scan["status"] == "passed":
+    failed_image_count = image_scan.get("failed_image_count")
+    if not isinstance(failed_image_count, int) or failed_image_count < 0:
+        image_errors.append("image_scan_failed_image_count_invalid")
+    elif failed_image_count > 0:
+        image_errors.append("image_scan_failed_images_present")
     scanned_image_count = image_scan.get("scanned_image_count")
     if not isinstance(scanned_image_count, int) or scanned_image_count < 0:
         image_errors.append("image_scan_scanned_image_count_invalid")
@@ -447,6 +489,16 @@ if image_scan["status"] == "passed":
         image_errors.append("image_scan_inventory_digest_invalid")
     elif scanned_image_refs_sha256 != image_policy["image_refs_sha256"]:
         image_errors.append("image_scan_inventory_mismatch")
+    scanned_report_count = image_scan.get("scanned_report_count")
+    if not isinstance(scanned_report_count, int) or scanned_report_count < 0:
+        image_errors.append("image_scan_report_count_invalid")
+    elif scanned_report_count != image_policy["image_count"]:
+        image_errors.append("image_scan_report_count_mismatch")
+    scanned_reports_sha256 = image_scan.get("scanned_reports_sha256")
+    if not isinstance(scanned_reports_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", scanned_reports_sha256
+    ):
+        image_errors.append("image_scan_reports_digest_invalid")
 
 risk_acceptance, risk_errors = load_risk_acceptance()
 coverable_errors = dependency_errors + image_errors + script_errors
