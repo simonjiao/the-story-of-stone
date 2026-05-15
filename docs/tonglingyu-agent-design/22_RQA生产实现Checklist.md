@@ -204,25 +204,38 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 ## Milestone C：自动 failure 记录
 
-状态：未开始
+状态：已完成（2026-05-15；runtime/API 触发矩阵已验证，eval 指标化仍属
+Milestone D）
 
 目标：Runtime 和 eval 在生产规则下自动记录 P0/P1 召回失败。
 
-- [ ] 候选数为 0 时记录 failure。
-- [ ] required evidence type 缺失时记录 failure。
-- [ ] expected evidence 未命中时记录 failure。
-- [ ] exact protected term 未命中时记录 failure。
-- [ ] reviewer 因证据不足降级时记录 failure。
-- [ ] package 无法支持关键 claim 时记录 failure。
-- [ ] 去重相同 trace/package/failure type，避免重复刷表。
-- [ ] failure 记录写入 audit event。
-- [ ] failure 写入和 audit append 在同一可追溯操作中完成。
-- [ ] RQA 持久化失败时请求不得被标记为完整成功。
-- [ ] 单测覆盖所有触发条件、去重、写入失败和 audit 失败。
+- [x] 候选数为 0 时记录 failure。
+- [x] required evidence type 缺失时记录 failure。
+- [x] expected evidence 未命中时记录 failure。
+- [x] exact protected term 未命中时记录 failure。
+- [x] reviewer 因证据不足降级时记录 failure。
+- [x] package 无法支持关键 claim 时记录 failure。
+- [x] 去重相同 trace/package/failure type，避免重复刷表。
+- [x] failure 记录写入 audit event。
+- [x] failure 写入和 audit append 在同一可追溯操作中完成。
+- [x] RQA 持久化失败时请求不得被标记为完整成功。
+- [x] 单测覆盖所有触发条件、去重、写入失败和 audit 失败。
 
 节点总结：
 
-- 待实现。
+- `RetrievalQualityReport.production_ready=false` 会在 workflow 中自动登记
+  failure；候选数为 0、required type 缺失、exact protected term 未命中和
+  source usage metadata 缺失都会进入 `retrieval_failures`。
+- expected evidence miss 可通过 `RetrievalFailureCreateInput.expected_evidence_ids`
+  与 selected evidence ids 计算并登记，允许 eval/gate 调用方复用同一失败表。
+- reviewer downgrade 会登记 `reviewer_evidence_insufficient`，覆盖证据不足或
+  package 无法支持关键 claim 的本地 reviewer 结论。
+- 相同 trace/package/failure type 通过 dedupe 查询和唯一索引去重；failure insert
+  与 audit append 在同一事务中完成，audit append 失败会 rollback failure。
+- 验证命令：`cargo test -p tonglingyu-runtime`，38 个测试通过。
+- 仍不能宣布整体 RQA production-ready：Milestone D 的 eval quality metrics、
+  Milestone F 的 release quality gate 和 Milestone G 的 saved report validator
+  仍未完成。
 
 ## Milestone D：eval 质量指标
 

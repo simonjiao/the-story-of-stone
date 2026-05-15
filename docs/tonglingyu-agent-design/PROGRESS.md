@@ -495,6 +495,14 @@
   quality failure 自动登记均已接入。`cargo test -p tonglingyu-runtime` 已通过 35
   个测试。该结果仍不等于完整 production-ready，因为 Milestone C 的完整触发矩阵、
   去重、eval expected evidence、release gate 和 saved report validator 尚未完成。
+- RQA Milestone C 的 runtime/API 层已完成代码切片：
+  workflow 会为非 production-ready quality report、reviewer downgrade 和 package
+  无法支持关键 claim 登记 failure；expected evidence miss 可由 eval/gate 调用方
+  通过 expected/selected evidence ids 写入；相同 trace/package/failure type 会
+  去重；failure insert 与 audit append 在同一事务中完成，audit append 失败会
+  rollback。`cargo test -p tonglingyu-runtime` 已通过 38 个测试。该结果仍不等于
+  完整 production-ready，因为 eval quality metrics、release quality gate 和 saved
+  report validator 尚未完成。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -515,9 +523,9 @@
 
 ## 下一步
 
-1. 实现 RQA Milestone C：完整自动 failure 触发矩阵、去重、eval 写入和
-   audit/持久化失败 fail-closed。
-2. 串接 RQA eval gate、release gate 和 saved report validator，使
+1. 实现 RQA Milestone D：eval quality metrics、expected evidence case
+   classification、case-level quality details 和 eval failure 写入。
+2. 串接 RQA release gate 和 saved report validator，使
    production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
 3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前

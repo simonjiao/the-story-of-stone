@@ -193,6 +193,7 @@ pub struct RuntimeStoreStats {
 }
 
 pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failures-v1";
+pub const RETRIEVAL_FAILURE_DEDUPE_MIGRATION: &str = "tonglingyu-retrieval-failure-dedupe-v1";
 pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
 pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
 
@@ -1758,6 +1759,7 @@ pub fn execute_runtime_workflow(
             selected_evidence_ids,
         )?;
     }
+    record_reviewer_failure_if_needed(conn, &input, &package)?;
     let package_plan_step = workflow_plan_step(&workflow_plan, "evidence_package_create")?;
     let package_step_id = package_plan_step.step_id.clone();
     let package_output_ref = workflow_output_ref(&input.trace_id, &package_step_id);
@@ -3536,6 +3538,8 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_status ON retrieval_failures(human_review_status);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_type ON retrieval_failures(failure_type);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_created ON retrieval_failures(created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_failures_dedupe
+            ON retrieval_failures(trace_id, IFNULL(package_id, ''), failure_type);
         "#,
     )?;
     conn.execute(
@@ -3545,6 +3549,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![RETRIEVAL_FAILURE_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![RETRIEVAL_FAILURE_DEDUPE_MIGRATION, now_rfc3339()],
     )?;
     Ok(())
 }
@@ -3577,6 +3585,7 @@ fn runtime_schema_required_migrations() -> Vec<String> {
     vec![
         "tonglingyu-runtime-schema-v1".to_string(),
         RETRIEVAL_FAILURE_SCHEMA_VERSION.to_string(),
+        RETRIEVAL_FAILURE_DEDUPE_MIGRATION.to_string(),
     ]
 }
 
@@ -3656,7 +3665,31 @@ pub fn create_retrieval_failure(
     conn: &Connection,
     input: RetrievalFailureCreateInput,
 ) -> Result<RetrievalFailureRecord> {
-    if input.quality_report.production_ready {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = create_retrieval_failure_inner(conn, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        create_retrieval_failure_inner(conn, input)
+    }
+}
+
+fn create_retrieval_failure_inner(
+    conn: &Connection,
+    input: RetrievalFailureCreateInput,
+) -> Result<RetrievalFailureRecord> {
+    let expected_missing =
+        expected_evidence_missing(&input.expected_evidence_ids, &input.selected_evidence_ids);
+    if input.quality_report.production_ready && expected_missing.is_empty() {
         return Err(anyhow!(
             "retrieval failure requires a non-production-ready quality report"
         ));
@@ -3668,7 +3701,22 @@ pub fn create_retrieval_failure(
     }
     let failure_id = format!("rf-{}", uuid::Uuid::now_v7().simple());
     let now = now_rfc3339();
-    let failure_type = retrieval_failure_type(&input.quality_report.issues);
+    let mut quality_issues = input.quality_report.issues.clone();
+    if !expected_missing.is_empty() {
+        quality_issues.push(format!(
+            "expected_evidence_missing:{}",
+            expected_missing.join(",")
+        ));
+    }
+    let failure_type = retrieval_failure_type(&quality_issues);
+    if let Some(existing) = load_retrieval_failure_by_dedupe(
+        conn,
+        &input.trace_id,
+        input.package_id.as_deref(),
+        &failure_type,
+    )? {
+        return Ok(existing);
+    }
     let question_summary = retrieval_failure_question_summary(&input.quality_report);
     let kb_version_id = latest_kb_version_id(conn)?;
     let agent_diagnosis = input.agent_diagnosis.unwrap_or_else(|| {
@@ -3676,7 +3724,7 @@ pub fn create_retrieval_failure(
             "quality_status={}; production_ready={}; issue_count={}",
             input.quality_report.quality_status,
             input.quality_report.production_ready,
-            input.quality_report.issues.len()
+            quality_issues.len()
         )
     });
     let proposed_fix = input.proposed_fix.or_else(|| {
@@ -3720,7 +3768,7 @@ pub fn create_retrieval_failure(
             serde_json::to_string(&input.expected_evidence_ids)?,
             serde_json::to_string(&input.selected_evidence_ids)?,
             serde_json::to_string(&input.quality_report.evidence_type_coverage.missing)?,
-            serde_json::to_string(&input.quality_report.issues)?,
+            serde_json::to_string(&quality_issues)?,
             agent_diagnosis,
             proposed_fix,
             "open",
@@ -3903,9 +3951,141 @@ fn record_retrieval_failure_if_needed(
     .map(Some)
 }
 
+fn record_reviewer_failure_if_needed(
+    conn: &Connection,
+    input: &RuntimeWorkflowInput,
+    package: &EvidencePackage,
+) -> Result<Option<RetrievalFailureRecord>> {
+    if package.review.status == "passed" {
+        return Ok(None);
+    }
+    create_retrieval_failure(
+        conn,
+        RetrievalFailureCreateInput {
+            trace_id: input.trace_id.clone(),
+            package_id: Some(package.package_id.clone()),
+            question: input.question.clone(),
+            quality_report: reviewer_retrieval_quality_report(input, package),
+            selected_evidence_ids: evidence_ids(&package.cards),
+            expected_evidence_ids: Vec::new(),
+            agent_diagnosis: Some(format!(
+                "local_reviewer_status={}; severity={}; issue_count={}",
+                package.review.status,
+                package.review.severity,
+                package.review.issues.len()
+            )),
+            proposed_fix: Some("revise_claims_or_add_supporting_evidence".to_string()),
+        },
+    )
+    .map(Some)
+}
+
+fn reviewer_retrieval_quality_report(
+    input: &RuntimeWorkflowInput,
+    package: &EvidencePackage,
+) -> RetrievalQualityReport {
+    let selected_evidence_types = evidence_types(&package.cards);
+    let selected_set = selected_evidence_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let required = input
+        .required_evidence_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let missing = required
+        .iter()
+        .filter(|item| !selected_set.contains(*item))
+        .cloned()
+        .collect::<Vec<_>>();
+    let redacted_terms = redacted_terms_from_question(&input.question);
+    let mut issues = vec!["reviewer_evidence_insufficient".to_string()];
+    issues.extend(
+        package
+            .review
+            .issues
+            .iter()
+            .map(|issue| format!("reviewer_issue:{}", trim_text(issue, 120))),
+    );
+    RetrievalQualityReport {
+        object: "tonglingyu.retrieval_quality_report".to_string(),
+        schema_version: RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION.to_string(),
+        tool_name: "tonglingyu.review_answer".to_string(),
+        quality_status: "failed".to_string(),
+        production_ready: false,
+        truncated: false,
+        query_summary: RetrievalQuerySummary {
+            question_sha256: hash_text(&input.question),
+            question_char_count: input.question.chars().count(),
+            raw_question_included: false,
+            redacted_terms: redacted_terms.clone(),
+        },
+        expanded_terms: redacted_terms,
+        protected_terms: Vec::new(),
+        expanded_aliases: Vec::new(),
+        candidate_count: package.cards.len(),
+        selected_count: package.cards.len(),
+        channel_distribution: retrieval_channel_distribution(&package.cards),
+        evidence_type_coverage: RetrievalEvidenceTypeCoverage {
+            required,
+            selected: selected_evidence_types,
+            missing,
+        },
+        exact_match_coverage: Vec::new(),
+        expected_evidence_hit: None,
+        expected_evidence_status: "not_applicable_review".to_string(),
+        source_coverage_boundary: RetrievalSourceCoverageBoundary {
+            source_ids: package
+                .cards
+                .iter()
+                .map(|card| card.source_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            source_categories: Vec::new(),
+            edition_boundaries: Vec::new(),
+            kb_schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+            source_snapshot_status: if package.cards.is_empty() {
+                "no_source_selected".to_string()
+            } else {
+                "source_snapshot_ready".to_string()
+            },
+            facsimile_review_status: "not_reviewed".to_string(),
+            authoritative_edition_review_status: "not_reviewed".to_string(),
+            scholarly_collation_status: "not_scholarly_collated".to_string(),
+            expert_collation_status: "not_reviewed".to_string(),
+        },
+        source_usage_refs: Vec::new(),
+        issues,
+        recommended_follow_up: vec!["revise_claims_or_add_supporting_evidence".to_string()],
+    }
+}
+
+fn redacted_terms_from_question(question: &str) -> Vec<String> {
+    let mut terms = cjk_tokens(question)
+        .into_iter()
+        .take(RETRIEVAL_QUALITY_REPORT_MAX_TERMS)
+        .map(|term| redacted_query_term(&term))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        terms.push(format!("sha256:{}", &hash_text(question)[..12]));
+    }
+    terms
+}
+
 fn retrieval_failure_type(issues: &[String]) -> String {
     if issues.iter().any(|issue| issue == "no_evidence_selected") {
         "no_evidence_selected".to_string()
+    } else if issues
+        .iter()
+        .any(|issue| issue.starts_with("expected_evidence_missing:"))
+    {
+        "expected_evidence_missing".to_string()
     } else if issues
         .iter()
         .any(|issue| issue.starts_with("missing_required_evidence_type:"))
@@ -3921,9 +4101,23 @@ fn retrieval_failure_type(issues: &[String]) -> String {
         .any(|issue| issue.starts_with("source_usage_metadata_incomplete:"))
     {
         "source_usage_metadata_incomplete".to_string()
+    } else if issues
+        .iter()
+        .any(|issue| issue == "reviewer_evidence_insufficient")
+    {
+        "reviewer_evidence_insufficient".to_string()
     } else {
         "quality_report_not_passed".to_string()
     }
+}
+
+fn expected_evidence_missing(expected: &[String], selected: &[String]) -> Vec<String> {
+    let selected = selected.iter().cloned().collect::<BTreeSet<_>>();
+    expected
+        .iter()
+        .filter(|evidence_id| !selected.contains(*evidence_id))
+        .cloned()
+        .collect()
 }
 
 fn retrieval_failure_question_summary(report: &RetrievalQualityReport) -> String {
@@ -4004,6 +4198,22 @@ fn load_retrieval_failure(
 ) -> Result<Option<RetrievalFailureRecord>> {
     let sql = format!("{} WHERE failure_id = ?1", retrieval_failure_select_sql());
     let mut records = query_retrieval_failure_records(conn, &sql, &[&failure_id])?;
+    Ok(records.pop())
+}
+
+fn load_retrieval_failure_by_dedupe(
+    conn: &Connection,
+    trace_id: &str,
+    package_id: Option<&str>,
+    failure_type: &str,
+) -> Result<Option<RetrievalFailureRecord>> {
+    let sql = format!(
+        "{} WHERE trace_id = ?1 AND IFNULL(package_id, '') = ?2 AND failure_type = ?3 LIMIT 1",
+        retrieval_failure_select_sql()
+    );
+    let package_id = package_id.unwrap_or("");
+    let mut records =
+        query_retrieval_failure_records(conn, &sql, &[&trace_id, &package_id, &failure_type])?;
     Ok(records.pop())
 }
 
@@ -7474,6 +7684,199 @@ mod tests {
             event["event_type"] == "retrieval_failure_status_updated"
                 && event["payload"]["review_note_sha256"].as_str().is_some()
         }));
+    }
+
+    #[test]
+    fn retrieval_failure_records_expected_evidence_miss_and_dedupes() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC BY-SA 4.0",
+                "attribution": "Wikisource contributors",
+            }),
+        );
+        let question = "通灵玉是什么？";
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert!(quality_report.production_ready);
+        let selected_evidence_ids = evidence_ids(&cards);
+
+        let first = create_retrieval_failure(
+            &conn,
+            RetrievalFailureCreateInput {
+                trace_id: "trace-expected-evidence-test".to_string(),
+                package_id: Some("pkg-expected-evidence-test".to_string()),
+                question: question.to_string(),
+                quality_report: (*quality_report).clone(),
+                selected_evidence_ids: selected_evidence_ids.clone(),
+                expected_evidence_ids: vec!["ev-expected-missing".to_string()],
+                agent_diagnosis: None,
+                proposed_fix: None,
+            },
+        )
+        .expect("expected evidence failure records");
+        let second = create_retrieval_failure(
+            &conn,
+            RetrievalFailureCreateInput {
+                trace_id: "trace-expected-evidence-test".to_string(),
+                package_id: Some("pkg-expected-evidence-test".to_string()),
+                question: question.to_string(),
+                quality_report: (*quality_report).clone(),
+                selected_evidence_ids,
+                expected_evidence_ids: vec!["ev-expected-missing".to_string()],
+                agent_diagnosis: None,
+                proposed_fix: None,
+            },
+        )
+        .expect("deduped expected evidence failure returns existing record");
+
+        assert_eq!(first.failure_id, second.failure_id);
+        assert_eq!(first.failure_type, "expected_evidence_missing");
+        assert!(
+            first
+                .quality_issues
+                .iter()
+                .any(|issue| { issue == "expected_evidence_missing:ev-expected-missing" })
+        );
+        let list = list_retrieval_failures(
+            &conn,
+            RetrievalFailureListInput {
+                human_review_status: None,
+                failure_type: Some("expected_evidence_missing".to_string()),
+                limit: 10,
+                offset: 0,
+                view: RetrievalFailureView::AdminDetail,
+            },
+        )
+        .expect("list expected evidence failures");
+        assert_eq!(list.items.len(), 1);
+        let events = runtime_audit_events_for_trace(&conn, "trace-expected-evidence-test")
+            .expect("audit events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "retrieval_failure_recorded")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn workflow_records_reviewer_failure_when_local_review_downgrades() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+
+        let workflow = execute_runtime_workflow(
+            &conn,
+            RuntimeWorkflowInput {
+                trace_id: "trace-reviewer-failure-test".to_string(),
+                question: "不存在的检索目标".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+                profiles: RuntimeWorkflowProfiles::default(),
+            },
+        )
+        .expect("workflow executes");
+
+        assert_eq!(workflow.package.review.status, "needs_revision");
+        let list = list_retrieval_failures(
+            &conn,
+            RetrievalFailureListInput {
+                human_review_status: Some("open".to_string()),
+                failure_type: None,
+                limit: 10,
+                offset: 0,
+                view: RetrievalFailureView::AdminDetail,
+            },
+        )
+        .expect("list failures");
+        let failure_types = list
+            .items
+            .iter()
+            .filter_map(|item| item["failure_type"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(failure_types.contains("no_evidence_selected"));
+        assert!(failure_types.contains("reviewer_evidence_insufficient"));
+    }
+
+    #[test]
+    fn retrieval_failure_rolls_back_when_audit_append_fails() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC BY-SA 4.0",
+                "attribution": "Wikisource contributors",
+            }),
+        );
+        let question = "通灵玉是什么？";
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        conn.execute_batch(
+            r#"
+            DROP TABLE audit_events;
+            CREATE TABLE audit_events (event_id TEXT PRIMARY KEY);
+            "#,
+        )
+        .expect("break audit table");
+
+        let error = create_retrieval_failure(
+            &conn,
+            RetrievalFailureCreateInput {
+                trace_id: "trace-audit-failure-test".to_string(),
+                package_id: Some("pkg-audit-failure-test".to_string()),
+                question: question.to_string(),
+                quality_report: (*quality_report).clone(),
+                selected_evidence_ids: evidence_ids(&cards),
+                expected_evidence_ids: vec!["ev-expected-missing".to_string()],
+                agent_diagnosis: None,
+                proposed_fix: None,
+            },
+        )
+        .expect_err("audit append failure should fail closed");
+        assert!(error.to_string().contains("audit_events"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM retrieval_failures", [], |row| {
+                row.get(0)
+            })
+            .expect("failure count");
+        assert_eq!(count, 0);
     }
 
     #[test]
