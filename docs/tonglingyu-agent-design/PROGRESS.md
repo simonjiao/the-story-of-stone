@@ -623,9 +623,10 @@
   commentary_links 或 version_notes，并记录 `knowledge_patch_applications` 与
   `knowledge_patch_proposals_applied` audit；不满足目标表约束或引用不存在时
   rebuild fail-closed。
-- 该 H 切片仍不等于 H 完成或 production-ready：retention/restore 和用户数据
-  lifecycle contract 仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须
-  经过 rebuild application、diff report 和 eval gate。
+- RQA Milestone H 已完成，但不等于整体 production-ready：Milestone I-J-K 的端到端
+  自动化、retention/restore、用户数据 lifecycle、性能预算、live release 证据和安全
+  扫描仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
+  application、diff report 和 eval gate。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
