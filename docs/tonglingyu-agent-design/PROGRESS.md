@@ -751,6 +751,10 @@
   readiness report 和 saved report validator，并记录 run id、git commit、gate
   summary 和 artifact hash。当前执行结果按预期 fail-closed，因为 release readiness
   阻塞仍未关闭。
+- Release automation wrapper 现在默认把 automation report、release readiness
+  report 和 saved report validator JSON 写入
+  `data/tonglingyu/release-artifacts/<run_id>/`；production-ready 结论会要求这些
+  证据不在脚本临时工作目录内，避免真实发布通过后核心 artifact 被 cleanup 删除。
 - Release readiness report 已新增 `tonglingyu.release_manifest` 和
   `release_manifest_digest`：manifest 绑定 git commit / tracked dirty 状态、
   runtime config digest、RQA schema、eval suite、eval run id、source snapshot
@@ -867,8 +871,9 @@
 1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
    本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
 2. 实现 RQA Milestone J 剩余项：目标 production DB pre-migration
-   backup/preflight artifact、live existing_refs 恢复演练、目标 live release
-   report artifact 留存，以及目标 live runtime identity artifact。
+   backup/preflight artifact、live existing_refs 恢复演练，并用 release
+   automation 持久 artifact 目录保存目标 live release report、validator JSON
+   和 live runtime identity artifact。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
    post-release monitor、目标环境 capacity/load、incident response drill 和
    audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。

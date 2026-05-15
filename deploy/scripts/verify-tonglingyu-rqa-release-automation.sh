@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 WORK_DIR="$(mktemp -d)"
-REPORT_PATH="${TONGLINGYU_RQA_RELEASE_AUTOMATION_REPORT_PATH:-}"
 KEEP_WORK_DIR="${TONGLINGYU_RQA_RELEASE_AUTOMATION_KEEP_WORK_DIR:-false}"
 
 cleanup() {
@@ -20,17 +19,30 @@ RUN_ID="${TONGLINGYU_RQA_RELEASE_RUN_ID:-}"
 if [[ -z "${RUN_ID}" ]]; then
   RUN_ID="local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 fi
+ARTIFACT_ROOT="${TONGLINGYU_RQA_RELEASE_AUTOMATION_ARTIFACT_ROOT:-${REPO_DIR}/data/tonglingyu/release-artifacts}"
+if [[ "${ARTIFACT_ROOT}" != /* ]]; then
+  ARTIFACT_ROOT="${REPO_DIR}/${ARTIFACT_ROOT}"
+fi
+ARTIFACT_DIR="${TONGLINGYU_RQA_RELEASE_AUTOMATION_ARTIFACT_DIR:-${ARTIFACT_ROOT}/${RUN_ID}}"
+if [[ "${ARTIFACT_DIR}" != /* ]]; then
+  ARTIFACT_DIR="${REPO_DIR}/${ARTIFACT_DIR}"
+fi
+REPORT_PATH="${TONGLINGYU_RQA_RELEASE_AUTOMATION_REPORT_PATH:-${ARTIFACT_DIR}/release-automation.json}"
 GIT_COMMIT="$(
   git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || printf 'unknown'
 )"
-RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-${WORK_DIR}/release-readiness.json}"
-VALIDATION_REPORT_PATH="${WORK_DIR}/release-readiness-validation.json"
+RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness.json}"
+VALIDATION_REPORT_PATH="${TONGLINGYU_RQA_RELEASE_VALIDATION_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness-validation.json}"
 CONTRACT_STDOUT="${WORK_DIR}/contract-smoke.stdout"
 CONTRACT_STDERR="${WORK_DIR}/contract-smoke.stderr"
 READINESS_STDOUT="${WORK_DIR}/release-readiness.stdout"
 READINESS_STDERR="${WORK_DIR}/release-readiness.stderr"
 VALIDATOR_STDOUT="${WORK_DIR}/saved-report-validator.stdout"
 VALIDATOR_STDERR="${WORK_DIR}/saved-report-validator.stderr"
+mkdir -p "${ARTIFACT_DIR}"
+for artifact_path in "${REPORT_PATH}" "${RELEASE_REPORT_PATH}" "${VALIDATION_REPORT_PATH}"; do
+  mkdir -p "$(dirname -- "${artifact_path}")"
+done
 
 contract_status="failed"
 if "${SCRIPT_DIR}/test-tonglingyu-release-readiness-contract.sh" \
@@ -54,7 +66,8 @@ if [[ -f "${RELEASE_REPORT_PATH}" ]]; then
   fi
 fi
 
-python3 - "${REPORT_PATH}" "${RUN_ID}" "${GIT_COMMIT}" \
+python3 - "${REPORT_PATH}" "${ARTIFACT_DIR}" "${WORK_DIR}" \
+  "${RUN_ID}" "${GIT_COMMIT}" \
   "${contract_status}" "${readiness_status}" "${validator_status}" \
   "${RELEASE_REPORT_PATH}" "${VALIDATION_REPORT_PATH}" \
   "${CONTRACT_STDOUT}" "${CONTRACT_STDERR}" \
@@ -68,6 +81,8 @@ from pathlib import Path
 
 (
     report_path_raw,
+    artifact_dir_raw,
+    work_dir_raw,
     run_id,
     git_commit,
     contract_status,
@@ -81,7 +96,7 @@ from pathlib import Path
     readiness_stderr_raw,
     validator_stdout_raw,
     validator_stderr_raw,
-) = sys.argv[1:15]
+) = sys.argv[1:17]
 
 
 def tail(path_raw, limit=20):
@@ -112,15 +127,65 @@ def load_json(path_raw):
         return None
 
 
+def write_json(path_raw, value):
+    if not path_raw or not isinstance(value, dict):
+        return False
+    path = Path(path_raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=True, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
+def path_is_outside_work_dir(path_raw):
+    if not path_raw:
+        return False
+    path = Path(path_raw)
+    if not path.is_file():
+        return False
+    try:
+        resolved = path.resolve()
+        work_dir = Path(work_dir_raw).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(work_dir)
+        return False
+    except ValueError:
+        return True
+
+
+def target_is_outside_work_dir(path_raw):
+    if not path_raw:
+        return False
+    try:
+        resolved = Path(path_raw).resolve()
+        work_dir = Path(work_dir_raw).resolve()
+    except OSError:
+        return False
+    try:
+        resolved.relative_to(work_dir)
+        return False
+    except ValueError:
+        return True
+
+
 release_report = load_json(release_report_path_raw)
 validator_report = None
-if validator_status == "passed":
-    validator_lines = tail(validator_stdout_raw, 1)
-    if validator_lines:
-        try:
-            validator_report = json.loads(validator_lines[-1])
-        except json.JSONDecodeError:
-            validator_report = None
+validator_lines = tail(validator_stdout_raw, 1)
+if validator_lines:
+    try:
+        validator_report = json.loads(validator_lines[-1])
+    except json.JSONDecodeError:
+        validator_report = None
+validation_report_written = write_json(validation_report_path_raw, validator_report)
+release_report_sha256 = file_sha256(release_report_path_raw)
+validation_report_sha256 = file_sha256(validation_report_path_raw)
+release_report_persistent = path_is_outside_work_dir(release_report_path_raw)
+validation_report_persistent = path_is_outside_work_dir(validation_report_path_raw)
+automation_report_persistent = target_is_outside_work_dir(report_path_raw)
 
 production_ready = (
     contract_status == "passed"
@@ -130,6 +195,11 @@ production_ready = (
     and release_report.get("production_release_ready") is True
     and isinstance(validator_report, dict)
     and validator_report.get("status") == "ok"
+    and bool(release_report_sha256)
+    and bool(validation_report_sha256)
+    and release_report_persistent
+    and validation_report_persistent
+    and automation_report_persistent
 )
 errors = []
 if contract_status != "passed":
@@ -146,6 +216,16 @@ if isinstance(release_report, dict):
             errors.append(f"release_blocker={blocker}")
 else:
     errors.append("release_report_missing_or_invalid")
+if not release_report_sha256:
+    errors.append("release_report_artifact_missing")
+if not validation_report_written or not validation_report_sha256:
+    errors.append("validation_report_artifact_missing")
+if not release_report_persistent:
+    errors.append("release_report_artifact_not_persistent")
+if not validation_report_persistent:
+    errors.append("validation_report_artifact_not_persistent")
+if not automation_report_persistent:
+    errors.append("automation_report_artifact_not_persistent")
 
 payload = {
     "object": "tonglingyu.rqa_release_automation",
@@ -156,14 +236,19 @@ payload = {
     "run_id": run_id,
     "git_commit": git_commit,
     "generated_at": datetime.now(timezone.utc).isoformat(),
+    "artifact_dir": str(Path(artifact_dir_raw)),
     "checks": {
         "contract_smoke": contract_status,
         "release_readiness": readiness_status,
         "saved_report_validator": validator_status,
     },
     "artifacts": {
+        "automation_report_path": str(Path(report_path_raw)) if report_path_raw else "",
+        "artifact_dir": str(Path(artifact_dir_raw)),
         "release_report_path": str(Path(release_report_path_raw)),
-        "release_report_sha256": file_sha256(release_report_path_raw),
+        "release_report_sha256": release_report_sha256,
+        "validation_report_path": str(Path(validation_report_path_raw)),
+        "validation_report_sha256": validation_report_sha256,
         "release_manifest_digest": (
             release_report.get("release_manifest_digest")
             if isinstance(release_report, dict)
@@ -189,7 +274,14 @@ payload = {
         "validator_stdout_sha256": file_sha256(validator_stdout_raw),
         "contract_stdout_sha256": file_sha256(contract_stdout_raw),
         "readiness_stdout_sha256": file_sha256(readiness_stdout_raw),
+        "artifact_persistence": {
+            "release_report_persistent": release_report_persistent,
+            "validation_report_persistent": validation_report_persistent,
+            "automation_report_persistent": automation_report_persistent,
+            "validation_report_written": validation_report_written,
+        },
     },
+    "validator_summary": validator_report if isinstance(validator_report, dict) else {},
     "gate_summary": {
         "required_failures": (
             release_report.get("required_failures")
