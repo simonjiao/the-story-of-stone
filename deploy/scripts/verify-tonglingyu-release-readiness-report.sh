@@ -35,6 +35,7 @@ required_gate_names = [
     "rqa_backup_restore_drill",
     "rqa_performance_budget",
     "rqa_api_contract",
+    "rqa_user_lifecycle",
     "security_scan",
     *live_gate_names,
     "openwebui_browser_review",
@@ -212,6 +213,18 @@ gate_stdout_requirements = {
             "negative_statuses",
             "pagination",
             "refs",
+        ],
+    },
+    "rqa_user_lifecycle": {
+        "object": "tonglingyu.rqa_user_lifecycle_gate",
+        "required_fields": [
+            "action_reports",
+            "checks",
+            "contract_version",
+            "generated_at",
+            "lifecycle_policy_version",
+            "refs",
+            "user_lifecycle_passed",
         ],
     },
     "security_scan": {
@@ -1362,6 +1375,79 @@ def validate_api_contract_gate_stdout():
                 errors.append(f"rqa_api_contract_{field}_invalid")
 
 
+def validate_user_lifecycle_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_user_lifecycle"),
+        "tonglingyu.rqa_user_lifecycle_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("user_lifecycle_passed") is not True:
+        errors.append("rqa_user_lifecycle_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_user_lifecycle_secret_values_printed_must_be_false")
+    if gate_json.get("contract_version") != "tonglingyu-rqa-user-lifecycle-contract-v1":
+        errors.append("rqa_user_lifecycle_contract_version_invalid")
+    if gate_json.get("lifecycle_policy_version") != "tonglingyu-rqa-lifecycle-v1":
+        errors.append("rqa_user_lifecycle_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_user_lifecycle_generated_at_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "export_audited_and_redacted",
+        "export_manifest_redacted",
+        "legal_hold_blocks_anonymize",
+        "legal_hold_can_be_released",
+        "anonymize_completed",
+        "raw_user_values_removed",
+        "tombstones_recorded",
+        "lifecycle_audit_events_recorded",
+        "rqa_traceability_preserved",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_user_lifecycle_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_user_lifecycle_check_failed={check}")
+
+    action_reports = gate_json.get("action_reports")
+    expected_actions = {
+        "export": "ok",
+        "legal_hold": "ok",
+        "blocked_anonymize": "blocked",
+        "release_hold": "ok",
+        "anonymize": "ok",
+    }
+    if not isinstance(action_reports, dict):
+        errors.append("rqa_user_lifecycle_action_reports_missing")
+    else:
+        for name, expected_status in expected_actions.items():
+            report = action_reports.get(name)
+            if not isinstance(report, dict):
+                errors.append(f"rqa_user_lifecycle_action_report_missing={name}")
+                continue
+            if report.get("status") != expected_status:
+                errors.append(f"rqa_user_lifecycle_{name}_status_invalid")
+            if report.get("source_text_included") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_source_text_included")
+            if report.get("response_body_included") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_response_body_included")
+            if report.get("secret_values_printed") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_secret_values_printed")
+            if not isinstance(report.get("counts"), dict):
+                errors.append(f"rqa_user_lifecycle_{name}_counts_missing")
+
+    refs = gate_json.get("refs")
+    if not isinstance(refs, dict):
+        errors.append("rqa_user_lifecycle_refs_missing")
+    else:
+        for field in ("subject_sha256", "trace_sha256", "package_sha256"):
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_user_lifecycle_{field}_invalid")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -1604,6 +1690,7 @@ validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()
 validate_performance_budget_gate_stdout()
 validate_api_contract_gate_stdout()
+validate_user_lifecycle_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

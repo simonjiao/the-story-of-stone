@@ -42,6 +42,9 @@ TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-chec
 TAMPERED_RQA_API_CONTRACT_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-api-contract-stdout-report.json"
 TAMPERED_RQA_API_CONTRACT_CHECK_REPORT="${WORK_DIR}/tampered-rqa-api-contract-check-report.json"
 TAMPERED_RQA_API_CONTRACT_STATUS_REPORT="${WORK_DIR}/tampered-rqa-api-contract-status-report.json"
+TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-stdout-report.json"
+TAMPERED_RQA_USER_LIFECYCLE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-check-report.json"
+TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-action-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -174,6 +177,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
@@ -692,6 +696,7 @@ TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
@@ -1279,6 +1284,75 @@ gate_stdout = {
         "secret_values_printed": False,
         "status": "ok",
     },
+    "rqa_user_lifecycle": {
+        "action_reports": {
+            "anonymize": {
+                "action": "anonymize",
+                "counts": {"message_count": 2, "session_count": 1},
+                "source_text_included": False,
+                "response_body_included": False,
+                "secret_values_printed": False,
+                "status": "ok",
+            },
+            "blocked_anonymize": {
+                "action": "anonymize",
+                "counts": {"active_legal_hold_count": 1, "message_count": 2, "session_count": 1},
+                "source_text_included": False,
+                "response_body_included": False,
+                "secret_values_printed": False,
+                "status": "blocked",
+            },
+            "export": {
+                "action": "export",
+                "counts": {"message_count": 2, "session_count": 1},
+                "source_text_included": False,
+                "response_body_included": False,
+                "secret_values_printed": False,
+                "status": "ok",
+            },
+            "legal_hold": {
+                "action": "legal_hold",
+                "counts": {"active_legal_hold_count": 1, "message_count": 2, "session_count": 1},
+                "source_text_included": False,
+                "response_body_included": False,
+                "secret_values_printed": False,
+                "status": "ok",
+            },
+            "release_hold": {
+                "action": "release_legal_hold",
+                "counts": {"active_legal_hold_count": 0, "message_count": 2, "session_count": 1},
+                "source_text_included": False,
+                "response_body_included": False,
+                "secret_values_printed": False,
+                "status": "ok",
+            },
+        },
+        "checks": {
+            "anonymize_completed": True,
+            "export_audited_and_redacted": True,
+            "export_manifest_redacted": True,
+            "legal_hold_blocks_anonymize": True,
+            "legal_hold_can_be_released": True,
+            "lifecycle_audit_events_recorded": True,
+            "raw_user_values_removed": True,
+            "rqa_traceability_preserved": True,
+            "tombstones_recorded": True,
+        },
+        "contract_version": "tonglingyu-rqa-user-lifecycle-contract-v1",
+        "errors": [],
+        "generated_at": "2026-05-15T00:00:08+00:00",
+        "lifecycle_policy_version": "tonglingyu-rqa-lifecycle-v1",
+        "object": "tonglingyu.rqa_user_lifecycle_gate",
+        "refs": {
+            "package_sha256": "d" * 64,
+            "subject_sha256": "e" * 64,
+            "trace_sha256": "f" * 64,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+        "user_lifecycle_passed": True,
+    },
     "security_scan": {
         "accepted_error_count": 0,
         "dependency_scan": {
@@ -1746,6 +1820,79 @@ fi
 assert_report "${tampered_rqa_api_contract_status_stdout}" \
   '"rqa_api_contract_retrieval_failure_invalid_status_status_invalid" in report["errors"]'
 
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_user_lifecycle":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_user_lifecycle_stdout="${WORK_DIR}/tampered-rqa-user-lifecycle-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT}" >"${tampered_rqa_user_lifecycle_stdout}"; then
+  echo "production-ready reports must bind RQA user lifecycle gate status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_user_lifecycle_stdout}" \
+  '"rqa_user_lifecycle_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_USER_LIFECYCLE_CHECK_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_user_lifecycle":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["checks"]["raw_user_values_removed"] = False
+        gate_json["user_lifecycle_passed"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_user_lifecycle_check_stdout="${WORK_DIR}/tampered-rqa-user-lifecycle-check.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_USER_LIFECYCLE_CHECK_REPORT}" >"${tampered_rqa_user_lifecycle_check_stdout}"; then
+  echo "production-ready reports must reject failed RQA user lifecycle checks" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_user_lifecycle_check_stdout}" \
+  '"rqa_user_lifecycle_not_passed" in report["errors"]'
+assert_report "${tampered_rqa_user_lifecycle_check_stdout}" \
+  '"rqa_user_lifecycle_check_failed=raw_user_values_removed" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_user_lifecycle":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["action_reports"]["blocked_anonymize"]["status"] = "ok"
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_user_lifecycle_action_stdout="${WORK_DIR}/tampered-rqa-user-lifecycle-action.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT}" >"${tampered_rqa_user_lifecycle_action_stdout}"; then
+  echo "production-ready reports must reject user lifecycle action status drift" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_user_lifecycle_action_stdout}" \
+  '"rqa_user_lifecycle_blocked_anonymize_status_invalid" in report["errors"]'
+
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
 import sys
@@ -2120,6 +2267,7 @@ if env \
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \

@@ -624,8 +624,9 @@
   `knowledge_patch_proposals_applied` audit；不满足目标表约束或引用不存在时
   rebuild fail-closed。
 - RQA Milestone H 已完成，但不等于整体 production-ready：Milestone I-J-K 的端到端
-  自动化、用户数据 lifecycle、live release 证据、真实安全扫描 artifact 和容量/值守
-  仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
+  自动化、live release 证据、真实安全扫描 artifact、live/load 容量和值守仍未完成；
+  用户数据 lifecycle 已有本地 gate，但还不能替代 live/Open WebUI admin Action
+  证据。accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
   application、diff report 和 eval gate。
 - RQA retention/prune 已完成第一批 production 保护切片：Runtime 新增
   `tonglingyu-rqa-lifecycle-v1` 和 `rqa_lifecycle_tombstones`，prune 会保护仍被
@@ -671,6 +672,14 @@
   admin payload 不返回完整原始 prompt。Gateway 输入边界已把非法 enum filter 从
   runtime 500 修正为 400；saved report validator 会拒绝缺 gate stdout、contract
   check 失败和负向状态码不是 400 的 production-ready report。
+- RQA 用户数据生命周期 gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh` 会启动本地 Gateway，验证
+  export 脱敏 manifest、legal hold 阻断 anonymize、release legal hold、
+  delete/anonymize、audit event、tombstone、原始用户值移除和
+  trace/package/failure/task 可追责性；gate stdout 只输出计数和 hash ref，不输出
+  原始 question、response、user_ref、chat_ref 或 secret。saved report validator
+  会拒绝缺 `rqa_user_lifecycle` gate stdout、关键 check 失败和 action status drift
+  的 production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
@@ -680,9 +689,9 @@
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
-- 后续 RQA production-ready 还必须定义 RQA 用户数据生命周期：export、
-  delete/anonymize、retention、legal hold 和 audit tombstone；缺少策略版本或
-  lifecycle contract smoke 时不能生成 production-ready artifact。
+- RQA 用户数据生命周期已具备本地 contract smoke 和策略版本；后续
+  production-ready 仍必须补齐 live/Open WebUI admin Action、旧/新字段兼容、
+  目标环境 live/load 性能和值守证据。
 
 ## 下一步
 
@@ -691,8 +700,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
    live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
    运维证据。
-3. 补齐 RQA Milestone K-M：隐私生命周期、Open WebUI admin Action contract、
-   旧/新字段兼容、发布值守、回滚、事故响应、容量和审计完整性。
+3. 补齐 RQA Milestone K-M：Open WebUI admin Action contract、旧/新字段兼容、
+   发布值守、回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
