@@ -664,6 +664,13 @@
   report validator 会拒绝缺 `rqa_performance_budget` gate stdout、缺 timeout
   边界、预算超限、budget/measurement 不一致和关键 checks 未通过的
   production-ready report。
+- RQA API contract gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-api-contract.sh` 会启动本地 Gateway，验证
+  retrieval failure 与 governance task 的 admin list/read schema version、pagination
+  metadata、max page size clamp、未知 filter 和非法 enum filter 的 400 边界，以及
+  admin payload 不返回完整原始 prompt。Gateway 输入边界已把非法 enum filter 从
+  runtime 500 修正为 400；saved report validator 会拒绝缺 gate stdout、contract
+  check 失败和负向状态码不是 400 的 production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
@@ -684,8 +691,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
    live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
    运维证据。
-3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、发布值守、回滚、事故响应、
-   容量和审计完整性。
+3. 补齐 RQA Milestone K-M：隐私生命周期、Open WebUI admin Action contract、
+   旧/新字段兼容、发布值守、回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

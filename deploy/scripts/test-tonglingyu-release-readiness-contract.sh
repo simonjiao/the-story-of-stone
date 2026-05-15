@@ -39,6 +39,9 @@ TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-
 TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-performance-gate-stdout-report.json"
 TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT="${WORK_DIR}/tampered-rqa-performance-budget-report.json"
 TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-check-report.json"
+TAMPERED_RQA_API_CONTRACT_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-api-contract-stdout-report.json"
+TAMPERED_RQA_API_CONTRACT_CHECK_REPORT="${WORK_DIR}/tampered-rqa-api-contract-check-report.json"
+TAMPERED_RQA_API_CONTRACT_STATUS_REPORT="${WORK_DIR}/tampered-rqa-api-contract-status-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -170,6 +173,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
@@ -687,6 +691,7 @@ TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
@@ -1219,6 +1224,61 @@ gate_stdout = {
             "rqa_quality_gate": 180.0,
         },
     },
+    "rqa_api_contract": {
+        "api_contract_passed": True,
+        "checks": {
+            "admin_payload_excludes_raw_prompts": True,
+            "governance_task_invalid_priority_rejected": True,
+            "governance_task_invalid_status_rejected": True,
+            "governance_task_list_pagination": True,
+            "governance_task_list_schema": True,
+            "governance_task_max_page_clamped": True,
+            "governance_task_read_schema": True,
+            "governance_task_unknown_filter_rejected": True,
+            "retrieval_failure_invalid_status_rejected": True,
+            "retrieval_failure_list_pagination": True,
+            "retrieval_failure_list_schema": True,
+            "retrieval_failure_max_page_clamped": True,
+            "retrieval_failure_read_schema": True,
+            "retrieval_failure_unknown_filter_rejected": True,
+        },
+        "contract_version": "tonglingyu-rqa-api-contract-v1",
+        "errors": [],
+        "generated_at": "2026-05-15T00:00:07+00:00",
+        "negative_statuses": {
+            "governance_task_invalid_priority": 400,
+            "governance_task_invalid_status": 400,
+            "governance_task_unknown_filter": 400,
+            "retrieval_failure_invalid_status": 400,
+            "retrieval_failure_unknown_filter": 400,
+        },
+        "object": "tonglingyu.rqa_api_contract_gate",
+        "pagination": {
+            "governance_tasks": {
+                "effective_limit": 1,
+                "max_limit": 100,
+                "next_offset": 1,
+                "offset": 0,
+                "requested_limit": 1,
+            },
+            "retrieval_failures": {
+                "effective_limit": 1,
+                "max_limit": 100,
+                "next_offset": 1,
+                "offset": 0,
+                "requested_limit": 1,
+            },
+        },
+        "refs": {
+            "failure_sha256": "9" * 64,
+            "governance_task_sha256": "a" * 64,
+            "package_sha256": "b" * 64,
+            "trace_sha256": "c" * 64,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+    },
     "security_scan": {
         "accepted_error_count": 0,
         "dependency_scan": {
@@ -1613,6 +1673,79 @@ fi
 assert_report "${tampered_rqa_performance_check_stdout}" \
   '"rqa_performance_budget_check_failed=admin_status_updates_closed_open_p0" in report["errors"]'
 
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_API_CONTRACT_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_api_contract":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_api_contract_stdout="${WORK_DIR}/tampered-rqa-api-contract-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_API_CONTRACT_STDOUT_REPORT}" >"${tampered_rqa_api_contract_stdout}"; then
+  echo "production-ready reports must bind RQA API contract gate status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_api_contract_stdout}" \
+  '"rqa_api_contract_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_API_CONTRACT_CHECK_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_api_contract":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["checks"]["admin_payload_excludes_raw_prompts"] = False
+        gate_json["api_contract_passed"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_api_contract_check_stdout="${WORK_DIR}/tampered-rqa-api-contract-check.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_API_CONTRACT_CHECK_REPORT}" >"${tampered_rqa_api_contract_check_stdout}"; then
+  echo "production-ready reports must reject failed RQA API contract checks" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_api_contract_check_stdout}" \
+  '"rqa_api_contract_not_passed" in report["errors"]'
+assert_report "${tampered_rqa_api_contract_check_stdout}" \
+  '"rqa_api_contract_check_failed=admin_payload_excludes_raw_prompts" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_API_CONTRACT_STATUS_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_api_contract":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["negative_statuses"]["retrieval_failure_invalid_status"] = 500
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_api_contract_status_stdout="${WORK_DIR}/tampered-rqa-api-contract-status.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_API_CONTRACT_STATUS_REPORT}" >"${tampered_rqa_api_contract_status_stdout}"; then
+  echo "production-ready reports must reject non-400 RQA API contract negative checks" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_api_contract_status_stdout}" \
+  '"rqa_api_contract_retrieval_failure_invalid_status_status_invalid" in report["errors"]'
+
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
 import sys
@@ -1986,6 +2119,7 @@ if env \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \

@@ -34,6 +34,7 @@ required_gate_names = [
     "retrieval_quality",
     "rqa_backup_restore_drill",
     "rqa_performance_budget",
+    "rqa_api_contract",
     "security_scan",
     *live_gate_names,
     "openwebui_browser_review",
@@ -199,6 +200,18 @@ gate_stdout_requirements = {
             "performance_budget_passed",
             "refs",
             "timeouts_seconds",
+        ],
+    },
+    "rqa_api_contract": {
+        "object": "tonglingyu.rqa_api_contract_gate",
+        "required_fields": [
+            "api_contract_passed",
+            "checks",
+            "contract_version",
+            "generated_at",
+            "negative_statuses",
+            "pagination",
+            "refs",
         ],
     },
     "security_scan": {
@@ -1262,6 +1275,93 @@ def validate_performance_budget_gate_stdout():
                 errors.append(f"rqa_performance_budget_{field}_invalid")
 
 
+def validate_api_contract_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_api_contract"),
+        "tonglingyu.rqa_api_contract_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("api_contract_passed") is not True:
+        errors.append("rqa_api_contract_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_api_contract_secret_values_printed_must_be_false")
+    if gate_json.get("contract_version") != "tonglingyu-rqa-api-contract-v1":
+        errors.append("rqa_api_contract_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_api_contract_generated_at_invalid")
+    checks = gate_json.get("checks")
+    required_checks = (
+        "retrieval_failure_list_schema",
+        "retrieval_failure_list_pagination",
+        "retrieval_failure_max_page_clamped",
+        "retrieval_failure_unknown_filter_rejected",
+        "retrieval_failure_invalid_status_rejected",
+        "retrieval_failure_read_schema",
+        "governance_task_list_schema",
+        "governance_task_list_pagination",
+        "governance_task_max_page_clamped",
+        "governance_task_unknown_filter_rejected",
+        "governance_task_invalid_status_rejected",
+        "governance_task_invalid_priority_rejected",
+        "governance_task_read_schema",
+        "admin_payload_excludes_raw_prompts",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_api_contract_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_api_contract_check_failed={check}")
+
+    pagination = gate_json.get("pagination")
+    if not isinstance(pagination, dict):
+        errors.append("rqa_api_contract_pagination_missing")
+    else:
+        for name in ("retrieval_failures", "governance_tasks"):
+            page = pagination.get(name)
+            if not isinstance(page, dict):
+                errors.append(f"rqa_api_contract_{name}_pagination_missing")
+                continue
+            if page.get("effective_limit") != 1:
+                errors.append(f"rqa_api_contract_{name}_effective_limit_invalid")
+            if page.get("max_limit") != 100:
+                errors.append(f"rqa_api_contract_{name}_max_limit_invalid")
+            if page.get("offset") != 0:
+                errors.append(f"rqa_api_contract_{name}_offset_invalid")
+            if page.get("next_offset") != 1:
+                errors.append(f"rqa_api_contract_{name}_next_offset_invalid")
+
+    negative_statuses = gate_json.get("negative_statuses")
+    expected_negative_statuses = (
+        "governance_task_invalid_priority",
+        "governance_task_invalid_status",
+        "governance_task_unknown_filter",
+        "retrieval_failure_invalid_status",
+        "retrieval_failure_unknown_filter",
+    )
+    if not isinstance(negative_statuses, dict):
+        errors.append("rqa_api_contract_negative_statuses_missing")
+    else:
+        for field in expected_negative_statuses:
+            if negative_statuses.get(field) != 400:
+                errors.append(f"rqa_api_contract_{field}_status_invalid")
+
+    refs = gate_json.get("refs")
+    required_refs = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_api_contract_refs_missing")
+    else:
+        for field in required_refs:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_api_contract_{field}_invalid")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -1503,6 +1603,7 @@ validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()
 validate_performance_budget_gate_stdout()
+validate_api_contract_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

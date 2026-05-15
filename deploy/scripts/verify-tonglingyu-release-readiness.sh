@@ -18,6 +18,7 @@ if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_SECURITY_SCAN_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-}" ]] \
@@ -30,6 +31,7 @@ RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verif
 RQA_QUALITY_CMD="${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-quality-gate.sh}"
 RQA_RESTORE_DRILL_CMD="${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-backup-restore-drill.sh}"
 RQA_PERFORMANCE_CMD="${TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-performance-budget.sh}"
+RQA_API_CONTRACT_CMD="${TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-api-contract.sh}"
 SECURITY_SCAN_CMD="${TONGLINGYU_RELEASE_SECURITY_SCAN_CMD:-${SCRIPT_DIR}/verify-tonglingyu-release-security.sh}"
 MODEL_UPSTREAM_CMD="${TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD:-${SCRIPT_DIR}/verify-model-upstream-network.sh}"
 STRICT_GATEWAY_CMD="${TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-strict-gateway.sh}"
@@ -162,6 +164,7 @@ run_gate "rqa_backup_restore_drill" "true" env \
   "TONGLINGYU_RQA_RESTORE_DRILL_REQUIRE_LIVE=${require_live}" \
   "${RQA_RESTORE_DRILL_CMD}" || failed=1
 run_gate "rqa_performance_budget" "true" "${RQA_PERFORMANCE_CMD}" || failed=1
+run_gate "rqa_api_contract" "true" "${RQA_API_CONTRACT_CMD}" || failed=1
 run_gate "security_scan" "true" "${SECURITY_SCAN_CMD}" || failed=1
 
 verify_strict_gateway="false"

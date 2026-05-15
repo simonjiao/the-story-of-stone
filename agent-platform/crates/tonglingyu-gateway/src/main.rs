@@ -5709,6 +5709,11 @@ fn retrieval_failure_list_input(
         .or_else(|| params.get("status"))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        human_review_status.as_deref(),
+        "human_review_status",
+        &["open", "in_review", "resolved", "wontfix"],
+    )?;
     let failure_type = params
         .get("failure_type")
         .map(|value| value.trim().to_string())
@@ -5764,14 +5769,33 @@ fn governance_task_list_input(
         .get("status")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        status.as_deref(),
+        "status",
+        &["open", "in_review", "accepted", "rejected", "closed"],
+    )?;
     let task_type = params
         .get("task_type")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        task_type.as_deref(),
+        "task_type",
+        &[
+            "source_metadata_fix",
+            "expected_evidence_fix",
+            "retrieval_policy_fix",
+            "alias_term_review",
+            "commentary_link_review",
+            "version_note_review",
+            "expert_review",
+        ],
+    )?;
     let priority = params
         .get("priority")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    validate_optional_filter_value(priority.as_deref(), "priority", &["p0", "p1", "p2"])?;
     let source_failure_id = params
         .get("source_failure_id")
         .map(|value| value.trim().to_string())
@@ -5780,6 +5804,18 @@ fn governance_task_list_input(
         .get("source_entity_type")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        source_entity_type.as_deref(),
+        "source_entity_type",
+        &[
+            "retrieval_failure",
+            "retrieval_failure_cluster",
+            "trace",
+            "package",
+            "user_feedback",
+            "knowledge_patch_proposal",
+        ],
+    )?;
     let source_entity_id = params
         .get("source_entity_id")
         .map(|value| value.trim().to_string())
@@ -5796,6 +5832,19 @@ fn governance_task_list_input(
         limit,
         offset,
     })
+}
+
+fn validate_optional_filter_value(
+    value: Option<&str>,
+    field_name: &str,
+    allowed_values: &[&str],
+) -> Result<()> {
+    if let Some(value) = value
+        && !allowed_values.contains(&value)
+    {
+        return Err(anyhow!("invalid {field_name} filter {value}"));
+    }
+    Ok(())
 }
 
 fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
