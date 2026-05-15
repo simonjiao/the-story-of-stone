@@ -325,6 +325,7 @@ gate_stdout_requirements = {
             "behavior_config",
             "behavior_config_binding",
             "checked_surfaces",
+            "metrics_privacy",
             "model_ids",
             "running_images",
             "stream_trace_id",
@@ -338,10 +339,18 @@ gate_stdout_requirements = {
         },
     },
     "openwebui_admin_action": {
+        "object": "tonglingyu.openwebui_admin_action_live_gate",
         "exact": {
             "function_id": "tonglingyu_gateway_admin",
             "type": "action",
         },
+        "required_fields": [
+            "checks",
+            "permission_boundary",
+            "secret_values_printed",
+            "source",
+            "valve_keys",
+        ],
     },
 }
 hex_digits = set("0123456789abcdef")
@@ -721,6 +730,39 @@ def validate_behavior_config_binding(prefix, binding, behavior_config):
         or binding.get("tool_audit_event_count") < binding.get("tool_result_count")
     ):
         errors.append(f"{prefix}_behavior_config_binding_tool_audit_count_invalid")
+
+
+def validate_strict_gateway_metrics_privacy(gate_json):
+    metrics_privacy = gate_json.get("metrics_privacy")
+    if not isinstance(metrics_privacy, dict):
+        errors.append("strict_gateway_metrics_privacy_missing")
+        return
+    if metrics_privacy.get("object") != "tonglingyu.strict_gateway_metrics_privacy":
+        errors.append("strict_gateway_metrics_privacy_object_invalid")
+    if metrics_privacy.get("schema_version") != 1:
+        errors.append("strict_gateway_metrics_privacy_schema_version_invalid")
+    if metrics_privacy.get("secret_values_printed") is not False:
+        errors.append("strict_gateway_metrics_privacy_secret_values_printed_must_be_false")
+    json_paths = metrics_privacy.get("json_metrics_sensitive_paths")
+    if not isinstance(json_paths, list):
+        errors.append("strict_gateway_metrics_privacy_json_paths_invalid")
+        json_paths = []
+    elif json_paths:
+        errors.append("strict_gateway_metrics_privacy_json_sensitive_paths_present")
+    if metrics_privacy.get("json_metrics_sensitive_paths_sha256") != canonical_digest(json_paths):
+        errors.append("strict_gateway_metrics_privacy_json_paths_digest_mismatch")
+    prom_tokens = metrics_privacy.get("prometheus_sensitive_tokens")
+    if not isinstance(prom_tokens, list):
+        errors.append("strict_gateway_metrics_privacy_prometheus_tokens_invalid")
+        prom_tokens = []
+    elif prom_tokens:
+        errors.append("strict_gateway_metrics_privacy_prometheus_sensitive_tokens_present")
+    if metrics_privacy.get("prometheus_sensitive_tokens_sha256") != canonical_digest(prom_tokens):
+        errors.append("strict_gateway_metrics_privacy_prometheus_tokens_digest_mismatch")
+    if metrics_privacy.get("json_metrics_secret_values_present") is not False:
+        errors.append("strict_gateway_metrics_privacy_json_secret_values_present")
+    if metrics_privacy.get("prometheus_secret_values_present") is not False:
+        errors.append("strict_gateway_metrics_privacy_prometheus_secret_values_present")
 
 
 def is_git_commit(value):
@@ -1670,6 +1712,7 @@ def validate_retrieval_quality_gate_stdout():
             strict_gate_json.get("behavior_config_binding"),
             strict_behavior_config,
         )
+        validate_strict_gateway_metrics_privacy(strict_gate_json)
         if isinstance(behavior_config, dict) and isinstance(strict_behavior_config, dict):
             if behavior_config != strict_behavior_config:
                 errors.append("retrieval_quality_behavior_config_strict_gateway_mismatch")
@@ -2805,6 +2848,98 @@ def validate_openwebui_admin_action_contract_gate_stdout():
             errors.append("openwebui_admin_action_contract_valve_keys_invalid")
 
 
+def validate_openwebui_admin_action_live_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("openwebui_admin_action"),
+        "tonglingyu.openwebui_admin_action_live_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("status") != "ok":
+        errors.append("openwebui_admin_action_status_invalid")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("openwebui_admin_action_secret_values_printed_must_be_false")
+    if gate_json.get("schema_version") != 1:
+        errors.append("openwebui_admin_action_schema_version_invalid")
+    if gate_json.get("function_id") != "tonglingyu_gateway_admin":
+        errors.append("openwebui_admin_action_function_id_invalid")
+    if gate_json.get("type") != "action":
+        errors.append("openwebui_admin_action_type_invalid")
+    if gate_json.get("is_active") is not True:
+        errors.append("openwebui_admin_action_inactive")
+    if gate_json.get("is_global") is not True:
+        errors.append("openwebui_admin_action_not_global")
+
+    required_actions = {
+        "metrics",
+        "trace",
+        "package",
+        "session",
+        "retrieval_failures",
+        "retrieval_failure",
+        "retrieval_failure_update",
+        "retrieval_failure_cluster",
+        "governance_tasks",
+        "governance_task",
+        "governance_task_create",
+        "governance_task_from_failure",
+        "governance_task_update",
+        "knowledge_patch_proposal",
+    }
+    required_api_paths = {
+        "/v1/admin/metrics",
+        "/v1/admin/traces/",
+        "/v1/admin/packages/",
+        "/v1/admin/sessions/",
+        "/v1/admin/retrieval-failures",
+        "/v1/admin/governance/tasks",
+        "/v1/admin/governance/proposals",
+    }
+    required_checks = (
+        "active_global_action",
+        "admin_role_guard_required",
+        "admin_role_denial_defined",
+        "required_valves_present",
+        "admin_key_not_printed",
+        "rqa_admin_actions_present",
+        "rqa_admin_api_paths_present",
+        "target_models_bound",
+    )
+    checks = gate_json.get("checks")
+    if not isinstance(checks, dict):
+        errors.append("openwebui_admin_action_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"openwebui_admin_action_check_failed={check}")
+    permission = gate_json.get("permission_boundary")
+    if not isinstance(permission, dict):
+        errors.append("openwebui_admin_action_permission_boundary_missing")
+    else:
+        if permission.get("admin_role_guard_required") is not True:
+            errors.append("openwebui_admin_action_admin_role_guard_missing")
+        if permission.get("admin_role_denial_defined") is not True:
+            errors.append("openwebui_admin_action_admin_role_denial_missing")
+        if permission.get("admin_key_valve_bound") is not True:
+            errors.append("openwebui_admin_action_admin_key_valve_unbound")
+        if permission.get("target_models_bound") is not True:
+            errors.append("openwebui_admin_action_target_models_unbound")
+        actions = permission.get("required_actions")
+        if not isinstance(actions, list) or set(actions) != required_actions:
+            errors.append("openwebui_admin_action_required_actions_mismatch")
+        api_paths = permission.get("required_api_paths")
+        if not isinstance(api_paths, list) or set(api_paths) != required_api_paths:
+            errors.append("openwebui_admin_action_required_api_paths_mismatch")
+    valve_keys = gate_json.get("valve_keys")
+    if not isinstance(valve_keys, list) or not set(valve_keys) >= {
+        "GATEWAY_BASE_URL",
+        "GATEWAY_ADMIN_API_KEY",
+        "TARGET_MODEL",
+        "TARGET_MODELS",
+    }:
+        errors.append("openwebui_admin_action_valve_keys_invalid")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -3303,6 +3438,7 @@ validate_performance_budget_gate_stdout()
 validate_api_contract_gate_stdout()
 validate_user_lifecycle_gate_stdout()
 validate_openwebui_admin_action_contract_gate_stdout()
+validate_openwebui_admin_action_live_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

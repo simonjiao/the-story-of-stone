@@ -805,6 +805,19 @@
   一致。saved report validator 会拒绝缺 binding 或 binding 与 strict Gateway
   行为配置不一致的 production-ready report；contract smoke 已覆盖 binding digest
   篡改。目标 production-ready 仍必须由真实 live strict Gateway gate 产出该证据。
+- Live Open WebUI admin Action gate 已升级为结构化
+  `tonglingyu.openwebui_admin_action_live_gate`：输出 active/global、valve keys、
+  admin role guard、role denied、RQA admin Action 覆盖、Gateway admin API path
+  覆盖、target model 绑定和 secret 输出边界。saved report validator 会拒绝
+  role guard 缺失、RQA Action/API 覆盖不完整或 valves 未绑定的 production-ready
+  report；contract smoke 已覆盖 live Action 权限边界篡改。目标 production-ready
+  仍必须由真实 live Open WebUI admin Action gate 产出该证据。
+- Strict Gateway live gate 已新增 `metrics_privacy`：递归检查 JSON metrics 是否
+  出现 query/question/trace/package/session/user 等高基数字段，检查 Prometheus
+  是否出现 query、trace、package、session、user 或鉴权 label，并确认已知 secret
+  值没有进入 metrics 输出。saved report validator 会拒绝 metrics privacy 摘要
+  缺失或含敏感 token 的 production-ready report；contract smoke 已覆盖
+  Prometheus sensitive token 篡改。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
@@ -844,9 +857,10 @@
   仍必须在目标 release run 中真实执行该 wrapper，并保存 automation artifact /
   release report / validator 输出，不能只引用本地人工命令。
 - RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；后续
-  production-ready 仍必须补齐 live Open WebUI admin Action、目标环境 live/load
-  性能和值守证据；Open WebUI admin Action source/fixture contract 已接入 release
-  readiness 必跑 gate，不能替代真实 live Action 验证。
+  production-ready 仍必须补齐目标环境 live Open WebUI admin Action 证据、目标环境
+  live/load 性能和值守证据；Open WebUI admin Action source/fixture contract 与
+  live Action gate schema 已接入 release readiness，不能替代真实 live Action
+  执行证据。
 
 ## 下一步
 

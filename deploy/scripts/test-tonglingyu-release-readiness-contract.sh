@@ -37,6 +37,7 @@ TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT="${WORK_DIR}/tampered-release-context-v
 TAMPERED_RUNTIME_IDENTITY_REPORT="${WORK_DIR}/tampered-runtime-identity-report.json"
 TAMPERED_RUNTIME_IDENTITY_IMAGES_REPORT="${WORK_DIR}/tampered-runtime-identity-images-report.json"
 TAMPERED_BEHAVIOR_BINDING_REPORT="${WORK_DIR}/tampered-behavior-binding-report.json"
+TAMPERED_STRICT_GATEWAY_METRICS_PRIVACY_REPORT="${WORK_DIR}/tampered-strict-gateway-metrics-privacy-report.json"
 TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
 TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
@@ -69,6 +70,7 @@ TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT="${WORK_DIR}/tampered-rqa-user-lifecyc
 TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_STDOUT_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-stdout-report.json"
 TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_CHECK_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-check-report.json"
 TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_ACTION_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-contract-action-report.json"
+TAMPERED_OPENWEBUI_ADMIN_ACTION_LIVE_REPORT="${WORK_DIR}/tampered-openwebui-admin-action-live-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -2019,6 +2021,17 @@ gate_stdout = {
         "behavior_config": behavior_config,
         "behavior_config_binding": behavior_config_binding,
         "checked_surfaces": ["tonglingyu-gateway:/healthz"],
+        "metrics_privacy": {
+            "object": "tonglingyu.strict_gateway_metrics_privacy",
+            "schema_version": 1,
+            "json_metrics_sensitive_paths": [],
+            "json_metrics_sensitive_paths_sha256": digest_json([]),
+            "prometheus_sensitive_tokens": [],
+            "prometheus_sensitive_tokens_sha256": digest_json([]),
+            "json_metrics_secret_values_present": False,
+            "prometheus_secret_values_present": False,
+            "secret_values_printed": False,
+        },
         "model_ids": ["tonglingyu"],
         "running_images": {
             "generated_at": "2026-05-15T00:00:10+00:00",
@@ -2061,9 +2074,62 @@ gate_stdout = {
         "type": "filter",
     },
     "openwebui_admin_action": {
+        "checks": {
+            "active_global_action": True,
+            "admin_key_not_printed": True,
+            "admin_role_denial_defined": True,
+            "admin_role_guard_required": True,
+            "required_valves_present": True,
+            "rqa_admin_actions_present": True,
+            "rqa_admin_api_paths_present": True,
+            "target_models_bound": True,
+        },
         "function_id": "tonglingyu_gateway_admin",
+        "is_active": True,
+        "is_global": True,
+        "object": "tonglingyu.openwebui_admin_action_live_gate",
+        "permission_boundary": {
+            "admin_key_valve_bound": True,
+            "admin_role_denial_defined": True,
+            "admin_role_guard_required": True,
+            "required_actions": [
+                "metrics",
+                "trace",
+                "package",
+                "session",
+                "retrieval_failures",
+                "retrieval_failure",
+                "retrieval_failure_update",
+                "retrieval_failure_cluster",
+                "governance_tasks",
+                "governance_task",
+                "governance_task_create",
+                "governance_task_from_failure",
+                "governance_task_update",
+                "knowledge_patch_proposal",
+            ],
+            "required_api_paths": [
+                "/v1/admin/metrics",
+                "/v1/admin/traces/",
+                "/v1/admin/packages/",
+                "/v1/admin/sessions/",
+                "/v1/admin/retrieval-failures",
+                "/v1/admin/governance/tasks",
+                "/v1/admin/governance/proposals",
+            ],
+            "target_models_bound": True,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "source": "admin-api",
         "status": "ok",
         "type": "action",
+        "valve_keys": [
+            "GATEWAY_ADMIN_API_KEY",
+            "GATEWAY_BASE_URL",
+            "TARGET_MODEL",
+            "TARGET_MODELS",
+        ],
     },
 }
 gate_stdout["rqa_migration_preflight"]["migration_preflight_sha256"] = hashlib.sha256(
@@ -2700,6 +2766,42 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_behavior_binding_stdout}" \
   '"strict_gateway_behavior_config_binding_behavior_config_digest_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_STRICT_GATEWAY_METRICS_PRIVACY_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") != "strict_gateway":
+        continue
+    gate_json = json.loads(gate["stdout_tail"][-1])
+    metrics_privacy = gate_json["metrics_privacy"]
+    metrics_privacy["prometheus_sensitive_tokens"] = ["trace_id"]
+    metrics_privacy["prometheus_sensitive_tokens_sha256"] = hashlib.sha256(
+        json.dumps(
+            metrics_privacy["prometheus_sensitive_tokens"],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_strict_gateway_metrics_privacy_stdout="${WORK_DIR}/tampered-strict-gateway-metrics-privacy.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_STRICT_GATEWAY_METRICS_PRIVACY_REPORT}" \
+  >"${tampered_strict_gateway_metrics_privacy_stdout}"; then
+  echo "production-ready reports must reject strict Gateway metrics privacy leaks" >&2
+  exit 1
+fi
+assert_report "${tampered_strict_gateway_metrics_privacy_stdout}" \
+  '"strict_gateway_metrics_privacy_prometheus_sensitive_tokens_present" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
 import json
@@ -3470,6 +3572,33 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_openwebui_admin_action_contract_action_stdout}" \
   '"openwebui_admin_action_contract_required_actions_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_OPENWEBUI_ADMIN_ACTION_LIVE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "openwebui_admin_action":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["checks"]["admin_role_guard_required"] = False
+        gate_json["permission_boundary"]["admin_role_guard_required"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_openwebui_admin_action_live_stdout="${WORK_DIR}/tampered-openwebui-admin-action-live.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_OPENWEBUI_ADMIN_ACTION_LIVE_REPORT}" >"${tampered_openwebui_admin_action_live_stdout}"; then
+  echo "production-ready reports must reject weak live Open WebUI admin Action permission boundary" >&2
+  exit 1
+fi
+assert_report "${tampered_openwebui_admin_action_live_stdout}" \
+  '"openwebui_admin_action_check_failed=admin_role_guard_required" in report["errors"]'
+assert_report "${tampered_openwebui_admin_action_live_stdout}" \
+  '"openwebui_admin_action_admin_role_guard_missing" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json

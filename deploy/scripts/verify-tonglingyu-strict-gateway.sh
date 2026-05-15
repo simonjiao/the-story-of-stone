@@ -547,6 +547,88 @@ if not isinstance(retrieval_failure_metrics.get("by_status"), dict):
 if not isinstance(retrieval_failure_metrics.get("by_type"), dict):
     errors.append("metrics.rqa.retrieval_failures.by_type must be an object")
 
+
+def sensitive_metric_paths(value, prefix="$"):
+    hits = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower()
+            child_prefix = f"{prefix}.{key}"
+            if normalized in {
+                "query",
+                "question",
+                "raw_query",
+                "raw_question",
+                "prompt",
+                "trace_id",
+                "trace_ids",
+                "package_id",
+                "package_ids",
+                "session_id",
+                "session_ids",
+                "user_id",
+                "user_ids",
+            }:
+                hits.append(child_prefix)
+            hits.extend(sensitive_metric_paths(child, child_prefix))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            hits.extend(sensitive_metric_paths(child, f"{prefix}[{index}]"))
+    return hits
+
+
+metrics_sensitive_paths = sensitive_metric_paths(metrics)
+prometheus_forbidden_needles = [
+    "query",
+    "question",
+    "raw_query",
+    "raw_question",
+    "trace_id",
+    "package_id",
+    "session_id",
+    "user_id",
+    "x-api-key",
+    "authorization",
+    "bearer ",
+]
+prometheus_sensitive_tokens = [
+    needle
+    for needle in prometheus_forbidden_needles
+    if needle in prometheus.lower()
+]
+known_secret_values = [
+    value.strip()
+    for value in (
+        os.environ.get("TONGLINGYU_ADMIN_API_KEY", ""),
+        os.environ.get("TONGLINGYU_GATEWAY_API_KEY", ""),
+        os.environ.get("OPENAI_API_KEY", ""),
+        os.environ.get("AGENT_BRIDGE_SECRET", ""),
+    )
+    if value and len(value.strip()) >= 8
+]
+metrics_encoded = json.dumps(metrics, ensure_ascii=True, sort_keys=True)
+secret_values_in_metrics = any(secret in metrics_encoded for secret in known_secret_values)
+secret_values_in_prometheus = any(secret in prometheus for secret in known_secret_values)
+metrics_privacy = {
+    "object": "tonglingyu.strict_gateway_metrics_privacy",
+    "schema_version": 1,
+    "json_metrics_sensitive_paths": metrics_sensitive_paths,
+    "json_metrics_sensitive_paths_sha256": canonical_digest(metrics_sensitive_paths),
+    "prometheus_sensitive_tokens": prometheus_sensitive_tokens,
+    "prometheus_sensitive_tokens_sha256": canonical_digest(prometheus_sensitive_tokens),
+    "json_metrics_secret_values_present": secret_values_in_metrics,
+    "prometheus_secret_values_present": secret_values_in_prometheus,
+    "secret_values_printed": False,
+}
+if metrics_sensitive_paths:
+    errors.append("metrics JSON must not expose query, trace, package, session, or user identifiers")
+if prometheus_sensitive_tokens:
+    errors.append("prometheus metrics must not expose query, trace, package, session, user, or auth labels")
+if secret_values_in_metrics:
+    errors.append("metrics JSON must not expose secret values")
+if secret_values_in_prometheus:
+    errors.append("prometheus metrics must not expose secret values")
+
 runtime_policy_digest = optional_file_sha256(
     repo_dir / "agent-platform" / "crates" / "tonglingyu-runtime" / "src" / "lib.rs"
 )
@@ -916,6 +998,7 @@ print(json.dumps(
         "stream_evidence_package_id": stream_package_id,
         "behavior_config": behavior_config,
         "behavior_config_binding": behavior_config_binding,
+        "metrics_privacy": metrics_privacy,
         "running_images": running_images,
     },
     ensure_ascii=True,
