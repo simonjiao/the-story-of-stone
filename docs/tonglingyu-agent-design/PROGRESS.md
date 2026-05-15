@@ -398,9 +398,10 @@
   状态的负向路径。
 - Open WebUI 已补 `tonglingyu_gateway_admin` Action Function：只读查询 Gateway
   metrics、trace、evidence package audit 和 session，Function 内强制
-  `__user__.role == "admin"` 后才调用 `/v1/admin/*`；普通用户不会触发 Gateway
-  admin 请求。已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入
-  release readiness live gate。
+  `__user__.role == "admin"` 后才调用 Gateway admin read/update API；普通用户只会
+  触发 `/v1/admin/access-denials` 写脱敏拒绝审计，不会读取或修改 admin 资源。
+  已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入 release
+  readiness live gate。
 - `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已补 Gateway
   Admin Action contract smoke，覆盖 Action 编译和单测、verify fixture 正向、
   admin key 为空、缺少 admin role guard、缺少 admin action endpoint，以及
@@ -521,15 +522,20 @@
   blocker 为空，`eval_failure_records=0`。本轮修复包含 source license /
   usage / attribution metadata 入库与校验、version boundary 与程乙正文检索
   策略校准，以及脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
-- RQA Milestone E 已进入进行中状态：
+- RQA Milestone E 已完成代码切片：
   Gateway admin trace 和 package audit 现在暴露 `retrieval_quality_summary`、
   `retrieval_failure_ids` 与 admin detail failure 列表；JSON metrics 新增
-  `rqa.retrieval_failures.total/by_status/by_type`，Prometheus 新增 bounded 的
-  retrieval failure total/status/type 指标；新增 admin retrieval failure
+  `rqa.retrieval_failures.total/by_status/by_type`，Prometheus 只保留 bounded
+  labels，覆盖 Gateway info、review status、retrieval failure status/type 和
+  audit event type，不输出 trace/user/question/package id；新增 admin retrieval failure
   list/read/update API，并在 Open WebUI admin Action 中提供 list/read/update 入口。
-  `admin update` 支持 `if_match_updated_at` 冲突检测，runtime 状态更新继续写
-  `retrieval_failure_status_updated` audit event。`cargo test -p tonglingyu-gateway`
-  已通过 25 个测试，Open WebUI admin Action 单测已通过 10 个测试。
+  admin list/read/update 成功、not-found 和 conflict 路径都会写访问审计；
+  admin auth failure、Open WebUI role denial 和 rate-limit denial 都写脱敏
+  `rqa_admin_access_denied`。`admin update` 支持 `if_match_updated_at` 冲突检测，
+  重复同 payload 且未带 CAS 时 runtime update no-op，不重复写状态更新 audit。
+  普通 completion 和 streaming completion 均有 RQA 内部字段不可见测试。
+  `cargo test -p tonglingyu-gateway` 已通过 36 个测试，Open WebUI admin Action
+  单测已通过 10 个测试。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -550,10 +556,10 @@
 
 ## 下一步
 
-1. 补齐 RQA Milestone E 剩余项：auth failure / role denial / rate-limit denial
-   脱敏 audit、update idempotency、404 枚举语义和 endpoint-level 拒绝测试。
-2. 实现 RQA Milestone F/G：release quality gate 和 saved report validator，使
+1. 实现 RQA Milestone F/G：release quality gate 和 saved report validator，使
    production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
+2. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
+   retention/prune、runbook/alert/rollback 和 production report 运维证据。
 3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

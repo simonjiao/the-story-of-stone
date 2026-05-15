@@ -3988,6 +3988,14 @@ pub fn update_retrieval_failure_status_checked(
     };
     let reviewer = reviewer.and_then(|value| bounded_optional_text(value, 80));
     let review_note = review_note.and_then(|value| bounded_optional_text(value, 480));
+    if let Some(current) = load_retrieval_failure(conn, failure_id)? {
+        let same_payload = current.human_review_status == human_review_status
+            && current.reviewer == reviewer
+            && current.review_note == review_note;
+        if same_payload && expected_updated_at.is_none() {
+            return Ok(Some(current));
+        }
+    }
     let updated = conn.execute(
         r#"
         UPDATE retrieval_failures

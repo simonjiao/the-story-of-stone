@@ -272,6 +272,7 @@ struct AppState {
     max_body_bytes: usize,
     rate_limit_per_minute: usize,
     rate_limiter: Arc<GatewayRateLimiter>,
+    admin_rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
     profiles: InternalProfiles,
     started_at: String,
@@ -424,6 +425,13 @@ struct RetrievalFailureUpdateRequest {
     if_match_updated_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminAccessDenialRequest {
+    action: Option<String>,
+    denial: String,
+    model: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PackageAccessContext {
     subject: String,
@@ -455,6 +463,50 @@ fn gateway_auth_and_rate_limit(
     }
 }
 
+fn admin_auth_and_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+) -> AuthResult<String> {
+    let request_subject = request_subject(headers);
+    let subject = match admin_auth_subject(state, headers) {
+        Ok(subject) => subject,
+        Err(response) => {
+            let subject_ref = audit_subject_ref(&request_subject);
+            let _ = append_admin_audit_event(
+                &state.db,
+                "rqa_admin_access_denied",
+                &subject_ref,
+                json!({
+                    "action": action,
+                    "denial": "auth_failed",
+                    "subject_ref": subject_ref,
+                }),
+            );
+            return Err(response);
+        }
+    };
+    let decision = state.admin_rate_limiter.check(&subject);
+    if decision.allowed {
+        Ok(subject)
+    } else {
+        let subject_ref = audit_subject_ref(&subject);
+        let _ = append_admin_audit_event(
+            &state.db,
+            "rqa_admin_access_denied",
+            &subject_ref,
+            json!({
+                "action": action,
+                "denial": "rate_limited",
+                "subject_ref": subject_ref,
+                "limit_per_minute": decision.limit,
+                "retry_after_secs": decision.retry_after_secs,
+            }),
+        );
+        Err(Box::new(rate_limit_response(&decision, None)))
+    }
+}
+
 fn admin_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
     let keys = if state.admin_api_keys.is_empty() && state.allow_admin_with_gateway_key {
         &state.gateway_api_keys
@@ -470,9 +522,7 @@ fn authorize_with_keys(
     code: &str,
     require_configured_key: bool,
 ) -> AuthResult<String> {
-    let subject = header_value(headers, "x-tonglingyu-subject")
-        .or_else(|| header_value(headers, "x-open-webui-user-id"))
-        .unwrap_or_else(|| "open-webui".to_string());
+    let subject = request_subject(headers);
     if expected_keys.is_empty() && !require_configured_key {
         return Ok(subject);
     }
@@ -502,6 +552,17 @@ fn authorize_with_keys(
             None,
         )))
     }
+}
+
+fn request_subject(headers: &HeaderMap) -> String {
+    header_value(headers, "x-tonglingyu-subject")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .unwrap_or_else(|| "open-webui".to_string())
+}
+
+fn audit_subject_ref(subject: &str) -> String {
+    let digest = hash_text(subject);
+    format!("sha256:{}", &digest[..16])
 }
 
 fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
@@ -784,6 +845,15 @@ fn safe_error_detail(_error: &anyhow::Error) -> &'static str {
     "internal details are hidden"
 }
 
+fn bounded_audit_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(max_chars).collect())
+    }
+}
+
 fn elapsed_ms(started: Instant) -> u128 {
     started.elapsed().as_millis()
 }
@@ -884,6 +954,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         max_body_bytes: args.max_body_bytes,
         rate_limit_per_minute: args.rate_limit_per_minute,
         rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
+        admin_rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
         profiles: InternalProfiles {
             main: args.profile_main,
@@ -913,6 +984,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/metrics/prometheus",
             get(prometheus_metrics_endpoint),
+        )
+        .route(
+            "/v1/admin/access-denials",
+            post(admin_access_denial_endpoint),
         )
         .route(
             "/v1/admin/retrieval-failures",
@@ -2919,7 +2994,7 @@ async fn trace_endpoint(
     headers: HeaderMap,
     AxumPath(trace_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "trace_read") {
         return *response;
     }
     match load_trace(&state.db, &trace_id) {
@@ -2942,7 +3017,7 @@ async fn admin_package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "package_audit_read") {
         return *response;
     }
     match load_package_audit(&state.db, &package_id) {
@@ -2965,7 +3040,7 @@ async fn session_endpoint(
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "session_read") {
         return *response;
     }
     match load_session(&state.db, &session_id) {
@@ -2984,7 +3059,7 @@ async fn session_endpoint(
 }
 
 async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "metrics_read") {
         return *response;
     }
     match load_metrics(&state) {
@@ -3006,7 +3081,7 @@ async fn retrieval_failures_endpoint(
     headers: HeaderMap,
     Query(params): Query<BTreeMap<String, String>>,
 ) -> Response {
-    let actor = match admin_auth_subject(&state, &headers) {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_list") {
         Ok(actor) => actor,
         Err(response) => return *response,
     };
@@ -3016,7 +3091,7 @@ async fn retrieval_failures_endpoint(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_retrieval_failure_filter",
-                &safe_error_detail(&error),
+                safe_error_detail(&error),
                 None,
             );
         }
@@ -3033,6 +3108,8 @@ async fn retrieval_failures_endpoint(
                     "page_size": list.limit,
                     "offset": list.offset,
                     "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
                 }),
             ) {
                 tracing::warn!(error = %error, "retrieval failure admin list audit failed");
@@ -3067,7 +3144,7 @@ async fn retrieval_failure_endpoint(
     headers: HeaderMap,
     AxumPath(failure_id): AxumPath<String>,
 ) -> Response {
-    let actor = match admin_auth_subject(&state, &headers) {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_read") {
         Ok(actor) => actor,
         Err(response) => return *response,
     };
@@ -3083,7 +3160,9 @@ async fn retrieval_failure_endpoint(
                 json!({
                     "action": "read",
                     "failure_id": failure_id,
+                    "trace_id": failure.get("trace_id").and_then(Value::as_str),
                     "result_count": 1,
+                    "result": "found",
                 }),
             ) {
                 tracing::warn!(error = %error, "retrieval failure admin read audit failed");
@@ -3101,7 +3180,29 @@ async fn retrieval_failure_endpoint(
             }))
             .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
         Err(error) => {
             tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure read failed");
             error_response(
@@ -3120,7 +3221,7 @@ async fn update_retrieval_failure_endpoint(
     AxumPath(failure_id): AxumPath<String>,
     Json(payload): Json<RetrievalFailureUpdateRequest>,
 ) -> Response {
-    let actor = match admin_auth_subject(&state, &headers) {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_update") {
         Ok(actor) => actor,
         Err(response) => return *response,
     };
@@ -3155,9 +3256,11 @@ async fn update_retrieval_failure_endpoint(
                 json!({
                     "action": "update",
                     "failure_id": &record.failure_id,
+                    "trace_id": failure.get("trace_id").and_then(Value::as_str),
                     "human_review_status": &record.human_review_status,
                     "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
                     "result_count": 1,
+                    "result": "updated",
                 }),
             ) {
                 tracing::warn!(error = %error, "retrieval failure admin update audit failed");
@@ -3175,19 +3278,78 @@ async fn update_retrieval_failure_endpoint(
             }))
             .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
-        Err(error) if error.to_string().contains("update conflict") => error_response(
-            StatusCode::CONFLICT,
-            "retrieval_failure_update_conflict",
-            "retrieval failure update conflict",
-            None,
-        ),
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "human_review_status": &payload.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) if error.to_string().contains("update conflict") => {
+            let trace_id = state
+                .runtime_store
+                .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+                .ok()
+                .flatten()
+                .and_then(|failure| {
+                    failure
+                        .get("trace_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                });
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id": &failure_id,
+                    "trace_id": trace_id,
+                    "human_review_status": &payload.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "retrieval_failure_update_conflict",
+                "retrieval failure update conflict",
+                None,
+            )
+        }
         Err(error) => {
             tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure update failed");
             error_response(
                 StatusCode::BAD_REQUEST,
                 "retrieval_failure_update_failed",
-                &safe_error_detail(&error),
+                safe_error_detail(&error),
                 None,
             )
         }
@@ -3198,7 +3360,7 @@ async fn prometheus_metrics_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "prometheus_metrics_read") {
         return *response;
     }
     match load_prometheus_metrics(&state) {
@@ -3217,6 +3379,58 @@ async fn prometheus_metrics_endpoint(
             )
         }
     }
+}
+
+async fn admin_access_denial_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<AdminAccessDenialRequest>,
+) -> Response {
+    let subject = match admin_auth_and_rate_limit(&state, &headers, "admin_access_denial_report") {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let denial = payload.denial.trim();
+    if !matches!(denial, "role_denied") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_admin_access_denial",
+            "invalid admin access denial",
+            None,
+        );
+    }
+    let subject_ref = audit_subject_ref(&subject);
+    let admin_trace_id = match append_admin_audit_event(
+        &state.db,
+        "rqa_admin_access_denied",
+        &subject_ref,
+        json!({
+            "action": bounded_audit_text(payload.action.as_deref(), 64)
+                .unwrap_or_else(|| "unknown".to_string()),
+            "denial": denial,
+            "subject_ref": subject_ref,
+            "model": bounded_audit_text(payload.model.as_deref(), 80),
+            "reported_by": "openwebui_admin_action",
+        }),
+    ) {
+        Ok(admin_trace_id) => admin_trace_id,
+        Err(error) => {
+            tracing::warn!(error = %error, "admin access denial audit failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "admin_audit_failed",
+                "admin audit failed",
+                None,
+            );
+        }
+    };
+    Json(json!({
+        "object": "tonglingyu.admin_access_denial_audit",
+        "schema_version": "tonglingyu-admin-access-denial-v1",
+        "admin_trace_id": admin_trace_id,
+        "recorded": true,
+    }))
+    .into_response()
 }
 
 async fn chat_completions(
@@ -4081,6 +4295,7 @@ fn append_admin_audit_event(
 ) -> Result<String> {
     let admin_trace_id = format!("admin-{}", uuid::Uuid::now_v7().simple());
     let conn = open_db(db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
     append_runtime_audit_event(
         &conn,
         &admin_trace_id,
@@ -4350,13 +4565,8 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
-        escape_metric_label(&state.model_id),
-        escape_metric_label(&state.profiles.main),
-        escape_metric_label(&state.profiles.reviewer),
-        escape_metric_label(agent_runtime_mode.as_str()),
-        state.rate_limit_per_minute,
-        state.max_body_bytes
+        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\"}} 1",
+        bounded_metric_enum_label(agent_runtime_mode.as_str(), &["minimal", "hermes"]),
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -4382,43 +4592,61 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         lines.push(format!("# TYPE {metric} gauge"));
         lines.push(format!("{metric} {count}"));
     }
-    for (status, count) in runtime_stats.review_status {
+    for (status, count) in
+        bounded_metric_count_map(runtime_stats.review_status, &["passed", "needs_revision"])
+    {
         lines.push(format!(
             "tonglingyu_review_status_total{{status=\"{}\"}} {}",
-            escape_metric_label(&status),
-            count
+            status, count
         ));
     }
-    for (status, count) in runtime_stats.retrieval_failure_status {
+    for (status, count) in bounded_metric_count_map(
+        runtime_stats.retrieval_failure_status,
+        &["open", "in_review", "resolved", "wontfix"],
+    ) {
         lines.push(format!(
             "tonglingyu_retrieval_failures_by_status_total{{status=\"{}\"}} {}",
-            bounded_metric_enum_label(&status, &["open", "in_review", "resolved", "wontfix"]),
-            count
+            status, count
         ));
     }
-    for (failure_type, count) in runtime_stats.retrieval_failure_type {
+    for (failure_type, count) in bounded_metric_count_map(
+        runtime_stats.retrieval_failure_type,
+        &[
+            "no_evidence_selected",
+            "expected_evidence_missing",
+            "missing_required_evidence_type",
+            "exact_term_missing",
+            "source_usage_metadata_incomplete",
+            "reviewer_evidence_insufficient",
+            "quality_report_not_passed",
+        ],
+    ) {
         lines.push(format!(
             "tonglingyu_retrieval_failures_by_type_total{{failure_type=\"{}\"}} {}",
-            bounded_metric_enum_label(
-                &failure_type,
-                &[
-                    "no_evidence_selected",
-                    "expected_evidence_missing",
-                    "missing_required_evidence_type",
-                    "exact_term_missing",
-                    "source_usage_metadata_incomplete",
-                    "reviewer_evidence_insufficient",
-                    "quality_report_not_passed",
-                ]
-            ),
-            count
+            failure_type, count
         ));
     }
-    for (event_type, count) in runtime_stats.audit_event_types {
+    for (event_type, count) in bounded_metric_count_map(
+        runtime_stats.audit_event_types,
+        &[
+            "agent_runtime_profile_draft_consumed",
+            "agent_runtime_profile_step_executed",
+            "agent_runtime_profile_execution_summarized",
+            "evidence_package_created",
+            "evidence_package_replayed",
+            "retrieval_failure_recorded",
+            "retrieval_failure_status_updated",
+            "retrieval_failure_admin_list",
+            "retrieval_failure_admin_read",
+            "retrieval_failure_admin_update",
+            "rqa_admin_access_denied",
+            "reviewer_completed",
+            "runtime_profile_step_completed",
+        ],
+    ) {
         lines.push(format!(
             "tonglingyu_audit_events_by_type_total{{event_type=\"{}\"}} {}",
-            escape_metric_label(&event_type),
-            count
+            event_type, count
         ));
     }
     lines.push(String::new());
@@ -4427,6 +4655,18 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
 
 fn escape_metric_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn bounded_metric_count_map(
+    values: BTreeMap<String, i64>,
+    allowed: &[&str],
+) -> BTreeMap<String, i64> {
+    let mut bounded = BTreeMap::new();
+    for (value, count) in values {
+        let label = bounded_metric_enum_label(&value, allowed);
+        *bounded.entry(label).or_insert(0) += count;
+    }
+    bounded
 }
 
 fn bounded_metric_enum_label(value: &str, allowed: &[&str]) -> String {
@@ -4654,6 +4894,7 @@ mod tests {
             max_body_bytes: 1024 * 1024,
             rate_limit_per_minute: 120,
             rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
+            admin_rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
             retention_days: 30,
             profiles: InternalProfiles {
                 main: "honglou-main".to_string(),
@@ -4701,6 +4942,25 @@ mod tests {
             })
             .expect("seed retrieval failure")
             .failure_id
+    }
+
+    fn admin_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "admin-1".parse().unwrap());
+        headers
+    }
+
+    fn audit_event_count(db_path: &Path, event_type: &str) -> i64 {
+        let conn = open_db(db_path).expect("db opens");
+        count_where(&conn, "audit_events", "event_type = ?1", event_type).expect("audit count")
+    }
+
+    async fn response_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body reads");
+        String::from_utf8(bytes.to_vec()).expect("response body is utf-8")
     }
 
     #[test]
@@ -4930,6 +5190,9 @@ mod tests {
         assert!(prometheus.contains(
             "tonglingyu_retrieval_failures_by_type_total{failure_type=\"quality_report_not_passed\"} 1"
         ));
+        assert!(prometheus.contains("tonglingyu_gateway_info{agent_runtime_mode="));
+        assert!(!prometheus.contains("main_profile="));
+        assert!(!prometheus.contains("reviewer_profile="));
         assert!(!prometheus.contains("trace-admin-metrics-test"));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -4989,6 +5252,317 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_denies_unauthorized_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-auth-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response =
+            retrieval_failures_endpoint(State(state), HeaderMap::new(), Query(BTreeMap::new()))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_denies_gateway_key_subject_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-user-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response =
+            retrieval_failures_endpoint(State(state), headers, Query(BTreeMap::new())).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_rate_limit_denial_is_audited() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-rate-limit");
+        let mut state = test_app_state(db_path.clone());
+        state.admin_rate_limiter = Arc::new(GatewayRateLimiter::new(1, Duration::from_secs(60)));
+        let state = Arc::new(state);
+        let headers = admin_headers();
+
+        let first = retrieval_failures_endpoint(
+            State(state.clone()),
+            headers.clone(),
+            Query(BTreeMap::new()),
+        )
+        .await;
+        let second =
+            retrieval_failures_endpoint(State(state), headers, Query(BTreeMap::new())).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn admin_access_denial_endpoint_records_role_denial_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-role-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = admin_headers();
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response = admin_access_denial_endpoint(
+            State(state),
+            headers,
+            Json(AdminAccessDenialRequest {
+                action: Some("metrics".to_string()),
+                denial: "role_denied".to_string(),
+                model: Some(DEFAULT_MODEL_ID.to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_read_not_found_is_redacted() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-not-found");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath("rf-does-not-exist".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_read"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_read_success_writes_access_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-read-audit");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-read-audit");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response =
+            retrieval_failure_endpoint(State(state), admin_headers(), AxumPath(failure_id)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_read"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_repeated_payload_is_idempotent() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-idempotent");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-idempotent");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let first = update_retrieval_failure_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(failure_id.clone()),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "in_review".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("reviewing".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+        let second = update_retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "in_review".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("reviewing".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_status_updated"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            2
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_denies_gateway_key_subject_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-user-denial");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-update-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response = update_retrieval_failure_endpoint(
+            State(state),
+            headers,
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "resolved".to_string(),
+                reviewer: Some("user-1".to_string()),
+                review_note: Some("should be denied".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            0
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_conflict_writes_access_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-conflict");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-conflict");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let failure = runtime_store
+            .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+            .expect("failure reads")
+            .expect("failure exists");
+        let stale_updated_at = failure["updated_at"]
+            .as_str()
+            .expect("updated_at is present")
+            .to_string();
+        runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "in_review",
+                Some("admin-1"),
+                Some("reviewing"),
+                Some(&stale_updated_at),
+            )
+            .expect("first update succeeds");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = update_retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "resolved".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("fixed".to_string()),
+                if_match_updated_at: Some(stale_updated_at),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn public_completion_does_not_expose_rqa_internal_fields() {
+        let package = EvidencePackage {
+            package_id: "pkg-public-rqa-test".to_string(),
+            trace_id: "trace-public-rqa-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards: vec![eval_test_card("block-public-rqa-test")],
+            claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer passed".to_string(),
+            },
+        };
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some("session-public-rqa-test"),
+        );
+
+        let rendered = serde_json::to_string(&value).expect("completion serializes");
+
+        assert!(!rendered.contains("retrieval_failures"));
+        assert!(!rendered.contains("retrieval_quality_summary"));
+        assert!(!rendered.contains("quality_report"));
+    }
+
+    #[tokio::test]
+    async fn streaming_completion_does_not_expose_rqa_internal_fields() {
+        let package = EvidencePackage {
+            package_id: "pkg-public-rqa-stream-test".to_string(),
+            trace_id: "trace-public-rqa-stream-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards: vec![eval_test_card("block-public-rqa-stream-test")],
+            claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer passed".to_string(),
+            },
+        };
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some("session-public-rqa-stream-test"),
+        );
+
+        let rendered = response_text(streaming_response_from_completion_value(&value)).await;
+
+        assert!(!rendered.contains("retrieval_failures"));
+        assert!(!rendered.contains("retrieval_quality_summary"));
+        assert!(!rendered.contains("quality_report"));
     }
 
     #[test]

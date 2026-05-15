@@ -307,8 +307,9 @@ Milestone D）
 
 ## Milestone E：admin trace 和 metrics
 
-状态：进行中（2026-05-15；核心 admin surface / metrics 已接入，auth failure
-audit、idempotency 和完整 strict gate 覆盖仍未完成）
+状态：已完成代码切片（2026-05-15；admin surface、metrics、安全边界和
+endpoint-level 测试已闭合；整体 RQA production-ready 仍取决于 Milestone F-G
+release gate / saved report validator，以及 H-J 的治理、自动化和运维闭环）
 
 目标：管理员能从 trace/package/session 看到召回质量摘要和 failure 状态。
 
@@ -317,25 +318,25 @@ audit、idempotency 和完整 strict gate 覆盖仍未完成）
 - [x] admin package audit 可看到 quality issue 摘要。
 - [x] JSON metrics 暴露 retrieval failure count by status/type。
 - [x] Prometheus 暴露 RQA failure 有界指标，不暴露 query 原文和 secret。
-- [ ] Prometheus labels 只能使用 bounded enum，不允许 trace/user/question/package id。
+- [x] Prometheus labels 只能使用 bounded enum，不允许 trace/user/question/package id。
 - [x] JSON metrics 只暴露聚合计数和 bounded histogram，不返回原始 query。
 - [x] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
 - [x] admin API / Action 输出带 RQA schema version，字段变更必须有兼容测试。
 - [x] admin list/read 响应大小有上限，超限必须分页或截断。
-- [ ] admin list/read/update 都写访问审计，记录 actor、action、filter summary、
+- [x] admin list/read/update 都写访问审计，记录 actor、action、filter summary、
       page size、result count 和 trace id。
 - [x] admin list filter 和 sort 只能使用 allowlist 字段，未知字段 fail-closed。
-- [ ] 直接枚举不存在或未授权 RQA id 时返回脱敏错误，不泄露内部存在性细节。
-- [ ] RQA admin endpoints 继承或定义专用 rate limit / body limit。
-- [ ] admin auth failure、role denial 和 rate-limit denial 都写脱敏 audit event。
+- [x] 直接枚举不存在或未授权 RQA id 时返回脱敏错误，不泄露内部存在性细节。
+- [x] RQA admin endpoints 继承或定义专用 rate limit / body limit。
+- [x] admin auth failure、role denial 和 rate-limit denial 都写脱敏 audit event。
 - [x] retrieval failure 人工状态更新写入 audit event。
 - [x] 普通用户不能读取或更新 retrieval failure。
 - [x] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
-- [ ] 重复 admin update 使用 idempotency key 或等价机制去重。
-- [ ] 普通 chat response 不暴露完整 quality report 或 failure 内部字段。
-- [ ] streaming response 同样不泄露内部字段。
+- [x] 重复 admin update 使用 idempotency key 或等价机制去重。
+- [x] 普通 chat response 不暴露完整 quality report 或 failure 内部字段。
+- [x] streaming response 同样不泄露内部字段。
 - [x] strict Gateway gate 增加 admin trace quality summary 校验。
-- [ ] 单测覆盖 admin 可见、admin update、并发冲突、重复更新、普通响应不可见、
+- [x] 单测覆盖 admin 可见、admin update、并发冲突、重复更新、普通响应不可见、
       普通用户不可更新、admin read audit、filter allowlist、rate-limit denial。
 
 节点总结：
@@ -347,20 +348,29 @@ audit、idempotency 和完整 strict gate 覆盖仍未完成）
   Prometheus 新增 `tonglingyu_retrieval_failures_total`、
   `tonglingyu_retrieval_failures_by_status_total` 和
   `tonglingyu_retrieval_failures_by_type_total`，status/type label 只输出 allowlist
-  枚举或 `other`。
+  枚举或 `other`；Gateway info、review status、audit event type 也只保留 bounded
+  label，避免 trace/user/question/package 等高基数字段进入 Prometheus。
 - 新增 `/v1/admin/retrieval-failures` list、
   `/v1/admin/retrieval-failures/{failure_id}` read/update；Open WebUI admin Action
   新增 retrieval failure list/read/update 入口。
-- admin update 支持 `if_match_updated_at` 冲突检测；runtime update 仍写
-  `retrieval_failure_status_updated` audit event。
+- admin list/read/update 全路径写 admin access audit；not-found 和 conflict 返回
+  脱敏错误并写审计，not-found 使用 id hash，成功 read/update 记录 trace id。
+- admin endpoints 使用独立 admin rate limiter 并继承 Gateway body limit；auth
+  failure、rate-limit denial 和 Open WebUI Action role denial 都写
+  `rqa_admin_access_denied`，subject 只落 hashed ref。
+- admin update 支持 `if_match_updated_at` 冲突检测；重复同 payload 且未带 CAS
+  时 runtime update no-op，不重复写 `retrieval_failure_status_updated`，但保留
+  admin update attempt audit。
+- 普通 completion 和 streaming completion 已覆盖 RQA 内部字段负向测试，不输出
+  `retrieval_failures`、`retrieval_quality_summary` 或 `quality_report`。
 - 验证命令：
   `cargo test -p tonglingyu-runtime`（42 个测试通过）；
-  `cargo test -p tonglingyu-gateway`（25 个测试通过）；
+  `cargo test -p tonglingyu-gateway`（36 个测试通过）；
   `python3 -m unittest deploy/open-webui/functions/test_tonglingyu_gateway_admin_action.py`
   （10 个测试通过）。
-- 仍不能宣布 Milestone E 完成：auth failure / role denial / rate-limit denial 的
-  脱敏 audit、admin update idempotency、404 枚举语义、完整 endpoint-level
-  普通用户拒绝测试和 read/update audit 断言仍未全部闭合。
+- 仍不能宣布整体 RQA production-ready：Milestone F 的 release quality gate、
+  Milestone G 的 saved report validator、Milestone H 的治理任务、Milestone I 的
+  自动化强制执行和 Milestone J 的运维/恢复闭环尚未完成。
 
 ## Milestone F：release quality gate
 

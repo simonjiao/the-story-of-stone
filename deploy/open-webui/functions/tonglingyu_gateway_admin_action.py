@@ -62,19 +62,30 @@ class Action:
         __id__: Optional[str] = None,
         __model__: Optional[Any] = None,
     ) -> dict:
-        if _user_role(__user__) != "admin":
-            return _message("Tonglingyu Gateway admin access requires Open WebUI admin role.")
-
+        action_id = (__id__ or "metrics").strip() or "metrics"
+        subject = _user_subject(__user__)
         model = _request_model(body, __model__)
+        admin_key = str(self.valves.GATEWAY_ADMIN_API_KEY or "").strip()
+        if _user_role(__user__) != "admin":
+            audit_error = await self._report_access_denial(
+                admin_key,
+                subject,
+                action_id,
+                model,
+                __event_emitter__,
+            )
+            message = "Tonglingyu Gateway admin access requires Open WebUI admin role."
+            if audit_error:
+                message = f"{message} Access denial audit failed."
+            return _message(message)
+
         target_models = _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL)
         if model and model not in target_models:
             return _message(f"Tonglingyu Gateway admin action is not enabled for model {model!r}.")
 
-        admin_key = str(self.valves.GATEWAY_ADMIN_API_KEY or "").strip()
         if not admin_key:
             return _message("Tonglingyu Gateway admin key is not configured.")
 
-        action_id = (__id__ or "metrics").strip() or "metrics"
         try:
             if action_id == "metrics":
                 result = await _gateway_get(
@@ -82,6 +93,7 @@ class Action:
                     admin_key,
                     "/v1/admin/metrics",
                     self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
                 )
                 return _json_message("Gateway metrics", result, self.valves.RESPONSE_MAX_CHARS)
             if action_id == "trace":
@@ -95,6 +107,7 @@ class Action:
                 return await self._lookup_json(
                     "Gateway trace",
                     f"/v1/admin/traces/{urllib.parse.quote(trace_id, safe='')}",
+                    subject,
                 )
             if action_id == "package":
                 package_id = await _resolve_identifier(
@@ -107,6 +120,7 @@ class Action:
                 return await self._lookup_json(
                     "Evidence package audit",
                     f"/v1/admin/packages/{urllib.parse.quote(package_id, safe='')}",
+                    subject,
                 )
             if action_id == "session":
                 session_id = await _resolve_identifier(
@@ -119,11 +133,13 @@ class Action:
                 return await self._lookup_json(
                     "Gateway session",
                     f"/v1/admin/sessions/{urllib.parse.quote(session_id, safe='')}",
+                    subject,
                 )
             if action_id == "retrieval_failures":
                 return await self._lookup_json(
                     "RQA retrieval failures",
                     f"/v1/admin/retrieval-failures{_retrieval_failure_query(body)}",
+                    subject,
                 )
             if action_id == "retrieval_failure":
                 failure_id = await _resolve_identifier(
@@ -136,6 +152,7 @@ class Action:
                 return await self._lookup_json(
                     "RQA retrieval failure",
                     f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}",
+                    subject,
                 )
             if action_id == "retrieval_failure_update":
                 failure_id = await _resolve_identifier(
@@ -163,6 +180,7 @@ class Action:
                         "if_match_updated_at": _deep_get(body, "if_match_updated_at"),
                     },
                     self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
                 )
                 return _json_message(
                     "RQA retrieval failure update",
@@ -175,14 +193,47 @@ class Action:
 
         return _message(f"Unsupported Tonglingyu Gateway admin action: {action_id}")
 
-    async def _lookup_json(self, title: str, path: str) -> dict:
+    async def _lookup_json(self, title: str, path: str, subject: str) -> dict:
         result = await _gateway_get(
             self.valves.GATEWAY_BASE_URL,
             str(self.valves.GATEWAY_ADMIN_API_KEY or "").strip(),
             path,
             self.valves.REQUEST_TIMEOUT_SECONDS,
+            subject,
         )
         return _json_message(title, result, self.valves.RESPONSE_MAX_CHARS)
+
+    async def _report_access_denial(
+        self,
+        admin_key: str,
+        subject: str,
+        action_id: str,
+        model: str,
+        event_emitter: Optional[Any],
+    ) -> bool:
+        if not admin_key:
+            return False
+        try:
+            await _gateway_post_json(
+                self.valves.GATEWAY_BASE_URL,
+                admin_key,
+                "/v1/admin/access-denials",
+                {
+                    "action": action_id,
+                    "denial": "role_denied",
+                    "model": model,
+                },
+                self.valves.REQUEST_TIMEOUT_SECONDS,
+                subject,
+            )
+            return False
+        except GatewayAdminError:
+            await _emit_status(
+                event_emitter,
+                "error",
+                "Tonglingyu Gateway admin access denial audit failed.",
+            )
+            return True
 
 
 def _message(content: str) -> dict:
@@ -199,13 +250,20 @@ def _json_message(title: str, payload: Any, max_chars: int) -> dict:
     return {"content": f"### {title}\n\n```json\n{content}\n```"}
 
 
-async def _gateway_get(base_url: str, admin_key: str, path: str, timeout_seconds: int) -> Any:
+async def _gateway_get(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
     return await asyncio.to_thread(
         _gateway_get_blocking,
         base_url,
         admin_key,
         path,
         timeout_seconds,
+        subject,
     )
 
 
@@ -215,6 +273,7 @@ async def _gateway_patch_json(
     path: str,
     payload: dict,
     timeout_seconds: int,
+    subject: str,
 ) -> Any:
     return await asyncio.to_thread(
         _gateway_json_blocking,
@@ -224,11 +283,46 @@ async def _gateway_patch_json(
         "PATCH",
         payload,
         timeout_seconds,
+        subject,
     )
 
 
-def _gateway_get_blocking(base_url: str, admin_key: str, path: str, timeout_seconds: int) -> Any:
-    return _gateway_json_blocking(base_url, admin_key, path, "GET", None, timeout_seconds)
+async def _gateway_post_json(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    payload: dict,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return await asyncio.to_thread(
+        _gateway_json_blocking,
+        base_url,
+        admin_key,
+        path,
+        "POST",
+        payload,
+        timeout_seconds,
+        subject,
+    )
+
+
+def _gateway_get_blocking(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return _gateway_json_blocking(
+        base_url,
+        admin_key,
+        path,
+        "GET",
+        None,
+        timeout_seconds,
+        subject,
+    )
 
 
 def _gateway_json_blocking(
@@ -238,12 +332,15 @@ def _gateway_json_blocking(
     method: str,
     payload: Optional[dict],
     timeout_seconds: int,
+    subject: str,
 ) -> Any:
     if not str(base_url or "").strip():
         raise GatewayAdminError("Tonglingyu Gateway base URL is not configured.")
     url = f"{str(base_url).rstrip('/')}{path}"
     data = None
     headers = {"Authorization": f"Bearer {admin_key}"}
+    if subject:
+        headers["X-Tonglingyu-Subject"] = subject
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -379,6 +476,16 @@ def _request_model(body: dict, model: Optional[Any]) -> str:
 
 def _user_role(user: Optional[Any]) -> str:
     return str(_get(user, "role") or "user").strip().lower() or "user"
+
+
+def _user_subject(user: Optional[Any]) -> str:
+    subject = str(
+        _get(user, "id")
+        or _get(user, "email")
+        or _get(user, "name")
+        or "open-webui"
+    ).strip()
+    return subject[:128] or "open-webui"
 
 
 def _get(value: Any, key: str) -> Any:
