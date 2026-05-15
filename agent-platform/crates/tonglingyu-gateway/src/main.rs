@@ -7799,13 +7799,16 @@ mod tests {
     #[test]
     fn metrics_include_bounded_retrieval_failure_counts() {
         let db_path = temp_gateway_db_path("tonglingyu-admin-metrics-rqa");
-        seed_eval_retrieval_failure(&db_path, "trace-admin-metrics-test");
+        let trace_id = "trace-admin-metrics-test";
+        let case = eval_case_fixture("rqa-admin-failure");
+        let failure_id = seed_eval_retrieval_failure(&db_path, trace_id);
         let conn = open_db(&db_path).expect("gateway db opens");
         tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema exists");
         let state = test_app_state(db_path.clone());
 
         let metrics = load_metrics(&state).expect("metrics load");
         let prometheus = load_prometheus_metrics(&state).expect("prometheus metrics load");
+        let metrics_text = serde_json::to_string(&metrics).expect("metrics serializes");
 
         assert_eq!(metrics["counts"]["retrieval_failures"], json!(1));
         assert_eq!(metrics["counts"]["governance_tasks"], json!(1));
@@ -7845,7 +7848,20 @@ mod tests {
         assert!(prometheus.contains("max_body_bytes=\"1048576\""));
         assert!(!prometheus.contains("main_profile="));
         assert!(!prometheus.contains("reviewer_profile="));
-        assert!(!prometheus.contains("trace-admin-metrics-test"));
+        for leaked_value in [
+            trace_id,
+            "pkg-rqa-admin-failure",
+            failure_id.as_str(),
+            case.question,
+        ] {
+            assert!(!metrics_text.contains(leaked_value));
+            assert!(!prometheus.contains(leaked_value));
+        }
+        for forbidden_label in ["trace_id=", "package_id=", "question=", "query=", "user="] {
+            assert!(!prometheus.contains(forbidden_label));
+        }
+        assert!(!metrics_text.contains("\"trace_id\""));
+        assert!(!metrics_text.contains("\"package_id\""));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

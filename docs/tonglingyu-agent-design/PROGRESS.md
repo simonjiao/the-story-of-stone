@@ -672,10 +672,12 @@
   retrieval failure 与 governance task 的 admin list/read schema version、pagination
   metadata、max page size clamp、未知 filter 和非法 enum filter 的 400 边界，以及
   旧客户端解析、响应新增字段容忍、RQA admin mutation 未知 request body 字段 422
-  拒绝、admin payload 不返回完整原始 prompt。兼容策略版本为
+  拒绝、admin metrics/Prometheus 不输出原始 prompt、trace/package id 或 secret、
+  Prometheus label set 只使用低基数字段、admin payload 不返回完整原始 prompt。
+  兼容策略版本为
   `tonglingyu-rqa-api-compatibility-v1`；saved report validator 会拒绝缺 gate
-  stdout、contract check 失败、兼容策略漂移、未知 request body 未拒绝和负向状态码
-  不是 400 的 production-ready report。
+  stdout、contract check 失败、兼容策略漂移、metrics 边界漂移、未知 request body
+  未拒绝和负向状态码不是 400 的 production-ready report。
 - RQA 用户数据生命周期 gate 已接入 release readiness 必跑路径：
   `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh` 会启动本地 Gateway，验证
   export 脱敏 manifest、legal hold 阻断 anonymize、release legal hold、

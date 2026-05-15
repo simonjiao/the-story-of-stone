@@ -1338,6 +1338,10 @@ def validate_api_contract_gate_stdout():
         "additive_response_fields_tolerated",
         "unknown_mutation_fields_rejected",
         "schema_versions_stable",
+        "json_metrics_schema",
+        "json_metrics_excludes_raw_identifiers",
+        "prometheus_metrics_excludes_raw_identifiers",
+        "prometheus_label_set_bounded",
         "admin_payload_excludes_raw_prompts",
     )
     if not isinstance(checks, dict):

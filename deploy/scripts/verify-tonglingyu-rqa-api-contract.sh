@@ -193,6 +193,21 @@ def request_json(method, path, *, body=None, admin=False, extra_headers=None):
         return exc.code, parsed
 
 
+def request_text(method, path, *, admin=False):
+    headers = {"accept": "text/plain"}
+    headers["authorization"] = f"Bearer {admin_key if admin else gateway_key}"
+    req = request.Request(
+        f"{base_url}{path}",
+        method=method,
+        headers=headers,
+    )
+    try:
+        with request.urlopen(req, timeout=timeout_seconds) as response:
+            return response.status, response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
 def add_error(condition, code):
     if condition:
         errors.append(code)
@@ -249,6 +264,34 @@ def response_with_additive_fields(payload):
         if isinstance(record, dict):
             record["future_record_field"] = "ignored"
     return candidate
+
+
+def prometheus_label_set_bounded(metrics_text):
+    allowed_label_names = {
+        "agent_runtime_mode",
+        "event_type",
+        "failure_type",
+        "max_body_bytes",
+        "priority",
+        "rate_limit_per_minute",
+        "status",
+        "task_type",
+    }
+    forbidden_labels = ("trace_id=", "package_id=", "question=", "query=", "user=", "session_id=")
+    if any(label in metrics_text for label in forbidden_labels):
+        return False
+    for raw_line in metrics_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "{" not in line:
+            continue
+        label_text = line.split("{", 1)[1].split("}", 1)[0]
+        for assignment in label_text.split(","):
+            if not assignment:
+                continue
+            label_name = assignment.split("=", 1)[0]
+            if label_name not in allowed_label_names:
+                return False
+    return True
 
 
 chat_refs = []
@@ -334,6 +377,16 @@ task_read_status, task_read = request_json(
     f"/v1/admin/governance/tasks/{task_id}",
     admin=True,
 ) if task_id else (0, {})
+metrics_status, metrics_payload = request_json(
+    "GET",
+    "/v1/admin/metrics",
+    admin=True,
+)
+prometheus_status, prometheus_metrics = request_text(
+    "GET",
+    "/v1/admin/metrics/prometheus",
+    admin=True,
+)
 
 max_failure_list = failures_max_page.get("list")
 max_task_list = tasks_max_page.get("list")
@@ -400,6 +453,25 @@ if task_id:
     )[0]
 else:
     unknown_request_statuses["governance_task_update"] = 0
+privacy_probe_values = [
+    *raw_prompts,
+    gateway_key,
+    admin_key,
+    failure_id,
+    task_id,
+    *[
+        payload.get("trace_id", "")
+        for payload in chat_refs
+        if isinstance(payload, dict)
+    ],
+    *[
+        payload.get("evidence_package_id", "")
+        for payload in chat_refs
+        if isinstance(payload, dict)
+    ],
+]
+privacy_probe_values = [value for value in privacy_probe_values if value]
+metrics_encoded = json.dumps(metrics_payload, ensure_ascii=False, sort_keys=True)
 
 checks = {
     "retrieval_failure_list_schema": (
@@ -524,6 +596,22 @@ checks = {
         "governance_task_list": "tonglingyu-knowledge-governance-tasks-v2",
         "governance_task_read": "tonglingyu-knowledge-governance-tasks-v2",
     },
+    "json_metrics_schema": (
+        metrics_status == 200
+        and metrics_payload.get("object") == "tonglingyu.gateway_metrics"
+        and isinstance(metrics_payload.get("rqa"), dict)
+        and isinstance(metrics_payload.get("counts"), dict)
+    ),
+    "json_metrics_excludes_raw_identifiers": not any(
+        value in metrics_encoded for value in privacy_probe_values
+    ),
+    "prometheus_metrics_excludes_raw_identifiers": (
+        prometheus_status == 200
+        and not any(value in prometheus_metrics for value in privacy_probe_values)
+    ),
+    "prometheus_label_set_bounded": (
+        prometheus_status == 200 and prometheus_label_set_bounded(prometheus_metrics)
+    ),
 }
 visible_payload = json.dumps(
     {
