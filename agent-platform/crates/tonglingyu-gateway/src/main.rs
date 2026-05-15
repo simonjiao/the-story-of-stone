@@ -4514,6 +4514,19 @@ async fn update_retrieval_failure_endpoint(
         Ok(actor) => actor,
         Err(response) => return *response,
     };
+    let previous_status = state
+        .runtime_store
+        .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+        .ok()
+        .flatten()
+        .and_then(|failure| {
+            failure
+                .get("failure")
+                .and_then(Value::as_object)
+                .and_then(|failure| failure.get("human_review_status"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
     match state.runtime_store.update_retrieval_failure_status_checked(
         &failure_id,
         &payload.human_review_status,
@@ -4546,6 +4559,15 @@ async fn update_retrieval_failure_endpoint(
                     "action": "update",
                     "failure_id": &record.failure_id,
                     "trace_id": failure.get("trace_id").and_then(Value::as_str),
+                    "previous_status": previous_status,
+                    "new_status": &record.human_review_status,
+                    "reason_sha256": payload.review_note.as_deref().map(hash_text),
+                    "status_history": {
+                        "previous_status": previous_status,
+                        "new_status": &record.human_review_status,
+                        "reason_sha256": payload.review_note.as_deref().map(hash_text),
+                        "timestamp": &record.updated_at,
+                    },
                     "human_review_status": &record.human_review_status,
                     "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
                     "result_count": 1,
@@ -5231,6 +5253,16 @@ async fn update_governance_task_endpoint(
         Ok(actor) => actor,
         Err(response) => return *response,
     };
+    let previous_status = state
+        .runtime_store
+        .read_governance_task(&task_id)
+        .ok()
+        .flatten()
+        .and_then(|task| {
+            task.get("status")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
     let input = KnowledgeGovernanceTaskUpdateInput {
         status: payload.status,
         reviewer: payload.reviewer,
@@ -5262,6 +5294,15 @@ async fn update_governance_task_endpoint(
                     "task_id": &record.task_id,
                     "source_failure_id": &record.source_failure_id,
                     "trace_id": &record.trace_id,
+                    "previous_status": previous_status,
+                    "new_status": &record.status,
+                    "reason_sha256": record.review_note.as_deref().map(hash_text),
+                    "status_history": {
+                        "previous_status": previous_status,
+                        "new_status": &record.status,
+                        "reason_sha256": record.review_note.as_deref().map(hash_text),
+                        "timestamp": &record.updated_at,
+                    },
                     "status": &record.status,
                     "result_count": 1,
                     "result": "updated",
@@ -7586,6 +7627,18 @@ mod tests {
         count_where(&conn, "audit_events", "event_type = ?1", event_type).expect("audit count")
     }
 
+    fn latest_audit_event_payload(db_path: &Path, event_type: &str) -> Value {
+        let conn = open_db(db_path).expect("db opens");
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM audit_events WHERE event_type = ?1 ORDER BY created_at DESC, event_id DESC LIMIT 1",
+                params![event_type],
+                |row| row.get(0),
+            )
+            .expect("audit payload exists");
+        serde_json::from_str(&payload).expect("audit payload json")
+    }
+
     async fn response_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -8088,6 +8141,28 @@ mod tests {
             audit_event_count(&db_path, "retrieval_failure_admin_update"),
             2
         );
+        let runtime_update_payload =
+            latest_audit_event_payload(&db_path, "retrieval_failure_status_updated");
+        assert_eq!(runtime_update_payload["previous_status"], "open");
+        assert_eq!(runtime_update_payload["new_status"], "in_review");
+        assert_eq!(
+            runtime_update_payload["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            runtime_update_payload["status_history"]["new_status"],
+            "in_review"
+        );
+        assert!(
+            runtime_update_payload["status_history"]["reason_sha256"]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            runtime_update_payload["status_history"]["timestamp"]
+                .as_str()
+                .is_some()
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -8263,6 +8338,39 @@ mod tests {
         assert_eq!(
             audit_event_count(&db_path, "governance_task_status_updated"),
             1
+        );
+        let runtime_update_payload =
+            latest_audit_event_payload(&db_path, "governance_task_status_updated");
+        assert_eq!(runtime_update_payload["previous_status"], "open");
+        assert_eq!(runtime_update_payload["new_status"], "accepted");
+        assert_eq!(
+            runtime_update_payload["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            runtime_update_payload["status_history"]["new_status"],
+            "accepted"
+        );
+        assert!(
+            runtime_update_payload["status_history"]["reason_sha256"]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            runtime_update_payload["status_history"]["timestamp"]
+                .as_str()
+                .is_some()
+        );
+        let admin_update_payload =
+            latest_audit_event_payload(&db_path, "governance_task_admin_update");
+        assert_eq!(admin_update_payload["actor"], "admin-1");
+        assert_eq!(
+            admin_update_payload["payload"]["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            admin_update_payload["payload"]["status_history"]["new_status"],
+            "accepted"
         );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

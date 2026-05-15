@@ -714,6 +714,17 @@
   evidence 会 fail-closed。saved report validator 会拒绝缺
   `release_ops_readiness` stdout、缺 post-release live gate ref 或高基数告警标签
   的 production-ready report。
+- RQA Milestone M 的本地 incident/capacity gate 已开始落地：
+  Runtime/Gateway 管理员状态更新现在把 previous status、new status、reason
+  hash 和 timestamp 写入 status-history audit；新增
+  `deploy/scripts/verify-tonglingyu-rqa-incident-capacity.sh` 并接入 release
+  readiness required gate `rqa_incident_capacity`。该 gate 在 preflight 模式只
+  证明 emergency/degraded fail-closed 规则、无无界队列静态检查、幂等标记、
+  status-history audit 标记和 incident runbook 结构；live 模式缺 capacity、
+  load、audit-history 或 incident evidence 会 fail-closed。saved report
+  validator 会拒绝缺 gate stdout、emergency/degraded/persistence-degraded
+  状态、非 live 模式、缺代表性数量、缺 load measurement 或缺 incident/audit
+  evidence 的 production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
@@ -735,7 +746,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留和
    live existing_refs 恢复演练。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
-   post-release monitor、目标环境容量/负载、事故响应和审计完整性。
+   post-release monitor、目标环境 capacity/load、incident response drill 和
+   audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

@@ -38,6 +38,7 @@ required_gate_names = [
     "rqa_user_lifecycle",
     "security_scan",
     "release_ops_readiness",
+    "rqa_incident_capacity",
     "openwebui_admin_action_contract",
     *live_gate_names,
     "openwebui_browser_review",
@@ -260,6 +261,22 @@ gate_stdout_requirements = {
             "rollback",
             "rto_rpo",
             "runbook",
+        ],
+    },
+    "rqa_incident_capacity": {
+        "object": "tonglingyu.rqa_incident_capacity_gate",
+        "required_fields": [
+            "audit_history",
+            "capacity_policy",
+            "checks",
+            "emergency_state",
+            "evidence",
+            "generated_at",
+            "incident_capacity_ready",
+            "incident_runbook",
+            "mode",
+            "policy_version",
+            "public_degraded_response",
         ],
     },
     "openwebui_admin_action_contract": {
@@ -1497,6 +1514,175 @@ def validate_release_ops_gate_stdout():
                 errors.append(f"release_ops_{field}_missing")
 
 
+def validate_incident_capacity_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_incident_capacity"),
+        "tonglingyu.rqa_incident_capacity_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("incident_capacity_ready") is not True:
+        errors.append("rqa_incident_capacity_not_ready")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_incident_capacity_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-incident-capacity-v1":
+        errors.append("rqa_incident_capacity_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_incident_capacity_generated_at_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("rqa_incident_capacity_mode_invalid")
+
+    emergency = gate_json.get("emergency_state")
+    if not isinstance(emergency, dict):
+        errors.append("rqa_incident_capacity_emergency_state_missing")
+    else:
+        if emergency.get("emergency_disabled") is True:
+            errors.append("rqa_incident_capacity_emergency_disabled")
+        if emergency.get("degraded_mode") is True:
+            errors.append("rqa_incident_capacity_degraded_mode")
+        if emergency.get("persistence_degraded") is True:
+            errors.append("rqa_incident_capacity_persistence_degraded")
+        if emergency.get("production_allowed") is not True:
+            errors.append("rqa_incident_capacity_production_not_allowed")
+        if emergency.get("non_production_required") is True:
+            errors.append("rqa_incident_capacity_non_production_required")
+
+    degraded_response = gate_json.get("public_degraded_response")
+    if not isinstance(degraded_response, dict):
+        errors.append("rqa_incident_capacity_degraded_response_missing")
+    else:
+        for field in (
+            "stable_status_required",
+            "trace_id_required",
+            "full_success_forbidden",
+        ):
+            if degraded_response.get(field) is not True:
+                errors.append(f"rqa_incident_capacity_degraded_response_{field}_missing")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "emergency_flags_fail_closed",
+        "public_degraded_response_defined",
+        "no_unbounded_queue",
+        "retry_idempotency_defined",
+        "status_history_audit_defined",
+        "hard_delete_open_records_forbidden",
+        "incident_runbook_defined",
+        "capacity_live_evidence_required",
+        "load_live_evidence_required",
+        "audit_history_live_evidence_required",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_incident_capacity_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_incident_capacity_check_failed={check}")
+
+    capacity = gate_json.get("capacity_policy")
+    if not isinstance(capacity, dict):
+        errors.append("rqa_incident_capacity_policy_missing")
+    else:
+        if capacity.get("write_queue_policy") != "synchronous_write_no_unbounded_queue":
+            errors.append("rqa_incident_capacity_write_queue_policy_invalid")
+        if capacity.get("max_in_memory_queue_items") != 0:
+            errors.append("rqa_incident_capacity_queue_bound_invalid")
+        if capacity.get("retry_idempotency_required") is not True:
+            errors.append("rqa_incident_capacity_retry_idempotency_not_required")
+        if capacity.get("retry_duplicate_record_forbidden") is not True:
+            errors.append("rqa_incident_capacity_retry_duplicate_not_forbidden")
+        for field in ("capacity_evidence_ref", "load_evidence_ref"):
+            ref = validate_release_ops_ref(f"rqa_incident_capacity_{field}", capacity.get(field))
+            if production_ready and not release_ops_ref_valid(ref):
+                errors.append(f"rqa_incident_capacity_{field}_missing")
+        counts = capacity.get("representative_counts")
+        if not isinstance(counts, dict):
+            errors.append("rqa_incident_capacity_representative_counts_missing")
+        else:
+            if production_ready:
+                minimums = {
+                    "eval_report_count": 1,
+                    "failure_count": 1,
+                    "admin_list_page_count": 2,
+                }
+                for field, minimum in minimums.items():
+                    if not isinstance(counts.get(field), int) or counts.get(field) < minimum:
+                        errors.append(f"rqa_incident_capacity_{field}_below_minimum")
+        measurements = capacity.get("load_measurements")
+        if not isinstance(measurements, dict):
+            errors.append("rqa_incident_capacity_load_measurements_missing")
+        elif production_ready:
+            for field in ("rqa_write_p95_ms", "admin_read_p95_ms", "release_gate_ms"):
+                if not isinstance(measurements.get(field), (int, float)) or measurements.get(field) <= 0:
+                    errors.append(f"rqa_incident_capacity_{field}_invalid")
+
+    audit_history = gate_json.get("audit_history")
+    if not isinstance(audit_history, dict):
+        errors.append("rqa_incident_capacity_audit_history_missing")
+    else:
+        if audit_history.get("status_history_required") is not True:
+            errors.append("rqa_incident_capacity_status_history_not_required")
+        if audit_history.get("hard_delete_open_records_forbidden") is not True:
+            errors.append("rqa_incident_capacity_hard_delete_not_forbidden")
+        required_fields = {
+            "actor",
+            "reason_sha256",
+            "previous_status",
+            "new_status",
+            "timestamp",
+        }
+        fields = audit_history.get("required_fields")
+        if not isinstance(fields, list):
+            errors.append("rqa_incident_capacity_audit_required_fields_missing")
+        else:
+            for field in sorted(required_fields - set(fields)):
+                errors.append(f"rqa_incident_capacity_audit_field_missing={field}")
+        audit_ref = validate_release_ops_ref(
+            "rqa_incident_capacity_audit_history_evidence",
+            audit_history.get("audit_history_evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(audit_ref):
+            errors.append("rqa_incident_capacity_audit_history_evidence_ref_missing")
+
+    incident_runbook = gate_json.get("incident_runbook")
+    if not isinstance(incident_runbook, dict):
+        errors.append("rqa_incident_capacity_incident_runbook_missing")
+    else:
+        if not nonempty(incident_runbook.get("ref")):
+            errors.append("rqa_incident_capacity_incident_runbook_ref_missing")
+        if not is_sha256(incident_runbook.get("sha256")):
+            errors.append("rqa_incident_capacity_incident_runbook_sha256_invalid")
+        if incident_runbook.get("severity_owner_first_response_defined") is not True:
+            errors.append("rqa_incident_capacity_incident_response_missing")
+        if incident_runbook.get("rto_rpo_breach_escalation_defined") is not True:
+            errors.append("rqa_incident_capacity_rto_rpo_escalation_missing")
+        incident_ref = validate_release_ops_ref(
+            "rqa_incident_capacity_incident_evidence",
+            incident_runbook.get("incident_evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(incident_ref):
+            errors.append("rqa_incident_capacity_incident_evidence_ref_missing")
+
+    evidence = gate_json.get("evidence")
+    if not isinstance(evidence, dict):
+        errors.append("rqa_incident_capacity_evidence_missing")
+    elif production_ready:
+        if evidence.get("capacity_evidence_complete") is not True:
+            errors.append("rqa_incident_capacity_evidence_incomplete")
+        for field in (
+            "capacity_evidence_ref",
+            "load_evidence_ref",
+            "audit_history_evidence_ref",
+            "incident_evidence_ref",
+        ):
+            if not release_ops_ref_valid(evidence.get(field)):
+                errors.append(f"rqa_incident_capacity_{field}_missing")
+        if gate_json.get("mode") != "live":
+            errors.append("production_ready_requires_rqa_incident_capacity_live_mode")
+        if gate_json.get("require_live") is not True:
+            errors.append("production_ready_requires_rqa_incident_capacity_require_live")
+
+
 def validate_performance_budget_gate_stdout():
     gate_json = success_json_from_gate_stdout(
         gates_by_name.get("rqa_performance_budget"),
@@ -2164,6 +2350,7 @@ validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()
 validate_release_ops_gate_stdout()
+validate_incident_capacity_gate_stdout()
 validate_performance_budget_gate_stdout()
 validate_api_contract_gate_stdout()
 validate_user_lifecycle_gate_stdout()
@@ -2229,6 +2416,7 @@ for name in (
     "rqa_backup_restore_drill",
     "security_scan",
     "release_ops_readiness",
+    "rqa_incident_capacity",
 ):
     gate = gates_by_name.get(name)
     add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")

@@ -39,6 +39,9 @@ TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-
 TAMPERED_RELEASE_OPS_STDOUT_REPORT="${WORK_DIR}/tampered-release-ops-stdout-report.json"
 TAMPERED_RELEASE_OPS_MONITOR_REPORT="${WORK_DIR}/tampered-release-ops-monitor-report.json"
 TAMPERED_RELEASE_OPS_ALERT_REPORT="${WORK_DIR}/tampered-release-ops-alert-report.json"
+TAMPERED_RQA_INCIDENT_CAPACITY_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-incident-capacity-stdout-report.json"
+TAMPERED_RQA_INCIDENT_CAPACITY_EMERGENCY_REPORT="${WORK_DIR}/tampered-rqa-incident-capacity-emergency-report.json"
+TAMPERED_RQA_INCIDENT_CAPACITY_EVIDENCE_REPORT="${WORK_DIR}/tampered-rqa-incident-capacity-evidence-report.json"
 TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-performance-gate-stdout-report.json"
 TAMPERED_RQA_PERFORMANCE_BUDGET_REPORT="${WORK_DIR}/tampered-rqa-performance-budget-report.json"
 TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-check-report.json"
@@ -187,6 +190,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_INCIDENT_CAPACITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
@@ -708,6 +712,7 @@ TONGLINGYU_RELEASE_RQA_API_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_INCIDENT_CAPACITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
@@ -1635,6 +1640,103 @@ gate_stdout = {
         "secret_values_printed": False,
         "status": "ok",
     },
+    "rqa_incident_capacity": {
+        "audit_history": {
+            "audit_history_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:audit-history",
+                "valid": True,
+            },
+            "hard_delete_open_records_forbidden": True,
+            "required_fields": [
+                "actor",
+                "reason_sha256",
+                "previous_status",
+                "new_status",
+                "timestamp",
+            ],
+            "status_history_required": True,
+        },
+        "capacity_policy": {
+            "capacity_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:capacity-smoke",
+                "valid": True,
+            },
+            "load_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:load-soak",
+                "valid": True,
+            },
+            "load_measurements": {
+                "admin_read_p95_ms": 80,
+                "release_gate_ms": 3000,
+                "rqa_write_p95_ms": 900,
+            },
+            "max_in_memory_queue_items": 0,
+            "representative_counts": {
+                "admin_list_page_count": 2,
+                "eval_report_count": 1,
+                "failure_count": 1,
+            },
+            "retry_duplicate_record_forbidden": True,
+            "retry_idempotency_required": True,
+            "write_queue_policy": "synchronous_write_no_unbounded_queue",
+        },
+        "checks": {
+            "audit_history_live_evidence_required": True,
+            "capacity_live_evidence_required": True,
+            "emergency_flags_fail_closed": True,
+            "hard_delete_open_records_forbidden": True,
+            "incident_runbook_defined": True,
+            "load_live_evidence_required": True,
+            "no_unbounded_queue": True,
+            "public_degraded_response_defined": True,
+            "retry_idempotency_defined": True,
+            "status_history_audit_defined": True,
+        },
+        "emergency_state": {
+            "degraded_mode": False,
+            "emergency_disabled": False,
+            "non_production_required": False,
+            "persistence_degraded": False,
+            "production_allowed": True,
+        },
+        "errors": [],
+        "evidence": {
+            "audit_history_evidence_ref": "artifact:audit-history",
+            "capacity_evidence_complete": True,
+            "capacity_evidence_ref": "artifact:capacity-smoke",
+            "incident_evidence_ref": "artifact:incident-response",
+            "load_evidence_ref": "artifact:load-soak",
+        },
+        "generated_at": "2026-05-15T00:00:11+00:00",
+        "incident_capacity_ready": True,
+        "incident_runbook": {
+            "incident_evidence_ref": {
+                "kind": "artifact",
+                "ref": "artifact:incident-response",
+                "valid": True,
+            },
+            "path": runbook_path,
+            "ref": "runbook:tonglingyu-rqa-release-runbook#incident-response",
+            "rto_rpo_breach_escalation_defined": True,
+            "severity_owner_first_response_defined": True,
+            "sha256": runbook_sha256,
+        },
+        "mode": "live",
+        "object": "tonglingyu.rqa_incident_capacity_gate",
+        "policy_version": "tonglingyu-rqa-incident-capacity-v1",
+        "public_degraded_response": {
+            "full_success_forbidden": True,
+            "stable_status_required": True,
+            "trace_id_required": True,
+        },
+        "require_live": True,
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "status": "ok",
+    },
     "openwebui_admin_action_contract": {
         "action": {
             "function_id": "tonglingyu_gateway_admin",
@@ -2041,6 +2143,90 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_release_ops_alert_stdout}" \
   '"release_ops_alert_rqa_write_failure_rate_forbidden_label=trace_id" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_INCIDENT_CAPACITY_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_incident_capacity":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_incident_capacity_stdout="${WORK_DIR}/tampered-rqa-incident-capacity-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_INCIDENT_CAPACITY_STDOUT_REPORT}" >"${tampered_rqa_incident_capacity_stdout}"; then
+  echo "production-ready reports must bind incident/capacity status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_incident_capacity_stdout}" \
+  '"rqa_incident_capacity_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_INCIDENT_CAPACITY_EMERGENCY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_incident_capacity":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["emergency_state"]["emergency_disabled"] = True
+        gate_json["emergency_state"]["production_allowed"] = False
+        gate_json["emergency_state"]["non_production_required"] = True
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_incident_capacity_emergency_stdout="${WORK_DIR}/tampered-rqa-incident-capacity-emergency.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_INCIDENT_CAPACITY_EMERGENCY_REPORT}" >"${tampered_rqa_incident_capacity_emergency_stdout}"; then
+  echo "production-ready reports must reject emergency-disabled RQA state" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_incident_capacity_emergency_stdout}" \
+  '"rqa_incident_capacity_emergency_disabled" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_emergency_stdout}" \
+  '"rqa_incident_capacity_production_not_allowed" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_INCIDENT_CAPACITY_EVIDENCE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_incident_capacity":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["evidence"]["capacity_evidence_complete"] = False
+        gate_json["capacity_policy"]["representative_counts"]["admin_list_page_count"] = 1
+        gate_json["capacity_policy"]["capacity_evidence_ref"] = {
+            "kind": "",
+            "ref": "",
+            "valid": False,
+        }
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_incident_capacity_evidence_stdout="${WORK_DIR}/tampered-rqa-incident-capacity-evidence.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_INCIDENT_CAPACITY_EVIDENCE_REPORT}" >"${tampered_rqa_incident_capacity_evidence_stdout}"; then
+  echo "production-ready reports must reject missing capacity evidence" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_evidence_incomplete" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_capacity_evidence_ref_missing" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_admin_list_page_count_below_minimum" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" <<'PY'
 import json
@@ -2748,6 +2934,7 @@ if env \
   "TONGLINGYU_RELEASE_RQA_USER_LIFECYCLE_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_OPS_READINESS_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_INCIDENT_CAPACITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CONTRACT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \

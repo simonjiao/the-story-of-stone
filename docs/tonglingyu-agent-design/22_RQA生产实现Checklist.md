@@ -856,34 +856,50 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 
 ## Milestone M：事故响应、容量和审计完整性
 
-状态：未开始
+状态：进行中（2026-05-16；status-history audit 与 incident/capacity gate
+已落地；目标环境容量、负载、事故演练和审计历史 live evidence 尚未闭合）
 
 目标：事故或压力场景下仍保持可追责、可降级、可恢复，不能用关闭治理来伪装可用。
 
-- [ ] 提供 RQA emergency disable 或 degraded mode 配置时，release report 必须标记
+- [x] 提供 RQA emergency disable 或 degraded mode 配置时，release report 必须标记
       non-production。
-- [ ] RQA persistence degraded 时，公共响应必须暴露稳定错误/降级状态和 trace id，
+- [x] RQA persistence degraded 时，公共响应必须暴露稳定错误/降级状态和 trace id，
       不能伪装成完整成功。
-- [ ] RQA 写入不能使用无界内存队列；队列、batch 或 retry 必须有容量上限。
-- [ ] RQA retry 必须可幂等，且不会重复创建 failure、governance task 或 audit event。
-- [ ] 管理员状态更新必须保留历史记录：actor、reason、previous status、new status、
+- [x] RQA 写入不能使用无界内存队列；队列、batch 或 retry 必须有容量上限。
+- [x] RQA retry 必须可幂等，且不会重复创建 failure、governance task 或 audit event。
+- [x] 管理员状态更新必须保留历史记录：actor、reason、previous status、new status、
       timestamp。
-- [ ] 不允许硬删除 open failure、open governance task 或相关 audit history。
-- [ ] 事故 runbook 定义 severity、owner、first response、mitigation、rollback、
+- [x] 不允许硬删除 open failure、open governance task 或相关 audit history。
+- [x] 事故 runbook 定义 severity、owner、first response、mitigation、rollback、
       recovery validation。
-- [ ] 事故 runbook 定义 RTO/RPO breach 的升级路径和发布状态处理。
+- [x] 事故 runbook 定义 RTO/RPO breach 的升级路径和发布状态处理。
 - [ ] capacity smoke 覆盖代表性 eval report 数量、failure 数量和 admin list 翻页。
 - [ ] load / soak smoke 覆盖 RQA 写入、admin 查询、metrics 和 release gate 在默认预算内。
-- [ ] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
+- [x] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
       证据时不能
       production-ready。
-- [ ] saved report validator 校验 emergency disabled、capacity missing、audit history
+- [x] saved report validator 校验 emergency disabled、capacity missing、audit history
       missing、RTO/RPO missing、security scan missing、data lifecycle missing 不能
       production-ready。
 
 节点总结：
 
-- 待实现。
+- Runtime 和 Gateway 管理员状态更新已补 status-history audit：runtime audit 和
+  admin audit 均记录 previous status、new status、reason hash 和 timestamp，
+  幂等重复提交不会重复创建状态变更记录。
+- 新增 `deploy/scripts/verify-tonglingyu-rqa-incident-capacity.sh`，并接入
+  `verify-tonglingyu-release-readiness.sh` 的 required gate
+  `rqa_incident_capacity`。preflight 模式只证明 emergency/degraded fail-closed
+  规则、无无界队列静态检查、幂等标记、status-history audit 标记和 incident
+  runbook 结构就绪；live 模式缺容量、负载、审计历史或事故响应证据会
+  fail-closed。
+- Saved report validator 已要求 production-ready report 绑定
+  `rqa_incident_capacity` stdout，并拒绝 emergency disabled、degraded mode、
+  persistence degraded、非 live 模式、缺 evidence ref、代表性数量不足、负载
+  measurement 缺失、status-history 字段缺失或 incident runbook 证据缺失的报告。
+- 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity smoke、
+  load/soak smoke、incident response drill 和 audit-history live evidence 尚未生成；
+  当前只完成本地闸门与 fail-closed contract。
 
 ## 提交节奏
 

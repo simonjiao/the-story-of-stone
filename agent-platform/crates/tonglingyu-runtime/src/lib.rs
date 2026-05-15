@@ -4648,12 +4648,16 @@ pub fn update_retrieval_failure_status_checked(
     };
     let reviewer = reviewer.and_then(|value| bounded_optional_text(value, 80));
     let review_note = review_note.and_then(|value| bounded_optional_text(value, 480));
-    if let Some(current) = load_retrieval_failure(conn, failure_id)? {
+    let current = load_retrieval_failure(conn, failure_id)?;
+    let previous_status = current
+        .as_ref()
+        .map(|record| record.human_review_status.clone());
+    if let Some(current) = current.as_ref() {
         let same_payload = current.human_review_status == human_review_status
             && current.reviewer == reviewer
             && current.review_note == review_note;
         if same_payload && expected_updated_at.is_none() {
-            return Ok(Some(current));
+            return Ok(Some(current.clone()));
         }
     }
     let updated = conn.execute(
@@ -4691,9 +4695,17 @@ pub fn update_retrieval_failure_status_checked(
         "retrieval_failure_status_updated",
         &json!({
             "failure_id": &record.failure_id,
+            "previous_status": previous_status,
+            "new_status": &record.human_review_status,
             "human_review_status": &record.human_review_status,
             "reviewer": &record.reviewer,
             "review_note_sha256": record.review_note.as_deref().map(hash_text),
+            "status_history": {
+                "previous_status": previous_status,
+                "new_status": &record.human_review_status,
+                "reason_sha256": record.review_note.as_deref().map(hash_text),
+                "timestamp": &record.updated_at,
+            },
             "resolved_at": &record.resolved_at,
         }),
     )?;
@@ -5112,13 +5124,15 @@ pub fn update_governance_task(
             "closed or rejected governance task requires reviewer and review_note"
         ));
     }
-    if let Some(current) = load_governance_task(conn, task_id)? {
+    let current = load_governance_task(conn, task_id)?;
+    let previous_status = current.as_ref().map(|record| record.status.clone());
+    if let Some(current) = current.as_ref() {
         let same_payload = current.status == input.status
             && current.reviewer == reviewer
             && current.review_note == review_note
             && current.evidence_ref == evidence_ref;
         if same_payload && input.expected_updated_at.is_none() {
-            return Ok(Some(current));
+            return Ok(Some(current.clone()));
         }
     }
     let now = now_rfc3339();
@@ -5170,11 +5184,19 @@ pub fn update_governance_task(
             "source_failure_id": &record.source_failure_id,
             "source_entity_type": &record.source_entity_type,
             "source_entity_id_sha256": hash_text(&record.source_entity_id),
+            "previous_status": previous_status,
+            "new_status": &record.status,
             "status": &record.status,
             "priority": &record.priority,
             "reviewer": &record.reviewer,
             "review_note_sha256": record.review_note.as_deref().map(hash_text),
             "evidence_ref_sha256": record.evidence_ref.as_deref().map(hash_text),
+            "status_history": {
+                "previous_status": previous_status,
+                "new_status": &record.status,
+                "reason_sha256": record.review_note.as_deref().map(hash_text),
+                "timestamp": &record.updated_at,
+            },
             "accepted_at": &record.accepted_at,
             "closed_at": &record.closed_at,
         }),
