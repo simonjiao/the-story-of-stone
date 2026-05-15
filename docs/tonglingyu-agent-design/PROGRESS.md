@@ -490,6 +490,9 @@
   该来源作为生产证据。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
+- 后续 RQA production-ready 还必须绑定 Runtime profile、prompt、tool policy、
+  reviewer policy、model upstream 和 decoding 参数摘要；RQA eval 与 live gate
+  行为配置不一致时不能声明当前线上 production-ready。
 
 ## 下一步
 
