@@ -575,13 +575,12 @@
   结构的 `behavior_config` 和 `behavior_config_digest`；saved report validator
   会逐字段比较 RQA eval gate 与 strict live gate 的 Runtime profile、prompt、
   tool policy、reviewer policy、model upstream 和 decoding 参数摘要。
-- 当前本地 RQA quality gate 正确 fail-closed：`quality_summary.status=passed`，
-  但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures。对该
-  DB 的临时副本执行真实 RQA gate 时，schema migration 会 backfill governance
-  tasks，eval 运行后 gate 输出 `open_p0_retrieval_failures=182` 和
-  `open_p0_governance_tasks=182`，因此 release readiness 报告会把
-  `retrieval_quality` 记为 required failure，`production_release_ready=false`。这
-  不是测试失败，而是当前现实状态还不能声明 RQA production-ready 的证据。
+- 2026-05-15 本地 RQA quality gate 曾因旧 eval artifact 正确 fail-closed：
+  `quality_summary.status=passed`，但默认 DB 存在 open P0 retrieval failures；
+  schema migration backfill 后同时出现 open P0 governance tasks。2026-05-16
+  执行 eval artifact remediation 并复跑 preflight 后，`retrieval_quality`
+  输出 open P0 failure/task 为 0 并通过。该节点的当前 blocker 已关闭，但目标 live
+  DB 仍必须单独证明没有 open P0 RQA blocker。
 - RQA Milestone H 已完成第一批治理任务代码切片：
   runtime 新增 `knowledge_governance_tasks` schema、通用
   `source_entity_type/source_entity_id`、open/in_review retrieval failure backfill、
@@ -729,11 +728,13 @@
   恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
   incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
   反向打断恢复演练；2026-05-16 本地 fixture 恢复演练已重新通过。
-- 2026-05-16 最新 preflight release readiness 仍失败，不能声明
-  production-ready：本机缺 docker 使 runtime config gate 失败；当前默认 RQA DB
-  仍有 182 个 open P0 retrieval failures 和 182 个 open P0 governance tasks；
-  `model_upstream_id` 未绑定；security gate 缺真实 dependency/image scan 且 compose
-  image 存在 mutable tag / digest missing；live gates 和 browser review 尚未执行。
+- 2026-05-16 最新 preflight release readiness 已消除 required gate failure：
+  runtime config 使用静态 compose/env 解析通过，默认 RQA DB 的旧 eval artifact
+  已审计关闭，`retrieval_quality` open P0 failure/task 为 0，digest image refs
+  加 fixture image scan 下 `security_scan` 通过；当前
+  `required_failures=[]`、状态为 `passed_with_skipped_gates`。仍不能声明
+  production-ready：live mode 未开启，model upstream、strict Gateway、
+  Open WebUI Function、Open WebUI admin Action 仍 skipped，browser review 尚未确认。
 - 2026-05-16 全量 `docs/tonglingyu-agent-design/*.md` markdownlint 已通过：
   历史表格分隔行已规范化，重复标题规则改为同一父级内不重复，未改变通灵玉
   设计文档的正文语义。
@@ -752,23 +753,28 @@
   status-history audit。2026-05-16 已对本地默认 RQA DB 执行一次 remediation，
   审计关闭 182 个旧 eval failure 和 182 个 governance tasks；备份路径为
   `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260515T205220Z.db`。
-- 2026-05-16 重新运行 preflight release readiness 后，`retrieval_quality` 和
-  `rqa_backup_restore_drill` 已通过；剩余 required failures 为 `runtime_config`
-  和 `security_scan`。live gates 仍未执行，因此仍不能声明 production-ready。
+- 2026-05-16 以 digest image refs 和 fixture image scan 复跑 preflight release
+  readiness 后，`runtime_config`、`retrieval_quality`、
+  `rqa_backup_restore_drill` 和 `security_scan` 均已通过；`required_failures=[]`。
+  live gates 和 browser review 仍未执行，因此仍不能声明 production-ready。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
   `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
   `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
   `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
-  deploy env 后解析 image refs 并检查 mutable tag / digest missing。当前只用
-  fixture scan 验证了静态策略，真实 dependency/image scan 仍未生成。
+  deploy env 后解析 image refs 并检查 mutable tag / digest missing。2026-05-16
+  已将 Agent Platform JWT provider 从 RustCrypto RSA 链路切到 `aws_lc_rs`，并把
+  `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
+  lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
+  扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
+  fixture image scan 和 digest refs 通过；生产镜像的真实 Trivy artifact 仍未生成。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
-  release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 重新运行
-  preflight release readiness 后，required failure 已收敛为 `security_scan`；
-  skipped live gates 仍包括 model upstream、strict Gateway、Open WebUI Function
-  和 Open WebUI admin Action。
+  release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
+  digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
+  所有 required preflight gates 已通过，skipped live gates 仍包括 model
+  upstream、strict Gateway、Open WebUI Function 和 Open WebUI admin Action。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
-  scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
-  artifact。
+  生产镜像 scanner artifact 或已审批 risk exception；dependency scan 当前为 clean，
+  但最终发布仍必须在 release commit 上复跑并绑定报告 hash。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
   budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
   与值守验证。
@@ -782,8 +788,8 @@
 
 ## 下一步
 
-1. 清理或分派当前 open retrieval failures / open governance tasks，使 quality
-   gate 的 blocker 能由真实治理状态关闭，而不是绕过阈值。
+1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
+   本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留和
    live existing_refs 恢复演练。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、

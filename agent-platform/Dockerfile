@@ -34,6 +34,9 @@ COPY --from=builder /artifacts/agent-runtime /usr/local/bin/agent-runtime
 COPY --from=builder /artifacts/agent-runtime /usr/local/bin/agent-action-gateway
 COPY --from=builder /artifacts/agent-worker /usr/local/bin/agent-worker
 COPY --from=builder /artifacts/agentctl /usr/local/bin/agentctl
+COPY crates/agent-store/migrations /usr/local/share/agent-platform/migrations
+
+ENV AGENT_STORE_MIGRATIONS_DIR=/usr/local/share/agent-platform/migrations
 
 WORKDIR /app
 CMD ["agent-manager"]
