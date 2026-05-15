@@ -37,6 +37,9 @@ RetrievalQualityReport
 6. schema 迁移破坏既有 package、audit、session 或 KB 数据；
 7. 普通用户能看到或修改 RQA 内部字段、failure 状态或治理任务；
 8. Agent 生成的诊断、聚类或修正建议绕过人工状态流转直接写入事实层。
+9. 写入 quality report、failure、governance task 或 audit 失败后仍把请求标记为
+   完整成功；
+10. 没有覆盖并发更新、重复请求、保留清理、备份恢复和真实 live release。
 
 ## 决策基线
 
@@ -50,6 +53,8 @@ RetrievalQualityReport
 | report 落点 | 完整 report 进入 audit/admin，普通响应只出安全摘要 |
 | 人工状态 | retrieval failure 必须有人工处理状态字段 |
 | 治理任务 | RQA-6 到 RQA-12 必须有可持久化任务和状态流转 |
+| 写入失败 | RQA 持久化和 audit 失败必须 fail-closed 或返回明确 degraded 状态 |
+| 运维闭环 | backup、restore、retention、prune、live release 均纳入验收 |
 
 ## Production 默认阈值
 
@@ -107,7 +112,10 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 字段覆盖 human review status、reviewer、note、created/resolved time。
 - [ ] 添加必要索引：trace、package、status、failure type、created_at。
 - [ ] 添加 Runtime store API：create/list/update/read。
-- [ ] 单测覆盖迁移幂等、写入、读取、状态更新。
+- [ ] schema migration 支持从现有生产 DB 升级，不重建 KB 或删除既有数据。
+- [ ] migration preflight 输出 schema version 和待执行 migration，不输出 secret。
+- [ ] migration 失败时不留下半初始化表或不一致 schema version。
+- [ ] 单测覆盖迁移幂等、写入、读取、状态更新和失败回滚。
 
 节点总结：
 
@@ -127,7 +135,9 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] package 无法支持关键 claim 时记录 failure。
 - [ ] 去重相同 trace/package/failure type，避免重复刷表。
 - [ ] failure 记录写入 audit event。
-- [ ] 单测覆盖所有触发条件和去重。
+- [ ] failure 写入和 audit append 在同一可追溯操作中完成。
+- [ ] RQA 持久化失败时请求不得被标记为完整成功。
+- [ ] 单测覆盖所有触发条件、去重、写入失败和 audit 失败。
 
 节点总结：
 
@@ -176,10 +186,13 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
 - [ ] retrieval failure 人工状态更新写入 audit event。
 - [ ] 普通用户不能读取或更新 retrieval failure。
+- [ ] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
+- [ ] 重复 admin update 使用 idempotency key 或等价机制去重。
 - [ ] 普通 chat response 不暴露完整 quality report 或 failure 内部字段。
 - [ ] streaming response 同样不泄露内部字段。
 - [ ] strict Gateway gate 增加 admin trace quality summary 校验。
-- [ ] 单测覆盖 admin 可见、admin update、普通响应不可见、普通用户不可更新。
+- [ ] 单测覆盖 admin 可见、admin update、并发冲突、重复更新、普通响应不可见、
+      普通用户不可更新。
 
 节点总结：
 
@@ -282,6 +295,28 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 - 待实现。
 
+## Milestone J：运维、恢复和真实发布
+
+状态：未开始
+
+目标：RQA 不是只在测试库可用，必须能在生产环境升级、保留、恢复和复测。
+
+- [ ] RQA 表纳入现有 backup / restore 演练。
+- [ ] RQA 表纳入 retention / prune dry-run 和实际 prune 路径。
+- [ ] prune 不删除仍被 open failure、open governance task 或 production report 引用的数据。
+- [ ] restore 后 admin trace、failure、governance task 和 quality gate 可继续读取。
+- [ ] 生产 DB migration 前必须有备份路径和 schema preflight 输出。
+- [ ] live release mode 必须生成真实 RQA quality gate，不接受 fixture-only report。
+- [ ] production-ready report 必须绑定当前 live environment、generated_at 和有效期。
+- [ ] live gate 必须验证 RQA admin Action/API 权限边界。
+- [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
+- [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
+- [ ] 单测或 smoke 覆盖 backup/restore、retention/prune、live report freshness。
+
+节点总结：
+
+- 待实现。
+
 ## 提交节奏
 
 1. Checklist 基线单独提交。
@@ -290,6 +325,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 4. Milestone E 完成后提交 admin trace/metrics 边界。
 5. Milestone F-G 完成后提交 release gate 和 saved report validator。
 6. Milestone H 完成后提交治理任务和反馈闭环。
-7. Milestone I 通过后提交最终 production-ready 验证更新。
+7. Milestone I 完成后提交端到端验证。
+8. Milestone J 通过后提交最终 production-ready 验证更新。
 
 每次提交前必须更新本 checklist 的状态和节点总结。
