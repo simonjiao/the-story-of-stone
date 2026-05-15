@@ -482,6 +482,9 @@
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
+- 后续 RQA production-ready 还必须绑定当前 live KB 的 source snapshot digest、
+  KB build hash、kb_version 和 eval run id；不能使用另一个 KB 构建的评测结果
+  证明当前线上知识库 production-ready。
 
 ## 下一步
 

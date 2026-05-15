@@ -57,6 +57,8 @@ production-ready 的替代验收。
     已完成。
 18. RQA release gate、saved report validator 或 contract smoke 只在人工本地命令中
     执行，没有进入 CI 或 release automation 的强制路径。
+19. production-ready report 没有绑定当前 live KB 的 source snapshot digest、
+    KB build hash、kb_version 和 eval run id，或使用了另一个 KB 构建的 RQA 指标。
 
 ## 决策基线
 
@@ -80,6 +82,7 @@ production-ready 的替代验收。
 | 发布溯源 | git commit、image digest、schema/eval/config digest 必须进入 release report |
 | 资料覆盖 | source coverage boundary 必须进入 report、公共回答边界和 release gate |
 | 强制执行 | CI 或 release automation 必须运行 RQA gate、validator 和 contract smoke |
+| KB 绑定 | live KB、source snapshot、eval run 和 release report 必须同源可复现 |
 
 ## Production 默认阈值
 
@@ -265,6 +268,9 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 低于默认阈值的配置必须把报告标记为 non-production。
 - [ ] gate report 记录实际阈值来源和有效阈值。
 - [ ] gate report 记录 RQA schema version、eval suite version 和有效配置摘要。
+- [ ] gate report 记录 source snapshot digest、KB build hash、kb_version 和
+      eval run id。
+- [ ] gate 校验 eval quality summary 与当前 live KB 的 kb_version / build hash 一致。
 - [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
 - [ ] gate stdout / stderr 不输出原始 question、query terms 或高基数 id 列表。
@@ -291,6 +297,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] validator 校验 RQA schema version、eval suite version 和有效配置摘要不缺失。
 - [ ] validator 校验 source coverage boundary 不缺失，且不高于当前 source snapshot
       实际登记范围。
+- [ ] validator 校验 source snapshot digest、KB build hash、kb_version 和 eval run id
+      不缺失，且 RQA 指标绑定同一个 KB 构建。
 - [ ] validator 校验低于默认阈值的报告不能 production-ready。
 - [ ] validator 校验 report 不包含原始用户问题、未脱敏 query 或高基数字段列表。
 - [ ] validator 继续扫描 secret-like values。
@@ -344,6 +352,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] production-ready report 必须包含 RQA quality gate 和治理任务 gate。
 - [ ] production-ready report 必须包含 git commit、image digest、RQA schema version、
       eval suite version 和有效配置摘要。
+- [ ] production-ready report 必须包含 source snapshot digest、KB build hash、
+      kb_version 和 eval run id，且与 live gate 读取的当前 KB 一致。
 - [ ] CI 或 release automation 必须强制运行 RQA quality gate、saved report
       validator 和 contract smoke；失败时不能生成 production-ready artifact。
 - [ ] 自动化产物必须记录 workflow/job id 或 release run id、触发 commit 和 gate
@@ -368,6 +378,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] live release mode 必须生成真实 RQA quality gate，不接受 fixture-only report。
 - [ ] production-ready report 必须绑定当前 live environment、generated_at 和有效期。
 - [ ] production-ready report 必须绑定当前运行镜像 digest、代码版本和 migration 状态。
+- [ ] production-ready report 必须绑定当前 live KB 的 source snapshot digest、
+      KB build hash、kb_version 和 eval run id。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
