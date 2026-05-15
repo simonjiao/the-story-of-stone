@@ -23,11 +23,13 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
-    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
-    RetrievalFailureCreateInput, RetrievalQualityReport, RetrievalQuerySummary,
+    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureCreateInput, RetrievalFailureListInput,
+    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
     RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json,
+    TonglingyuRuntimeStore, append_runtime_audit_event, execute_agent_runtime_plan_gate,
+    package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -412,6 +414,14 @@ struct MessagePart {
 struct SearchParams {
     q: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetrievalFailureUpdateRequest {
+    human_review_status: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    if_match_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -903,6 +913,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/metrics/prometheus",
             get(prometheus_metrics_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures",
+            get(retrieval_failures_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/{failure_id}",
+            get(retrieval_failure_endpoint).patch(update_retrieval_failure_endpoint),
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(args.max_body_bytes))
@@ -2983,6 +3001,199 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 
+async fn retrieval_failures_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_subject(&state, &headers) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match retrieval_failure_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_retrieval_failure_filter",
+                &safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_retrieval_failures(input.clone()) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": retrieval_failure_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_list",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "retrieval failure list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retrieval_failure_list_failed",
+                "retrieval failure list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn retrieval_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_subject(&state, &headers) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state
+        .runtime_store
+        .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+    {
+        Ok(Some(failure)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "failure_id": failure_id,
+                    "result_count": 1,
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_read",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "failure": failure,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retrieval_failure_read_failed",
+                "retrieval failure read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn update_retrieval_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+    Json(payload): Json<RetrievalFailureUpdateRequest>,
+) -> Response {
+    let actor = match admin_auth_subject(&state, &headers) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state.runtime_store.update_retrieval_failure_status_checked(
+        &failure_id,
+        &payload.human_review_status,
+        payload.reviewer.as_deref(),
+        payload.review_note.as_deref(),
+        payload.if_match_updated_at.as_deref(),
+    ) {
+        Ok(Some(record)) => {
+            let failure = match state
+                .runtime_store
+                .read_retrieval_failure(&record.failure_id, RetrievalFailureView::AdminDetail)
+            {
+                Ok(Some(failure)) => failure,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(failure_id = %record.failure_id, error = %error, "updated retrieval failure reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "retrieval_failure_reload_failed",
+                        "retrieval failure reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id": &record.failure_id,
+                    "human_review_status": &record.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 1,
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_update",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "failure": failure,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) if error.to_string().contains("update conflict") => error_response(
+            StatusCode::CONFLICT,
+            "retrieval_failure_update_conflict",
+            "retrieval failure update conflict",
+            None,
+        ),
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure update failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "retrieval_failure_update_failed",
+                &safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn prometheus_metrics_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3813,6 +4024,76 @@ fn package_owned_by_subject(
     Ok(owned > 0)
 }
 
+fn retrieval_failure_list_input(
+    params: &BTreeMap<String, String>,
+) -> Result<RetrievalFailureListInput> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "human_review_status" | "status" | "failure_type" | "limit" | "offset"
+        ) {
+            return Err(anyhow!("unsupported retrieval failure filter {key}"));
+        }
+    }
+    let human_review_status = params
+        .get("human_review_status")
+        .or_else(|| params.get("status"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let failure_type = params
+        .get("failure_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(RetrievalFailureListInput {
+        human_review_status,
+        failure_type,
+        limit,
+        offset,
+        view: RetrievalFailureView::AdminDetail,
+    })
+}
+
+fn parse_optional_usize(value: Option<&String>, name: &str) -> Result<Option<usize>> {
+    value
+        .map(|raw| {
+            raw.parse::<usize>()
+                .with_context(|| format!("{name} must be a positive integer"))
+        })
+        .transpose()
+}
+
+fn retrieval_failure_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "human_review_status": params.get("human_review_status").or_else(|| params.get("status")),
+        "failure_type": params.get("failure_type"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
+fn append_admin_audit_event(
+    db: &Path,
+    event_type: &str,
+    actor: &str,
+    payload: Value,
+) -> Result<String> {
+    let admin_trace_id = format!("admin-{}", uuid::Uuid::now_v7().simple());
+    let conn = open_db(db)?;
+    append_runtime_audit_event(
+        &conn,
+        &admin_trace_id,
+        event_type,
+        &json!({
+            "actor": actor,
+            "admin_trace_id": &admin_trace_id,
+            "payload": payload,
+        }),
+    )?;
+    Ok(admin_trace_id)
+}
+
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
     let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
@@ -3824,6 +4105,12 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     )?;
     let audit_events = runtime_store.audit_events_for_trace(trace_id)?;
     let agent_runtime_summary = latest_agent_runtime_summary(&audit_events);
+    let retrieval_failures = runtime_store.list_retrieval_failures_for_trace(
+        trace_id,
+        RetrievalFailureView::AdminDetail,
+        100,
+    )?;
+    let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -3848,6 +4135,9 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "workflow_states": workflow_states,
         "audit_events": audit_events,
         "agent_runtime_summary": agent_runtime_summary,
+        "retrieval_quality_summary": retrieval_quality_summary,
+        "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
+        "retrieval_failures": retrieval_failures,
         "messages": messages,
         "packages": packages,
     })))
@@ -3866,18 +4156,81 @@ fn latest_agent_runtime_summary(audit_events: &[Value]) -> Value {
 }
 
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
-    let Some(package) = TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)?
-    else {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    let Some(package) = runtime_store.read_package(package_id)? else {
         return Ok(None);
     };
+    let retrieval_failures = runtime_store.list_retrieval_failures_for_package(
+        package_id,
+        RetrievalFailureView::AdminDetail,
+        100,
+    )?;
+    let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let trace = load_trace(db, &package.trace_id)?;
     Ok(Some(json!({
         "object": "tonglingyu.package_audit",
         "package_id": &package.package_id,
         "trace_id": &package.trace_id,
         "package": package_json(&package),
+        "retrieval_quality_summary": retrieval_quality_summary,
+        "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
+        "retrieval_failures": retrieval_failures,
         "trace": trace,
     })))
+}
+
+fn retrieval_quality_summary(failures: &[Value]) -> Value {
+    let mut status_counts = BTreeMap::<String, usize>::new();
+    let mut type_counts = BTreeMap::<String, usize>::new();
+    let mut quality_issue_count = 0_usize;
+    for failure in failures {
+        if let Some(status) = failure
+            .get("human_review_status")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            *status_counts.entry(status).or_default() += 1;
+        }
+        if let Some(failure_type) = failure
+            .get("failure_type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            *type_counts.entry(failure_type).or_default() += 1;
+        }
+        quality_issue_count += failure
+            .get("quality_issues")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .or_else(|| {
+                failure
+                    .get("quality_issue_count")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+            })
+            .unwrap_or_default();
+    }
+    let open_failure_count = status_counts.get("open").copied().unwrap_or_default()
+        + status_counts.get("in_review").copied().unwrap_or_default();
+    json!({
+        "object": "tonglingyu.retrieval_quality_admin_summary",
+        "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+        "status": if open_failure_count == 0 { "passed" } else { "needs_attention" },
+        "failure_count": failures.len(),
+        "open_failure_count": open_failure_count,
+        "quality_issue_count": quality_issue_count,
+        "failure_ids": retrieval_failure_ids(failures),
+        "by_status": status_counts,
+        "by_type": type_counts,
+    })
+}
+
+fn retrieval_failure_ids(failures: &[Value]) -> Vec<String> {
+    failures
+        .iter()
+        .filter_map(|failure| failure.get("failure_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
@@ -3971,11 +4324,20 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "messages": table_count(&conn, "gateway_messages")?,
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
+            "retrieval_failures": runtime_stats.retrieval_failures,
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
         "review_status": runtime_stats.review_status,
         "evidence_types": runtime_stats.evidence_types,
+        "rqa": {
+            "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+            "retrieval_failures": {
+                "total": runtime_stats.retrieval_failures,
+                "by_status": runtime_stats.retrieval_failure_status,
+                "by_type": runtime_stats.retrieval_failure_type,
+            },
+        },
         "workflow_status": workflow_status_counts,
     }))
 }
@@ -4011,6 +4373,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "tonglingyu_evidence_packages_total",
             runtime_stats.evidence_packages,
         ),
+        (
+            "tonglingyu_retrieval_failures_total",
+            runtime_stats.retrieval_failures,
+        ),
         ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
         lines.push(format!("# TYPE {metric} gauge"));
@@ -4020,6 +4386,31 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         lines.push(format!(
             "tonglingyu_review_status_total{{status=\"{}\"}} {}",
             escape_metric_label(&status),
+            count
+        ));
+    }
+    for (status, count) in runtime_stats.retrieval_failure_status {
+        lines.push(format!(
+            "tonglingyu_retrieval_failures_by_status_total{{status=\"{}\"}} {}",
+            bounded_metric_enum_label(&status, &["open", "in_review", "resolved", "wontfix"]),
+            count
+        ));
+    }
+    for (failure_type, count) in runtime_stats.retrieval_failure_type {
+        lines.push(format!(
+            "tonglingyu_retrieval_failures_by_type_total{{failure_type=\"{}\"}} {}",
+            bounded_metric_enum_label(
+                &failure_type,
+                &[
+                    "no_evidence_selected",
+                    "expected_evidence_missing",
+                    "missing_required_evidence_type",
+                    "exact_term_missing",
+                    "source_usage_metadata_incomplete",
+                    "reviewer_evidence_insufficient",
+                    "quality_report_not_passed",
+                ]
+            ),
             count
         ));
     }
@@ -4036,6 +4427,14 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
 
 fn escape_metric_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn bounded_metric_enum_label(value: &str, allowed: &[&str]) -> String {
+    if allowed.contains(&value) {
+        escape_metric_label(value)
+    } else {
+        "other".to_string()
+    }
 }
 
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
@@ -4232,6 +4631,78 @@ mod tests {
         }
     }
 
+    fn temp_gateway_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{label}-{}.db", new_trace_id()))
+    }
+
+    fn test_app_state(db_path: PathBuf) -> AppState {
+        AppState {
+            db: db_path.clone(),
+            runtime_store: TonglingyuRuntimeStore::new(db_path),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            model_name: DEFAULT_MODEL_NAME.to_string(),
+            upstream_base_url: None,
+            upstream_api_key: None,
+            upstream_model: DEFAULT_MODEL_ID.to_string(),
+            upstream_timeout_secs: 30,
+            max_evidence: 8,
+            gateway_api_keys: vec!["gateway-key".to_string()],
+            admin_api_keys: vec!["admin-key".to_string()],
+            allow_admin_with_gateway_key: false,
+            max_messages: 20,
+            max_question_chars: 2000,
+            max_body_bytes: 1024 * 1024,
+            rate_limit_per_minute: 120,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
+            retention_days: 30,
+            profiles: InternalProfiles {
+                main: "honglou-main".to_string(),
+                text: "honglou-text".to_string(),
+                commentary: "honglou-commentary".to_string(),
+                reviewer: "honglou-reviewer".to_string(),
+            },
+            started_at: now_rfc3339(),
+        }
+    }
+
+    fn seed_eval_retrieval_failure(db_path: &Path, trace_id: &str) -> String {
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let case = eval_case_fixture("rqa-admin-failure");
+        let package = EvidencePackage {
+            package_id: "pkg-rqa-admin-failure".to_string(),
+            trace_id: trace_id.to_string(),
+            question: case.question.to_string(),
+            cards: Vec::new(),
+            claims: vec!["证据不足，不能给出确定结论。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "needs_revision".to_string(),
+                severity: "high".to_string(),
+                issues: vec!["当前没有可追溯证据。".to_string()],
+                summary: "reviewer requires evidence".to_string(),
+            },
+        };
+        let quality_report = eval_failure_quality_report(
+            None,
+            &case,
+            &package,
+            &["forced eval failure".to_string()],
+        );
+        runtime_store
+            .create_retrieval_failure(RetrievalFailureCreateInput {
+                trace_id: trace_id.to_string(),
+                package_id: Some(package.package_id),
+                question: case.question.to_string(),
+                quality_report,
+                selected_evidence_ids: Vec::new(),
+                expected_evidence_ids: Vec::new(),
+                agent_diagnosis: Some("eval_case_failed:forced eval failure".to_string()),
+                proposed_fix: Some("inspect_eval_case_quality_details".to_string()),
+            })
+            .expect("seed retrieval failure")
+            .failure_id
+    }
+
     #[test]
     fn eval_quality_summary_fails_closed_without_expected_denominator() {
         let quality = EvalQualityAccumulator {
@@ -4343,10 +4814,7 @@ mod tests {
 
     #[test]
     fn eval_failure_record_uses_retrieval_failures_api() {
-        let db_path = std::env::temp_dir().join(format!(
-            "tonglingyu-gateway-eval-failure-{}.db",
-            new_trace_id()
-        ));
+        let db_path = temp_gateway_db_path("tonglingyu-gateway-eval-failure");
         let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
         let case = eval_case_fixture("eval-failure-test");
         let package = EvidencePackage {
@@ -4397,6 +4865,127 @@ mod tests {
             failures.items[0]["trace_id"],
             json!("trace-eval-failure-test")
         );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn admin_trace_includes_retrieval_quality_summary_and_failure_ids() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-trace-rqa");
+        let trace_id = "trace-admin-rqa-test";
+        let failure_id = seed_eval_retrieval_failure(&db_path, trace_id);
+
+        let trace = load_trace(&db_path, trace_id)
+            .expect("trace loads")
+            .expect("trace exists");
+
+        assert_eq!(
+            trace["retrieval_quality_summary"]["schema_version"],
+            RETRIEVAL_FAILURE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            trace["retrieval_quality_summary"]["failure_count"],
+            json!(1)
+        );
+        assert_eq!(
+            trace["retrieval_quality_summary"]["open_failure_count"],
+            json!(1)
+        );
+        assert_eq!(trace["retrieval_failure_ids"], json!([failure_id]));
+        assert_eq!(trace["retrieval_failures"][0]["view"], "admin_detail");
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn metrics_include_bounded_retrieval_failure_counts() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-metrics-rqa");
+        seed_eval_retrieval_failure(&db_path, "trace-admin-metrics-test");
+        let conn = open_db(&db_path).expect("gateway db opens");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema exists");
+        let state = test_app_state(db_path.clone());
+
+        let metrics = load_metrics(&state).expect("metrics load");
+        let prometheus = load_prometheus_metrics(&state).expect("prometheus metrics load");
+
+        assert_eq!(metrics["counts"]["retrieval_failures"], json!(1));
+        assert_eq!(
+            metrics["rqa"]["schema_version"],
+            RETRIEVAL_FAILURE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            metrics["rqa"]["retrieval_failures"]["by_status"]["open"],
+            json!(1)
+        );
+        assert_eq!(
+            metrics["rqa"]["retrieval_failures"]["by_type"]["quality_report_not_passed"],
+            json!(1)
+        );
+        assert!(prometheus.contains("tonglingyu_retrieval_failures_total 1"));
+        assert!(
+            prometheus.contains("tonglingyu_retrieval_failures_by_status_total{status=\"open\"} 1")
+        );
+        assert!(prometheus.contains(
+            "tonglingyu_retrieval_failures_by_type_total{failure_type=\"quality_report_not_passed\"} 1"
+        ));
+        assert!(!prometheus.contains("trace-admin-metrics-test"));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn retrieval_failure_list_filter_rejects_unknown_fields() {
+        let mut params = BTreeMap::new();
+        params.insert("trace_id".to_string(), "trace-leak-attempt".to_string());
+
+        let error =
+            retrieval_failure_list_input(&params).expect_err("unknown filter must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported retrieval failure filter")
+        );
+    }
+
+    #[test]
+    fn retrieval_failure_update_detects_stale_updated_at() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-cas");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cas");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let failure = runtime_store
+            .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+            .expect("failure reads")
+            .expect("failure exists");
+        let updated_at = failure["updated_at"]
+            .as_str()
+            .expect("updated_at is present")
+            .to_string();
+
+        runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "in_review",
+                Some("admin-1"),
+                Some("reviewing"),
+                Some(&updated_at),
+            )
+            .expect("first update succeeds")
+            .expect("failure updated");
+        let stale = runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "resolved",
+                Some("admin-1"),
+                Some("fixed"),
+                Some(&updated_at),
+            )
+            .expect_err("stale update must conflict");
+
+        assert!(stale.to_string().contains("update conflict"));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

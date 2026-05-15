@@ -521,6 +521,15 @@
   blocker 为空，`eval_failure_records=0`。本轮修复包含 source license /
   usage / attribution metadata 入库与校验、version boundary 与程乙正文检索
   策略校准，以及脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
+- RQA Milestone E 已进入进行中状态：
+  Gateway admin trace 和 package audit 现在暴露 `retrieval_quality_summary`、
+  `retrieval_failure_ids` 与 admin detail failure 列表；JSON metrics 新增
+  `rqa.retrieval_failures.total/by_status/by_type`，Prometheus 新增 bounded 的
+  retrieval failure total/status/type 指标；新增 admin retrieval failure
+  list/read/update API，并在 Open WebUI admin Action 中提供 list/read/update 入口。
+  `admin update` 支持 `if_match_updated_at` 冲突检测，runtime 状态更新继续写
+  `retrieval_failure_status_updated` audit event。`cargo test -p tonglingyu-gateway`
+  已通过 25 个测试，Open WebUI admin Action 单测已通过 10 个测试。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -541,9 +550,10 @@
 
 ## 下一步
 
-1. 实现 RQA Milestone E/F/G：admin trace / metrics、release quality gate 和
-   saved report validator，使
+1. 补齐 RQA Milestone E 剩余项：auth failure / role denial / rate-limit denial
+   脱敏 audit、update idempotency、404 枚举语义和 endpoint-level 拒绝测试。
+2. 实现 RQA Milestone F/G：release quality gate 和 saved report validator，使
    production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
-2. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-3. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

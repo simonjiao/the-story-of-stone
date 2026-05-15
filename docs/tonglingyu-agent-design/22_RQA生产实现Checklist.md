@@ -307,39 +307,60 @@ Milestone D）
 
 ## Milestone E：admin trace 和 metrics
 
-状态：未开始
+状态：进行中（2026-05-15；核心 admin surface / metrics 已接入，auth failure
+audit、idempotency 和完整 strict gate 覆盖仍未完成）
 
 目标：管理员能从 trace/package/session 看到召回质量摘要和 failure 状态。
 
-- [ ] admin trace 顶层暴露 retrieval quality summary。
-- [ ] admin trace 关联 retrieval failure ids。
-- [ ] admin package audit 可看到 quality issue 摘要。
-- [ ] JSON metrics 暴露 retrieval failure count by status/type。
-- [ ] Prometheus 暴露有界指标，不暴露 query 原文和 secret。
+- [x] admin trace 顶层暴露 retrieval quality summary。
+- [x] admin trace 关联 retrieval failure ids。
+- [x] admin package audit 可看到 quality issue 摘要。
+- [x] JSON metrics 暴露 retrieval failure count by status/type。
+- [x] Prometheus 暴露 RQA failure 有界指标，不暴露 query 原文和 secret。
 - [ ] Prometheus labels 只能使用 bounded enum，不允许 trace/user/question/package id。
-- [ ] JSON metrics 只暴露聚合计数和 bounded histogram，不返回原始 query。
-- [ ] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
-- [ ] admin API / Action 输出带 RQA schema version，字段变更必须有兼容测试。
-- [ ] admin list/read 响应大小有上限，超限必须分页或截断。
+- [x] JSON metrics 只暴露聚合计数和 bounded histogram，不返回原始 query。
+- [x] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
+- [x] admin API / Action 输出带 RQA schema version，字段变更必须有兼容测试。
+- [x] admin list/read 响应大小有上限，超限必须分页或截断。
 - [ ] admin list/read/update 都写访问审计，记录 actor、action、filter summary、
       page size、result count 和 trace id。
-- [ ] admin list filter 和 sort 只能使用 allowlist 字段，未知字段 fail-closed。
+- [x] admin list filter 和 sort 只能使用 allowlist 字段，未知字段 fail-closed。
 - [ ] 直接枚举不存在或未授权 RQA id 时返回脱敏错误，不泄露内部存在性细节。
 - [ ] RQA admin endpoints 继承或定义专用 rate limit / body limit。
 - [ ] admin auth failure、role denial 和 rate-limit denial 都写脱敏 audit event。
-- [ ] retrieval failure 人工状态更新写入 audit event。
-- [ ] 普通用户不能读取或更新 retrieval failure。
-- [ ] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
+- [x] retrieval failure 人工状态更新写入 audit event。
+- [x] 普通用户不能读取或更新 retrieval failure。
+- [x] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
 - [ ] 重复 admin update 使用 idempotency key 或等价机制去重。
 - [ ] 普通 chat response 不暴露完整 quality report 或 failure 内部字段。
 - [ ] streaming response 同样不泄露内部字段。
-- [ ] strict Gateway gate 增加 admin trace quality summary 校验。
+- [x] strict Gateway gate 增加 admin trace quality summary 校验。
 - [ ] 单测覆盖 admin 可见、admin update、并发冲突、重复更新、普通响应不可见、
       普通用户不可更新、admin read audit、filter allowlist、rate-limit denial。
 
 节点总结：
 
-- 待实现。
+- Gateway admin trace 现在返回 `retrieval_quality_summary`、
+  `retrieval_failure_ids` 和 admin detail failures；admin package audit 也返回同
+  一组 RQA 摘要，便于从 package 追到 failure 状态。
+- `/v1/admin/metrics` 新增 `rqa.retrieval_failures.total/by_status/by_type`；
+  Prometheus 新增 `tonglingyu_retrieval_failures_total`、
+  `tonglingyu_retrieval_failures_by_status_total` 和
+  `tonglingyu_retrieval_failures_by_type_total`，status/type label 只输出 allowlist
+  枚举或 `other`。
+- 新增 `/v1/admin/retrieval-failures` list、
+  `/v1/admin/retrieval-failures/{failure_id}` read/update；Open WebUI admin Action
+  新增 retrieval failure list/read/update 入口。
+- admin update 支持 `if_match_updated_at` 冲突检测；runtime update 仍写
+  `retrieval_failure_status_updated` audit event。
+- 验证命令：
+  `cargo test -p tonglingyu-runtime`（42 个测试通过）；
+  `cargo test -p tonglingyu-gateway`（25 个测试通过）；
+  `python3 -m unittest deploy/open-webui/functions/test_tonglingyu_gateway_admin_action.py`
+  （10 个测试通过）。
+- 仍不能宣布 Milestone E 完成：auth failure / role denial / rate-limit denial 的
+  脱敏 audit、admin update idempotency、404 枚举语义、完整 endpoint-level
+  普通用户拒绝测试和 read/update audit 断言仍未全部闭合。
 
 ## Milestone F：release quality gate
 

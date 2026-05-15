@@ -192,6 +192,7 @@ pub struct RuntimeStoreStats {
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
     pub retrieval_failure_status: BTreeMap<String, i64>,
+    pub retrieval_failure_type: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
 }
 
@@ -603,6 +604,26 @@ impl TonglingyuRuntimeStore {
         list_retrieval_failures(&conn, input)
     }
 
+    pub fn list_retrieval_failures_for_trace(
+        &self,
+        trace_id: &str,
+        view: RetrievalFailureView,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        list_retrieval_failures_for_trace(&conn, trace_id, view, limit)
+    }
+
+    pub fn list_retrieval_failures_for_package(
+        &self,
+        package_id: &str,
+        view: RetrievalFailureView,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        list_retrieval_failures_for_package(&conn, package_id, view, limit)
+    }
+
     pub fn read_retrieval_failure(
         &self,
         failure_id: &str,
@@ -626,6 +647,25 @@ impl TonglingyuRuntimeStore {
             human_review_status,
             reviewer,
             review_note,
+        )
+    }
+
+    pub fn update_retrieval_failure_status_checked(
+        &self,
+        failure_id: &str,
+        human_review_status: &str,
+        reviewer: Option<&str>,
+        review_note: Option<&str>,
+        expected_updated_at: Option<&str>,
+    ) -> Result<Option<RetrievalFailureRecord>> {
+        let conn = self.open_connection()?;
+        update_retrieval_failure_status_checked(
+            &conn,
+            failure_id,
+            human_review_status,
+            reviewer,
+            review_note,
+            expected_updated_at,
         )
     }
 
@@ -3640,6 +3680,10 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
             conn,
             "SELECT human_review_status, COUNT(*) FROM retrieval_failures GROUP BY human_review_status",
         )?,
+        retrieval_failure_type: grouped_count_map(
+            conn,
+            "SELECT failure_type, COUNT(*) FROM retrieval_failures GROUP BY failure_type",
+        )?,
         audit_event_types: grouped_count_map(
             conn,
             "SELECT event_type, COUNT(*) FROM audit_events GROUP BY event_type",
@@ -3870,12 +3914,70 @@ pub fn read_retrieval_failure(
         .map(|record| retrieval_failure_record_json(record, view)))
 }
 
+pub fn list_retrieval_failures_for_trace(
+    conn: &Connection,
+    trace_id: &str,
+    view: RetrievalFailureView,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let limit = retrieval_failure_page_limit(limit);
+    let limit_i64 = limit as i64;
+    let sql = format!(
+        "{} WHERE trace_id = ?1 ORDER BY created_at DESC, failure_id DESC LIMIT ?2",
+        retrieval_failure_select_sql()
+    );
+    Ok(
+        query_retrieval_failure_records(conn, &sql, &[&trace_id, &limit_i64])?
+            .iter()
+            .map(|record| retrieval_failure_record_json(record, view))
+            .collect(),
+    )
+}
+
+pub fn list_retrieval_failures_for_package(
+    conn: &Connection,
+    package_id: &str,
+    view: RetrievalFailureView,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let limit = retrieval_failure_page_limit(limit);
+    let limit_i64 = limit as i64;
+    let sql = format!(
+        "{} WHERE package_id = ?1 ORDER BY created_at DESC, failure_id DESC LIMIT ?2",
+        retrieval_failure_select_sql()
+    );
+    Ok(
+        query_retrieval_failure_records(conn, &sql, &[&package_id, &limit_i64])?
+            .iter()
+            .map(|record| retrieval_failure_record_json(record, view))
+            .collect(),
+    )
+}
+
 pub fn update_retrieval_failure_status(
     conn: &Connection,
     failure_id: &str,
     human_review_status: &str,
     reviewer: Option<&str>,
     review_note: Option<&str>,
+) -> Result<Option<RetrievalFailureRecord>> {
+    update_retrieval_failure_status_checked(
+        conn,
+        failure_id,
+        human_review_status,
+        reviewer,
+        review_note,
+        None,
+    )
+}
+
+pub fn update_retrieval_failure_status_checked(
+    conn: &Connection,
+    failure_id: &str,
+    human_review_status: &str,
+    reviewer: Option<&str>,
+    review_note: Option<&str>,
+    expected_updated_at: Option<&str>,
 ) -> Result<Option<RetrievalFailureRecord>> {
     validate_human_review_status(human_review_status)?;
     let now = now_rfc3339();
@@ -3895,6 +3997,7 @@ pub fn update_retrieval_failure_status(
             updated_at = ?5,
             resolved_at = ?6
         WHERE failure_id = ?1
+          AND (?7 IS NULL OR updated_at = ?7)
         "#,
         params![
             failure_id,
@@ -3903,9 +4006,13 @@ pub fn update_retrieval_failure_status(
             review_note,
             now,
             resolved_at,
+            expected_updated_at,
         ],
     )?;
     if updated == 0 {
+        if expected_updated_at.is_some() && load_retrieval_failure(conn, failure_id)?.is_some() {
+            return Err(anyhow!("retrieval failure update conflict"));
+        }
         return Ok(None);
     }
     let record = load_retrieval_failure(conn, failure_id)?

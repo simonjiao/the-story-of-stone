@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import pathlib
 import sys
 import unittest
@@ -132,6 +133,85 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             urlopen.call_args.args[0].full_url,
             "http://tonglingyu-gateway:8090/v1/admin/packages/pkg-1",
         )
+
+    def test_retrieval_failures_list_supports_bounded_filters(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_list"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "failure_type": "quality_report_not_passed",
+                        "limit": 20,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failures",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures?status=open&failure_type=quality_report_not_passed&limit=20",
+        )
+        self.assertIn("tonglingyu.retrieval_failure_admin_list", result["content"])
+
+    def test_retrieval_failure_id_can_be_extracted_from_message_content(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_read"}'),
+        ) as urlopen:
+            asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "messages": [{"content": "failure_id: rf-1"}],
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1",
+        )
+
+    def test_retrieval_failure_update_uses_patch_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_update"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "failure_id": "rf-1",
+                        "human_review_status": "resolved",
+                        "reviewer": "admin-1",
+                        "review_note": "fixed",
+                        "if_match_updated_at": "2026-05-15T00:00:00Z",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure_update",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1",
+        )
+        self.assertEqual(payload["human_review_status"], "resolved")
+        self.assertEqual(payload["if_match_updated_at"], "2026-05-15T00:00:00Z")
+        self.assertIn("tonglingyu.retrieval_failure_admin_update", result["content"])
 
     def test_target_model_guard_skips_non_tonglingyu_model(self) -> None:
         action = self.action_with_key()

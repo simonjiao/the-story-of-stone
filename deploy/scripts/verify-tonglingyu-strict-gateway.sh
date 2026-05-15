@@ -383,11 +383,21 @@ if security.get("rate_limit_disabled") is True:
     errors.append("metrics.security.rate_limit_disabled must be false")
 if int(limits.get("max_body_bytes") or 0) <= 0:
     errors.append("metrics.limits.max_body_bytes must be positive")
+rqa_metrics = metrics.get("rqa") or {}
+retrieval_failure_metrics = rqa_metrics.get("retrieval_failures") or {}
+if rqa_metrics.get("schema_version") != "tonglingyu-retrieval-failures-v1":
+    errors.append("metrics.rqa.schema_version must be tonglingyu-retrieval-failures-v1")
+if not isinstance(retrieval_failure_metrics.get("by_status"), dict):
+    errors.append("metrics.rqa.retrieval_failures.by_status must be an object")
+if not isinstance(retrieval_failure_metrics.get("by_type"), dict):
+    errors.append("metrics.rqa.retrieval_failures.by_type must be an object")
 
 if 'agent_runtime_mode="hermes"' not in prometheus:
     errors.append("prometheus tonglingyu_gateway_info must include agent_runtime_mode=hermes")
 if 'agent_runtime_mode="minimal"' in prometheus:
     errors.append("prometheus tonglingyu_gateway_info must not report minimal runtime mode")
+if "tonglingyu_retrieval_failures_total" not in prometheus:
+    errors.append("prometheus must expose bounded retrieval failure totals")
 
 chat_trace_id = chat.get("trace_id")
 chat_package_id = chat.get("evidence_package_id")
@@ -450,6 +460,11 @@ if stream_trace_id and stream_package_id:
     )
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
+trace_quality_summary = trace.get("retrieval_quality_summary") or {}
+if trace_quality_summary.get("schema_version") != "tonglingyu-retrieval-failures-v1":
+    errors.append("admin trace must expose RQA retrieval quality summary")
+if not isinstance(trace.get("retrieval_failure_ids"), list):
+    errors.append("admin trace retrieval_failure_ids must be a list")
 event_types = {
     item.get("event_type")
     for item in trace.get("audit_events") or []

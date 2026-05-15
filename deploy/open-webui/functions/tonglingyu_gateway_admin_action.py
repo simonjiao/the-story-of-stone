@@ -36,6 +36,9 @@ class Action:
         {"id": "trace", "name": "Gateway trace"},
         {"id": "package", "name": "Evidence package audit"},
         {"id": "session", "name": "Gateway session"},
+        {"id": "retrieval_failures", "name": "RQA retrieval failures"},
+        {"id": "retrieval_failure", "name": "RQA retrieval failure"},
+        {"id": "retrieval_failure_update", "name": "Update RQA failure status"},
     ]
 
     class Valves(BaseModel):
@@ -117,6 +120,55 @@ class Action:
                     "Gateway session",
                     f"/v1/admin/sessions/{urllib.parse.quote(session_id, safe='')}",
                 )
+            if action_id == "retrieval_failures":
+                return await self._lookup_json(
+                    "RQA retrieval failures",
+                    f"/v1/admin/retrieval-failures{_retrieval_failure_query(body)}",
+                )
+            if action_id == "retrieval_failure":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "RQA retrieval failure",
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}",
+                )
+            if action_id == "retrieval_failure_update":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                status = str(
+                    _deep_get(body, "human_review_status")
+                    or _deep_get(body, "status")
+                    or ""
+                ).strip()
+                if not status:
+                    raise GatewayAdminError("Human review status is required.")
+                result = await _gateway_patch_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}",
+                    {
+                        "human_review_status": status,
+                        "reviewer": _deep_get(body, "reviewer"),
+                        "review_note": _deep_get(body, "review_note"),
+                        "if_match_updated_at": _deep_get(body, "if_match_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                )
+                return _json_message(
+                    "RQA retrieval failure update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
         except GatewayAdminError as error:
             await _emit_status(__event_emitter__, "error", str(error))
             return _message(str(error))
@@ -157,14 +209,49 @@ async def _gateway_get(base_url: str, admin_key: str, path: str, timeout_seconds
     )
 
 
+async def _gateway_patch_json(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    payload: dict,
+    timeout_seconds: int,
+) -> Any:
+    return await asyncio.to_thread(
+        _gateway_json_blocking,
+        base_url,
+        admin_key,
+        path,
+        "PATCH",
+        payload,
+        timeout_seconds,
+    )
+
+
 def _gateway_get_blocking(base_url: str, admin_key: str, path: str, timeout_seconds: int) -> Any:
+    return _gateway_json_blocking(base_url, admin_key, path, "GET", None, timeout_seconds)
+
+
+def _gateway_json_blocking(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    method: str,
+    payload: Optional[dict],
+    timeout_seconds: int,
+) -> Any:
     if not str(base_url or "").strip():
         raise GatewayAdminError("Tonglingyu Gateway base URL is not configured.")
     url = f"{str(base_url).rstrip('/')}{path}"
+    data = None
+    headers = {"Authorization": f"Bearer {admin_key}"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
         url,
-        headers={"Authorization": f"Bearer {admin_key}"},
-        method="GET",
+        data=data,
+        headers=headers,
+        method=method,
     )
     try:
         with urllib.request.urlopen(req, timeout=max(1, int(timeout_seconds))) as response:
@@ -181,6 +268,17 @@ def _gateway_get_blocking(base_url: str, admin_key: str, path: str, timeout_seco
         ) from None
     except (TimeoutError, OSError, urllib.error.URLError):
         raise GatewayAdminError("Tonglingyu Gateway admin request failed: network error") from None
+
+
+def _retrieval_failure_query(body: dict) -> str:
+    params = {}
+    for key in ("human_review_status", "status", "failure_type", "limit", "offset"):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
 
 
 async def _resolve_identifier(
