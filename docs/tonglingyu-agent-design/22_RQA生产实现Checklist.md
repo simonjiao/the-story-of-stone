@@ -52,6 +52,9 @@ production-ready 的替代验收。
 15. RQA admin read/list 不写访问审计，或允许无界过滤、无界排序、枚举式探测。
 16. release report 无法指出通过 gate 的 git commit、镜像 digest、schema version、
     eval suite version 和有效配置摘要。
+17. public response、RQA report 或 release report 没有声明 source coverage
+    boundary，却把当前 Wikisource snapshot 包装成影印件、权威校注或专家校勘
+    已完成。
 
 ## 决策基线
 
@@ -73,6 +76,7 @@ production-ready 的替代验收。
 | 发布安全 | emergency disable / degraded mode 只能产生 non-production 状态 |
 | Admin 访问 | RQA read/list/update 都必须鉴权、限流、审计和防枚举 |
 | 发布溯源 | git commit、image digest、schema/eval/config digest 必须进入 release report |
+| 资料覆盖 | source coverage boundary 必须进入 report、公共回答边界和 release gate |
 
 ## Production 默认阈值
 
@@ -92,6 +96,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 | reviewer_status_matched | 100% |
 | open P0 retrieval failures | 0 |
 | public_response_boundary_passed | 100% |
+| source_coverage_boundary_passed | 100% |
 | admin_trace_quality_summary | 100% |
 
 ## Milestone A：Runtime 质量报告
@@ -109,6 +114,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 记录 required / actual / missing evidence types。
 - [ ] 记录 candidate / selected count 和 channel 分布。
 - [ ] 记录 source diversity、edition diversity、exact term coverage。
+- [ ] 记录 source coverage boundary，区分当前 source snapshot、影印件复核、
+      权威校注本复核和专家校勘状态。
 - [ ] 记录 expected evidence hit 结果。
 - [ ] 记录 quality status、issues、recommended follow-up。
 - [ ] 单测覆盖完整、缺证据、缺 required type、exact term missing。
@@ -183,6 +190,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 增加 edition_diversity。
 - [ ] source / edition diversity 标明当前只覆盖 Wikisource source snapshot，
       不等同于影印或权威校注本复核。
+- [ ] eval case 覆盖需要影印件、权威校注或专家校勘才能确认的问题，并要求
+      reviewer 降级为资料不足。
 - [ ] 增加 forbidden_conclusion_avoided。
 - [ ] 增加 reviewer_status_matched。
 - [ ] 无 expected evidence 标注的 case 不计入 hit@k 分母。
@@ -246,6 +255,9 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] gate 校验 reviewer_status_matched。
 - [ ] gate 校验 open P0 retrieval failures 为 0。
 - [ ] gate 校验 quality report coverage 为 100%。
+- [ ] gate 校验 source coverage boundary 在 eval summary、quality report 和
+      release report 中一致。
+- [ ] gate 校验需要影印件、权威校注或专家校勘的问题没有被公共回答声明为已确认。
 - [ ] gate 支持阈值配置，默认值采用本文 Production 默认阈值。
 - [ ] 低于默认阈值的配置必须把报告标记为 non-production。
 - [ ] gate report 记录实际阈值来源和有效阈值。
@@ -274,6 +286,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] validator 校验 threshold / blocker / ready flag 不漂移。
 - [ ] validator 校验 effective thresholds 与 report 中 gate 输出一致。
 - [ ] validator 校验 RQA schema version、eval suite version 和有效配置摘要不缺失。
+- [ ] validator 校验 source coverage boundary 不缺失，且不高于当前 source snapshot
+      实际登记范围。
 - [ ] validator 校验低于默认阈值的报告不能 production-ready。
 - [ ] validator 校验 report 不包含原始用户问题、未脱敏 query 或高基数字段列表。
 - [ ] validator 继续扫描 secret-like values。

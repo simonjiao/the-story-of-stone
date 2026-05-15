@@ -25,7 +25,9 @@
 - `hongloumeng-wikisource-chengjia` 已通过 ProofreadPage Page namespace 展开补齐正文。
 - 第一批 Wikisource snapshot 已补 source snapshot ready 口径和 19 个跨版本
   抽样点；当前可支持通俗分析场景下的跨版本对照和证据链检索，但仍不代表
-  完成学术校勘、影印复核或权威校注本复核。
+  完成学术校勘、影印复核或权威校注本复核。后续 RQA production-ready
+  必须把这个 source coverage boundary 写入公共回答边界、RQA report 和
+  release report。
 - M1 完成闸门已明确：进入 M2 前必须完成并通过 source snapshot registry
   校验；本计划不设置独立“M1.5”。若影印件、权威校注本或评测题库要阻塞
   M2，必须先提升为 M1 P0。
