@@ -536,30 +536,41 @@
   普通 completion 和 streaming completion 均有 RQA 内部字段不可见测试。
   `cargo test -p tonglingyu-gateway` 已通过 36 个测试，Open WebUI admin Action
   单测已通过 10 个测试。
+- RQA Milestone F/G 已开始接入 release artifact：
+  新增 `deploy/scripts/verify-tonglingyu-rqa-quality-gate.sh`，并把
+  `retrieval_quality` 加入 `verify-tonglingyu-release-readiness.sh` 的 required
+  gate；saved report validator 的 canonical gate set 也加入
+  `retrieval_quality`。gate 会验证 eval quality summary、Production 默认阈值、
+  open retrieval failures、source coverage boundary、source license/attribution
+  metadata、source snapshot digest、KB build hash、kb_version、eval run id、
+  runtime profile/prompt/tool/reviewer policy digest、model upstream id 和 decoding
+  参数摘要。contract smoke 已覆盖 RQA gate stdout 缺失和阈值被降低的篡改路径。
+- 当前本地 RQA quality gate 正确 fail-closed：`quality_summary.status=passed`，
+  但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures，
+  因此 release readiness 报告会把 `retrieval_quality` 记为 required failure，
+  `production_release_ready=false`。这不是测试失败，而是当前现实状态还不能声明
+  RQA production-ready 的证据。
+- 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
+  复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
+- 后续 RQA production-ready 还必须让 saved report validator 从 eval report 原始
+  文件重算全部 RQA gate 派生字段，并逐字段校验 RQA eval 行为配置与 strict live
+  gate 读取的运行配置一致；仅记录摘要还不等于最终完成。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
-- 后续 RQA production-ready 还必须绑定当前 live KB 的 source snapshot digest、
-  KB build hash、kb_version 和 eval run id；不能使用另一个 KB 构建的评测结果
-  证明当前线上知识库 production-ready。
-- 后续 RQA production-ready 还必须验证进入 production evidence chain 的 source
-  都具备机器可读 license、usage boundary 和 attribution metadata；缺失时不能把
-  该来源作为生产证据。
-- 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
-  复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
-- 后续 RQA production-ready 还必须绑定 Runtime profile、prompt、tool policy、
-  reviewer policy、model upstream 和 decoding 参数摘要；RQA eval 与 live gate
-  行为配置不一致时不能声明当前线上 production-ready。
 - 后续 RQA production-ready 还必须定义 RQA 用户数据生命周期：export、
   delete/anonymize、retention、legal hold 和 audit tombstone；缺少策略版本或
   lifecycle contract smoke 时不能生成 production-ready artifact。
 
 ## 下一步
 
-1. 实现 RQA Milestone F/G：release quality gate 和 saved report validator，使
-   production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
-2. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
+1. 继续收紧 RQA Milestone F/G：补 saved report validator 从 eval report 原始文件
+   重算派生字段、补 missing-report/open-P0 独立 contract smoke，并校验 RQA eval
+   行为配置与 strict live gate 配置一致。
+2. 清理或分派当前 open retrieval failures，使 quality gate 的 open failure
+   blocker 能由真实治理状态关闭，而不是绕过阈值。
+3. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
    retention/prune、runbook/alert/rollback 和 production report 运维证据。
-3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

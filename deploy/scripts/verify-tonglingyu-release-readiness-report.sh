@@ -31,6 +31,7 @@ live_gate_names = [
 ]
 required_gate_names = [
     "runtime_config",
+    "retrieval_quality",
     *live_gate_names,
     "openwebui_browser_review",
 ]
@@ -86,6 +87,23 @@ gate_stdout_requirements = {
             "checked_policy_fields",
             "checked_secret_fields",
             "checked_services",
+        ],
+    },
+    "retrieval_quality": {
+        "object": "tonglingyu.rqa_quality_gate",
+        "required_fields": [
+            "behavior_config",
+            "effective_thresholds",
+            "eval_report_sha256",
+            "eval_run_id",
+            "eval_suite_version",
+            "kb_build_hash",
+            "kb_version",
+            "quality_gate_passed",
+            "quality_summary",
+            "rqa_schema_version",
+            "source_license_summary",
+            "source_snapshot_digest",
         ],
     },
     "model_upstream_network": {
@@ -273,6 +291,14 @@ def browser_validation_from_gate(gate):
     )
 
 
+def ratio_is_one(value):
+    return isinstance(value, dict) and value.get("ratio") == 1.0
+
+
+def nonempty_dict(value):
+    return isinstance(value, dict) and bool(value)
+
+
 def validate_gate_stdout(name, gate, requirement):
     if not isinstance(gate, dict) or gate.get("status") != "passed":
         return
@@ -306,6 +332,140 @@ def validate_production_gate_stdout():
             validate_gate_stdout(name, gate, requirement)
         else:
             errors.append(f"production_ready_requires_{name}_stdout_success_json")
+
+
+def validate_retrieval_quality_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("quality_gate_passed") is not True:
+        errors.append("retrieval_quality_gate_not_passed")
+    if gate_json.get("errors") not in ([], None):
+        errors.append("retrieval_quality_gate_errors_present")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("retrieval_quality_secret_values_printed_must_be_false")
+    if gate_json.get("rqa_schema_version") != "tonglingyu-retrieval-failures-v1":
+        errors.append("retrieval_quality_rqa_schema_version_invalid")
+    if not nonempty(gate_json.get("eval_suite_version")):
+        errors.append("retrieval_quality_eval_suite_version_missing")
+    if not nonempty(gate_json.get("eval_run_id")):
+        errors.append("retrieval_quality_eval_run_id_missing")
+    for field in ("source_snapshot_digest", "kb_build_hash", "eval_report_sha256"):
+        if not is_sha256(gate_json.get(field)):
+            errors.append(f"retrieval_quality_{field}_invalid")
+    thresholds = gate_json.get("effective_thresholds")
+    if not isinstance(thresholds, dict):
+        errors.append("retrieval_quality_effective_thresholds_missing")
+    else:
+        expected_thresholds = {
+            "quality_report_coverage": 1.0,
+            "quality_report_production_ready": 1.0,
+            "eval_case_classification": 1.0,
+            "expected_evidence_denominator_min": 1,
+            "expected_evidence_hit_at_8": 1.0,
+            "required_type_coverage": 1.0,
+            "exact_term_coverage": 1.0,
+            "forbidden_conclusion_avoided": 1.0,
+            "reviewer_status_matched": 1.0,
+            "open_p0_retrieval_failures": 0,
+        }
+        for key, expected in expected_thresholds.items():
+            if thresholds.get(key) != expected:
+                errors.append(f"retrieval_quality_threshold_{key}_mismatch")
+    quality = gate_json.get("quality_summary")
+    if not isinstance(quality, dict):
+        errors.append("retrieval_quality_summary_missing")
+    else:
+        if quality.get("status") != "passed":
+            errors.append("retrieval_quality_summary_status_not_passed")
+        if quality.get("blockers") not in ([], None):
+            errors.append("retrieval_quality_summary_blockers_present")
+        for field in (
+            "quality_report_coverage",
+            "quality_report_production_ready",
+            "eval_case_classification",
+            "expected_evidence_hit_at_8",
+            "required_type_coverage",
+            "exact_term_coverage",
+            "forbidden_conclusion_avoided",
+            "reviewer_status_matched",
+        ):
+            if not ratio_is_one(quality.get(field)):
+                errors.append(f"retrieval_quality_{field}_below_threshold")
+        if quality.get("eval_failure_records") != 0:
+            errors.append("retrieval_quality_eval_failure_records_not_zero")
+        denominator = quality.get("expected_evidence_denominator")
+        if not isinstance(denominator, int) or denominator < 1:
+            errors.append("retrieval_quality_expected_evidence_denominator_invalid")
+        source_boundary = quality.get("source_coverage_boundary")
+        if not isinstance(source_boundary, dict):
+            errors.append("retrieval_quality_source_coverage_boundary_missing")
+        else:
+            if source_boundary.get("source_snapshot_status") != "wikisource_source_snapshot":
+                errors.append("retrieval_quality_source_snapshot_status_invalid")
+            for field in (
+                "facsimile_review_status",
+                "authoritative_edition_review_status",
+                "expert_collation_status",
+            ):
+                if source_boundary.get(field) != "not_reviewed":
+                    errors.append(f"retrieval_quality_{field}_unexpected")
+    kb_version = gate_json.get("kb_version")
+    if not nonempty_dict(kb_version):
+        errors.append("retrieval_quality_kb_version_missing")
+    else:
+        for field in ("version_id", "source_count", "block_count", "schema_version", "built_at"):
+            if field not in kb_version:
+                errors.append(f"retrieval_quality_kb_version_{field}_missing")
+    source_license = gate_json.get("source_license_summary")
+    if not isinstance(source_license, dict):
+        errors.append("retrieval_quality_source_license_summary_missing")
+    else:
+        if not isinstance(source_license.get("source_count"), int) or source_license.get("source_count") < 1:
+            errors.append("retrieval_quality_source_license_source_count_invalid")
+        if source_license.get("missing_metadata") not in ([], None):
+            errors.append("retrieval_quality_source_license_missing_metadata")
+        sources = source_license.get("sources")
+        if not isinstance(sources, list) or not sources:
+            errors.append("retrieval_quality_source_license_sources_missing")
+    if gate_json.get("open_p0_retrieval_failures") != 0:
+        errors.append("retrieval_quality_open_p0_retrieval_failures_not_zero")
+    if production_ready and gate_json.get("eval_report_generated_by_gate") is not True:
+        errors.append("retrieval_quality_eval_report_must_be_generated_by_gate")
+    behavior_config = gate_json.get("behavior_config")
+    if not isinstance(behavior_config, dict):
+        errors.append("retrieval_quality_behavior_config_missing")
+    else:
+        for field in (
+            "agent_runtime_mode_env",
+            "runtime_profile_digest",
+            "prompt_digest",
+            "profile_contract",
+            "tool_policy",
+            "tool_policy_digest",
+            "reviewer_policy",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+            "model_upstream_id",
+            "model_upstream_bound_by_gate",
+            "decoding_parameters_source",
+        ):
+            if not nonempty(behavior_config.get(field)):
+                errors.append(f"retrieval_quality_behavior_config_{field}_missing")
+        for field in (
+            "runtime_profile_digest",
+            "prompt_digest",
+            "tool_policy_digest",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+        ):
+            if not is_sha256(behavior_config.get(field)):
+                errors.append(f"retrieval_quality_behavior_config_{field}_invalid")
+        if not isinstance(behavior_config.get("decoding_parameters_summary"), dict):
+            errors.append("retrieval_quality_behavior_config_decoding_parameters_summary_missing")
 
 
 if not report_path:
@@ -540,6 +700,7 @@ add_mismatch("production_release_ready", computed_production_ready, production_r
 add_mismatch("exit_policy", computed_exit_policy, exit_policy)
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
+validate_retrieval_quality_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,

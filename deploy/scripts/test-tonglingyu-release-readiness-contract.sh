@@ -29,6 +29,8 @@ SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
+TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
+TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
@@ -149,6 +151,7 @@ PY
 common_env=(
   "TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true"
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
@@ -662,6 +665,7 @@ env_file_report="${WORK_DIR}/env-file-report.json"
 cat >"${env_file}" <<EOF
 TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}
@@ -775,6 +779,93 @@ gate_stdout = {
         "checked_services": ["tonglingyu-gateway"],
         "status": "ok",
     },
+    "retrieval_quality": {
+        "behavior_config": {
+            "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            "decoding_parameters_source": "gateway_runtime_config",
+            "decoding_parameters_summary": {
+                "source": "gateway_runtime_config",
+                "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
+            },
+            "gateway_policy_digest": "6" * 64,
+            "model_upstream_id": "gpt-synthetic",
+            "model_upstream_bound_by_gate": "model_upstream_network",
+            "profile_contract": "tonglingyu-runtime-profile-contract-v1",
+            "prompt_digest": "7" * 64,
+            "reviewer_policy": "local_reviewer_enforced",
+            "reviewer_policy_digest": "8" * 64,
+            "runtime_profile_digest": "9" * 64,
+            "tool_policy": "read_only_runtime_tools",
+            "tool_policy_digest": "a" * 64,
+        },
+        "effective_thresholds": {
+            "eval_case_classification": 1.0,
+            "exact_term_coverage": 1.0,
+            "expected_evidence_denominator_min": 1,
+            "expected_evidence_hit_at_8": 1.0,
+            "forbidden_conclusion_avoided": 1.0,
+            "open_p0_retrieval_failures": 0,
+            "quality_report_coverage": 1.0,
+            "quality_report_production_ready": 1.0,
+            "required_type_coverage": 1.0,
+            "reviewer_status_matched": 1.0,
+        },
+        "errors": [],
+        "eval_report_generated_by_gate": True,
+        "eval_report_sha256": "1" * 64,
+        "eval_run_id": "rqa-eval-synthetic",
+        "eval_suite_version": "tonglingyu-eval-quality-v1",
+        "kb_build_hash": "2" * 64,
+        "kb_version": {
+            "block_count": 10419,
+            "built_at": "2026-05-15T00:00:00Z",
+            "schema_version": "tonglingyu-kb-v1",
+            "source_count": 5,
+            "source_root": "resources/sources/wiki",
+            "version_id": "kb-synthetic",
+        },
+        "object": "tonglingyu.rqa_quality_gate",
+        "open_p0_retrieval_failures": 0,
+        "quality_gate_passed": True,
+        "quality_summary": {
+            "blockers": [],
+            "eval_case_classification": {"passed": 103, "ratio": 1.0, "total": 103},
+            "eval_failure_records": 0,
+            "exact_term_coverage": {"passed": 3, "ratio": 1.0, "total": 3},
+            "expected_evidence_denominator": 5,
+            "expected_evidence_hit_at_8": {"passed": 5, "ratio": 1.0, "total": 5},
+            "forbidden_conclusion_avoided": {"passed": 103, "ratio": 1.0, "total": 103},
+            "quality_report_coverage": {"passed": 103, "ratio": 1.0, "total": 103},
+            "quality_report_production_ready": {"passed": 86, "ratio": 1.0, "total": 86},
+            "required_type_coverage": {"passed": 33, "ratio": 1.0, "total": 33},
+            "reviewer_status_matched": {"passed": 103, "ratio": 1.0, "total": 103},
+            "source_coverage_boundary": {
+                "authoritative_edition_review_status": "not_reviewed",
+                "expert_collation_status": "not_reviewed",
+                "facsimile_review_status": "not_reviewed",
+                "source_snapshot_status": "wikisource_source_snapshot",
+            },
+            "status": "passed",
+        },
+        "rqa_schema_version": "tonglingyu-retrieval-failures-v1",
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "source_license_summary": {
+            "missing_metadata": [],
+            "source_count": 1,
+            "sources": [{
+                "attribution": "Wikisource contributors",
+                "license": "CC-BY-SA-4.0",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "source_hash": "3" * 64,
+                "source_id": "hongloumeng-wikisource-120",
+                "usage_boundary_sha256": "4" * 64,
+            }],
+        },
+        "source_snapshot_digest": "5" * 64,
+        "status": "ok",
+    },
     "model_upstream_network": {
         "errors": [],
         "object": "tonglingyu.model_upstream_network_gate",
@@ -852,6 +943,52 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_live_gate_stdout}" \
   '"strict_gateway_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_stdout="${WORK_DIR}/tampered-rqa-gate-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_GATE_STDOUT_REPORT}" >"${tampered_rqa_gate_stdout}"; then
+  echo "production-ready reports must bind RQA quality gate status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_stdout}" \
+  '"retrieval_quality_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["effective_thresholds"]["expected_evidence_hit_at_8"] = 0.8
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_threshold_stdout="${WORK_DIR}/tampered-rqa-gate-threshold.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" >"${tampered_rqa_gate_threshold_stdout}"; then
+  echo "production-ready reports must reject lowered RQA quality thresholds" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_threshold_stdout}" \
+  '"retrieval_quality_threshold_expected_evidence_hit_at_8_mismatch" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRODUCTION_FLAG_REPORT}" <<'PY'
 import json
@@ -1051,6 +1188,7 @@ failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \
   TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}" \
