@@ -671,9 +671,11 @@
   `deploy/scripts/verify-tonglingyu-rqa-api-contract.sh` 会启动本地 Gateway，验证
   retrieval failure 与 governance task 的 admin list/read schema version、pagination
   metadata、max page size clamp、未知 filter 和非法 enum filter 的 400 边界，以及
-  admin payload 不返回完整原始 prompt。Gateway 输入边界已把非法 enum filter 从
-  runtime 500 修正为 400；saved report validator 会拒绝缺 gate stdout、contract
-  check 失败和负向状态码不是 400 的 production-ready report。
+  旧客户端解析、响应新增字段容忍、RQA admin mutation 未知 request body 字段 422
+  拒绝、admin payload 不返回完整原始 prompt。兼容策略版本为
+  `tonglingyu-rqa-api-compatibility-v1`；saved report validator 会拒绝缺 gate
+  stdout、contract check 失败、兼容策略漂移、未知 request body 未拒绝和负向状态码
+  不是 400 的 production-ready report。
 - RQA 用户数据生命周期 gate 已接入 release readiness 必跑路径：
   `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh` 会启动本地 Gateway，验证
   export 脱敏 manifest、legal hold 阻断 anonymize、release legal hold、
@@ -691,10 +693,10 @@
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
-- RQA 用户数据生命周期已具备本地 contract smoke 和策略版本；后续
-  production-ready 仍必须补齐 live Open WebUI admin Action、旧/新字段兼容、
-  目标环境 live/load 性能和值守证据；Open WebUI admin Action source/fixture
-  contract 已接入 release readiness 必跑 gate，不能替代真实 live Action 验证。
+- RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；后续
+  production-ready 仍必须补齐 live Open WebUI admin Action、目标环境 live/load
+  性能和值守证据；Open WebUI admin Action source/fixture contract 已接入 release
+  readiness 必跑 gate，不能替代真实 live Action 验证。
 
 ## 下一步
 
@@ -703,8 +705,8 @@
 2. 实现 RQA Milestone I-J：端到端自动化、production report 引用保留、
    live existing_refs 恢复演练、runbook/alert/rollback 和 live production report
    运维证据。
-3. 补齐 RQA Milestone K-M：live Open WebUI admin Action、旧/新字段兼容、发布
-   值守、回滚、事故响应、容量和审计完整性。
+3. 补齐 RQA Milestone K-M：live Open WebUI admin Action、发布值守、回滚、
+   事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

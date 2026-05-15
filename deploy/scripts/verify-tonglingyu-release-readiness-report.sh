@@ -209,6 +209,7 @@ gate_stdout_requirements = {
         "required_fields": [
             "api_contract_passed",
             "checks",
+            "compatibility_policy",
             "contract_version",
             "generated_at",
             "negative_statuses",
@@ -1330,6 +1331,13 @@ def validate_api_contract_gate_stdout():
         "governance_task_invalid_status_rejected",
         "governance_task_invalid_priority_rejected",
         "governance_task_read_schema",
+        "old_client_retrieval_failure_list_compatible",
+        "old_client_retrieval_failure_read_compatible",
+        "old_client_governance_task_list_compatible",
+        "old_client_governance_task_read_compatible",
+        "additive_response_fields_tolerated",
+        "unknown_mutation_fields_rejected",
+        "schema_versions_stable",
         "admin_payload_excludes_raw_prompts",
     )
     if not isinstance(checks, dict):
@@ -1371,6 +1379,51 @@ def validate_api_contract_gate_stdout():
         for field in expected_negative_statuses:
             if negative_statuses.get(field) != 400:
                 errors.append(f"rqa_api_contract_{field}_status_invalid")
+
+    compatibility_policy = gate_json.get("compatibility_policy")
+    if not isinstance(compatibility_policy, dict):
+        errors.append("rqa_api_contract_compatibility_policy_missing")
+    else:
+        if (
+            compatibility_policy.get("policy_version")
+            != "tonglingyu-rqa-api-compatibility-v1"
+        ):
+            errors.append("rqa_api_contract_compatibility_policy_version_invalid")
+        if compatibility_policy.get("query_unknown_fields") != "reject":
+            errors.append("rqa_api_contract_query_unknown_fields_policy_invalid")
+        if compatibility_policy.get("request_unknown_fields") != "reject":
+            errors.append("rqa_api_contract_request_unknown_fields_policy_invalid")
+        if (
+            compatibility_policy.get("response_unknown_fields")
+            != "ignore_additive_fields"
+        ):
+            errors.append("rqa_api_contract_response_unknown_fields_policy_invalid")
+        schema_versions = compatibility_policy.get("schema_versions")
+        expected_schema_versions = {
+            "retrieval_failure_list": "tonglingyu-retrieval-failures-v1",
+            "retrieval_failure_read": "tonglingyu-retrieval-failures-v1",
+            "governance_task_list": "tonglingyu-knowledge-governance-tasks-v2",
+            "governance_task_read": "tonglingyu-knowledge-governance-tasks-v2",
+        }
+        if schema_versions != expected_schema_versions:
+            errors.append("rqa_api_contract_schema_versions_invalid")
+        unknown_request_statuses = compatibility_policy.get("unknown_request_statuses")
+        expected_unknown_request_fields = (
+            "retrieval_failure_update",
+            "retrieval_failure_cluster",
+            "governance_task_create_from_failure",
+            "governance_task_manual_create",
+            "knowledge_patch_proposal_create",
+            "governance_task_update",
+        )
+        if not isinstance(unknown_request_statuses, dict):
+            errors.append("rqa_api_contract_unknown_request_statuses_missing")
+        else:
+            for field in expected_unknown_request_fields:
+                if unknown_request_statuses.get(field) not in (400, 422):
+                    errors.append(
+                        f"rqa_api_contract_{field}_unknown_request_status_invalid"
+                    )
 
     refs = gate_json.get("refs")
     required_refs = (

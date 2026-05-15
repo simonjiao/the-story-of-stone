@@ -464,6 +464,7 @@ struct UserFeedbackRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetrievalFailureUpdateRequest {
     human_review_status: String,
     reviewer: Option<String>,
@@ -472,6 +473,7 @@ struct RetrievalFailureUpdateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RetrievalFailureClusterRequest {
     human_review_status: Option<String>,
     failure_type: Option<String>,
@@ -481,6 +483,7 @@ struct RetrievalFailureClusterRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GovernanceTaskCreateRequest {
     task_type: Option<String>,
     priority: Option<String>,
@@ -489,6 +492,7 @@ struct GovernanceTaskCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GovernanceTaskManualCreateRequest {
     source_entity_type: String,
     source_entity_id: String,
@@ -499,6 +503,7 @@ struct GovernanceTaskManualCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct KnowledgePatchProposalCreateRequest {
     proposal_type: String,
     trace_id: Option<String>,
@@ -509,6 +514,7 @@ struct KnowledgePatchProposalCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GovernanceTaskUpdateRequest {
     status: String,
     reviewer: Option<String>,

@@ -42,6 +42,7 @@ TAMPERED_RQA_PERFORMANCE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-performance-chec
 TAMPERED_RQA_API_CONTRACT_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-api-contract-stdout-report.json"
 TAMPERED_RQA_API_CONTRACT_CHECK_REPORT="${WORK_DIR}/tampered-rqa-api-contract-check-report.json"
 TAMPERED_RQA_API_CONTRACT_STATUS_REPORT="${WORK_DIR}/tampered-rqa-api-contract-status-report.json"
+TAMPERED_RQA_API_CONTRACT_POLICY_REPORT="${WORK_DIR}/tampered-rqa-api-contract-policy-report.json"
 TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-stdout-report.json"
 TAMPERED_RQA_USER_LIFECYCLE_CHECK_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-check-report.json"
 TAMPERED_RQA_USER_LIFECYCLE_ACTION_REPORT="${WORK_DIR}/tampered-rqa-user-lifecycle-action-report.json"
@@ -1245,12 +1246,39 @@ gate_stdout = {
             "governance_task_max_page_clamped": True,
             "governance_task_read_schema": True,
             "governance_task_unknown_filter_rejected": True,
+            "old_client_governance_task_list_compatible": True,
+            "old_client_governance_task_read_compatible": True,
             "retrieval_failure_invalid_status_rejected": True,
             "retrieval_failure_list_pagination": True,
             "retrieval_failure_list_schema": True,
             "retrieval_failure_max_page_clamped": True,
             "retrieval_failure_read_schema": True,
             "retrieval_failure_unknown_filter_rejected": True,
+            "old_client_retrieval_failure_list_compatible": True,
+            "old_client_retrieval_failure_read_compatible": True,
+            "additive_response_fields_tolerated": True,
+            "unknown_mutation_fields_rejected": True,
+            "schema_versions_stable": True,
+        },
+        "compatibility_policy": {
+            "policy_version": "tonglingyu-rqa-api-compatibility-v1",
+            "query_unknown_fields": "reject",
+            "request_unknown_fields": "reject",
+            "response_unknown_fields": "ignore_additive_fields",
+            "schema_versions": {
+                "governance_task_list": "tonglingyu-knowledge-governance-tasks-v2",
+                "governance_task_read": "tonglingyu-knowledge-governance-tasks-v2",
+                "retrieval_failure_list": "tonglingyu-retrieval-failures-v1",
+                "retrieval_failure_read": "tonglingyu-retrieval-failures-v1",
+            },
+            "unknown_request_statuses": {
+                "governance_task_create_from_failure": 422,
+                "governance_task_manual_create": 422,
+                "governance_task_update": 422,
+                "knowledge_patch_proposal_create": 422,
+                "retrieval_failure_cluster": 422,
+                "retrieval_failure_update": 422,
+            },
         },
         "contract_version": "tonglingyu-rqa-api-contract-v1",
         "errors": [],
@@ -1881,6 +1909,33 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_api_contract_status_stdout}" \
   '"rqa_api_contract_retrieval_failure_invalid_status_status_invalid" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_API_CONTRACT_POLICY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_api_contract":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["compatibility_policy"]["request_unknown_fields"] = "ignore"
+        gate_json["compatibility_policy"]["unknown_request_statuses"]["governance_task_update"] = 200
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_api_contract_policy_stdout="${WORK_DIR}/tampered-rqa-api-contract-policy.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_API_CONTRACT_POLICY_REPORT}" >"${tampered_rqa_api_contract_policy_stdout}"; then
+  echo "production-ready reports must reject incomplete RQA API compatibility policies" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_api_contract_policy_stdout}" \
+  '"rqa_api_contract_request_unknown_fields_policy_invalid" in report["errors"]'
+assert_report "${tampered_rqa_api_contract_policy_stdout}" \
+  '"rqa_api_contract_governance_task_update_unknown_request_status_invalid" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_USER_LIFECYCLE_STDOUT_REPORT}" <<'PY'
 import json

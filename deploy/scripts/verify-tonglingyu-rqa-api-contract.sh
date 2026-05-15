@@ -151,6 +151,7 @@ python3 - \
 import hashlib
 import json
 import sys
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib import error, request
@@ -195,6 +196,59 @@ def request_json(method, path, *, body=None, admin=False, extra_headers=None):
 def add_error(condition, code):
     if condition:
         errors.append(code)
+
+
+def request_unknown_field_rejected(status):
+    return status in (400, 422)
+
+
+def old_client_parse_list(payload, *, root_object, list_object, id_field):
+    if not isinstance(payload, dict) or payload.get("object") != root_object:
+        return False
+    page = payload.get("list")
+    if not isinstance(page, dict) or page.get("object") != list_object:
+        return False
+    if not isinstance(page.get("schema_version"), str):
+        return False
+    if not isinstance(page.get("limit"), int) or not isinstance(page.get("offset"), int):
+        return False
+    if not isinstance(page.get("next_offset"), int):
+        return False
+    items = page.get("items")
+    if not isinstance(items, list) or not items:
+        return False
+    return all(isinstance(item, dict) and isinstance(item.get(id_field), str) for item in items)
+
+
+def old_client_parse_read(payload, *, root_object, record_key, record_object, id_field):
+    if not isinstance(payload, dict) or payload.get("object") != root_object:
+        return False
+    record = payload.get(record_key)
+    if not isinstance(record, dict) or record.get("object") != record_object:
+        return False
+    if not isinstance(record.get("schema_version"), str):
+        return False
+    return isinstance(record.get(id_field), str)
+
+
+def response_with_additive_fields(payload):
+    candidate = deepcopy(payload)
+    if not isinstance(candidate, dict):
+        return candidate
+    candidate["future_contract_field"] = {"ignored_by_old_clients": True}
+    page = candidate.get("list")
+    if isinstance(page, dict):
+        page["future_page_field"] = "ignored"
+        items = page.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    item["future_item_field"] = "ignored"
+    for key in ("failure", "task"):
+        record = candidate.get(key)
+        if isinstance(record, dict):
+            record["future_record_field"] = "ignored"
+    return candidate
 
 
 chat_refs = []
@@ -285,6 +339,67 @@ max_failure_list = failures_max_page.get("list")
 max_task_list = tasks_max_page.get("list")
 failure_read_failure = failure_read.get("failure")
 task_read_task = task_read.get("task")
+schema_versions = {
+    "retrieval_failure_list": failure_list.get("schema_version") if isinstance(failure_list, dict) else None,
+    "retrieval_failure_read": (
+        failure_read_failure.get("schema_version") if isinstance(failure_read_failure, dict) else None
+    ),
+    "governance_task_list": task_list.get("schema_version") if isinstance(task_list, dict) else None,
+    "governance_task_read": task_read_task.get("schema_version") if isinstance(task_read_task, dict) else None,
+}
+unknown_request_statuses = {}
+unknown_request_payload = {"unexpected_contract_field": "must_be_rejected"}
+if failure_id:
+    unknown_request_statuses["retrieval_failure_update"] = request_json(
+        "PATCH",
+        f"/v1/admin/retrieval-failures/{failure_id}",
+        body={"human_review_status": "in_review", **unknown_request_payload},
+        admin=True,
+    )[0]
+    unknown_request_statuses["governance_task_create_from_failure"] = request_json(
+        "POST",
+        f"/v1/admin/retrieval-failures/{failure_id}/governance-task",
+        body={"task_type": "expert_review", **unknown_request_payload},
+        admin=True,
+    )[0]
+else:
+    unknown_request_statuses["retrieval_failure_update"] = 0
+    unknown_request_statuses["governance_task_create_from_failure"] = 0
+unknown_request_statuses["retrieval_failure_cluster"] = request_json(
+    "POST",
+    "/v1/admin/retrieval-failures/cluster",
+    body={"human_review_status": "open", "create_tasks": False, **unknown_request_payload},
+    admin=True,
+)[0]
+unknown_request_statuses["governance_task_manual_create"] = request_json(
+    "POST",
+    "/v1/admin/governance/tasks",
+    body={
+        "source_entity_type": "trace",
+        "source_entity_id": "missing-trace-for-contract-smoke",
+        **unknown_request_payload,
+    },
+    admin=True,
+)[0]
+unknown_request_statuses["knowledge_patch_proposal_create"] = request_json(
+    "POST",
+    "/v1/admin/governance/proposals",
+    body={
+        "proposal_type": "source_correction",
+        "payload": {"reason": "contract smoke"},
+        **unknown_request_payload,
+    },
+    admin=True,
+)[0]
+if task_id:
+    unknown_request_statuses["governance_task_update"] = request_json(
+        "PATCH",
+        f"/v1/admin/governance/tasks/{task_id}",
+        body={"status": "in_review", **unknown_request_payload},
+        admin=True,
+    )[0]
+else:
+    unknown_request_statuses["governance_task_update"] = 0
 
 checks = {
     "retrieval_failure_list_schema": (
@@ -344,6 +459,71 @@ checks = {
         and task_read_task.get("object") == "tonglingyu.knowledge_governance_task"
         and isinstance(task_read_task.get("schema_version"), str)
     ),
+    "old_client_retrieval_failure_list_compatible": old_client_parse_list(
+        failures_page,
+        root_object="tonglingyu.retrieval_failure_admin_list",
+        list_object="tonglingyu.retrieval_failure_list",
+        id_field="failure_id",
+    ),
+    "old_client_retrieval_failure_read_compatible": old_client_parse_read(
+        failure_read,
+        root_object="tonglingyu.retrieval_failure_admin_read",
+        record_key="failure",
+        record_object="tonglingyu.retrieval_failure",
+        id_field="failure_id",
+    ),
+    "old_client_governance_task_list_compatible": old_client_parse_list(
+        tasks_page,
+        root_object="tonglingyu.governance_task_admin_list",
+        list_object="tonglingyu.knowledge_governance_task_list",
+        id_field="task_id",
+    ),
+    "old_client_governance_task_read_compatible": old_client_parse_read(
+        task_read,
+        root_object="tonglingyu.governance_task_admin_read",
+        record_key="task",
+        record_object="tonglingyu.knowledge_governance_task",
+        id_field="task_id",
+    ),
+    "additive_response_fields_tolerated": (
+        old_client_parse_list(
+            response_with_additive_fields(failures_page),
+            root_object="tonglingyu.retrieval_failure_admin_list",
+            list_object="tonglingyu.retrieval_failure_list",
+            id_field="failure_id",
+        )
+        and old_client_parse_read(
+            response_with_additive_fields(failure_read),
+            root_object="tonglingyu.retrieval_failure_admin_read",
+            record_key="failure",
+            record_object="tonglingyu.retrieval_failure",
+            id_field="failure_id",
+        )
+        and old_client_parse_list(
+            response_with_additive_fields(tasks_page),
+            root_object="tonglingyu.governance_task_admin_list",
+            list_object="tonglingyu.knowledge_governance_task_list",
+            id_field="task_id",
+        )
+        and old_client_parse_read(
+            response_with_additive_fields(task_read),
+            root_object="tonglingyu.governance_task_admin_read",
+            record_key="task",
+            record_object="tonglingyu.knowledge_governance_task",
+            id_field="task_id",
+        )
+    ),
+    "unknown_mutation_fields_rejected": (
+        len(unknown_request_statuses) == 6
+        and all(request_unknown_field_rejected(status) for status in unknown_request_statuses.values())
+    ),
+    "schema_versions_stable": schema_versions
+    == {
+        "retrieval_failure_list": "tonglingyu-retrieval-failures-v1",
+        "retrieval_failure_read": "tonglingyu-retrieval-failures-v1",
+        "governance_task_list": "tonglingyu-knowledge-governance-tasks-v2",
+        "governance_task_read": "tonglingyu-knowledge-governance-tasks-v2",
+    },
 }
 visible_payload = json.dumps(
     {
@@ -397,6 +577,14 @@ payload = {
         "governance_task_unknown_filter": tasks_unknown_status,
         "retrieval_failure_invalid_status": status_invalid,
         "retrieval_failure_unknown_filter": status_unknown,
+    },
+    "compatibility_policy": {
+        "policy_version": "tonglingyu-rqa-api-compatibility-v1",
+        "query_unknown_fields": "reject",
+        "request_unknown_fields": "reject",
+        "response_unknown_fields": "ignore_additive_fields",
+        "schema_versions": schema_versions,
+        "unknown_request_statuses": unknown_request_statuses,
     },
     "refs": {
         "failure_sha256": sha256(failure_id),
