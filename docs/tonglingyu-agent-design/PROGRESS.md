@@ -488,6 +488,8 @@
 - 后续 RQA production-ready 还必须验证进入 production evidence chain 的 source
   都具备机器可读 license、usage boundary 和 attribution metadata；缺失时不能把
   该来源作为生产证据。
+- 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
+  复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 
 ## 下一步
 

@@ -61,6 +61,10 @@ production-ready 的替代验收。
     KB build hash、kb_version 和 eval run id，或使用了另一个 KB 构建的 RQA 指标。
 20. production evidence chain 使用的 source 缺少机器可读 license、usage boundary
     或 attribution metadata。
+21. backup/restore 没有 RTO/RPO、最近一次恢复演练证据，或恢复后没有重新运行
+    RQA gate。
+22. release automation 没有依赖、运行镜像和发布脚本的安全扫描或等价风险评估，
+    或存在未分级的 critical/high 风险。
 
 ## 决策基线
 
@@ -86,6 +90,8 @@ production-ready 的替代验收。
 | 强制执行 | CI 或 release automation 必须运行 RQA gate、validator 和 contract smoke |
 | KB 绑定 | live KB、source snapshot、eval run 和 release report 必须同源可复现 |
 | 来源许可 | production source 必须具备可核验 license / usage / attribution metadata |
+| 恢复目标 | RTO/RPO、恢复演练和恢复后 gate 复核必须进入 production report |
+| 供应链安全 | 依赖、运行镜像和发布脚本扫描必须进入 release automation |
 
 ## Production 默认阈值
 
@@ -357,6 +363,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
 - [ ] `deploy/scripts/verify-tonglingyu-release-readiness.sh`
 - [ ] `deploy/scripts/verify-tonglingyu-release-readiness-report.sh` fixture path
+- [ ] release automation 执行依赖、运行镜像和发布脚本安全扫描或等价风险评估。
 - [ ] production-ready report 不允许依赖 mock gate command override。
 - [ ] production-ready report 不允许使用低于默认阈值的 RQA 配置。
 - [ ] production-ready report 必须包含 RQA quality gate 和治理任务 gate。
@@ -370,6 +377,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
       validator 和 contract smoke；失败时不能生成 production-ready artifact。
 - [ ] 自动化产物必须记录 workflow/job id 或 release run id、触发 commit 和 gate
       结果摘要。
+- [ ] 自动化产物必须记录安全扫描摘要、risk owner、accepted risk id 或空风险结论。
 - [ ] `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 节点总结：
@@ -383,9 +391,13 @@ release report 和 saved report validator，不能只存在于运行环境中。
 目标：RQA 不是只在测试库可用，必须能在生产环境升级、保留、恢复和复测。
 
 - [ ] RQA 表纳入现有 backup / restore 演练。
+- [ ] 定义 RQA 数据的 RTO 和 RPO 默认目标，并写入 release report。
 - [ ] RQA 表纳入 retention / prune dry-run 和实际 prune 路径。
 - [ ] prune 不删除仍被 open failure、open governance task 或 production report 引用的数据。
 - [ ] restore 后 admin trace、failure、governance task 和 quality gate 可继续读取。
+- [ ] restore 后必须重新运行 RQA quality gate 和 saved report validator。
+- [ ] 最近一次恢复演练必须记录 started_at、finished_at、RTO/RPO 是否满足、
+      operator、环境和恢复后 gate 结果。
 - [ ] 生产 DB migration 前必须有备份路径和 schema preflight 输出。
 - [ ] live release mode 必须生成真实 RQA quality gate，不接受 fixture-only report。
 - [ ] production-ready report 必须绑定当前 live environment、generated_at 和有效期。
@@ -394,6 +406,10 @@ release report 和 saved report validator，不能只存在于运行环境中。
       KB build hash、kb_version 和 eval run id。
 - [ ] production-ready report 必须绑定当前 live KB 的 source license summary 和
       attribution summary。
+- [ ] production-ready report 必须包含 RTO/RPO、最近一次恢复演练证据和恢复后
+      gate 结果。
+- [ ] production-ready report 必须包含依赖/镜像/发布脚本安全扫描摘要或已审批
+      risk exception。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
@@ -440,6 +456,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
       validation。
 - [ ] runbook 覆盖回滚到上一镜像/配置的步骤。
 - [ ] runbook 覆盖 DB restore 或 additive schema 保留后的降级处理。
+- [ ] runbook 覆盖 RTO/RPO 目标、恢复步骤、恢复后 RQA gate 和 validator 复核。
 - [ ] rollback 后必须重新运行 release readiness 或明确标记 non-production。
 - [ ] 定义 RQA 写入失败率、admin API 5xx、admin API latency、open P0 failure、
       quality gate failure 的告警条件。
@@ -448,11 +465,12 @@ release report 和 saved report validator，不能只存在于运行环境中。
       查询。
 - [ ] post-release 监控记录 operator、时间、环境、报告路径和结论。
 - [ ] production-ready report 必须引用 runbook / rollback / post-release 证据。
-- [ ] runbook 必须说明如何按 release report 的 commit/image/config 摘要复现本次发布。
+- [ ] runbook 必须说明如何按 release report 的 commit/image/config/KB/security
+      摘要复现本次发布。
 - [ ] release gate 或 saved report validator 缺少值守证据时不能
       production-ready。
 - [ ] smoke 覆盖告警字段存在性、runbook ref、rollback evidence ref 和
-      post-release monitor ref。
+      post-release monitor ref、RTO/RPO evidence ref、安全扫描 evidence ref。
 
 节点总结：
 
@@ -475,12 +493,14 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 不允许硬删除 open failure、open governance task 或相关 audit history。
 - [ ] 事故 runbook 定义 severity、owner、first response、mitigation、rollback、
       recovery validation。
+- [ ] 事故 runbook 定义 RTO/RPO breach 的升级路径和发布状态处理。
 - [ ] capacity smoke 覆盖代表性 eval report 数量、failure 数量和 admin list 翻页。
 - [ ] load / soak smoke 覆盖 RQA 写入、admin 查询、metrics 和 release gate 在默认预算内。
-- [ ] release gate 缺少 capacity / incident / audit-history 证据时不能
+- [ ] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
+      证据时不能
       production-ready。
 - [ ] saved report validator 校验 emergency disabled、capacity missing、audit history
-      missing 不能 production-ready。
+      missing、RTO/RPO missing、security scan missing 不能 production-ready。
 
 节点总结：
 
