@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -124,9 +125,13 @@ curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0
 fi
 
 python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
-  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" <<'PY'
+  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" \
+  "${REPO_DIR}" <<'PY'
+import hashlib
 import json
+import os
 import sys
+from pathlib import Path
 
 (
     health_path,
@@ -137,7 +142,9 @@ import sys
     stream_path,
     trace_path,
     stream_trace_path,
-) = sys.argv[1:9]
+    repo_dir_raw,
+) = sys.argv[1:10]
+repo_dir = Path(repo_dir_raw)
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
 with open(models_path, "r", encoding="utf-8") as handle:
@@ -229,6 +236,31 @@ def stream_event_has_content_delta(event):
         if isinstance(delta, dict) and delta.get("content"):
             return True
     return False
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def optional_file_sha256(path):
+    try:
+        return file_sha256(path)
+    except OSError:
+        errors.append(f"policy file missing: {path.name}")
+        return ""
+
+
+def canonical_digest(value):
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(encoded.encode("utf-8"))
 
 
 def validate_trace_summary_surface(trace_value, expected_trace_id, expected_package_id, label):
@@ -391,6 +423,39 @@ if not isinstance(retrieval_failure_metrics.get("by_status"), dict):
     errors.append("metrics.rqa.retrieval_failures.by_status must be an object")
 if not isinstance(retrieval_failure_metrics.get("by_type"), dict):
     errors.append("metrics.rqa.retrieval_failures.by_type must be an object")
+
+runtime_policy_digest = optional_file_sha256(
+    repo_dir / "agent-platform" / "crates" / "tonglingyu-runtime" / "src" / "lib.rs"
+)
+gateway_policy_digest = optional_file_sha256(
+    repo_dir / "agent-platform" / "crates" / "tonglingyu-gateway" / "src" / "main.rs"
+)
+model_upstream_id = (
+    os.environ.get("TONGLINGYU_UPSTREAM_MODEL")
+    or os.environ.get("AGENT_RUNTIME_HERMES_MODEL")
+    or ""
+).strip()
+if not model_upstream_id:
+    errors.append("strict gateway model upstream id missing")
+behavior_config = {
+    "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+    "decoding_parameters_summary": {
+        "source": "gateway_runtime_config",
+        "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
+    },
+    "profile_contract": "tonglingyu-runtime-profile-contract-v1",
+    "runtime_profile_digest": runtime_policy_digest,
+    "prompt_digest": runtime_policy_digest,
+    "tool_policy": "read_only_runtime_tools",
+    "tool_policy_digest": runtime_policy_digest,
+    "reviewer_policy": "local_reviewer_enforced",
+    "reviewer_policy_digest": runtime_policy_digest,
+    "gateway_policy_digest": gateway_policy_digest,
+    "model_upstream_id": model_upstream_id,
+    "model_upstream_bound_by_gate": "model_upstream_network",
+    "decoding_parameters_source": "gateway_runtime_config",
+}
+behavior_config["behavior_config_digest"] = canonical_digest(behavior_config)
 
 if 'agent_runtime_mode="hermes"' not in prometheus:
     errors.append("prometheus tonglingyu_gateway_info must include agent_runtime_mode=hermes")
@@ -647,6 +712,7 @@ print(json.dumps(
         "evidence_package_id": chat_package_id,
         "stream_trace_id": stream_trace_id,
         "stream_evidence_package_id": stream_package_id,
+        "behavior_config": behavior_config,
     },
     ensure_ascii=True,
     sort_keys=True,

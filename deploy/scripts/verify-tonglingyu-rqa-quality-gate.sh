@@ -57,7 +57,7 @@ db_path = Path(db_path_raw)
 eval_report_path = Path(eval_report_path_raw)
 repo_dir = Path(repo_dir_raw)
 errors = []
-thresholds = {
+production_default_thresholds = {
     "quality_report_coverage": 1.0,
     "quality_report_production_ready": 1.0,
     "eval_case_classification": 1.0,
@@ -65,10 +65,73 @@ thresholds = {
     "expected_evidence_hit_at_8": 1.0,
     "required_type_coverage": 1.0,
     "exact_term_coverage": 1.0,
+    "source_boundary_confirmation_avoided": 1.0,
     "forbidden_conclusion_avoided": 1.0,
     "reviewer_status_matched": 1.0,
     "open_p0_retrieval_failures": 0,
 }
+threshold_env = {
+    "quality_report_coverage": ("TONGLINGYU_RQA_THRESHOLD_QUALITY_REPORT_COVERAGE", float),
+    "quality_report_production_ready": ("TONGLINGYU_RQA_THRESHOLD_QUALITY_REPORT_PRODUCTION_READY", float),
+    "eval_case_classification": ("TONGLINGYU_RQA_THRESHOLD_EVAL_CASE_CLASSIFICATION", float),
+    "expected_evidence_denominator_min": ("TONGLINGYU_RQA_THRESHOLD_EXPECTED_EVIDENCE_DENOMINATOR_MIN", int),
+    "expected_evidence_hit_at_8": ("TONGLINGYU_RQA_THRESHOLD_EXPECTED_EVIDENCE_HIT_AT_8", float),
+    "required_type_coverage": ("TONGLINGYU_RQA_THRESHOLD_REQUIRED_TYPE_COVERAGE", float),
+    "exact_term_coverage": ("TONGLINGYU_RQA_THRESHOLD_EXACT_TERM_COVERAGE", float),
+    "source_boundary_confirmation_avoided": ("TONGLINGYU_RQA_THRESHOLD_SOURCE_BOUNDARY_CONFIRMATION_AVOIDED", float),
+    "forbidden_conclusion_avoided": ("TONGLINGYU_RQA_THRESHOLD_FORBIDDEN_CONCLUSION_AVOIDED", float),
+    "reviewer_status_matched": ("TONGLINGYU_RQA_THRESHOLD_REVIEWER_STATUS_MATCHED", float),
+    "open_p0_retrieval_failures": ("TONGLINGYU_RQA_THRESHOLD_OPEN_P0_RETRIEVAL_FAILURES", int),
+}
+
+
+def parse_thresholds():
+    thresholds = dict(production_default_thresholds)
+    overrides = []
+    invalid_overrides = []
+    less_strict_overrides = []
+    for key, (env_name, parser) in threshold_env.items():
+        raw_value = os.environ.get(env_name)
+        if raw_value is None or not raw_value.strip():
+            continue
+        raw_value = raw_value.strip()
+        try:
+            parsed = parser(raw_value)
+        except ValueError:
+            invalid_overrides.append({"key": key, "env": env_name, "value": raw_value})
+            continue
+        if parser is float:
+            parsed = float(parsed)
+            if parsed < 0.0 or parsed > 1.0:
+                invalid_overrides.append({"key": key, "env": env_name, "value": raw_value})
+                continue
+        elif parsed < 0:
+            invalid_overrides.append({"key": key, "env": env_name, "value": raw_value})
+            continue
+        thresholds[key] = parsed
+        overrides.append({"key": key, "env": env_name, "value": parsed})
+        default = production_default_thresholds[key]
+        if key == "open_p0_retrieval_failures":
+            if parsed > default:
+                less_strict_overrides.append(key)
+        elif parsed < default:
+            less_strict_overrides.append(key)
+    config = {
+        "source": "environment_overrides" if overrides else "production_defaults",
+        "override_env_prefix": "TONGLINGYU_RQA_THRESHOLD_",
+        "overrides": overrides,
+        "invalid_overrides": invalid_overrides,
+        "less_strict_overrides": less_strict_overrides,
+        "production_ready_thresholds_enforced": not invalid_overrides and not less_strict_overrides,
+    }
+    return thresholds, config
+
+
+thresholds, threshold_config = parse_thresholds()
+if threshold_config["invalid_overrides"]:
+    errors.append("threshold_config_invalid")
+if threshold_config["less_strict_overrides"]:
+    errors.append("thresholds_below_production_defaults")
 
 
 def sha256_bytes(data):
@@ -159,6 +222,8 @@ exact_total = count_value(summary, "exact_term_coverage", "total")
 exact_ratio = ratio(summary, "exact_term_coverage")
 if exact_total and exact_ratio != thresholds["exact_term_coverage"]:
     errors.append("exact_term_coverage_below_threshold")
+if ratio(summary, "source_boundary_confirmation_avoided") != thresholds["source_boundary_confirmation_avoided"]:
+    errors.append("source_boundary_confirmation_avoided_below_threshold")
 if ratio(summary, "forbidden_conclusion_avoided") != thresholds["forbidden_conclusion_avoided"]:
     errors.append("forbidden_conclusion_avoided_below_threshold")
 if ratio(summary, "reviewer_status_matched") != thresholds["reviewer_status_matched"]:
@@ -292,6 +357,7 @@ quality_summary_public = {
     "expected_evidence_hit_at_8": summary.get("expected_evidence_hit_at_8"),
     "required_type_coverage": summary.get("required_type_coverage"),
     "exact_term_coverage": summary.get("exact_term_coverage"),
+    "source_boundary_confirmation_avoided": summary.get("source_boundary_confirmation_avoided"),
     "forbidden_conclusion_avoided": summary.get("forbidden_conclusion_avoided"),
     "reviewer_status_matched": summary.get("reviewer_status_matched"),
     "eval_failure_records": summary.get("eval_failure_records"),
@@ -317,6 +383,25 @@ model_upstream_id = (
 ).strip()
 if not model_upstream_id:
     errors.append("model_upstream_id_missing")
+behavior_config = {
+    "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+    "decoding_parameters_summary": {
+        "source": "gateway_runtime_config",
+        "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
+    },
+    "profile_contract": "tonglingyu-runtime-profile-contract-v1",
+    "runtime_profile_digest": runtime_policy_digest,
+    "prompt_digest": runtime_policy_digest,
+    "tool_policy": "read_only_runtime_tools",
+    "tool_policy_digest": runtime_policy_digest,
+    "reviewer_policy": "local_reviewer_enforced",
+    "reviewer_policy_digest": runtime_policy_digest,
+    "gateway_policy_digest": gateway_policy_digest,
+    "model_upstream_id": model_upstream_id,
+    "model_upstream_bound_by_gate": "model_upstream_network",
+    "decoding_parameters_source": "gateway_runtime_config",
+}
+behavior_config["behavior_config_digest"] = canonical_digest(behavior_config)
 gate = {
     "object": "tonglingyu.rqa_quality_gate",
     "schema_version": 1,
@@ -324,7 +409,9 @@ gate = {
     "quality_gate_passed": not errors,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "errors": errors,
+    "production_default_thresholds": production_default_thresholds,
     "effective_thresholds": thresholds,
+    "threshold_config": threshold_config,
     "rqa_schema_version": "tonglingyu-retrieval-failures-v1",
     "eval_suite_version": summary.get("schema_version"),
     "eval_run_id": eval_run_id,
@@ -342,24 +429,7 @@ gate = {
     "source_license_summary": source_license_summary,
     "quality_summary": quality_summary_public,
     "open_p0_retrieval_failures": open_retrieval_failures,
-    "behavior_config": {
-        "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
-        "decoding_parameters_summary": {
-            "source": "gateway_runtime_config",
-            "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
-        },
-        "profile_contract": "tonglingyu-runtime-profile-contract-v1",
-        "runtime_profile_digest": runtime_policy_digest,
-        "prompt_digest": runtime_policy_digest,
-        "tool_policy": "read_only_runtime_tools",
-        "tool_policy_digest": runtime_policy_digest,
-        "reviewer_policy": "local_reviewer_enforced",
-        "reviewer_policy_digest": runtime_policy_digest,
-        "gateway_policy_digest": gateway_policy_digest,
-        "model_upstream_id": model_upstream_id,
-        "model_upstream_bound_by_gate": "model_upstream_network",
-        "decoding_parameters_source": "gateway_runtime_config",
-    },
+    "behavior_config": behavior_config,
     "secret_values_printed": False,
 }
 print(json.dumps(gate, ensure_ascii=True, sort_keys=True))

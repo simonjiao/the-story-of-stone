@@ -536,7 +536,7 @@
   普通 completion 和 streaming completion 均有 RQA 内部字段不可见测试。
   `cargo test -p tonglingyu-gateway` 已通过 36 个测试，Open WebUI admin Action
   单测已通过 10 个测试。
-- RQA Milestone F/G 已开始接入 release artifact：
+- RQA Milestone F/G 已完成 release artifact 主干实现：
   新增 `deploy/scripts/verify-tonglingyu-rqa-quality-gate.sh`，并把
   `retrieval_quality` 加入 `verify-tonglingyu-release-readiness.sh` 的 required
   gate；saved report validator 的 canonical gate set 也加入
@@ -547,20 +547,32 @@
   参数摘要，并输出可复核的 `eval_report_path`。当 release report path 已设置且
   未显式指定 eval report path 时，release readiness 会为真实 RQA gate 生成同目录
   `.rqa-eval.json` artifact，避免 production-ready report 绑定临时文件。
+- RQA quality gate 已支持 `TONGLINGYU_RQA_THRESHOLD_*` 阈值配置；默认值仍是
+  Production 默认阈值。更严格阈值会进入 `effective_thresholds` 和
+  `threshold_config`，低于默认值或不可解析的覆盖会 fail-closed，不能生成
+  production-ready artifact。新增 eval 指标
+  `source_boundary_confirmation_avoided`，用于证明需要影印件、权威校注或专家
+  校勘的问题没有被公共回答声明为已确认。
 - RQA Milestone G 已完成 saved report validator 的 artifact 复核：
   validator 会读取 `eval_report_path`，校验 `eval_report_sha256`、`eval_run_id`
   和 `eval_suite_version`，并从原始 eval cases 重算 quality report coverage、
   production-ready quality report coverage、eval classification、expected
   evidence hit@1/@3/@8、required type coverage、exact term coverage、forbidden
   conclusion avoided、reviewer status matched、eval failure records 和 source
-  diversity。为支持完整重算，`tonglingyu-gateway eval` 的 case result 已新增
-  `expected_review_status`、`required_evidence_type` 和
-  `quality.required_type_required`。
+  boundary confirmation avoided、source diversity。为支持完整重算，
+  `tonglingyu-gateway eval` 的 case result 已新增 `expected_review_status`、
+  `required_evidence_type`、`quality.required_type_required`、
+  `quality.source_boundary_confirmation_required` 和
+  `quality.source_boundary_confirmation_avoided`。
 - Saved report validator 还会扫描 release report 中的 raw question/query/prompt
   字段、stdout JSON 字符串泄露，以及 trace/package/evidence/block/case/user 等
   高基数 id 列表。contract smoke 已覆盖 RQA gate stdout 缺失、阈值被降低、
   open P0 tamper、eval artifact 缺失、summary tamper、privacy leak 和
   high-cardinality list leak。
+- `deploy/scripts/verify-tonglingyu-strict-gateway.sh` 已输出与 RQA quality gate 同
+  结构的 `behavior_config` 和 `behavior_config_digest`；saved report validator
+  会逐字段比较 RQA eval gate 与 strict live gate 的 Runtime profile、prompt、
+  tool policy、reviewer policy、model upstream 和 decoding 参数摘要。
 - 当前本地 RQA quality gate 正确 fail-closed：`quality_summary.status=passed`，
   但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures，
   因此 release readiness 报告会把 `retrieval_quality` 记为 required failure，
@@ -568,8 +580,6 @@
   RQA production-ready 的证据。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
-- 后续 RQA production-ready 还必须逐字段校验 RQA eval 行为配置与 strict live
-  gate 读取的运行配置一致；仅记录摘要还不等于最终完成。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -579,12 +589,12 @@
 
 ## 下一步
 
-1. 继续收紧 RQA Milestone F：补阈值运行时配置，并校验 RQA eval 行为配置与
-   strict live gate 配置一致。
-2. 清理或分派当前 open retrieval failures，使 quality gate 的 open failure
+1. 清理或分派当前 open retrieval failures，使 quality gate 的 open failure
    blocker 能由真实治理状态关闭，而不是绕过阈值。
-3. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
+2. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
    retention/prune、runbook/alert/rollback 和 production report 运维证据。
+3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、性能预算、发布值守、
+   回滚、事故响应、容量和审计完整性。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

@@ -34,6 +34,7 @@ TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-repo
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
 TAMPERED_RQA_GATE_MISSING_EVAL_REPORT="${WORK_DIR}/tampered-rqa-gate-missing-eval-report.json"
+TAMPERED_BEHAVIOR_CONFIG_REPORT="${WORK_DIR}/tampered-behavior-config-report.json"
 TAMPERED_PRIVACY_REPORT="${WORK_DIR}/tampered-privacy-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
@@ -45,6 +46,7 @@ TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-has
 TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT="${WORK_DIR}/tampered-browser-local-ref-hash-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 SYNTHETIC_RQA_EVAL_REPORT="${WORK_DIR}/synthetic-rqa-eval-report.json"
+SYNTHETIC_RQA_DB="${WORK_DIR}/synthetic-rqa.db"
 
 mkdir -p "${WORK_DIR}/screenshots"
 : >"${WORK_DIR}/screenshots/models.png"
@@ -765,12 +767,13 @@ assert_report "${tampered_browser_relative_evidence_stdout}" \
   '"browser_review_validation_evidence_path_must_be_absolute" in report["errors"]'
 
 python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" \
-  "${SYNTHETIC_RQA_EVAL_REPORT}" <<'PY'
+  "${SYNTHETIC_RQA_EVAL_REPORT}" "${SYNTHETIC_RQA_DB}" <<'PY'
 import hashlib
 import json
+import sqlite3
 import sys
 
-source, target, eval_report_path = sys.argv[1:4]
+source, target, eval_report_path, db_path = sys.argv[1:5]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
 report["production_release_ready"] = True
@@ -781,18 +784,19 @@ report["status"] = "passed"
 report["release_blockers"] = []
 quality_summary = {
     "blockers": [],
-    "eval_case_classification": {"passed": 1, "ratio": 1.0, "total": 1},
+    "eval_case_classification": {"passed": 2, "ratio": 1.0, "total": 2},
     "eval_failure_records": 0,
     "exact_term_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
     "expected_evidence_denominator": 1,
     "expected_evidence_hit_at_1": {"passed": 1, "ratio": 1.0, "total": 1},
     "expected_evidence_hit_at_3": {"passed": 1, "ratio": 1.0, "total": 1},
     "expected_evidence_hit_at_8": {"passed": 1, "ratio": 1.0, "total": 1},
-    "forbidden_conclusion_avoided": {"passed": 1, "ratio": 1.0, "total": 1},
-    "quality_report_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
+    "forbidden_conclusion_avoided": {"passed": 2, "ratio": 1.0, "total": 2},
+    "quality_report_coverage": {"passed": 2, "ratio": 1.0, "total": 2},
     "quality_report_production_ready": {"passed": 1, "ratio": 1.0, "total": 1},
-    "required_type_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
-    "reviewer_status_matched": {"passed": 1, "ratio": 1.0, "total": 1},
+    "required_type_coverage": {"passed": 2, "ratio": 1.0, "total": 2},
+    "reviewer_status_matched": {"passed": 2, "ratio": 1.0, "total": 2},
+    "source_boundary_confirmation_avoided": {"passed": 1, "ratio": 1.0, "total": 1},
     "schema_version": "tonglingyu-eval-quality-v1",
     "source_coverage_boundary": {
         "authoritative_edition_review_status": "not_reviewed",
@@ -810,49 +814,178 @@ quality_summary = {
 eval_report = {
     "object": "tonglingyu.eval_report",
     "status": "passed",
-    "summary": {"failed": 0, "passed": 1, "total": 1},
+    "summary": {"failed": 0, "passed": 2, "total": 2},
     "quality_summary": quality_summary,
-    "cases": [{
-        "block_ids": ["synthetic-block"],
-        "card_count": 1,
-        "evidence_ids": ["synthetic-evidence"],
-        "expected_review_status": "passed",
-        "failures": [],
-        "forbidden_conclusion_count": 0,
-        "id": "synthetic-ready-case",
-        "package_id": "pkg-synthetic",
-        "passed": True,
-        "quality": {
-            "classification": {
-                "classification": "expected_evidence",
-                "expected_block_ids": ["synthetic-block"],
-                "expected_evidence_ids": ["synthetic-evidence"],
+    "cases": [
+        {
+            "block_ids": ["synthetic-block"],
+            "card_count": 1,
+            "evidence_ids": ["synthetic-evidence"],
+            "expected_review_status": "passed",
+            "failures": [],
+            "forbidden_conclusion_count": 0,
+            "id": "synthetic-ready-case",
+            "package_id": "pkg-synthetic",
+            "passed": True,
+            "quality": {
+                "classification": {
+                    "classification": "expected_evidence",
+                    "expected_block_ids": ["synthetic-block"],
+                    "expected_evidence_ids": ["synthetic-evidence"],
+                },
+                "edition_labels": ["synthetic-edition"],
+                "exact_term_coverage": {"passed": 1, "total": 1},
+                "expected_evidence_hit_at_1": True,
+                "expected_evidence_hit_at_3": True,
+                "expected_evidence_hit_at_8": True,
+                "quality_report_count": 1,
+                "quality_report_production_ready_required": True,
+                "quality_report_unallowed_non_production_issues": [],
+                "required_type_required": True,
+                "required_type_passed": True,
+                "source_boundary_confirmation_required": False,
+                "source_boundary_confirmation_avoided": False,
+                "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+                "source_ids": ["hongloumeng-wikisource-120"],
             },
-            "edition_labels": ["synthetic-edition"],
-            "exact_term_coverage": {"passed": 1, "total": 1},
-            "expected_evidence_hit_at_1": True,
-            "expected_evidence_hit_at_3": True,
-            "expected_evidence_hit_at_8": True,
-            "quality_report_count": 1,
-            "quality_report_production_ready_required": True,
-            "quality_report_unallowed_non_production_issues": [],
-            "required_type_required": True,
-            "required_type_passed": True,
-            "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
-            "source_ids": ["hongloumeng-wikisource-120"],
+            "question": "synthetic release eval case",
+            "required_evidence_type": "base_text",
+            "review_severity": "none",
+            "review_status": "passed",
+            "trace_id": "eval-synthetic",
         },
-        "question": "synthetic release eval case",
-        "required_evidence_type": "base_text",
-        "review_severity": "none",
-        "review_status": "passed",
-        "trace_id": "eval-synthetic",
-    }],
+        {
+            "block_ids": ["synthetic-block"],
+            "card_count": 1,
+            "evidence_ids": ["synthetic-evidence"],
+            "expected_review_status": "needs_revision",
+            "failures": [],
+            "forbidden_conclusion_count": 0,
+            "id": "synthetic-source-boundary-case",
+            "package_id": "pkg-synthetic-boundary",
+            "passed": True,
+            "quality": {
+                "classification": {
+                    "classification": "not_applicable",
+                    "reason": "source_boundary_requires_facsimile_authoritative_or_expert_review",
+                },
+                "edition_labels": ["synthetic-edition"],
+                "exact_term_coverage": {"passed": 0, "total": 0},
+                "expected_evidence_hit_at_1": False,
+                "expected_evidence_hit_at_3": False,
+                "expected_evidence_hit_at_8": False,
+                "quality_report_count": 1,
+                "quality_report_production_ready_required": False,
+                "quality_report_unallowed_non_production_issues": [],
+                "required_type_required": True,
+                "required_type_passed": True,
+                "source_boundary_confirmation_required": True,
+                "source_boundary_confirmation_avoided": True,
+                "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+                "source_ids": ["hongloumeng-wikisource-120"],
+            },
+            "question": "synthetic source boundary confirmation case",
+            "required_evidence_type": "base_text",
+            "review_severity": "needs_revision",
+            "review_status": "needs_revision",
+            "trace_id": "eval-synthetic-boundary",
+        },
+    ],
 }
 with open(eval_report_path, "w", encoding="utf-8") as handle:
     json.dump(eval_report, handle, sort_keys=True)
     handle.write("\n")
 with open(eval_report_path, "rb") as handle:
     eval_report_sha256 = hashlib.sha256(handle.read()).hexdigest()
+conn = sqlite3.connect(db_path)
+conn.executescript(
+    """
+    CREATE TABLE kb_version (
+        version_id TEXT,
+        source_root TEXT,
+        source_count INTEGER,
+        block_count INTEGER,
+        schema_version TEXT,
+        built_at TEXT
+    );
+    CREATE TABLE sources (
+        source_id TEXT,
+        source_hash TEXT,
+        license TEXT,
+        license_url TEXT,
+        license_source_url TEXT,
+        attribution TEXT,
+        usage_boundary TEXT
+    );
+    CREATE TABLE retrieval_failures (
+        human_review_status TEXT
+    );
+    """
+)
+conn.execute(
+    "INSERT INTO kb_version VALUES (?, ?, ?, ?, ?, ?)",
+    (
+        "kb-synthetic",
+        "resources/sources/wiki",
+        1,
+        1,
+        "tonglingyu-kb-v1",
+        "2026-05-15T00:00:00Z",
+    ),
+)
+conn.execute(
+    "INSERT INTO sources VALUES (?, ?, ?, ?, ?, ?, ?)",
+    (
+        "hongloumeng-wikisource-120",
+        "3" * 64,
+        "CC-BY-SA-4.0",
+        "https://creativecommons.org/licenses/by-sa/4.0/",
+        "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+        "Wikisource contributors",
+        "synthetic usage boundary",
+    ),
+)
+conn.commit()
+conn.close()
+behavior_config = {
+    "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+    "decoding_parameters_source": "gateway_runtime_config",
+    "decoding_parameters_summary": {
+        "source": "gateway_runtime_config",
+        "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
+    },
+    "gateway_policy_digest": "6" * 64,
+    "model_upstream_id": "gpt-synthetic",
+    "model_upstream_bound_by_gate": "model_upstream_network",
+    "profile_contract": "tonglingyu-runtime-profile-contract-v1",
+    "prompt_digest": "7" * 64,
+    "reviewer_policy": "local_reviewer_enforced",
+    "reviewer_policy_digest": "8" * 64,
+    "runtime_profile_digest": "9" * 64,
+    "tool_policy": "read_only_runtime_tools",
+    "tool_policy_digest": "a" * 64,
+}
+behavior_config["behavior_config_digest"] = hashlib.sha256(
+    json.dumps(
+        behavior_config,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+production_default_thresholds = {
+    "eval_case_classification": 1.0,
+    "exact_term_coverage": 1.0,
+    "expected_evidence_denominator_min": 1,
+    "expected_evidence_hit_at_8": 1.0,
+    "forbidden_conclusion_avoided": 1.0,
+    "open_p0_retrieval_failures": 0,
+    "quality_report_coverage": 1.0,
+    "quality_report_production_ready": 1.0,
+    "required_type_coverage": 1.0,
+    "reviewer_status_matched": 1.0,
+    "source_boundary_confirmation_avoided": 1.0,
+}
 gate_stdout = {
     "runtime_config": {
         "checked_policy_fields": ["TONGLINGYU_AGENT_RUNTIME_MODE"],
@@ -861,36 +994,8 @@ gate_stdout = {
         "status": "ok",
     },
     "retrieval_quality": {
-        "behavior_config": {
-            "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
-            "decoding_parameters_source": "gateway_runtime_config",
-            "decoding_parameters_summary": {
-                "source": "gateway_runtime_config",
-                "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
-            },
-            "gateway_policy_digest": "6" * 64,
-            "model_upstream_id": "gpt-synthetic",
-            "model_upstream_bound_by_gate": "model_upstream_network",
-            "profile_contract": "tonglingyu-runtime-profile-contract-v1",
-            "prompt_digest": "7" * 64,
-            "reviewer_policy": "local_reviewer_enforced",
-            "reviewer_policy_digest": "8" * 64,
-            "runtime_profile_digest": "9" * 64,
-            "tool_policy": "read_only_runtime_tools",
-            "tool_policy_digest": "a" * 64,
-        },
-        "effective_thresholds": {
-            "eval_case_classification": 1.0,
-            "exact_term_coverage": 1.0,
-            "expected_evidence_denominator_min": 1,
-            "expected_evidence_hit_at_8": 1.0,
-            "forbidden_conclusion_avoided": 1.0,
-            "open_p0_retrieval_failures": 0,
-            "quality_report_coverage": 1.0,
-            "quality_report_production_ready": 1.0,
-            "required_type_coverage": 1.0,
-            "reviewer_status_matched": 1.0,
-        },
+        "behavior_config": behavior_config,
+        "effective_thresholds": production_default_thresholds,
         "errors": [],
         "eval_report_generated_by_gate": True,
         "eval_report_path": eval_report_path,
@@ -908,6 +1013,7 @@ gate_stdout = {
         },
         "object": "tonglingyu.rqa_quality_gate",
         "open_p0_retrieval_failures": 0,
+        "production_default_thresholds": production_default_thresholds,
         "quality_gate_passed": True,
         "quality_summary": {
             "blockers": quality_summary["blockers"],
@@ -921,6 +1027,7 @@ gate_stdout = {
             "quality_report_production_ready": quality_summary["quality_report_production_ready"],
             "required_type_coverage": quality_summary["required_type_coverage"],
             "reviewer_status_matched": quality_summary["reviewer_status_matched"],
+            "source_boundary_confirmation_avoided": quality_summary["source_boundary_confirmation_avoided"],
             "source_coverage_boundary": quality_summary["source_coverage_boundary"],
             "source_diversity": quality_summary["source_diversity"],
             "status": quality_summary["status"],
@@ -943,6 +1050,14 @@ gate_stdout = {
         },
         "source_snapshot_digest": "5" * 64,
         "status": "ok",
+        "threshold_config": {
+            "invalid_overrides": [],
+            "less_strict_overrides": [],
+            "override_env_prefix": "TONGLINGYU_RQA_THRESHOLD_",
+            "overrides": [],
+            "production_ready_thresholds_enforced": True,
+            "source": "production_defaults",
+        },
     },
     "model_upstream_network": {
         "errors": [],
@@ -954,6 +1069,7 @@ gate_stdout = {
     },
     "strict_gateway": {
         "agent_runtime_mode": "hermes",
+        "behavior_config": behavior_config,
         "checked_surfaces": ["tonglingyu-gateway:/healthz"],
         "model_ids": ["tonglingyu"],
         "status": "ok",
@@ -979,6 +1095,34 @@ with open(target, "w", encoding="utf-8") as handle:
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+rqa_gate_default_stdout="${WORK_DIR}/rqa-gate-default-thresholds.stdout"
+env \
+  TONGLINGYU_UPSTREAM_MODEL=gpt-synthetic \
+  TONGLINGYU_RQA_DB_PATH="${SYNTHETIC_RQA_DB}" \
+  TONGLINGYU_RQA_EVAL_REPORT_PATH="${SYNTHETIC_RQA_EVAL_REPORT}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-rqa-quality-gate.sh" >"${rqa_gate_default_stdout}"
+assert_report "${rqa_gate_default_stdout}" 'report["status"] == "ok"'
+assert_report "${rqa_gate_default_stdout}" \
+  'report["threshold_config"]["source"] == "production_defaults"'
+assert_report "${rqa_gate_default_stdout}" \
+  'report["threshold_config"]["production_ready_thresholds_enforced"] is True'
+
+rqa_gate_low_threshold_stdout="${WORK_DIR}/rqa-gate-low-threshold.stdout"
+if env \
+  TONGLINGYU_UPSTREAM_MODEL=gpt-synthetic \
+  TONGLINGYU_RQA_DB_PATH="${SYNTHETIC_RQA_DB}" \
+  TONGLINGYU_RQA_EVAL_REPORT_PATH="${SYNTHETIC_RQA_EVAL_REPORT}" \
+  TONGLINGYU_RQA_THRESHOLD_EXPECTED_EVIDENCE_HIT_AT_8=0.8 \
+  "${SCRIPT_DIR}/verify-tonglingyu-rqa-quality-gate.sh" \
+  >"${rqa_gate_low_threshold_stdout}"; then
+  echo "RQA quality gate must fail closed when thresholds are below production defaults" >&2
+  exit 1
+fi
+assert_report "${rqa_gate_low_threshold_stdout}" \
+  '"thresholds_below_production_defaults" in report["errors"]'
+assert_report "${rqa_gate_low_threshold_stdout}" \
+  '"expected_evidence_hit_at_8" in report["threshold_config"]["less_strict_overrides"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_STALE_READY_REPORT}" <<'PY'
 import json
@@ -1066,7 +1210,7 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   exit 1
 fi
 assert_report "${tampered_rqa_gate_threshold_stdout}" \
-  '"retrieval_quality_threshold_expected_evidence_hit_at_8_mismatch" in report["errors"]'
+  '"retrieval_quality_threshold_expected_evidence_hit_at_8_below_production_default" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_OPEN_P0_REPORT}" <<'PY'
 import json
@@ -1140,6 +1284,32 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_gate_missing_eval_stdout}" \
   '"retrieval_quality_eval_report_file_not_found" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BEHAVIOR_CONFIG_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "strict_gateway":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["behavior_config"]["model_upstream_id"] = "other-model"
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_behavior_config_stdout="${WORK_DIR}/tampered-behavior-config.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BEHAVIOR_CONFIG_REPORT}" >"${tampered_behavior_config_stdout}"; then
+  echo "RQA eval behavior config must match strict live gate behavior config" >&2
+  exit 1
+fi
+assert_report "${tampered_behavior_config_stdout}" \
+  '"strict_gateway_behavior_config_digest_mismatch" in report["errors"]'
+assert_report "${tampered_behavior_config_stdout}" \
+  '"retrieval_quality_behavior_config_strict_gateway_mismatch" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRIVACY_REPORT}" <<'PY'
 import json

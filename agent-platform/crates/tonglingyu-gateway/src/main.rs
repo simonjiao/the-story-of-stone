@@ -1431,6 +1431,8 @@ struct EvalQualityAccumulator {
     required_type_passed: usize,
     exact_term_total: usize,
     exact_term_passed: usize,
+    source_boundary_confirmation_cases: usize,
+    source_boundary_confirmation_avoided: usize,
     forbidden_conclusion_cases: usize,
     forbidden_conclusion_avoided: usize,
     reviewer_status_matched: usize,
@@ -1615,6 +1617,9 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         let expected_refs = expected_eval_refs(&case);
         let exact_terms = eval_exact_terms(&case);
         let forbidden_conclusion_terms = eval_forbidden_conclusion_terms(&case);
+        let source_boundary_confirmation_required =
+            eval_expected_evidence_not_applicable_reason(&case)
+                == Some(EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY);
         let case_classification = if expected_refs.is_empty() {
             match eval_expected_evidence_not_applicable_reason(&case) {
                 Some(reason) => {
@@ -1683,6 +1688,18 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if source_boundary_confirmation_required {
+            quality.source_boundary_confirmation_cases += 1;
+            if package.review.status == "needs_revision"
+                && case.expected_review_status == "needs_revision"
+            {
+                quality.source_boundary_confirmation_avoided += 1;
+            } else {
+                failures.push(
+                    "source boundary confirmation was not downgraded to needs_revision".to_string(),
+                );
+            }
         }
         let forbidden_conclusion_hit = forbidden_conclusion_terms
             .iter()
@@ -1757,6 +1774,10 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                     "passed": exact_terms_matched,
                     "total": exact_terms.len(),
                 },
+                "source_boundary_confirmation_required": source_boundary_confirmation_required,
+                "source_boundary_confirmation_avoided": source_boundary_confirmation_required
+                    && package.review.status == "needs_revision"
+                    && case.expected_review_status == "needs_revision",
                 "source_ids": package.cards.iter().map(|card| card.source_id.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "edition_labels": package.cards.iter().map(|card| card.source_title.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
@@ -2031,6 +2052,15 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     if quality.exact_term_total > 0 && quality.exact_term_passed != quality.exact_term_total {
         blockers.insert("exact_term_coverage_below_100_percent".to_string());
     }
+    if quality.source_boundary_confirmation_cases == 0 {
+        blockers.insert("source_boundary_confirmation_denominator_zero".to_string());
+    }
+    if quality.source_boundary_confirmation_cases > 0
+        && quality.source_boundary_confirmation_avoided
+            != quality.source_boundary_confirmation_cases
+    {
+        blockers.insert("source_boundary_confirmation_avoided_below_100_percent".to_string());
+    }
     if quality.forbidden_conclusion_avoided != quality.forbidden_conclusion_cases {
         blockers.insert("forbidden_conclusion_avoided_below_100_percent".to_string());
     }
@@ -2053,6 +2083,10 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
         "expected_evidence_hit_at_8": ratio_json(quality.expected_hit_at_8, quality.expected_evidence_cases),
         "required_type_coverage": ratio_json(quality.required_type_passed, quality.required_type_cases),
         "exact_term_coverage": ratio_json(quality.exact_term_passed, quality.exact_term_total),
+        "source_boundary_confirmation_avoided": ratio_json(
+            quality.source_boundary_confirmation_avoided,
+            quality.source_boundary_confirmation_cases,
+        ),
         "source_diversity": {
             "count": quality.source_ids.len(),
             "source_ids": quality.source_ids.iter().cloned().collect::<Vec<_>>(),
@@ -5005,6 +5039,8 @@ mod tests {
             required_type_passed: 1,
             exact_term_total: 1,
             exact_term_passed: 1,
+            source_boundary_confirmation_cases: 1,
+            source_boundary_confirmation_avoided: 1,
             forbidden_conclusion_cases: 1,
             forbidden_conclusion_avoided: 1,
             reviewer_status_matched: 1,

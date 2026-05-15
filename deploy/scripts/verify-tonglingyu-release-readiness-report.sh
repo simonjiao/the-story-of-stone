@@ -155,9 +155,11 @@ gate_stdout_requirements = {
             "kb_version",
             "quality_gate_passed",
             "quality_summary",
+            "production_default_thresholds",
             "rqa_schema_version",
             "source_license_summary",
             "source_snapshot_digest",
+            "threshold_config",
         ],
     },
     "model_upstream_network": {
@@ -172,6 +174,7 @@ gate_stdout_requirements = {
             "agent_runtime_mode": "hermes",
         },
         "required_fields": [
+            "behavior_config",
             "checked_surfaces",
             "model_ids",
             "stream_trace_id",
@@ -268,6 +271,15 @@ def file_sha256(file_path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical_digest(value):
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(encoded.encode("utf-8"))
 
 
 def secret_value_paths(value, prefix="$"):
@@ -387,6 +399,78 @@ def nonempty_dict(value):
     return isinstance(value, dict) and bool(value)
 
 
+def threshold_below_production_default(key, actual, default):
+    if not isinstance(actual, (int, float)) or not isinstance(default, (int, float)):
+        return True
+    if key == "open_p0_retrieval_failures":
+        return actual > default
+    return actual < default
+
+
+def threshold_invalid(key, actual):
+    if not isinstance(actual, (int, float)):
+        return True
+    if key == "open_p0_retrieval_failures":
+        return int(actual) != actual or actual < 0
+    if key == "expected_evidence_denominator_min":
+        return int(actual) != actual or actual < 0
+    return actual < 0.0 or actual > 1.0
+
+
+def ratio_at_least(value, threshold):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("ratio"), (int, float))
+        and isinstance(threshold, (int, float))
+        and float(value.get("ratio")) >= float(threshold)
+    )
+
+
+def validate_behavior_config(prefix, behavior_config):
+    if not isinstance(behavior_config, dict):
+        errors.append(f"{prefix}_behavior_config_missing")
+        return
+    for field in (
+        "agent_runtime_mode_env",
+        "runtime_profile_digest",
+        "prompt_digest",
+        "profile_contract",
+        "tool_policy",
+        "tool_policy_digest",
+        "reviewer_policy",
+        "reviewer_policy_digest",
+        "gateway_policy_digest",
+        "model_upstream_id",
+        "model_upstream_bound_by_gate",
+        "decoding_parameters_source",
+        "behavior_config_digest",
+    ):
+        if not nonempty(behavior_config.get(field)):
+            errors.append(f"{prefix}_behavior_config_{field}_missing")
+    for field in (
+        "runtime_profile_digest",
+        "prompt_digest",
+        "tool_policy_digest",
+        "reviewer_policy_digest",
+        "gateway_policy_digest",
+        "behavior_config_digest",
+    ):
+        if not is_sha256(behavior_config.get(field)):
+            errors.append(f"{prefix}_behavior_config_{field}_invalid")
+    if not isinstance(behavior_config.get("decoding_parameters_summary"), dict):
+        errors.append(f"{prefix}_behavior_config_decoding_parameters_summary_missing")
+    digest_payload = {
+        key: value
+        for key, value in behavior_config.items()
+        if key != "behavior_config_digest"
+    }
+    if (
+        is_sha256(behavior_config.get("behavior_config_digest"))
+        and behavior_config.get("behavior_config_digest") != canonical_digest(digest_payload)
+    ):
+        errors.append(f"{prefix}_behavior_config_digest_mismatch")
+
+
 def ratio_json(passed, total):
     return {
         "passed": passed,
@@ -411,6 +495,8 @@ def recompute_eval_quality_from_cases(cases):
     required_type_passed = 0
     exact_term_total = 0
     exact_term_passed = 0
+    source_boundary_confirmation_cases = 0
+    source_boundary_confirmation_avoided = 0
     forbidden_conclusion_avoided = 0
     reviewer_status_matched = 0
     eval_failure_records = 0
@@ -469,6 +555,17 @@ def recompute_eval_quality_from_cases(cases):
             if isinstance(exact_passed, int) and isinstance(exact_total, int):
                 exact_term_passed += exact_passed
                 exact_term_total += exact_total
+        source_boundary_required = quality.get("source_boundary_confirmation_required")
+        if source_boundary_required not in (True, False):
+            return None
+        if source_boundary_required:
+            source_boundary_confirmation_cases += 1
+            if (
+                quality.get("source_boundary_confirmation_avoided") is True
+                and case.get("expected_review_status") == "needs_revision"
+                and case.get("review_status") == "needs_revision"
+            ):
+                source_boundary_confirmation_avoided += 1
         failures = case.get("failures")
         if not isinstance(failures, list):
             return None
@@ -501,6 +598,10 @@ def recompute_eval_quality_from_cases(cases):
         "expected_evidence_hit_at_8": ratio_json(expected_hit_at_8, expected_evidence_cases),
         "required_type_coverage": ratio_json(required_type_passed, required_type_cases),
         "exact_term_coverage": ratio_json(exact_term_passed, exact_term_total),
+        "source_boundary_confirmation_avoided": ratio_json(
+            source_boundary_confirmation_avoided,
+            source_boundary_confirmation_cases,
+        ),
         "forbidden_conclusion_avoided": ratio_json(
             forbidden_conclusion_avoided,
             total_cases,
@@ -568,6 +669,7 @@ def validate_retrieval_quality_eval_report_artifact(gate_json):
         "expected_evidence_hit_at_8",
         "required_type_coverage",
         "exact_term_coverage",
+        "source_boundary_confirmation_avoided",
         "forbidden_conclusion_avoided",
         "reviewer_status_matched",
         "eval_failure_records",
@@ -590,6 +692,7 @@ def validate_retrieval_quality_eval_report_artifact(gate_json):
         "expected_evidence_hit_at_8",
         "required_type_coverage",
         "exact_term_coverage",
+        "source_boundary_confirmation_avoided",
         "forbidden_conclusion_avoided",
         "reviewer_status_matched",
         "eval_failure_records",
@@ -664,25 +767,42 @@ def validate_retrieval_quality_gate_stdout():
     for field in ("source_snapshot_digest", "kb_build_hash", "eval_report_sha256"):
         if not is_sha256(gate_json.get(field)):
             errors.append(f"retrieval_quality_{field}_invalid")
+    production_thresholds = {
+        "quality_report_coverage": 1.0,
+        "quality_report_production_ready": 1.0,
+        "eval_case_classification": 1.0,
+        "expected_evidence_denominator_min": 1,
+        "expected_evidence_hit_at_8": 1.0,
+        "required_type_coverage": 1.0,
+        "exact_term_coverage": 1.0,
+        "source_boundary_confirmation_avoided": 1.0,
+        "forbidden_conclusion_avoided": 1.0,
+        "reviewer_status_matched": 1.0,
+        "open_p0_retrieval_failures": 0,
+    }
+    if gate_json.get("production_default_thresholds") != production_thresholds:
+        errors.append("retrieval_quality_production_default_thresholds_mismatch")
+    threshold_config = gate_json.get("threshold_config")
+    if not isinstance(threshold_config, dict):
+        errors.append("retrieval_quality_threshold_config_missing")
+    else:
+        if threshold_config.get("less_strict_overrides") not in ([], None):
+            errors.append("retrieval_quality_threshold_config_less_strict_overrides_present")
+        if threshold_config.get("invalid_overrides") not in ([], None):
+            errors.append("retrieval_quality_threshold_config_invalid_overrides_present")
+        if threshold_config.get("production_ready_thresholds_enforced") is not True:
+            errors.append("retrieval_quality_threshold_config_not_production_ready")
     thresholds = gate_json.get("effective_thresholds")
     if not isinstance(thresholds, dict):
         errors.append("retrieval_quality_effective_thresholds_missing")
+        thresholds = production_thresholds
     else:
-        expected_thresholds = {
-            "quality_report_coverage": 1.0,
-            "quality_report_production_ready": 1.0,
-            "eval_case_classification": 1.0,
-            "expected_evidence_denominator_min": 1,
-            "expected_evidence_hit_at_8": 1.0,
-            "required_type_coverage": 1.0,
-            "exact_term_coverage": 1.0,
-            "forbidden_conclusion_avoided": 1.0,
-            "reviewer_status_matched": 1.0,
-            "open_p0_retrieval_failures": 0,
-        }
-        for key, expected in expected_thresholds.items():
-            if thresholds.get(key) != expected:
-                errors.append(f"retrieval_quality_threshold_{key}_mismatch")
+        for key, default in production_thresholds.items():
+            actual = thresholds.get(key)
+            if threshold_invalid(key, actual):
+                errors.append(f"retrieval_quality_threshold_{key}_invalid")
+            elif threshold_below_production_default(key, actual, default):
+                errors.append(f"retrieval_quality_threshold_{key}_below_production_default")
     quality = gate_json.get("quality_summary")
     if not isinstance(quality, dict):
         errors.append("retrieval_quality_summary_missing")
@@ -691,22 +811,28 @@ def validate_retrieval_quality_gate_stdout():
             errors.append("retrieval_quality_summary_status_not_passed")
         if quality.get("blockers") not in ([], None):
             errors.append("retrieval_quality_summary_blockers_present")
-        for field in (
-            "quality_report_coverage",
-            "quality_report_production_ready",
-            "eval_case_classification",
-            "expected_evidence_hit_at_8",
-            "required_type_coverage",
-            "exact_term_coverage",
-            "forbidden_conclusion_avoided",
-            "reviewer_status_matched",
+        for field, threshold_key in (
+            ("quality_report_coverage", "quality_report_coverage"),
+            ("quality_report_production_ready", "quality_report_production_ready"),
+            ("eval_case_classification", "eval_case_classification"),
+            ("expected_evidence_hit_at_8", "expected_evidence_hit_at_8"),
+            ("required_type_coverage", "required_type_coverage"),
+            ("exact_term_coverage", "exact_term_coverage"),
+            ("source_boundary_confirmation_avoided", "source_boundary_confirmation_avoided"),
+            ("forbidden_conclusion_avoided", "forbidden_conclusion_avoided"),
+            ("reviewer_status_matched", "reviewer_status_matched"),
         ):
-            if not ratio_is_one(quality.get(field)):
+            if not ratio_at_least(quality.get(field), thresholds.get(threshold_key)):
                 errors.append(f"retrieval_quality_{field}_below_threshold")
         if quality.get("eval_failure_records") != 0:
             errors.append("retrieval_quality_eval_failure_records_not_zero")
         denominator = quality.get("expected_evidence_denominator")
-        if not isinstance(denominator, int) or denominator < 1:
+        denominator_threshold = thresholds.get("expected_evidence_denominator_min")
+        if (
+            not isinstance(denominator, int)
+            or not isinstance(denominator_threshold, int)
+            or denominator < denominator_threshold
+        ):
             errors.append("retrieval_quality_expected_evidence_denominator_invalid")
         source_boundary = quality.get("source_coverage_boundary")
         if not isinstance(source_boundary, dict):
@@ -744,36 +870,14 @@ def validate_retrieval_quality_gate_stdout():
     if production_ready and gate_json.get("eval_report_generated_by_gate") is not True:
         errors.append("retrieval_quality_eval_report_must_be_generated_by_gate")
     behavior_config = gate_json.get("behavior_config")
-    if not isinstance(behavior_config, dict):
-        errors.append("retrieval_quality_behavior_config_missing")
-    else:
-        for field in (
-            "agent_runtime_mode_env",
-            "runtime_profile_digest",
-            "prompt_digest",
-            "profile_contract",
-            "tool_policy",
-            "tool_policy_digest",
-            "reviewer_policy",
-            "reviewer_policy_digest",
-            "gateway_policy_digest",
-            "model_upstream_id",
-            "model_upstream_bound_by_gate",
-            "decoding_parameters_source",
-        ):
-            if not nonempty(behavior_config.get(field)):
-                errors.append(f"retrieval_quality_behavior_config_{field}_missing")
-        for field in (
-            "runtime_profile_digest",
-            "prompt_digest",
-            "tool_policy_digest",
-            "reviewer_policy_digest",
-            "gateway_policy_digest",
-        ):
-            if not is_sha256(behavior_config.get(field)):
-                errors.append(f"retrieval_quality_behavior_config_{field}_invalid")
-        if not isinstance(behavior_config.get("decoding_parameters_summary"), dict):
-            errors.append("retrieval_quality_behavior_config_decoding_parameters_summary_missing")
+    validate_behavior_config("retrieval_quality", behavior_config)
+    strict_gate_json = success_json_from_gate_stdout(gates_by_name.get("strict_gateway"))
+    if strict_gate_json is not None:
+        strict_behavior_config = strict_gate_json.get("behavior_config")
+        validate_behavior_config("strict_gateway", strict_behavior_config)
+        if isinstance(behavior_config, dict) and isinstance(strict_behavior_config, dict):
+            if behavior_config != strict_behavior_config:
+                errors.append("retrieval_quality_behavior_config_strict_gateway_mismatch")
     validate_retrieval_quality_eval_report_artifact(gate_json)
 
 
