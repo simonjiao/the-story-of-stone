@@ -24,7 +24,8 @@
 - 已下载第一批 source snapshot：`hongloumeng-wikisource-120`、`hongloumeng-wikisource-chengjia`、`hongloumeng-wikisource-chengyi`、`shitouji-wikisource-zhiyanzhai`、`shitouji-wikisource-jiaxu`。
 - `hongloumeng-wikisource-chengjia` 已通过 ProofreadPage Page namespace 展开补齐正文。
 - 第一批 Wikisource snapshot 已补 source snapshot ready 口径和 19 个跨版本
-  抽样点；这只代表工程上可进入 loader，不代表完成学术校勘。
+  抽样点；当前可支持通俗分析场景下的跨版本对照和证据链检索，但仍不代表
+  完成学术校勘、影印复核或权威校注本复核。
 - M1 完成闸门已明确：进入 M2 前必须完成并通过 source snapshot registry
   校验；本计划不设置独立“M1.5”。若影印件、权威校注本或评测题库要阻塞
   M2，必须先提升为 M1 P0。
@@ -479,5 +480,5 @@
 ## 下一步
 
 1. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-2. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
-   M2 loader 的默认前置项。
+2. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+   M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

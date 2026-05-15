@@ -113,6 +113,8 @@ RetrievalQualityReport
 - [ ] 增加 exact_term_coverage。
 - [ ] 增加 source_diversity。
 - [ ] 增加 edition_diversity。
+- [ ] source / edition diversity 标明当前只覆盖 Wikisource source snapshot，
+      不等同于影印或权威校注本复核。
 - [ ] 增加 forbidden_conclusion_avoided。
 - [ ] 增加 reviewer_status_matched。
 - [ ] 无 expected evidence 标注的 case 不计入 hit@k 分母。
