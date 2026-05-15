@@ -479,6 +479,15 @@
   browser review evidence 为
   `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
   事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
+- RQA Milestone A 已完成代码切片：
+  `tonglingyu-runtime` 的 text/commentary search 输出已携带
+  `RetrievalQualityReport`，覆盖 redacted query summary、candidate/selected
+  count、channel distribution、protected terms、expanded aliases、
+  required/missing evidence types、exact-match coverage、source coverage boundary、
+  source license/usage/attribution refs、`expected_evidence_status` 和
+  `truncated`；`cargo test -p tonglingyu-runtime` 已通过 32 个测试。该结果只证明
+  runtime search 质量报告闭环，不证明后续
+  RQA release gate、saved report validator 或 live KB 已 production-ready。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -499,6 +508,10 @@
 
 ## 下一步
 
-1. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-2. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+1. 实现 RQA Milestone B：`retrieval_failures` schema、迁移、分页 API、
+   admin/safe summary 输出和失败路径单测。
+2. 串接 RQA eval gate、release gate 和 saved report validator，使
+   production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
+3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

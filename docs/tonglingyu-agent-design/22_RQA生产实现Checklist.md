@@ -123,30 +123,45 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 ## Milestone A：Runtime 质量报告
 
-状态：未开始
+状态：已完成（2026-05-15；runtime search 报告闭环已实现并通过单测，
+但不代表整体 RQA production-ready）
 
 目标：Runtime search tools 为每次检索生成结构化 `RetrievalQualityReport`。
 
-- [ ] 定义 `RetrievalQualityReport` Rust 类型和 JSON schema version。
-- [ ] 覆盖 `tonglingyu.text.search`。
-- [ ] 覆盖 `tonglingyu.commentary.search`。
-- [ ] 记录 query terms、protected terms、expanded aliases。
-- [ ] query terms 和 question 字段进入 report 前必须脱敏、截断并保留 hash。
-- [ ] report payload 有明确大小上限，超限时记录 truncated 标记。
-- [ ] 记录 required / actual / missing evidence types。
-- [ ] 记录 candidate / selected count 和 channel 分布。
-- [ ] 记录 source diversity、edition diversity、exact term coverage。
-- [ ] 记录 source coverage boundary，区分当前 source snapshot、影印件复核、
+- [x] 定义 `RetrievalQualityReport` Rust 类型和 JSON schema version。
+- [x] 覆盖 `tonglingyu.text.search`。
+- [x] 覆盖 `tonglingyu.commentary.search`。
+- [x] 记录 query terms、protected terms、expanded aliases。
+- [x] query terms 和 question 字段进入 report 前必须脱敏、截断并保留 hash。
+- [x] report payload 有明确大小上限，超限时记录 truncated 标记。
+- [x] 记录 required / actual / missing evidence types。
+- [x] 记录 candidate / selected count 和 channel 分布。
+- [x] 记录 source diversity、edition diversity、exact term coverage。
+- [x] 记录 source coverage boundary，区分当前 source snapshot、影印件复核、
       权威校注本复核和专家校勘状态。
-- [ ] 记录 source license refs、usage boundary 和 attribution refs，不把缺失
+- [x] 记录 source license refs、usage boundary 和 attribution refs，不把缺失
       许可/署名 metadata 的 source 用作 production evidence。
-- [ ] 记录 expected evidence hit 结果。
-- [ ] 记录 quality status、issues、recommended follow-up。
-- [ ] 单测覆盖完整、缺证据、缺 required type、exact term missing。
+- [x] 记录 expected evidence hit 结果。
+- [x] 记录 quality status、issues、recommended follow-up。
+- [x] 单测覆盖完整、缺证据、缺 required type、exact term missing。
 
 节点总结：
 
-- 待实现。
+- `agent-platform/crates/tonglingyu-runtime/src/lib.rs` 已新增
+  `tonglingyu-rqa-report-v1`，`tonglingyu.text.search` 和
+  `tonglingyu.commentary.search` 的 `EvidenceCards` 输出都会携带
+  `quality_report`。
+- report 已覆盖问题 hash、redacted terms、protected terms、expanded aliases、
+  candidate/selected count、channel distribution、required/selected/missing
+  evidence types、exact-match coverage、source/edition boundary、source usage refs、
+  `expected_evidence_status` 和 `truncated`。
+- production 语义已 fail-closed：无证据、缺 required type、protected exact term
+  未命中时 `quality_status=failed`；source license/attribution metadata 缺失时
+  `production_ready=false`。
+- 验证命令：`cargo test -p tonglingyu-runtime`，32 个测试通过。
+- 仍不能宣布整体 RQA production-ready：后续 `retrieval_failures`、eval gate、
+  release gate、saved report validator、live KB 绑定、source metadata migration
+  和 lifecycle gate 仍未完成。
 
 ## Milestone B：retrieval_failures schema
 

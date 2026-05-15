@@ -71,6 +71,83 @@ pub const PROFILE_CONTRACT_VERSION: &str = "tonglingyu-runtime-profiles-v1";
 pub const KNOWLEDGE_BASE_SCHEMA_VERSION: &str = "tonglingyu-v1-sqlite-fts";
 pub const RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
 pub const RUNTIME_WORKFLOW_PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
+pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report-v1";
+pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
+pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalQuerySummary {
+    pub question_sha256: String,
+    pub question_char_count: usize,
+    pub raw_question_included: bool,
+    pub redacted_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalEvidenceTypeCoverage {
+    pub required: Vec<String>,
+    pub selected: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalExactMatchCoverage {
+    pub term: String,
+    pub matched: bool,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalSourceUsageRef {
+    pub source_id: String,
+    pub source_category: Option<String>,
+    pub title: Option<String>,
+    pub edition: Option<String>,
+    pub fetched_at: Option<String>,
+    pub source_hash: Option<String>,
+    pub license: Option<String>,
+    pub attribution: Option<String>,
+    pub usage_boundary: String,
+    pub metadata_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalSourceCoverageBoundary {
+    pub source_ids: Vec<String>,
+    pub source_categories: Vec<String>,
+    pub edition_boundaries: Vec<String>,
+    pub kb_schema_version: String,
+    pub source_snapshot_status: String,
+    pub facsimile_review_status: String,
+    pub authoritative_edition_review_status: String,
+    pub scholarly_collation_status: String,
+    pub expert_collation_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalQualityReport {
+    pub object: String,
+    pub schema_version: String,
+    pub tool_name: String,
+    pub quality_status: String,
+    pub production_ready: bool,
+    pub truncated: bool,
+    pub query_summary: RetrievalQuerySummary,
+    pub expanded_terms: Vec<String>,
+    pub protected_terms: Vec<String>,
+    pub expanded_aliases: Vec<String>,
+    pub candidate_count: usize,
+    pub selected_count: usize,
+    pub channel_distribution: BTreeMap<String, usize>,
+    pub evidence_type_coverage: RetrievalEvidenceTypeCoverage,
+    pub exact_match_coverage: Vec<RetrievalExactMatchCoverage>,
+    pub expected_evidence_hit: Option<bool>,
+    pub expected_evidence_status: String,
+    pub source_coverage_boundary: RetrievalSourceCoverageBoundary,
+    pub source_usage_refs: Vec<RetrievalSourceUsageRef>,
+    pub issues: Vec<String>,
+    pub recommended_follow_up: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
@@ -795,6 +872,7 @@ pub enum TonglingyuToolCall {
 pub enum TonglingyuToolOutput {
     EvidenceCards {
         cards: Vec<EvidenceCard>,
+        quality_report: Box<RetrievalQualityReport>,
         tool_version: String,
     },
     EvidencePackage {
@@ -953,6 +1031,22 @@ pub fn tool_catalog() -> Vec<ToolDescriptor> {
             }),
             output_contract: json!({
                 "object": "evidence_cards",
+                "required": ["cards", "quality_report"],
+                "quality_report_schema": RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
+                "quality_report_must_include": [
+                    "candidate_count",
+                    "selected_count",
+                    "channel_distribution",
+                    "evidence_type_coverage",
+                    "exact_match_coverage",
+                    "expected_evidence_status",
+                    "protected_terms",
+                    "expanded_aliases",
+                    "source_coverage_boundary",
+                    "source_usage_refs",
+                    "query_summary",
+                    "truncated"
+                ],
                 "preserves": ["original_text", "source_id", "source_url", "revision_id", "block_id"]
             }),
         },
@@ -970,7 +1064,9 @@ pub fn tool_catalog() -> Vec<ToolDescriptor> {
             }),
             output_contract: json!({
                 "object": "evidence_cards",
-                "required_evidence_type": "commentary"
+                "required": ["cards", "quality_report"],
+                "required_evidence_type": "commentary",
+                "quality_report_schema": RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION
             }),
         },
         ToolDescriptor {
@@ -1347,13 +1443,34 @@ pub fn execute_tool(conn: &Connection, call: TonglingyuToolCall) -> Result<Tongl
             question,
             limit,
             required_evidence_types,
-        } => Ok(TonglingyuToolOutput::EvidenceCards {
-            cards: search_evidence(conn, &question, limit, &required_evidence_types)?,
-            tool_version: TOOL_CATALOG_VERSION.to_string(),
-        }),
-        TonglingyuToolCall::CommentarySearch { question, limit } => {
+        } => {
+            let search = search_evidence_result(conn, &question, limit, &required_evidence_types)?;
+            let quality_report = retrieval_quality_report(
+                conn,
+                "tonglingyu.text.search",
+                &question,
+                &required_evidence_types,
+                &search,
+            )?;
             Ok(TonglingyuToolOutput::EvidenceCards {
-                cards: search_evidence(conn, &question, limit, &["commentary".to_string()])?,
+                cards: search.cards,
+                quality_report: Box::new(quality_report),
+                tool_version: TOOL_CATALOG_VERSION.to_string(),
+            })
+        }
+        TonglingyuToolCall::CommentarySearch { question, limit } => {
+            let required_evidence_types = vec!["commentary".to_string()];
+            let search = search_evidence_result(conn, &question, limit, &required_evidence_types)?;
+            let quality_report = retrieval_quality_report(
+                conn,
+                "tonglingyu.commentary.search",
+                &question,
+                &required_evidence_types,
+                &search,
+            )?;
+            Ok(TonglingyuToolOutput::EvidenceCards {
+                cards: search.cards,
+                quality_report: Box::new(quality_report),
                 tool_version: TOOL_CATALOG_VERSION.to_string(),
             })
         }
@@ -1408,7 +1525,7 @@ pub fn execute_runtime_workflow(
         text_required_types.push("base_text".to_string());
     }
     let text_started = Instant::now();
-    let text_cards = match execute_tool(
+    let (text_cards, text_quality_report) = match execute_tool(
         conn,
         TonglingyuToolCall::TextSearch {
             question: input.question.clone(),
@@ -1416,7 +1533,11 @@ pub fn execute_runtime_workflow(
             required_evidence_types: text_required_types,
         },
     )? {
-        TonglingyuToolOutput::EvidenceCards { cards, .. } => cards,
+        TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } => (cards, *quality_report),
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
     cards = merge_cards(cards, text_cards.clone());
@@ -1438,6 +1559,7 @@ pub fn execute_runtime_workflow(
             "card_count": text_cards.len(),
             "evidence_ids": evidence_ids(&text_cards),
             "evidence_types": evidence_types(&text_cards),
+            "quality_report": &text_quality_report,
             }),
         },
     )?);
@@ -1448,14 +1570,18 @@ pub fn execute_runtime_workflow(
         .any(|item| item == "commentary")
     {
         let commentary_started = Instant::now();
-        let commentary_cards = match execute_tool(
+        let (commentary_cards, commentary_quality_report) = match execute_tool(
             conn,
             TonglingyuToolCall::CommentarySearch {
                 question: input.question.clone(),
                 limit: input.limit,
             },
         )? {
-            TonglingyuToolOutput::EvidenceCards { cards, .. } => cards,
+            TonglingyuToolOutput::EvidenceCards {
+                cards,
+                quality_report,
+                ..
+            } => (cards, *quality_report),
             other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
         };
         cards = merge_cards(cards, commentary_cards.clone());
@@ -1479,6 +1605,7 @@ pub fn execute_runtime_workflow(
                 "evidence_ids": evidence_ids(&commentary_cards),
                 "evidence_types": evidence_types(&commentary_cards),
                 "base_text_limits": "commentary evidence cannot prove base text facts alone",
+                "quality_report": &commentary_quality_report,
                 }),
             },
         )?);
@@ -4184,10 +4311,26 @@ pub fn search_evidence(
     limit: usize,
     required_evidence_types: &[String],
 ) -> Result<Vec<EvidenceCard>> {
-    let terms = extract_terms(conn, question)?;
+    Ok(search_evidence_result(conn, question, limit, required_evidence_types)?.cards)
+}
+
+fn search_evidence_result(
+    conn: &Connection,
+    question: &str,
+    limit: usize,
+    required_evidence_types: &[String],
+) -> Result<SearchEvidenceResult> {
+    let extracted_query_terms = extract_query_terms(conn, question)?;
+    let terms = extracted_query_terms.terms;
+    let exact_terms = required_exact_terms(question)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let mut scored: BTreeMap<String, (i64, EvidenceCard)> = BTreeMap::new();
+    let mut candidate_block_ids = BTreeSet::new();
     for term in &terms {
         for block in query_blocks_like(conn, term, limit * 4)? {
+            candidate_block_ids.insert(block.block_id.clone());
             let score = score_block(question, term, &block);
             let card = evidence_card_from_block_with_focus(block, term);
             scored
@@ -4198,6 +4341,7 @@ pub fn search_evidence(
     }
     if scored.is_empty() {
         for block in query_blocks_like(conn, question, limit * 2)? {
+            candidate_block_ids.insert(block.block_id.clone());
             let card = evidence_card_from_block_with_focus(block, question);
             scored.insert(card.block_id.clone(), (1, card));
         }
@@ -4215,11 +4359,12 @@ pub fn search_evidence(
         .iter()
         .map(|card| card.block_id.clone())
         .collect::<HashSet<_>>();
-    for exact_term in required_exact_terms(question) {
+    for exact_term in &exact_terms {
         for block in query_blocks_exact_text(conn, exact_term, limit * 8)? {
             if !block.text.contains(exact_term) {
                 continue;
             }
+            candidate_block_ids.insert(block.block_id.clone());
             let card = evidence_card_from_block(block);
             if seen.insert(card.block_id.clone()) {
                 cards.insert(0, card);
@@ -4236,6 +4381,7 @@ pub fn search_evidence(
         }
         for term in &terms {
             for block in query_blocks_like(conn, term, limit * 8)? {
+                candidate_block_ids.insert(block.block_id.clone());
                 let card = evidence_card_from_block(block);
                 if card.evidence_type == *required_type && seen.insert(card.block_id.clone()) {
                     cards.insert(0, card);
@@ -4251,7 +4397,413 @@ pub fn search_evidence(
         }
     }
     cards.truncate(limit.max(required_evidence_types.len()));
-    Ok(cards)
+    Ok(SearchEvidenceResult {
+        cards,
+        expanded_terms: terms,
+        expanded_aliases: extracted_query_terms.aliases,
+        exact_terms,
+        candidate_count: candidate_block_ids.len(),
+    })
+}
+
+fn retrieval_quality_report(
+    conn: &Connection,
+    tool_name: &str,
+    question: &str,
+    required_evidence_types: &[String],
+    search: &SearchEvidenceResult,
+) -> Result<RetrievalQualityReport> {
+    let redacted_terms = search
+        .expanded_terms
+        .iter()
+        .take(RETRIEVAL_QUALITY_REPORT_MAX_TERMS)
+        .map(|term| redacted_query_term(term))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let protected_terms = search
+        .exact_terms
+        .iter()
+        .map(|term| redacted_query_term(term))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let expanded_aliases = search
+        .expanded_aliases
+        .iter()
+        .take(RETRIEVAL_QUALITY_REPORT_MAX_TERMS)
+        .map(|term| redacted_query_term(term))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let evidence_type_coverage =
+        retrieval_evidence_type_coverage(required_evidence_types, &search.cards);
+    let exact_match_coverage = retrieval_exact_match_coverage(&search.exact_terms, &search.cards);
+    let source_usage_refs_all = retrieval_source_usage_refs(conn, &search.cards)?;
+    let source_usage_refs = source_usage_refs_all
+        .iter()
+        .take(RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS)
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_coverage_boundary =
+        retrieval_source_coverage_boundary(&search.cards, &source_usage_refs_all);
+    let issues = retrieval_quality_issues(
+        search,
+        &evidence_type_coverage,
+        &exact_match_coverage,
+        &source_usage_refs_all,
+    );
+    let blocking_quality_issue = issues.iter().any(|issue| {
+        issue == "no_evidence_selected"
+            || issue.starts_with("missing_required_evidence_type:")
+            || issue.starts_with("required_exact_term_not_selected:")
+    });
+    let quality_status = if blocking_quality_issue {
+        "failed"
+    } else if issues.is_empty() {
+        "passed"
+    } else {
+        "needs_attention"
+    };
+    Ok(RetrievalQualityReport {
+        object: "tonglingyu.retrieval_quality_report".to_string(),
+        schema_version: RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION.to_string(),
+        tool_name: tool_name.to_string(),
+        quality_status: quality_status.to_string(),
+        production_ready: issues.is_empty(),
+        truncated: search.expanded_terms.len() > RETRIEVAL_QUALITY_REPORT_MAX_TERMS
+            || search.expanded_aliases.len() > RETRIEVAL_QUALITY_REPORT_MAX_TERMS
+            || source_usage_refs_all.len() > RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS,
+        query_summary: RetrievalQuerySummary {
+            question_sha256: hash_text(question),
+            question_char_count: question.chars().count(),
+            raw_question_included: false,
+            redacted_terms: redacted_terms.clone(),
+        },
+        expanded_terms: redacted_terms,
+        protected_terms,
+        expanded_aliases,
+        candidate_count: search.candidate_count,
+        selected_count: search.cards.len(),
+        channel_distribution: retrieval_channel_distribution(&search.cards),
+        evidence_type_coverage,
+        exact_match_coverage,
+        expected_evidence_hit: None,
+        expected_evidence_status: "not_applicable_runtime_search".to_string(),
+        source_coverage_boundary,
+        source_usage_refs,
+        issues: issues.clone(),
+        recommended_follow_up: retrieval_recommended_follow_up(&issues),
+    })
+}
+
+fn retrieval_evidence_type_coverage(
+    required_evidence_types: &[String],
+    cards: &[EvidenceCard],
+) -> RetrievalEvidenceTypeCoverage {
+    let required = required_evidence_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let selected = evidence_types(cards);
+    let selected_set = selected.iter().cloned().collect::<BTreeSet<_>>();
+    let missing = required
+        .iter()
+        .filter(|required_type| !selected_set.contains(*required_type))
+        .cloned()
+        .collect::<Vec<_>>();
+    RetrievalEvidenceTypeCoverage {
+        required,
+        selected,
+        missing,
+    }
+}
+
+fn retrieval_exact_match_coverage(
+    exact_terms: &[String],
+    cards: &[EvidenceCard],
+) -> Vec<RetrievalExactMatchCoverage> {
+    exact_terms
+        .iter()
+        .map(|term| {
+            let evidence_ids = cards
+                .iter()
+                .filter(|card| card.text.contains(term))
+                .map(|card| card.evidence_id.clone())
+                .collect::<Vec<_>>();
+            RetrievalExactMatchCoverage {
+                term: term.clone(),
+                matched: !evidence_ids.is_empty(),
+                evidence_ids,
+            }
+        })
+        .collect()
+}
+
+fn retrieval_channel_distribution(cards: &[EvidenceCard]) -> BTreeMap<String, usize> {
+    let mut distribution = BTreeMap::new();
+    for card in cards {
+        *distribution.entry(card.evidence_type.clone()).or_insert(0) += 1;
+    }
+    distribution
+}
+
+fn retrieval_source_usage_refs(
+    conn: &Connection,
+    cards: &[EvidenceCard],
+) -> Result<Vec<RetrievalSourceUsageRef>> {
+    let mut refs = Vec::new();
+    for source_id in cards
+        .iter()
+        .map(|card| card.source_id.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        refs.push(retrieval_source_usage_ref(conn, &source_id)?);
+    }
+    Ok(refs)
+}
+
+fn retrieval_source_usage_ref(
+    conn: &Connection,
+    source_id: &str,
+) -> Result<RetrievalSourceUsageRef> {
+    let row = conn
+        .query_row(
+            r#"
+            SELECT
+                s.source_category,
+                s.title,
+                s.edition,
+                s.fetched_at,
+                s.snapshot_contract_json,
+                s.source_hash,
+                vn.usage_limit
+            FROM sources s
+            LEFT JOIN version_notes vn ON vn.source_id = s.source_id
+            WHERE s.source_id = ?1
+            LIMIT 1
+            "#,
+            params![source_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        source_category,
+        title,
+        edition,
+        fetched_at,
+        snapshot_contract_json,
+        source_hash,
+        usage_limit,
+    )) = row
+    else {
+        return Ok(RetrievalSourceUsageRef {
+            source_id: source_id.to_string(),
+            source_category: None,
+            title: None,
+            edition: None,
+            fetched_at: None,
+            source_hash: None,
+            license: None,
+            attribution: None,
+            usage_boundary: "source metadata missing; cannot enter production evidence chain"
+                .to_string(),
+            metadata_status: "missing_source_metadata".to_string(),
+        });
+    };
+    let snapshot_contract =
+        serde_json::from_str::<Value>(&snapshot_contract_json).unwrap_or_else(|_| json!({}));
+    let license = snapshot_text_field(
+        &snapshot_contract,
+        &["license", "license_note", "licence", "rights"],
+    );
+    let attribution = snapshot_text_field(
+        &snapshot_contract,
+        &["attribution", "attribution_note", "citation"],
+    );
+    let metadata_status = match (license.is_some(), attribution.is_some()) {
+        (true, true) => "complete",
+        (false, true) => "missing_license_metadata",
+        (true, false) => "missing_attribution_metadata",
+        (false, false) => "missing_license_and_attribution_metadata",
+    };
+    Ok(RetrievalSourceUsageRef {
+        source_id: source_id.to_string(),
+        source_category: Some(source_category),
+        title,
+        edition,
+        fetched_at,
+        source_hash: Some(source_hash),
+        license,
+        attribution,
+        usage_boundary: usage_limit.unwrap_or_else(|| usage_limit_for_unknown_source(source_id)),
+        metadata_status: metadata_status.to_string(),
+    })
+}
+
+fn retrieval_source_coverage_boundary(
+    cards: &[EvidenceCard],
+    refs: &[RetrievalSourceUsageRef],
+) -> RetrievalSourceCoverageBoundary {
+    RetrievalSourceCoverageBoundary {
+        source_ids: cards
+            .iter()
+            .map(|card| card.source_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        source_categories: refs
+            .iter()
+            .filter_map(|item| item.source_category.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        edition_boundaries: refs
+            .iter()
+            .filter_map(|item| item.edition.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        kb_schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+        source_snapshot_status: if refs
+            .iter()
+            .any(|item| item.metadata_status == "missing_source_metadata")
+        {
+            "source_snapshot_metadata_missing".to_string()
+        } else if cards.is_empty() {
+            "no_source_selected".to_string()
+        } else {
+            "source_snapshot_ready".to_string()
+        },
+        facsimile_review_status: "not_reviewed".to_string(),
+        authoritative_edition_review_status: "not_reviewed".to_string(),
+        scholarly_collation_status: "not_scholarly_collated".to_string(),
+        expert_collation_status: "not_reviewed".to_string(),
+    }
+}
+
+fn retrieval_quality_issues(
+    search: &SearchEvidenceResult,
+    evidence_type_coverage: &RetrievalEvidenceTypeCoverage,
+    exact_match_coverage: &[RetrievalExactMatchCoverage],
+    source_usage_refs: &[RetrievalSourceUsageRef],
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    if search.cards.is_empty() {
+        issues.push("no_evidence_selected".to_string());
+    }
+    for missing in &evidence_type_coverage.missing {
+        issues.push(format!("missing_required_evidence_type:{missing}"));
+    }
+    for coverage in exact_match_coverage {
+        if !coverage.matched {
+            issues.push(format!(
+                "required_exact_term_not_selected:{}",
+                redacted_query_term(&coverage.term)
+            ));
+        }
+    }
+    for source_ref in source_usage_refs {
+        if source_ref.metadata_status != "complete" {
+            issues.push(format!(
+                "source_usage_metadata_incomplete:{}:{}",
+                source_ref.source_id, source_ref.metadata_status
+            ));
+        }
+    }
+    issues
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn retrieval_recommended_follow_up(issues: &[String]) -> Vec<String> {
+    let mut follow_up = BTreeSet::new();
+    for issue in issues {
+        if issue == "no_evidence_selected" {
+            follow_up.insert("expand_source_snapshot_or_return_evidence_insufficient".to_string());
+        } else if issue.starts_with("missing_required_evidence_type:") {
+            follow_up.insert("add_or_reindex_required_evidence_type".to_string());
+        } else if issue.starts_with("required_exact_term_not_selected:") {
+            follow_up.insert("verify_exact_term_source_snapshot_and_alias_index".to_string());
+        } else if issue.starts_with("source_usage_metadata_incomplete:") {
+            follow_up.insert(
+                "add_machine_readable_source_license_usage_attribution_metadata".to_string(),
+            );
+        }
+    }
+    follow_up.into_iter().collect()
+}
+
+fn snapshot_text_field(snapshot_contract: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| {
+            snapshot_contract
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            keys.iter().find_map(|key| {
+                snapshot_contract
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get(*key))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn usage_limit_for_unknown_source(source_id: &str) -> String {
+    if source_id.contains("zhiyanzhai") || source_id.contains("jiaxu") {
+        "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。".to_string()
+    } else {
+        "可作为正文或版本对照证据候选；不声明完成学术校勘。".to_string()
+    }
+}
+
+fn redacted_query_term(term: &str) -> String {
+    let trimmed = term.trim();
+    if trimmed.is_empty() {
+        return "[empty]".to_string();
+    }
+    if looks_sensitive_query_term(trimmed) {
+        return format!("sha256:{}", &hash_text(trimmed)[..12]);
+    }
+    trim_text(trimmed, 32)
+}
+
+fn looks_sensitive_query_term(term: &str) -> bool {
+    let lower = term.to_ascii_lowercase();
+    if lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("sk-")
+        || term.contains('@')
+    {
+        return true;
+    }
+    let ascii_alnum = term.chars().filter(|ch| ch.is_ascii_alphanumeric()).count();
+    ascii_alnum >= 20 && ascii_alnum * 2 >= term.chars().count()
 }
 
 pub fn package_json(package: &EvidencePackage) -> Value {
@@ -4491,6 +5043,21 @@ struct SearchBlockRecord {
     text: String,
 }
 
+#[derive(Debug, Clone)]
+struct SearchEvidenceResult {
+    cards: Vec<EvidenceCard>,
+    expanded_terms: Vec<String>,
+    expanded_aliases: Vec<String>,
+    exact_terms: Vec<String>,
+    candidate_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedQueryTerms {
+    terms: Vec<String>,
+    aliases: Vec<String>,
+}
+
 fn required_exact_terms(question: &str) -> Vec<&'static str> {
     let mut terms = Vec::new();
     if question.contains("寳玉") {
@@ -4502,8 +5069,9 @@ fn required_exact_terms(question: &str) -> Vec<&'static str> {
     terms
 }
 
-fn extract_terms(conn: &Connection, question: &str) -> Result<Vec<String>> {
+fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQueryTerms> {
     let mut terms = Vec::new();
+    let mut aliases = Vec::new();
     let normalized = normalize_text(question);
     let seed_terms = [
         ("通灵玉", "通靈玉"),
@@ -4610,11 +5178,12 @@ fn extract_terms(conn: &Connection, question: &str) -> Result<Vec<String>> {
     }
 
     let mut stmt = conn.prepare("SELECT alias FROM aliases")?;
-    let aliases = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    for alias in aliases {
+    let alias_rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for alias in alias_rows {
         let alias = alias?;
         if question.contains(&alias) || normalized.contains(&normalize_text(&alias)) {
             push_term(&mut terms, &alias);
+            push_term(&mut aliases, &alias);
         }
     }
 
@@ -4626,7 +5195,7 @@ fn extract_terms(conn: &Connection, question: &str) -> Result<Vec<String>> {
     if terms.is_empty() && question.chars().count() <= 24 {
         push_term(&mut terms, question);
     }
-    Ok(terms)
+    Ok(ExtractedQueryTerms { terms, aliases })
 }
 
 fn query_blocks_like(
@@ -5725,6 +6294,305 @@ mod tests {
             confidence: "medium".to_string(),
             verification_status: "test".to_string(),
         }
+    }
+
+    fn seed_retrieval_quality_source(conn: &Connection, snapshot_contract: Value) {
+        conn.execute(
+            r#"
+            INSERT INTO sources (
+                source_id, source_category, format, title, work, edition, language,
+                api_url, fetched_at, notes, snapshot_contract_json, source_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                "quality-source",
+                "base_material",
+                "mediawiki",
+                "质量测试红楼梦 source",
+                "红楼梦",
+                "测试底本；仅用于 RQA 单元测试",
+                "zh",
+                "https://example.test/api",
+                "2026-05-15T00:00:00Z",
+                "测试 source snapshot",
+                serde_json::to_string(&snapshot_contract).expect("snapshot serializes"),
+                "hash-quality-source",
+            ],
+        )
+        .expect("insert source");
+        conn.execute(
+            "INSERT INTO version_notes (version_note_id, source_id, note, source_status, usage_limit) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "version-note:quality-source",
+                "quality-source",
+                "测试 source snapshot",
+                "source_snapshot_ready",
+                "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            ],
+        )
+        .expect("insert version note");
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, source_url, revision_id,
+                block_index, kind, tag, text, normalized_text, evidence_type, chapter_no
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                "quality-block-001",
+                "quality-source",
+                "quality-section-001",
+                "质量测试红楼梦/第一回",
+                "https://example.test/source/1",
+                1_i64,
+                1_i64,
+                "paragraph",
+                Option::<String>::None,
+                "通靈玉上写着莫失莫忘，仙壽恒昌。",
+                normalize_text("通靈玉上写着莫失莫忘，仙壽恒昌。"),
+                "base_text",
+                1_i64,
+            ],
+        )
+        .expect("insert block");
+    }
+
+    #[test]
+    fn text_search_returns_production_ready_retrieval_quality_report() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC BY-SA 4.0",
+                "attribution": "Wikisource contributors",
+            }),
+        );
+        conn.execute(
+            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
+            params!["quality-person", "通灵玉", "RQA alias test"],
+        )
+        .expect("insert person");
+        conn.execute(
+            "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
+            params!["灵玉", "quality-person", "test"],
+        )
+        .expect("insert alias");
+        let question = "灵玉 password=SECRET_RUNTIME_TOKEN_01234567890123456789";
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            quality_report.schema_version,
+            RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION
+        );
+        assert_eq!(quality_report.tool_name, "tonglingyu.text.search");
+        assert_eq!(quality_report.candidate_count, 1);
+        assert_eq!(quality_report.selected_count, 1);
+        assert_eq!(quality_report.quality_status, "passed");
+        assert!(quality_report.production_ready);
+        assert!(!quality_report.truncated);
+        assert_eq!(
+            quality_report.channel_distribution.get("base_text"),
+            Some(&1_usize)
+        );
+        assert_eq!(quality_report.expanded_aliases, vec!["灵玉".to_string()]);
+        assert_eq!(quality_report.expected_evidence_hit, None);
+        assert_eq!(
+            quality_report.expected_evidence_status,
+            "not_applicable_runtime_search"
+        );
+        assert_eq!(
+            quality_report.evidence_type_coverage.selected,
+            vec!["base_text".to_string()]
+        );
+        assert!(quality_report.evidence_type_coverage.missing.is_empty());
+        assert!(!quality_report.query_summary.raw_question_included);
+        assert_eq!(
+            quality_report.source_usage_refs[0].metadata_status,
+            "complete"
+        );
+        assert_eq!(
+            quality_report.source_usage_refs[0].license.as_deref(),
+            Some("CC BY-SA 4.0")
+        );
+        let report_json = serde_json::to_string(&quality_report).expect("report serializes");
+        assert!(!report_json.contains(question));
+        assert!(!report_json.contains("SECRET_RUNTIME_TOKEN"));
+    }
+
+    #[test]
+    fn retrieval_quality_report_blocks_production_without_source_usage_metadata() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+            }),
+        );
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "通灵玉是什么？".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards { quality_report, .. } = output else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(quality_report.quality_status, "needs_attention");
+        assert!(!quality_report.production_ready);
+        assert!(quality_report.issues.iter().any(|issue| {
+            issue
+                == "source_usage_metadata_incomplete:quality-source:missing_license_and_attribution_metadata"
+        }));
+        assert!(quality_report.recommended_follow_up.iter().any(|item| {
+            item == "add_machine_readable_source_license_usage_attribution_metadata"
+        }));
+    }
+
+    #[test]
+    fn retrieval_quality_report_fails_when_required_type_is_missing() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC BY-SA 4.0",
+                "attribution": "Wikisource contributors",
+            }),
+        );
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "通灵玉是什么？".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["commentary".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards { quality_report, .. } = output else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(quality_report.quality_status, "failed");
+        assert!(!quality_report.production_ready);
+        assert!(
+            quality_report
+                .issues
+                .iter()
+                .any(|issue| { issue == "missing_required_evidence_type:commentary" })
+        );
+    }
+
+    #[test]
+    fn retrieval_quality_report_fails_when_no_evidence_is_selected() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "不存在的检索目标".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert!(cards.is_empty());
+        assert_eq!(quality_report.quality_status, "failed");
+        assert!(!quality_report.production_ready);
+        assert!(
+            quality_report
+                .issues
+                .iter()
+                .any(|issue| { issue == "no_evidence_selected" })
+        );
+        assert!(
+            quality_report
+                .issues
+                .iter()
+                .any(|issue| { issue == "missing_required_evidence_type:base_text" })
+        );
+    }
+
+    #[test]
+    fn retrieval_quality_report_fails_when_required_exact_term_is_missing() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC BY-SA 4.0",
+                "attribution": "Wikisource contributors",
+            }),
+        );
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "寳玉和通灵玉是什么关系？".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards { quality_report, .. } = output else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(quality_report.quality_status, "failed");
+        assert!(!quality_report.production_ready);
+        assert!(
+            quality_report
+                .exact_match_coverage
+                .iter()
+                .any(|coverage| { coverage.term == "寳玉" && !coverage.matched })
+        );
+        assert_eq!(quality_report.protected_terms, vec!["寳玉".to_string()]);
+        assert!(
+            quality_report
+                .issues
+                .iter()
+                .any(|issue| { issue == "required_exact_term_not_selected:寳玉" })
+        );
     }
 
     #[test]
