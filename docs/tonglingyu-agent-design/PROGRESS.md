@@ -678,6 +678,12 @@
   `tonglingyu-rqa-api-compatibility-v1`；saved report validator 会拒绝缺 gate
   stdout、contract check 失败、兼容策略漂移、metrics 边界漂移、未知 request body
   未拒绝和负向状态码不是 400 的 production-ready report。
+- RQA failure 隐私 schema 已接入 runtime migration：
+  `tonglingyu-retrieval-failure-privacy-v1` 新增 `redacted_question_excerpt`，
+  `retrieval_failures` 默认只存 `question_sha256`、`question_summary`、
+  `redacted_question_excerpt` 和 `redacted_query_terms_json`，不接受 raw `question`
+  列。redaction 覆盖 password/key、token、URL secret、邮箱、手机号和长随机串；
+  RQA API contract gate 会验证 admin detail 不回显原始 prompt 或敏感片段。
 - RQA 用户数据生命周期 gate 已接入 release readiness 必跑路径：
   `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh` 会启动本地 Gateway，验证
   export 脱敏 manifest、legal hold 阻断 anonymize、release legal hold、

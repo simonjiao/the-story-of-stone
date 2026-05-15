@@ -1253,6 +1253,7 @@ gate_stdout = {
             "retrieval_failure_list_schema": True,
             "retrieval_failure_max_page_clamped": True,
             "retrieval_failure_read_schema": True,
+            "retrieval_failure_storage_minimized": True,
             "retrieval_failure_unknown_filter_rejected": True,
             "old_client_retrieval_failure_list_compatible": True,
             "old_client_retrieval_failure_read_compatible": True,
@@ -1263,6 +1264,7 @@ gate_stdout = {
             "json_metrics_excludes_raw_identifiers": True,
             "prometheus_metrics_excludes_raw_identifiers": True,
             "prometheus_label_set_bounded": True,
+            "admin_detail_excludes_sensitive_patterns": True,
         },
         "compatibility_policy": {
             "policy_version": "tonglingyu-rqa-api-compatibility-v1",
@@ -1874,6 +1876,7 @@ for gate in report["gates"]:
     if gate.get("name") == "rqa_api_contract":
         gate_json = json.loads(gate["stdout_tail"][0])
         gate_json["checks"]["admin_payload_excludes_raw_prompts"] = False
+        gate_json["checks"]["admin_detail_excludes_sensitive_patterns"] = False
         gate_json["checks"]["prometheus_label_set_bounded"] = False
         gate_json["api_contract_passed"] = False
         gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
@@ -1890,6 +1893,8 @@ assert_report "${tampered_rqa_api_contract_check_stdout}" \
   '"rqa_api_contract_not_passed" in report["errors"]'
 assert_report "${tampered_rqa_api_contract_check_stdout}" \
   '"rqa_api_contract_check_failed=admin_payload_excludes_raw_prompts" in report["errors"]'
+assert_report "${tampered_rqa_api_contract_check_stdout}" \
+  '"rqa_api_contract_check_failed=admin_detail_excludes_sensitive_patterns" in report["errors"]'
 assert_report "${tampered_rqa_api_contract_check_stdout}" \
   '"rqa_api_contract_check_failed=prometheus_label_set_bounded" in report["errors"]'
 

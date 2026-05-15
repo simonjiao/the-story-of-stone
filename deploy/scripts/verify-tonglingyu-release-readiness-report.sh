@@ -1324,6 +1324,7 @@ def validate_api_contract_gate_stdout():
         "retrieval_failure_unknown_filter_rejected",
         "retrieval_failure_invalid_status_rejected",
         "retrieval_failure_read_schema",
+        "retrieval_failure_storage_minimized",
         "governance_task_list_schema",
         "governance_task_list_pagination",
         "governance_task_max_page_clamped",
@@ -1343,6 +1344,7 @@ def validate_api_contract_gate_stdout():
         "prometheus_metrics_excludes_raw_identifiers",
         "prometheus_label_set_bounded",
         "admin_payload_excludes_raw_prompts",
+        "admin_detail_excludes_sensitive_patterns",
     )
     if not isinstance(checks, dict):
         errors.append("rqa_api_contract_checks_missing")

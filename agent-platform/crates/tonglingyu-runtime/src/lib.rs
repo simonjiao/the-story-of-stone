@@ -211,6 +211,7 @@ pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failure
 pub const RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION: &str =
     "tonglingyu-retrieval-failure-clusters-v1";
 pub const RETRIEVAL_FAILURE_DEDUPE_MIGRATION: &str = "tonglingyu-retrieval-failure-dedupe-v1";
+pub const RETRIEVAL_FAILURE_PRIVACY_MIGRATION: &str = "tonglingyu-retrieval-failure-privacy-v1";
 pub const RQA_LIFECYCLE_POLICY_VERSION: &str = "tonglingyu-rqa-lifecycle-v1";
 pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
 pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
@@ -232,6 +233,7 @@ pub struct RetrievalFailureRecord {
     pub question_sha256: String,
     pub question_char_count: usize,
     pub question_summary: String,
+    pub redacted_question_excerpt: String,
     pub kb_schema_version: String,
     pub kb_version_id: Option<String>,
     pub failure_type: String,
@@ -3796,6 +3798,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             question_sha256 TEXT NOT NULL,
             question_char_count INTEGER NOT NULL,
             question_summary TEXT NOT NULL,
+            redacted_question_excerpt TEXT NOT NULL DEFAULT '',
             kb_schema_version TEXT NOT NULL,
             kb_version_id TEXT,
             failure_type TEXT NOT NULL,
@@ -3831,6 +3834,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             ON retrieval_failures(trace_id, IFNULL(package_id, ''), failure_type);
         "#,
     )?;
+    migrate_retrieval_failure_privacy_schema(conn)?;
     conn.execute_batch(knowledge_governance_task_create_table_sql())?;
     migrate_knowledge_governance_task_source_entity_schema(conn)?;
     conn.execute_batch(knowledge_governance_task_indexes_sql())?;
@@ -3898,6 +3902,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![RETRIEVAL_FAILURE_DEDUPE_MIGRATION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![RETRIEVAL_FAILURE_PRIVACY_MIGRATION, now_rfc3339()],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
@@ -3993,6 +4001,30 @@ fn knowledge_patch_proposal_schema_sql() -> &'static str {
     CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_updated
         ON knowledge_patch_proposals(updated_at);
     "#
+}
+
+fn migrate_retrieval_failure_privacy_schema(conn: &Connection) -> Result<()> {
+    if !sqlite_table_exists(conn, "retrieval_failures")? {
+        return Ok(());
+    }
+    let columns = sqlite_table_columns(conn, "retrieval_failures")?;
+    if columns.contains("question") {
+        return Err(anyhow!(
+            "retrieval_failures contains raw question column; manual privacy migration required"
+        ));
+    }
+    if !columns.contains("redacted_question_excerpt") {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE retrieval_failures
+                ADD COLUMN redacted_question_excerpt TEXT NOT NULL DEFAULT '';
+            UPDATE retrieval_failures
+                SET redacted_question_excerpt = question_summary
+                WHERE redacted_question_excerpt = '';
+            "#,
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_knowledge_governance_task_source_entity_schema(conn: &Connection) -> Result<()> {
@@ -4121,6 +4153,7 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         "tonglingyu-runtime-schema-v1".to_string(),
         RETRIEVAL_FAILURE_SCHEMA_VERSION.to_string(),
         RETRIEVAL_FAILURE_DEDUPE_MIGRATION.to_string(),
+        RETRIEVAL_FAILURE_PRIVACY_MIGRATION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION.to_string(),
         RQA_LIFECYCLE_POLICY_VERSION.to_string(),
@@ -4277,6 +4310,7 @@ fn create_retrieval_failure_inner(
         return Ok(existing);
     }
     let question_summary = retrieval_failure_question_summary(&input.quality_report);
+    let redacted_question_excerpt = retrieval_failure_redacted_excerpt(&input.quality_report);
     let kb_version_id = latest_kb_version_id(conn)?;
     let agent_diagnosis = input.agent_diagnosis.unwrap_or_else(|| {
         format!(
@@ -4297,15 +4331,15 @@ fn create_retrieval_failure_inner(
         r#"
         INSERT INTO retrieval_failures (
             failure_id, trace_id, package_id, question_sha256, question_char_count,
-            question_summary, kb_schema_version, kb_version_id, failure_type,
-            redacted_query_terms_json, required_evidence_types_json,
+            question_summary, redacted_question_excerpt, kb_schema_version,
+            kb_version_id, failure_type, redacted_query_terms_json, required_evidence_types_json,
             actual_evidence_types_json, expected_evidence_ids_json,
             selected_evidence_ids_json, missing_evidence_types_json,
             quality_issues_json, agent_diagnosis, proposed_fix, human_review_status,
             reviewer, review_note, created_at, updated_at, resolved_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
         )
         "#,
         params![
@@ -4315,6 +4349,7 @@ fn create_retrieval_failure_inner(
             input.quality_report.query_summary.question_sha256,
             input.quality_report.query_summary.question_char_count as i64,
             question_summary,
+            redacted_question_excerpt,
             input
                 .quality_report
                 .source_coverage_boundary
@@ -5432,17 +5467,64 @@ fn reviewer_retrieval_quality_report(
 }
 
 fn redacted_terms_from_question(question: &str) -> Vec<String> {
-    let mut terms = cjk_tokens(question)
-        .into_iter()
-        .take(RETRIEVAL_QUALITY_REPORT_MAX_TERMS)
-        .map(|term| redacted_query_term(&term))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mut term_set = BTreeSet::new();
+    for term in sensitive_query_terms(question) {
+        term_set.insert(redacted_query_term(&term));
+        if term_set.len() >= RETRIEVAL_QUALITY_REPORT_MAX_TERMS {
+            break;
+        }
+    }
+    for term in cjk_tokens(question) {
+        if term_set.len() >= RETRIEVAL_QUALITY_REPORT_MAX_TERMS {
+            break;
+        }
+        term_set.insert(redacted_query_term(&term));
+    }
+    let mut terms = term_set.into_iter().collect::<Vec<_>>();
     if terms.is_empty() {
         terms.push(format!("sha256:{}", &hash_text(question)[..12]));
     }
     terms
+}
+
+fn sensitive_query_terms(question: &str) -> Vec<String> {
+    question
+        .split(query_term_delimiter)
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .filter(|term| looks_sensitive_query_term(term))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn query_term_delimiter(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '！'
+                | '？'
+                | ','
+                | ';'
+                | '"'
+                | '\''
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+        )
 }
 
 fn retrieval_failure_type(issues: &[String]) -> String {
@@ -5492,6 +5574,13 @@ fn retrieval_failure_question_summary(report: &RetrievalQualityReport) -> String
         return format!("sha256:{}", &report.query_summary.question_sha256[..12]);
     }
     trim_text(&report.query_summary.redacted_terms.join(" "), 200)
+}
+
+fn retrieval_failure_redacted_excerpt(report: &RetrievalQualityReport) -> String {
+    if report.query_summary.redacted_terms.is_empty() {
+        return format!("sha256:{}", &report.query_summary.question_sha256[..12]);
+    }
+    trim_text(&report.query_summary.redacted_terms.join(" "), 120)
 }
 
 fn retrieval_failure_page_limit(requested: usize) -> usize {
@@ -5556,8 +5645,8 @@ fn retrieval_failure_select_sql() -> &'static str {
     r#"
     SELECT
         failure_id, trace_id, package_id, question_sha256, question_char_count,
-        question_summary, kb_schema_version, kb_version_id, failure_type,
-        redacted_query_terms_json, required_evidence_types_json,
+        question_summary, redacted_question_excerpt, kb_schema_version,
+        kb_version_id, failure_type, redacted_query_terms_json, required_evidence_types_json,
         actual_evidence_types_json, expected_evidence_ids_json,
         selected_evidence_ids_json, missing_evidence_types_json,
         quality_issues_json, agent_diagnosis, proposed_fix, human_review_status,
@@ -5612,6 +5701,7 @@ struct RetrievalFailureSqlRow {
     question_sha256: String,
     question_char_count: i64,
     question_summary: String,
+    redacted_question_excerpt: String,
     kb_schema_version: String,
     kb_version_id: Option<String>,
     failure_type: String,
@@ -5640,24 +5730,25 @@ fn retrieval_failure_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Retrie
         question_sha256: row.get(3)?,
         question_char_count: row.get(4)?,
         question_summary: row.get(5)?,
-        kb_schema_version: row.get(6)?,
-        kb_version_id: row.get(7)?,
-        failure_type: row.get(8)?,
-        redacted_query_terms_json: row.get(9)?,
-        required_evidence_types_json: row.get(10)?,
-        actual_evidence_types_json: row.get(11)?,
-        expected_evidence_ids_json: row.get(12)?,
-        selected_evidence_ids_json: row.get(13)?,
-        missing_evidence_types_json: row.get(14)?,
-        quality_issues_json: row.get(15)?,
-        agent_diagnosis: row.get(16)?,
-        proposed_fix: row.get(17)?,
-        human_review_status: row.get(18)?,
-        reviewer: row.get(19)?,
-        review_note: row.get(20)?,
-        created_at: row.get(21)?,
-        updated_at: row.get(22)?,
-        resolved_at: row.get(23)?,
+        redacted_question_excerpt: row.get(6)?,
+        kb_schema_version: row.get(7)?,
+        kb_version_id: row.get(8)?,
+        failure_type: row.get(9)?,
+        redacted_query_terms_json: row.get(10)?,
+        required_evidence_types_json: row.get(11)?,
+        actual_evidence_types_json: row.get(12)?,
+        expected_evidence_ids_json: row.get(13)?,
+        selected_evidence_ids_json: row.get(14)?,
+        missing_evidence_types_json: row.get(15)?,
+        quality_issues_json: row.get(16)?,
+        agent_diagnosis: row.get(17)?,
+        proposed_fix: row.get(18)?,
+        human_review_status: row.get(19)?,
+        reviewer: row.get(20)?,
+        review_note: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
+        resolved_at: row.get(24)?,
     })
 }
 
@@ -5672,6 +5763,7 @@ fn retrieval_failure_record_from_sql_row(
         question_char_count: usize::try_from(row.question_char_count)
             .context("retrieval failure question_char_count is negative")?,
         question_summary: row.question_summary,
+        redacted_question_excerpt: row.redacted_question_excerpt,
         kb_schema_version: row.kb_schema_version,
         kb_version_id: row.kb_version_id,
         failure_type: row.failure_type,
@@ -5708,6 +5800,7 @@ fn retrieval_failure_record_json(
             "question_sha256": &record.question_sha256,
             "question_char_count": record.question_char_count,
             "question_summary": &record.question_summary,
+            "redacted_question_excerpt": &record.redacted_question_excerpt,
             "kb_schema_version": &record.kb_schema_version,
             "kb_version_id": &record.kb_version_id,
             "failure_type": &record.failure_type,
@@ -5735,6 +5828,7 @@ fn retrieval_failure_record_json(
             "question_sha256": &record.question_sha256,
             "question_char_count": record.question_char_count,
             "question_summary": &record.question_summary,
+            "redacted_question_excerpt": &record.redacted_question_excerpt,
             "kb_schema_version": &record.kb_schema_version,
             "failure_type": &record.failure_type,
             "redacted_query_terms": &record.redacted_query_terms,
@@ -8511,14 +8605,16 @@ fn retrieval_quality_report(
     required_evidence_types: &[String],
     search: &SearchEvidenceResult,
 ) -> Result<RetrievalQualityReport> {
-    let redacted_terms = search
-        .expanded_terms
-        .iter()
-        .take(RETRIEVAL_QUALITY_REPORT_MAX_TERMS)
-        .map(|term| redacted_query_term(term))
-        .collect::<BTreeSet<_>>()
+    let mut redacted_term_set = redacted_terms_from_question(question)
         .into_iter()
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    for term in &search.expanded_terms {
+        if redacted_term_set.len() >= RETRIEVAL_QUALITY_REPORT_MAX_TERMS {
+            break;
+        }
+        redacted_term_set.insert(redacted_query_term(term));
+    }
+    let redacted_terms = redacted_term_set.into_iter().collect::<Vec<_>>();
     let protected_terms = search
         .exact_terms
         .iter()
@@ -8959,8 +9055,24 @@ fn looks_sensitive_query_term(term: &str) -> bool {
         || lower.contains("token")
         || lower.contains("api_key")
         || lower.contains("apikey")
+        || lower.contains("api-key")
+        || lower.contains("access_key")
+        || lower.contains("access-key")
+        || lower.contains("key=")
+        || lower.contains("credential")
         || lower.contains("sk-")
         || term.contains('@')
+    {
+        return true;
+    }
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return true;
+    }
+    let digit_count = term.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if digit_count >= 10
+        && term
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '(' | ')'))
     {
         return true;
     }
@@ -10708,6 +10820,43 @@ mod tests {
     }
 
     #[test]
+    fn redacted_query_terms_hash_sensitive_patterns() {
+        for sensitive in [
+            "password=SECRET_RUNTIME_TOKEN",
+            "token=SECRET_RUNTIME_TOKEN",
+            "api_key=SECRET_RUNTIME_TOKEN",
+            "https://example.invalid/path?token=SECRET_RUNTIME_TOKEN",
+            "reader@example.invalid",
+            "+8613800138000",
+            "ABCD1234EFGH5678IJKL9012",
+        ] {
+            let redacted = redacted_query_term(sensitive);
+            assert!(redacted.starts_with("sha256:"), "{sensitive} -> {redacted}");
+            assert!(!redacted.contains("SECRET_RUNTIME_TOKEN"));
+            assert!(!redacted.contains("example.invalid"));
+            assert!(!redacted.contains("13800138000"));
+        }
+
+        let question = concat!(
+            "通灵玉 token=SECRET_RUNTIME_TOKEN ",
+            "https://example.invalid/a?secret=SECRET_RUNTIME_TOKEN ",
+            "reader@example.invalid +8613800138000"
+        );
+        let terms = redacted_terms_from_question(question);
+        let rendered = terms.join(" ");
+        assert!(terms.iter().any(|term| term.starts_with("sha256:")));
+        assert!(rendered.contains("通灵玉"));
+        for leaked in [
+            "SECRET_RUNTIME_TOKEN",
+            "example.invalid",
+            "reader@example.invalid",
+            "13800138000",
+        ] {
+            assert!(!rendered.contains(leaked));
+        }
+    }
+
+    #[test]
     fn retrieval_quality_report_blocks_production_without_source_usage_metadata() {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
         init_runtime_schema(&conn).expect("runtime schema");
@@ -10880,6 +11029,13 @@ mod tests {
                     .iter()
                     .any(|item| item.as_str() == Some(RETRIEVAL_FAILURE_SCHEMA_VERSION)))
         );
+        assert!(
+            before["pending_migrations"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.as_str() == Some(RETRIEVAL_FAILURE_PRIVACY_MIGRATION)))
+        );
         assert_eq!(before["contains_secret_values"], json!(false));
         assert_eq!(before["will_delete_runtime_data"], json!(false));
 
@@ -10897,6 +11053,13 @@ mod tests {
             .expect("migration count");
         assert_eq!(migration_count, 1);
         assert!(sqlite_table_exists(&conn, "retrieval_failures").expect("table check"));
+        let retrieval_failure_columns =
+            sqlite_table_columns(&conn, "retrieval_failures").expect("retrieval failure columns");
+        assert!(retrieval_failure_columns.contains("question_sha256"));
+        assert!(retrieval_failure_columns.contains("question_summary"));
+        assert!(retrieval_failure_columns.contains("redacted_question_excerpt"));
+        assert!(retrieval_failure_columns.contains("redacted_query_terms_json"));
+        assert!(!retrieval_failure_columns.contains("question"));
         assert!(sqlite_table_exists(&conn, "knowledge_governance_tasks").expect("table check"));
         assert!(sqlite_table_exists(&conn, "knowledge_patch_proposals").expect("table check"));
     }
@@ -10984,6 +11147,18 @@ mod tests {
         .expect("legacy governance task schema");
 
         init_runtime_schema(&conn).expect("runtime schema migrates legacy governance tasks");
+        let failure_columns =
+            sqlite_table_columns(&conn, "retrieval_failures").expect("failure table columns");
+        assert!(failure_columns.contains("redacted_question_excerpt"));
+        assert!(!failure_columns.contains("question"));
+        let migrated_excerpt: String = conn
+            .query_row(
+                "SELECT redacted_question_excerpt FROM retrieval_failures WHERE failure_id = 'rf-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated excerpt");
+        assert_eq!(migrated_excerpt, "legacy question");
         let columns =
             sqlite_table_columns(&conn, "knowledge_governance_tasks").expect("table columns");
         assert!(columns.contains("source_entity_type"));
@@ -11073,6 +11248,19 @@ mod tests {
         assert_eq!(item["trace_id"], json!("trace-retrieval-failure-test"));
         assert_eq!(item["package_id"], json!(workflow.package.package_id));
         assert_eq!(item["human_review_status"], json!("open"));
+        assert!(item["question_sha256"].as_str().is_some());
+        assert!(item["question_summary"].as_str().is_some());
+        assert!(item["redacted_question_excerpt"].as_str().is_some());
+        assert!(
+            item["redacted_query_terms"]
+                .as_array()
+                .is_some_and(|terms| {
+                    terms.iter().any(|term| {
+                        term.as_str()
+                            .is_some_and(|term| term.starts_with("sha256:"))
+                    })
+                })
+        );
         assert!(item["selected_evidence_ids"].as_array().is_some_and(|ids| {
             ids.iter()
                 .any(|id| id.as_str().is_some_and(|id| id.starts_with("ev-")))
@@ -11080,6 +11268,7 @@ mod tests {
         let admin_json = serde_json::to_string(item).expect("admin serializes");
         assert!(!admin_json.contains(question));
         assert!(!admin_json.contains("SECRET_RUNTIME_TOKEN"));
+        assert!(!admin_json.contains("password="));
 
         let failure_id = item["failure_id"].as_str().expect("failure id");
         let updated = update_retrieval_failure_status(
@@ -11101,6 +11290,7 @@ mod tests {
         assert!(safe.get("trace_id").is_none());
         assert!(safe.get("package_id").is_none());
         assert!(safe.get("selected_evidence_ids").is_none());
+        assert!(safe["redacted_question_excerpt"].as_str().is_some());
         assert_eq!(safe["quality_issue_count"], json!(1));
 
         let stats = runtime_store_stats(&conn).expect("stats");
