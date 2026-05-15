@@ -104,6 +104,10 @@ struct BuildKbArgs {
     db: PathBuf,
     #[arg(long, default_value_t = false)]
     rebuild: bool,
+    #[arg(long, default_value_t = 8)]
+    eval_limit: usize,
+    #[arg(long, default_value_t = false)]
+    skip_diff_eval: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1013,6 +1017,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
             source_root: args.source_root.clone(),
             db: args.db.clone(),
             rebuild: false,
+            eval_limit: args.max_evidence,
+            skip_diff_eval: true,
         };
         build_kb(&build)?;
     }
@@ -1114,6 +1120,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 fn build_kb(args: &BuildKbArgs) -> Result<()> {
+    let before_eval_report = if args.skip_diff_eval {
+        None
+    } else {
+        eval_report_on_db_copy(&args.db, "before-kb-rebuild", args.eval_limit)?
+    };
     if args.rebuild && args.db.exists() {
         fs::remove_file(&args.db)
             .with_context(|| format!("remove existing db {}", args.db.display()))?;
@@ -1124,17 +1135,86 @@ fn build_kb(args: &BuildKbArgs) -> Result<()> {
 
     let conn = open_db(&args.db)?;
     clear_gateway_generated_rows(&conn)?;
-    let report = TonglingyuRuntimeStore::new(args.db.clone())
-        .rebuild_knowledge_base_from_snapshots(&args.source_root)?;
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+    let mut report = runtime_store.rebuild_knowledge_base_from_snapshots(&args.source_root)?;
+    let after_eval_report = if args.skip_diff_eval {
+        None
+    } else {
+        eval_report_on_db_copy(&args.db, "after-kb-rebuild", args.eval_limit)?
+    };
+    if let Some(after_eval_report) = after_eval_report.as_ref() {
+        let before_eval_summary = before_eval_report
+            .as_ref()
+            .and_then(|report| report.get("quality_summary"))
+            .cloned();
+        let after_eval_summary = after_eval_report
+            .get("quality_summary")
+            .cloned()
+            .ok_or_else(|| anyhow!("after rebuild eval report missing quality_summary"))?;
+        let report_id = report
+            .diff_report
+            .get("report_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("kb diff report missing report_id"))?;
+        report.diff_report = runtime_store
+            .record_kb_version_diff_eval_summaries(
+                report_id,
+                before_eval_summary,
+                after_eval_summary,
+            )?
+            .ok_or_else(|| anyhow!("kb diff report not found after eval summary update"))?;
+        if after_eval_report.get("status").and_then(Value::as_str) != Some("passed") {
+            return Err(anyhow!("post-rebuild eval quality failed"));
+        }
+    }
     println!(
-        "OK build_kb db={} source_root={} sources={} blocks={} schema={}",
+        "OK build_kb db={} source_root={} kb_version={} sources={} blocks={} schema={} kb_build_hash={} diff_report={} eval_diff={}",
         args.db.display(),
         report.source_root,
+        report.version_id,
         report.source_count,
         report.block_count,
-        report.schema_version
+        report.schema_version,
+        report.kb_build_hash,
+        report
+            .diff_report
+            .get("report_id")
+            .and_then(Value::as_str)
+            .unwrap_or("missing"),
+        if args.skip_diff_eval {
+            "skipped"
+        } else {
+            "recorded"
+        }
     );
     Ok(())
+}
+
+fn eval_report_on_db_copy(db: &Path, label: &str, limit: usize) -> Result<Option<Value>> {
+    if !TonglingyuRuntimeStore::new(db.to_path_buf()).has_knowledge_base()? {
+        return Ok(None);
+    }
+    let copy_path = std::env::temp_dir().join(format!(
+        "tonglingyu-{label}-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let result = (|| -> Result<Value> {
+        let conn = open_db(db)?;
+        conn.execute("VACUUM INTO ?1", params![copy_path.display().to_string()])?;
+        run_eval(&EvalArgs {
+            db: copy_path.clone(),
+            limit,
+            report: None,
+        })
+    })();
+    remove_sqlite_file_set(&copy_path);
+    result.map(Some)
+}
+
+fn remove_sqlite_file_set(path: &Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(path.with_extension("db-wal"));
+    let _ = fs::remove_file(path.with_extension("db-shm"));
 }
 
 fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {

@@ -69,6 +69,7 @@ pub struct EvidencePackage {
 pub const TOOL_CATALOG_VERSION: &str = "tonglingyu-readonly-tools-v1";
 pub const PROFILE_CONTRACT_VERSION: &str = "tonglingyu-runtime-profiles-v1";
 pub const KNOWLEDGE_BASE_SCHEMA_VERSION: &str = "tonglingyu-v1-sqlite-fts";
+pub const KB_VERSION_DIFF_REPORT_SCHEMA_VERSION: &str = "tonglingyu-kb-version-diff-v1";
 pub const RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
 pub const RUNTIME_WORKFLOW_PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
 pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report-v1";
@@ -175,10 +176,15 @@ pub struct ProfileDescriptor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBaseBuildReport {
+    pub version_id: String,
     pub source_root: String,
     pub source_count: i64,
     pub block_count: i64,
     pub schema_version: String,
+    pub built_at: String,
+    pub source_snapshot_digest: String,
+    pub kb_build_hash: String,
+    pub diff_report: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -889,6 +895,21 @@ impl TonglingyuRuntimeStore {
         let report = rebuild_knowledge_base_from_snapshots(&tx, source_root)?;
         tx.commit()?;
         Ok(report)
+    }
+
+    pub fn record_kb_version_diff_eval_summaries(
+        &self,
+        report_id: &str,
+        before_eval_summary: Option<Value>,
+        after_eval_summary: Value,
+    ) -> Result<Option<Value>> {
+        let conn = self.open_connection()?;
+        record_kb_version_diff_eval_summaries(
+            &conn,
+            report_id,
+            before_eval_summary,
+            after_eval_summary,
+        )
     }
 
     pub fn prune_data(&self, retention_days: u32, dry_run: bool) -> Result<Value> {
@@ -6581,10 +6602,30 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
             built_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS kb_version_diff_reports (
+            report_id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL,
+            before_version_id TEXT,
+            after_version_id TEXT NOT NULL,
+            source_root TEXT NOT NULL,
+            before_summary_json TEXT,
+            after_summary_json TEXT NOT NULL,
+            diff_json TEXT NOT NULL,
+            eval_before_summary_json TEXT,
+            eval_after_summary_json TEXT,
+            eval_diff_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
         CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
         CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
+        CREATE INDEX IF NOT EXISTS idx_kb_version_diff_reports_after
+            ON kb_version_diff_reports(after_version_id);
+        CREATE INDEX IF NOT EXISTS idx_kb_version_diff_reports_created
+            ON kb_version_diff_reports(created_at);
         "#,
     )?;
     ensure_source_metadata_columns(conn)?;
@@ -6624,12 +6665,17 @@ pub fn rebuild_knowledge_base_from_snapshots(
             source_root.display()
         ));
     }
+    let before_summary = knowledge_base_summary(conn)?;
     clear_knowledge_base_rows(conn)?;
     seed_aliases(conn)?;
     for source_dir in source_dirs {
         load_source_snapshot(conn, &source_dir)?;
     }
-    write_kb_version(conn, source_root)
+    let mut report = write_kb_version(conn, source_root)?;
+    let after_summary = knowledge_base_summary(conn)?
+        .ok_or_else(|| anyhow!("knowledge base summary missing after rebuild"))?;
+    report.diff_report = write_kb_version_diff_report(conn, before_summary, after_summary)?;
+    Ok(report)
 }
 
 fn clear_knowledge_base_rows(conn: &Connection) -> Result<()> {
@@ -6857,22 +6903,410 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
 fn write_kb_version(conn: &Connection, source_root: &Path) -> Result<KnowledgeBaseBuildReport> {
     let source_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
     let block_count: i64 = conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
+    let version_id = format!("kb-{}", uuid::Uuid::now_v7().simple());
+    let built_at = now_rfc3339();
     conn.execute(
         "INSERT INTO kb_version (version_id, source_root, source_count, block_count, schema_version, built_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
-            format!("kb-{}", uuid::Uuid::now_v7().simple()),
+            &version_id,
             source_root.display().to_string(),
             source_count,
             block_count,
             KNOWLEDGE_BASE_SCHEMA_VERSION,
-            now_rfc3339(),
+            &built_at,
         ],
     )?;
+    let summary = knowledge_base_summary(conn)?
+        .ok_or_else(|| anyhow!("knowledge base summary missing after version write"))?;
     Ok(KnowledgeBaseBuildReport {
+        version_id,
         source_root: source_root.display().to_string(),
         source_count,
         block_count,
         schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+        built_at,
+        source_snapshot_digest: summary["source_snapshot_digest"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        kb_build_hash: summary["kb_build_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        diff_report: Value::Null,
+    })
+}
+
+fn knowledge_base_summary(conn: &Connection) -> Result<Option<Value>> {
+    if !sqlite_table_exists(conn, "kb_version")? {
+        return Ok(None);
+    }
+    let Some(kb_version) = latest_kb_version_json(conn)? else {
+        return Ok(None);
+    };
+    let source_hashes = source_hash_refs(conn)?;
+    let source_snapshot_digest = hash_text(&serde_json::to_string(&source_hashes)?);
+    let counts = json!({
+        "sources": table_count_if_exists(conn, "sources")?,
+        "blocks": table_count_if_exists(conn, "blocks")?,
+        "commentaries": table_count_if_exists(conn, "commentaries")?,
+        "version_notes": table_count_if_exists(conn, "version_notes")?,
+        "aliases": table_count_if_exists(conn, "aliases")?,
+        "rare_char_annotations": table_count_if_exists(conn, "rare_char_annotations")?,
+    });
+    let kb_build_hash = hash_text(&serde_json::to_string(&canonical_json_value(&json!({
+        "kb_version": kb_version,
+        "source_snapshot_digest": source_snapshot_digest,
+        "counts": counts,
+    })))?);
+    Ok(Some(json!({
+        "object": "tonglingyu.kb_version_summary",
+        "schema_version": KNOWLEDGE_BASE_SCHEMA_VERSION,
+        "kb_version": latest_kb_version_json(conn)?.expect("kb_version checked"),
+        "counts": counts,
+        "source_hashes": source_hashes,
+        "source_snapshot_digest": source_snapshot_digest,
+        "kb_build_hash": kb_build_hash,
+    })))
+}
+
+fn latest_kb_version_json(conn: &Connection) -> Result<Option<Value>> {
+    if !sqlite_table_exists(conn, "kb_version")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        r#"
+        SELECT version_id, source_root, source_count, block_count, schema_version, built_at
+        FROM kb_version
+        ORDER BY built_at DESC, version_id DESC
+        LIMIT 1
+        "#,
+        [],
+        |row| {
+            Ok(json!({
+                "version_id": row.get::<_, String>(0)?,
+                "source_root": row.get::<_, String>(1)?,
+                "source_count": row.get::<_, i64>(2)?,
+                "block_count": row.get::<_, i64>(3)?,
+                "schema_version": row.get::<_, String>(4)?,
+                "built_at": row.get::<_, String>(5)?,
+            }))
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn source_hash_refs(conn: &Connection) -> Result<Vec<Value>> {
+    if !sqlite_table_exists(conn, "sources")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT source_id, source_hash
+        FROM sources
+        ORDER BY source_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(json!({
+            "source_id": row.get::<_, String>(0)?,
+            "source_hash": row.get::<_, String>(1)?,
+        }))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn table_count_if_exists(conn: &Connection, table: &str) -> Result<i64> {
+    if sqlite_table_exists(conn, table)? {
+        table_count(conn, table)
+    } else {
+        Ok(0)
+    }
+}
+
+fn write_kb_version_diff_report(
+    conn: &Connection,
+    before_summary: Option<Value>,
+    after_summary: Value,
+) -> Result<Value> {
+    let after_version_id = after_summary["kb_version"]["version_id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("after kb version summary missing version_id"))?
+        .to_string();
+    let before_version_id = before_summary
+        .as_ref()
+        .and_then(|summary| summary["kb_version"]["version_id"].as_str())
+        .map(ToOwned::to_owned);
+    let source_root = after_summary["kb_version"]["source_root"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let diff = kb_version_summary_diff(before_summary.as_ref(), &after_summary);
+    let report_id = format!("kb-diff-{}", uuid::Uuid::now_v7().simple());
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO kb_version_diff_reports (
+            report_id, schema_version, before_version_id, after_version_id,
+            source_root, before_summary_json, after_summary_json, diff_json,
+            eval_before_summary_json, eval_after_summary_json, eval_diff_json,
+            created_at, updated_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, ?9, ?9
+        )
+        "#,
+        params![
+            &report_id,
+            KB_VERSION_DIFF_REPORT_SCHEMA_VERSION,
+            &before_version_id,
+            &after_version_id,
+            &source_root,
+            optional_json_string(before_summary.as_ref())?,
+            serde_json::to_string(&after_summary)?,
+            serde_json::to_string(&diff)?,
+            &now,
+        ],
+    )?;
+    load_kb_version_diff_report(conn, &report_id)?
+        .ok_or_else(|| anyhow!("kb version diff report was not readable after insert"))
+}
+
+pub fn record_kb_version_diff_eval_summaries(
+    conn: &Connection,
+    report_id: &str,
+    before_eval_summary: Option<Value>,
+    after_eval_summary: Value,
+) -> Result<Option<Value>> {
+    if !after_eval_summary.is_object() {
+        return Err(anyhow!("after eval quality summary must be a JSON object"));
+    }
+    if before_eval_summary
+        .as_ref()
+        .is_some_and(|summary| !summary.is_object())
+    {
+        return Err(anyhow!("before eval quality summary must be a JSON object"));
+    }
+    let eval_diff = eval_quality_summary_diff(before_eval_summary.as_ref(), &after_eval_summary);
+    let updated_at = now_rfc3339();
+    let updated = conn.execute(
+        r#"
+        UPDATE kb_version_diff_reports
+        SET eval_before_summary_json = ?2,
+            eval_after_summary_json = ?3,
+            eval_diff_json = ?4,
+            updated_at = ?5
+        WHERE report_id = ?1
+        "#,
+        params![
+            report_id,
+            optional_json_string(before_eval_summary.as_ref())?,
+            serde_json::to_string(&after_eval_summary)?,
+            serde_json::to_string(&eval_diff)?,
+            updated_at,
+        ],
+    )?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    load_kb_version_diff_report(conn, report_id)
+}
+
+fn optional_json_string(value: Option<&Value>) -> Result<Option<String>> {
+    value
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn load_kb_version_diff_report(conn: &Connection, report_id: &str) -> Result<Option<Value>> {
+    if !sqlite_table_exists(conn, "kb_version_diff_reports")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        r#"
+        SELECT report_id, schema_version, before_version_id, after_version_id,
+               source_root, before_summary_json, after_summary_json, diff_json,
+               eval_before_summary_json, eval_after_summary_json, eval_diff_json,
+               created_at, updated_at
+        FROM kb_version_diff_reports
+        WHERE report_id = ?1
+        "#,
+        params![report_id],
+        kb_version_diff_report_json_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn kb_version_diff_report_json_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+    let before_summary_json: Option<String> = row.get(5)?;
+    let after_summary_json: String = row.get(6)?;
+    let diff_json: String = row.get(7)?;
+    let eval_before_summary_json: Option<String> = row.get(8)?;
+    let eval_after_summary_json: Option<String> = row.get(9)?;
+    let eval_diff_json: Option<String> = row.get(10)?;
+    Ok(json!({
+        "object": "tonglingyu.kb_version_diff_report",
+        "report_id": row.get::<_, String>(0)?,
+        "schema_version": row.get::<_, String>(1)?,
+        "before_version_id": row.get::<_, Option<String>>(2)?,
+        "after_version_id": row.get::<_, String>(3)?,
+        "source_root": row.get::<_, String>(4)?,
+        "before_summary": parse_optional_json_for_sql(before_summary_json)?,
+        "after_summary": parse_json_for_sql(after_summary_json)?,
+        "diff": parse_json_for_sql(diff_json)?,
+        "eval_before_summary": parse_optional_json_for_sql(eval_before_summary_json)?,
+        "eval_after_summary": parse_optional_json_for_sql(eval_after_summary_json)?,
+        "eval_diff": parse_optional_json_for_sql(eval_diff_json)?,
+        "created_at": row.get::<_, String>(11)?,
+        "updated_at": row.get::<_, String>(12)?,
+    }))
+}
+
+fn parse_json_for_sql(data: String) -> rusqlite::Result<Value> {
+    serde_json::from_str(&data)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+fn parse_optional_json_for_sql(data: Option<String>) -> rusqlite::Result<Value> {
+    match data {
+        Some(data) => parse_json_for_sql(data),
+        None => Ok(Value::Null),
+    }
+}
+
+fn kb_version_summary_diff(before: Option<&Value>, after: &Value) -> Value {
+    let before_counts = before
+        .and_then(|summary| summary.get("counts"))
+        .and_then(Value::as_object);
+    let after_counts = after.get("counts").and_then(Value::as_object);
+    let mut count_diff = serde_json::Map::new();
+    for key in [
+        "sources",
+        "blocks",
+        "commentaries",
+        "version_notes",
+        "aliases",
+        "rare_char_annotations",
+    ] {
+        let before_value = before_counts
+            .and_then(|counts| counts.get(key))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let after_value = after_counts
+            .and_then(|counts| counts.get(key))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        count_diff.insert(
+            key.to_string(),
+            json!({
+                "before": before_value,
+                "after": after_value,
+                "delta": after_value - before_value,
+            }),
+        );
+    }
+    let before_sources = source_hash_map(before);
+    let after_sources = source_hash_map(Some(after));
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    let mut unchanged_count = 0_usize;
+    for (source_id, after_hash) in &after_sources {
+        match before_sources.get(source_id) {
+            Some(before_hash) if before_hash == after_hash => unchanged_count += 1,
+            Some(before_hash) => changed.push(json!({
+                "source_id": source_id,
+                "before_hash": before_hash,
+                "after_hash": after_hash,
+            })),
+            None => added.push(json!({
+                "source_id": source_id,
+                "after_hash": after_hash,
+            })),
+        }
+    }
+    for (source_id, before_hash) in &before_sources {
+        if !after_sources.contains_key(source_id) {
+            removed.push(json!({
+                "source_id": source_id,
+                "before_hash": before_hash,
+            }));
+        }
+    }
+    json!({
+        "object": "tonglingyu.kb_version_diff",
+        "schema_version": KB_VERSION_DIFF_REPORT_SCHEMA_VERSION,
+        "before_version_id": before
+            .and_then(|summary| summary["kb_version"]["version_id"].as_str()),
+        "after_version_id": after["kb_version"]["version_id"].as_str(),
+        "source_snapshot_digest_changed": before
+            .and_then(|summary| summary["source_snapshot_digest"].as_str())
+            .is_some_and(|before_digest| {
+                Some(before_digest) != after["source_snapshot_digest"].as_str()
+            }),
+        "kb_build_hash_changed": before
+            .and_then(|summary| summary["kb_build_hash"].as_str())
+            .is_some_and(|before_hash| Some(before_hash) != after["kb_build_hash"].as_str()),
+        "counts": Value::Object(count_diff),
+        "sources": {
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+            "unchanged_count": unchanged_count,
+        },
+    })
+}
+
+fn source_hash_map(summary: Option<&Value>) -> BTreeMap<String, String> {
+    summary
+        .and_then(|summary| summary.get("source_hashes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                item.get("source_id")?.as_str()?.to_string(),
+                item.get("source_hash")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn eval_quality_summary_diff(before: Option<&Value>, after: &Value) -> Value {
+    let mut metric_diff = serde_json::Map::new();
+    for key in [
+        "quality_report_coverage",
+        "quality_report_production_ready",
+        "eval_case_classification",
+        "expected_evidence_hit_at_8",
+        "required_type_coverage",
+        "exact_term_coverage",
+        "source_boundary_confirmation_avoided",
+        "forbidden_conclusion_avoided",
+        "reviewer_status_matched",
+    ] {
+        metric_diff.insert(
+            key.to_string(),
+            json!({
+                "before": before.and_then(|summary| summary.get(key)).cloned(),
+                "after": after.get(key).cloned(),
+            }),
+        );
+    }
+    json!({
+        "object": "tonglingyu.eval_quality_summary_diff",
+        "schema_version": KB_VERSION_DIFF_REPORT_SCHEMA_VERSION,
+        "before_status": before.and_then(|summary| summary["status"].as_str()),
+        "after_status": after["status"].as_str(),
+        "before_blockers": before
+            .and_then(|summary| summary.get("blockers"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "after_blockers": after.get("blockers").cloned().unwrap_or(Value::Null),
+        "metrics": Value::Object(metric_diff),
     })
 }
 
@@ -10406,6 +10840,73 @@ mod tests {
             event["event_type"] == "governance_task_status_updated"
                 && event["payload"]["evidence_ref_sha256"].as_str().is_some()
         }));
+    }
+
+    #[test]
+    fn kb_version_diff_report_records_eval_before_after_summary() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        write_kb_version(&conn, Path::new("resources/sources/wiki"))
+            .expect("before kb version writes");
+        let before_summary = knowledge_base_summary(&conn)
+            .expect("before summary loads")
+            .expect("before summary exists");
+        conn.execute(
+            "UPDATE sources SET source_hash = ?1 WHERE source_id = ?2",
+            params!["hash-quality-source-updated", "quality-source"],
+        )
+        .expect("source hash updates");
+        let mut build_report = write_kb_version(&conn, Path::new("resources/sources/wiki"))
+            .expect("after kb version writes");
+        let after_summary = knowledge_base_summary(&conn)
+            .expect("after summary loads")
+            .expect("after summary exists");
+        build_report.diff_report =
+            write_kb_version_diff_report(&conn, Some(before_summary), after_summary)
+                .expect("diff report writes");
+
+        assert_eq!(
+            build_report.diff_report["schema_version"],
+            json!(KB_VERSION_DIFF_REPORT_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            build_report.diff_report["diff"]["sources"]["changed"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let report_id = build_report.diff_report["report_id"]
+            .as_str()
+            .expect("report id");
+        let updated = record_kb_version_diff_eval_summaries(
+            &conn,
+            report_id,
+            Some(json!({
+                "status": "passed",
+                "expected_evidence_hit_at_8": {"ratio": 1.0},
+                "blockers": [],
+            })),
+            json!({
+                "status": "passed",
+                "expected_evidence_hit_at_8": {"ratio": 1.0},
+                "blockers": [],
+            }),
+        )
+        .expect("eval summaries record")
+        .expect("diff report still exists");
+        assert_eq!(updated["eval_after_summary"]["status"], json!("passed"));
+        assert_eq!(updated["eval_diff"]["after_status"], json!("passed"));
     }
 
     #[test]
