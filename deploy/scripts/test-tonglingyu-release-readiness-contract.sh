@@ -30,6 +30,8 @@ TAMPERED_SECRET_REPORT="${WORK_DIR}/tampered-secret-report.json"
 SYNTHETIC_READY_REPORT="${WORK_DIR}/synthetic-ready-report.json"
 TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
+TAMPERED_RELEASE_MANIFEST_REPORT="${WORK_DIR}/tampered-release-manifest-report.json"
+TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
@@ -1085,6 +1087,17 @@ behavior_config["behavior_config_digest"] = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 runbook_sha256 = hashlib.sha256(Path(runbook_path).read_bytes()).hexdigest()
+image_refs = [
+    "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
+    "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
+    "registry.invalid/hermes@sha256:" + "c" * 64,
+    "registry.invalid/open-webui@sha256:" + "d" * 64,
+    "registry.invalid/cloudflared@sha256:" + "e" * 64,
+    "registry.invalid/postgres@sha256:" + "f" * 64,
+]
+image_refs_sha256 = hashlib.sha256(
+    ("\n".join(image_refs) + "\n").encode("utf-8")
+).hexdigest()
 production_default_thresholds = {
     "eval_case_classification": 1.0,
     "exact_term_coverage": 1.0,
@@ -1488,12 +1501,13 @@ gate_stdout = {
             "failed_image_count": 0,
             "high_count": 0,
             "image_count": 6,
-            "image_refs_sha256": "c" * 64,
+            "image_refs": image_refs,
+            "image_refs_sha256": image_refs_sha256,
             "mutable_tag_count": 0,
             "report_sha256": "b" * 64,
             "scanner": "trivy",
             "scanned_image_count": 6,
-            "scanned_image_refs_sha256": "c" * 64,
+            "scanned_image_refs_sha256": image_refs_sha256,
             "scanned_report_count": 6,
             "scanned_reports_sha256": "d" * 64,
             "status": "passed",
@@ -1896,11 +1910,138 @@ gate_stdout = {
 for gate in report["gates"]:
     if gate.get("name") in gate_stdout:
         gate["stdout_tail"] = [json.dumps(gate_stdout[gate["name"]], sort_keys=True)]
+
+
+def canonical_digest(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+runtime_config = gate_stdout["runtime_config"]
+rqa_gate = gate_stdout["retrieval_quality"]
+security_gate = gate_stdout["security_scan"]
+behavior = rqa_gate["behavior_config"]
+image_scan = security_gate["image_scan"]
+kb_version = rqa_gate["kb_version"]
+release_manifest = {
+    "object": "tonglingyu.release_manifest",
+    "schema_version": 1,
+    "git": {
+        "commit": "f" * 40,
+        "tracked_dirty": False,
+    },
+    "runtime_config": {
+        "config_digest": canonical_digest(runtime_config),
+        "config_mode": runtime_config.get("config_mode"),
+        "checked_policy_fields": runtime_config.get("checked_policy_fields"),
+        "checked_services": runtime_config.get("checked_services"),
+    },
+    "rqa": {
+        "rqa_schema_version": rqa_gate["rqa_schema_version"],
+        "eval_suite_version": rqa_gate["eval_suite_version"],
+        "eval_run_id": rqa_gate["eval_run_id"],
+        "eval_report_sha256": rqa_gate["eval_report_sha256"],
+        "source_snapshot_digest": rqa_gate["source_snapshot_digest"],
+        "kb_build_hash": rqa_gate["kb_build_hash"],
+        "kb_version": {
+            "version_id": kb_version.get("version_id"),
+            "schema_version": kb_version.get("schema_version"),
+            "source_count": kb_version.get("source_count"),
+            "block_count": kb_version.get("block_count"),
+            "built_at": kb_version.get("built_at"),
+        },
+        "source_license_summary_digest": canonical_digest(
+            rqa_gate["source_license_summary"]
+        ),
+    },
+    "behavior_config": {
+        "behavior_config_digest": behavior["behavior_config_digest"],
+        "runtime_profile_digest": behavior["runtime_profile_digest"],
+        "prompt_digest": behavior["prompt_digest"],
+        "tool_policy_digest": behavior["tool_policy_digest"],
+        "reviewer_policy_digest": behavior["reviewer_policy_digest"],
+        "gateway_policy_digest": behavior["gateway_policy_digest"],
+        "model_upstream_id": behavior["model_upstream_id"],
+        "model_upstream_bound_by_gate": behavior["model_upstream_bound_by_gate"],
+        "decoding_parameters_source": behavior["decoding_parameters_source"],
+        "decoding_parameters_summary": behavior["decoding_parameters_summary"],
+    },
+    "security": {
+        "dependency_scan_sha256": security_gate["dependency_scan"]["report_sha256"],
+        "image_count": image_scan["image_count"],
+        "image_refs": image_scan["image_refs"],
+        "image_refs_sha256": image_scan["image_refs_sha256"],
+        "digest_missing_count": image_scan["digest_missing_count"],
+        "mutable_tag_count": image_scan["mutable_tag_count"],
+        "scanned_image_count": image_scan["scanned_image_count"],
+        "scanned_image_refs_sha256": image_scan["scanned_image_refs_sha256"],
+        "scanned_report_count": image_scan["scanned_report_count"],
+        "scanned_reports_sha256": image_scan["scanned_reports_sha256"],
+    },
+}
+report["release_manifest"] = release_manifest
+report["release_manifest_digest"] = canonical_digest(release_manifest)
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_MANIFEST_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["release_manifest"]["rqa"]["source_snapshot_digest"] = "0" * 64
+report["release_manifest_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_manifest"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_manifest_stdout="${WORK_DIR}/tampered-release-manifest.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_MANIFEST_REPORT}" >"${tampered_release_manifest_stdout}"; then
+  echo "production-ready reports must bind release manifest to RQA source snapshot" >&2
+  exit 1
+fi
+assert_report "${tampered_release_manifest_stdout}" \
+  '"release_manifest_rqa_source_snapshot_digest_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["release_manifest_digest"] = "0" * 64
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_release_manifest_digest_stdout="${WORK_DIR}/tampered-release-manifest-digest.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT}" \
+  >"${tampered_release_manifest_digest_stdout}"; then
+  echo "production-ready reports must bind release manifest digest" >&2
+  exit 1
+fi
+assert_report "${tampered_release_manifest_digest_stdout}" \
+  '"release_manifest_digest_mismatch" in report["errors"]'
 
 rqa_gate_default_stdout="${WORK_DIR}/rqa-gate-default-thresholds.stdout"
 env \

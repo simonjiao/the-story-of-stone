@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+REPO_DIR="$(cd -- "${DEPLOY_DIR}/.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 RESULTS_JSONL="${WORK_DIR}/results.jsonl"
 READY_STATUS="${WORK_DIR}/production-ready.status"
@@ -268,8 +269,13 @@ else
     "set TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true, TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF, and TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE after browser-side review"
 fi
 
-python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" "${require_live}" "${summary_only}" "${browser_review_ref}" "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}" "${GATE_CMD_OVERRIDES_USED}" <<'PY'
+python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" \
+  "${require_live}" "${summary_only}" "${browser_review_ref}" \
+  "${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE:-}" \
+  "${GATE_CMD_OVERRIDES_USED}" "${REPO_DIR}" <<'PY'
 import json
+import hashlib
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -282,7 +288,8 @@ from datetime import datetime, timezone
     browser_review_ref,
     browser_review_evidence,
     gate_cmd_overrides_raw,
-) = sys.argv[1:9]
+    repo_dir,
+) = sys.argv[1:10]
 require_live = require_live_raw == "true"
 summary_only = summary_only_raw == "true"
 browser_review_ref = browser_review_ref.strip()
@@ -292,6 +299,125 @@ with open(results_path, "r", encoding="utf-8") as handle:
     gates = [json.loads(line) for line in handle if line.strip()]
 
 gates_by_name = {gate["name"]: gate for gate in gates}
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical_digest(value):
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(encoded.encode("utf-8"))
+
+
+def success_json_from_gate_stdout(name, expected_object=None):
+    gate = gates_by_name.get(name) or {}
+    for line in reversed(gate.get("stdout_tail") or []):
+        try:
+            candidate = json.loads(line)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(candidate, dict) or candidate.get("status") != "ok":
+            continue
+        if expected_object and candidate.get("object") != expected_object:
+            continue
+        return candidate
+    return None
+
+
+def git_output(args):
+    try:
+        completed = subprocess.run(
+            ["git", "-C", repo_dir, *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return completed.stdout.strip()
+
+
+def git_tracked_dirty():
+    return bool(git_output(["status", "--porcelain", "--untracked-files=no"]))
+
+
+def build_release_manifest():
+    runtime_config = success_json_from_gate_stdout("runtime_config") or {}
+    rqa_gate = success_json_from_gate_stdout(
+        "retrieval_quality",
+        "tonglingyu.rqa_quality_gate",
+    ) or {}
+    security_gate = success_json_from_gate_stdout(
+        "security_scan",
+        "tonglingyu.release_security_gate",
+    ) or {}
+    dependency_scan = security_gate.get("dependency_scan") or {}
+    image_scan = security_gate.get("image_scan") or {}
+    behavior_config = rqa_gate.get("behavior_config") or {}
+    kb_version = rqa_gate.get("kb_version") or {}
+    source_license = rqa_gate.get("source_license_summary") or {}
+    manifest = {
+        "object": "tonglingyu.release_manifest",
+        "schema_version": 1,
+        "git": {
+            "commit": git_output(["rev-parse", "HEAD"]),
+            "tracked_dirty": git_tracked_dirty(),
+        },
+        "runtime_config": {
+            "config_digest": canonical_digest(runtime_config) if runtime_config else "",
+            "config_mode": runtime_config.get("config_mode"),
+            "checked_policy_fields": runtime_config.get("checked_policy_fields"),
+            "checked_services": runtime_config.get("checked_services"),
+        },
+        "rqa": {
+            "rqa_schema_version": rqa_gate.get("rqa_schema_version"),
+            "eval_suite_version": rqa_gate.get("eval_suite_version"),
+            "eval_run_id": rqa_gate.get("eval_run_id"),
+            "eval_report_sha256": rqa_gate.get("eval_report_sha256"),
+            "source_snapshot_digest": rqa_gate.get("source_snapshot_digest"),
+            "kb_build_hash": rqa_gate.get("kb_build_hash"),
+            "kb_version": {
+                "version_id": kb_version.get("version_id"),
+                "schema_version": kb_version.get("schema_version"),
+                "source_count": kb_version.get("source_count"),
+                "block_count": kb_version.get("block_count"),
+                "built_at": kb_version.get("built_at"),
+            },
+            "source_license_summary_digest": (
+                canonical_digest(source_license) if source_license else ""
+            ),
+        },
+        "behavior_config": {
+            "behavior_config_digest": behavior_config.get("behavior_config_digest"),
+            "runtime_profile_digest": behavior_config.get("runtime_profile_digest"),
+            "prompt_digest": behavior_config.get("prompt_digest"),
+            "tool_policy_digest": behavior_config.get("tool_policy_digest"),
+            "reviewer_policy_digest": behavior_config.get("reviewer_policy_digest"),
+            "gateway_policy_digest": behavior_config.get("gateway_policy_digest"),
+            "model_upstream_id": behavior_config.get("model_upstream_id"),
+            "model_upstream_bound_by_gate": behavior_config.get("model_upstream_bound_by_gate"),
+            "decoding_parameters_source": behavior_config.get("decoding_parameters_source"),
+            "decoding_parameters_summary": behavior_config.get("decoding_parameters_summary"),
+        },
+        "security": {
+            "dependency_scan_sha256": dependency_scan.get("report_sha256"),
+            "image_count": image_scan.get("image_count"),
+            "image_refs": image_scan.get("image_refs"),
+            "image_refs_sha256": image_scan.get("image_refs_sha256"),
+            "digest_missing_count": image_scan.get("digest_missing_count"),
+            "mutable_tag_count": image_scan.get("mutable_tag_count"),
+            "scanned_image_count": image_scan.get("scanned_image_count"),
+            "scanned_image_refs_sha256": image_scan.get("scanned_image_refs_sha256"),
+            "scanned_report_count": image_scan.get("scanned_report_count"),
+            "scanned_reports_sha256": image_scan.get("scanned_reports_sha256"),
+        },
+    }
+    return manifest
+
+
+release_manifest = build_release_manifest()
+release_manifest_digest = canonical_digest(release_manifest)
 browser_review_validation = None
 browser_review_gate = gates_by_name.get("openwebui_browser_review") or {}
 for line in reversed(browser_review_gate.get("stdout_tail") or []):
@@ -413,6 +539,8 @@ report = {
     "browser_review_validation": browser_review_validation,
     "generated_at": datetime.now(timezone.utc).isoformat(),
     "secret_values_printed": False,
+    "release_manifest": release_manifest,
+    "release_manifest_digest": release_manifest_digest,
     "gates": gates,
     "required_failures": required_failures,
     "optional_failures": optional_failures,

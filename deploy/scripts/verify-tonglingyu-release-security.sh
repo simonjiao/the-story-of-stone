@@ -399,6 +399,7 @@ def compose_image_policy():
             mutable.append(ref)
     return {
         "image_count": len(refs),
+        "image_refs": refs,
         "image_refs_sha256": hashlib.sha256(
             encoded_refs.encode("utf-8")
         ).hexdigest(),

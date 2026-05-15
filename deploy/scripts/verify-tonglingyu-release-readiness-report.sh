@@ -616,6 +616,175 @@ def validate_behavior_config(prefix, behavior_config):
         errors.append(f"{prefix}_behavior_config_digest_mismatch")
 
 
+def is_git_commit(value):
+    return (
+        isinstance(value, str)
+        and 7 <= len(value) <= 64
+        and all(char in hex_digits for char in value.lower())
+    )
+
+
+def validate_release_manifest():
+    manifest = report.get("release_manifest")
+    manifest_digest = report.get("release_manifest_digest")
+    if not isinstance(manifest, dict):
+        if production_ready:
+            errors.append("production_ready_requires_release_manifest")
+        return
+    if manifest.get("object") != "tonglingyu.release_manifest":
+        errors.append("release_manifest_object_invalid")
+    if manifest.get("schema_version") != 1:
+        errors.append("release_manifest_schema_version_invalid")
+    if not is_sha256(manifest_digest):
+        errors.append("release_manifest_digest_invalid")
+    elif manifest_digest != canonical_digest(manifest):
+        errors.append("release_manifest_digest_mismatch")
+
+    git = manifest.get("git")
+    if not isinstance(git, dict):
+        errors.append("release_manifest_git_missing")
+    else:
+        if not is_git_commit(git.get("commit")):
+            errors.append("release_manifest_git_commit_invalid")
+        if not isinstance(git.get("tracked_dirty"), bool):
+            errors.append("release_manifest_git_tracked_dirty_must_be_bool")
+        if production_ready and git.get("tracked_dirty") is not False:
+            errors.append("production_ready_requires_clean_tracked_worktree")
+
+    runtime_config_json = success_json_from_gate_stdout(gates_by_name.get("runtime_config"))
+    runtime_config = manifest.get("runtime_config")
+    if not isinstance(runtime_config, dict):
+        errors.append("release_manifest_runtime_config_missing")
+    elif runtime_config_json is not None:
+        if runtime_config.get("config_digest") != canonical_digest(runtime_config_json):
+            errors.append("release_manifest_runtime_config_digest_mismatch")
+        for field in ("config_mode", "checked_policy_fields", "checked_services"):
+            if runtime_config.get(field) != runtime_config_json.get(field):
+                errors.append(f"release_manifest_runtime_config_{field}_mismatch")
+
+    rqa_gate = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    )
+    rqa = manifest.get("rqa")
+    if not isinstance(rqa, dict):
+        errors.append("release_manifest_rqa_missing")
+    elif rqa_gate is not None:
+        for field in (
+            "rqa_schema_version",
+            "eval_suite_version",
+            "eval_run_id",
+            "eval_report_sha256",
+            "source_snapshot_digest",
+            "kb_build_hash",
+        ):
+            if rqa.get(field) != rqa_gate.get(field):
+                errors.append(f"release_manifest_rqa_{field}_mismatch")
+        for field in (
+            "eval_report_sha256",
+            "source_snapshot_digest",
+            "kb_build_hash",
+        ):
+            if not is_sha256(rqa.get(field)):
+                errors.append(f"release_manifest_rqa_{field}_invalid")
+        kb_version = rqa_gate.get("kb_version") or {}
+        expected_kb_version = {
+            "version_id": kb_version.get("version_id"),
+            "schema_version": kb_version.get("schema_version"),
+            "source_count": kb_version.get("source_count"),
+            "block_count": kb_version.get("block_count"),
+            "built_at": kb_version.get("built_at"),
+        }
+        if rqa.get("kb_version") != expected_kb_version:
+            errors.append("release_manifest_rqa_kb_version_mismatch")
+        source_license = rqa_gate.get("source_license_summary") or {}
+        expected_source_license_digest = (
+            canonical_digest(source_license) if source_license else ""
+        )
+        if rqa.get("source_license_summary_digest") != expected_source_license_digest:
+            errors.append("release_manifest_rqa_source_license_summary_digest_mismatch")
+        if production_ready and not is_sha256(rqa.get("source_license_summary_digest")):
+            errors.append("production_ready_requires_source_license_summary_digest")
+
+    behavior = manifest.get("behavior_config")
+    behavior_config = rqa_gate.get("behavior_config") if isinstance(rqa_gate, dict) else None
+    if not isinstance(behavior, dict):
+        errors.append("release_manifest_behavior_config_missing")
+    elif isinstance(behavior_config, dict):
+        for field in (
+            "behavior_config_digest",
+            "runtime_profile_digest",
+            "prompt_digest",
+            "tool_policy_digest",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+            "model_upstream_id",
+            "model_upstream_bound_by_gate",
+            "decoding_parameters_source",
+            "decoding_parameters_summary",
+        ):
+            if behavior.get(field) != behavior_config.get(field):
+                errors.append(f"release_manifest_behavior_config_{field}_mismatch")
+        for field in (
+            "behavior_config_digest",
+            "runtime_profile_digest",
+            "prompt_digest",
+            "tool_policy_digest",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+        ):
+            if not is_sha256(behavior.get(field)):
+                errors.append(f"release_manifest_behavior_config_{field}_invalid")
+
+    security_gate = success_json_from_gate_stdout(
+        gates_by_name.get("security_scan"),
+        "tonglingyu.release_security_gate",
+    )
+    security = manifest.get("security")
+    if not isinstance(security, dict):
+        errors.append("release_manifest_security_missing")
+    elif security_gate is not None:
+        dependency_scan = security_gate.get("dependency_scan") or {}
+        image_scan = security_gate.get("image_scan") or {}
+        if security.get("dependency_scan_sha256") != dependency_scan.get("report_sha256"):
+            errors.append("release_manifest_security_dependency_scan_sha256_mismatch")
+        for field in (
+            "image_count",
+            "image_refs",
+            "image_refs_sha256",
+            "digest_missing_count",
+            "mutable_tag_count",
+            "scanned_image_count",
+            "scanned_image_refs_sha256",
+            "scanned_report_count",
+            "scanned_reports_sha256",
+        ):
+            if security.get(field) != image_scan.get(field):
+                errors.append(f"release_manifest_security_{field}_mismatch")
+        for field in (
+            "dependency_scan_sha256",
+            "image_refs_sha256",
+            "scanned_image_refs_sha256",
+            "scanned_reports_sha256",
+        ):
+            if not is_sha256(security.get(field)):
+                errors.append(f"release_manifest_security_{field}_invalid")
+        if production_ready and security.get("digest_missing_count") != 0:
+            errors.append("production_ready_release_manifest_image_digest_missing")
+        if production_ready and security.get("mutable_tag_count") != 0:
+            errors.append("production_ready_release_manifest_mutable_image_tag")
+        if production_ready:
+            image_refs = security.get("image_refs")
+            if not isinstance(image_refs, list) or not image_refs:
+                errors.append("production_ready_release_manifest_image_refs_missing")
+            elif any("@sha256:" not in image_ref for image_ref in image_refs):
+                errors.append("production_ready_release_manifest_image_refs_not_digest_pinned")
+        if production_ready and security.get("image_count") != security.get("scanned_image_count"):
+            errors.append("production_ready_release_manifest_image_scan_count_mismatch")
+        if production_ready and security.get("image_count") != security.get("scanned_report_count"):
+            errors.append("production_ready_release_manifest_image_report_count_mismatch")
+
+
 def ratio_json(passed, total):
     return {
         "passed": passed,
@@ -1198,6 +1367,11 @@ def validate_security_scan_gate_stdout():
             errors.append(f"security_scan_{field}_report_sha256_invalid")
     image_scan = gate_json.get("image_scan")
     if isinstance(image_scan, dict):
+        image_refs = image_scan.get("image_refs")
+        if not isinstance(image_refs, list) or not all(
+            isinstance(item, str) and item for item in image_refs
+        ):
+            errors.append("security_scan_image_refs_invalid")
         for count_field in (
             "image_count",
             "mutable_tag_count",
@@ -1216,6 +1390,20 @@ def validate_security_scan_gate_stdout():
         ):
             if not is_sha256(image_scan.get(digest_field)):
                 errors.append(f"security_scan_image_{digest_field}_invalid")
+        if (
+            isinstance(image_refs, list)
+            and isinstance(image_scan.get("image_count"), int)
+            and len(image_refs) != image_scan["image_count"]
+        ):
+            errors.append("security_scan_image_refs_count_mismatch")
+        if isinstance(image_refs, list) and all(isinstance(item, str) for item in image_refs):
+            image_refs_raw = "\n".join(image_refs) + "\n"
+            if (
+                is_sha256(image_scan.get("image_refs_sha256"))
+                and hashlib.sha256(image_refs_raw.encode("utf-8")).hexdigest()
+                != image_scan["image_refs_sha256"]
+            ):
+                errors.append("security_scan_image_refs_digest_mismatch")
         if (
             is_sha256(image_scan.get("image_refs_sha256"))
             and is_sha256(image_scan.get("scanned_image_refs_sha256"))
@@ -2381,6 +2569,7 @@ add_mismatch(
 )
 add_mismatch("production_release_ready", computed_production_ready, production_ready)
 add_mismatch("exit_policy", computed_exit_policy, exit_policy)
+validate_release_manifest()
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()

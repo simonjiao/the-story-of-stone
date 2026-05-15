@@ -747,6 +747,15 @@
   readiness report 和 saved report validator，并记录 run id、git commit、gate
   summary 和 artifact hash。当前执行结果按预期 fail-closed，因为 release readiness
   阻塞仍未关闭。
+- Release readiness report 已新增 `tonglingyu.release_manifest` 和
+  `release_manifest_digest`：manifest 绑定 git commit / tracked dirty 状态、
+  runtime config digest、RQA schema、eval suite、eval run id、source snapshot
+  digest、KB build hash、kb_version、source license summary digest、behavior
+  config digest、model upstream、decoding 参数摘要、dependency scan hash、
+  digest-pinned image refs、image inventory hash 和 per-image scan report hash。
+  saved report validator 会重算 manifest digest，并反查 manifest 与
+  `runtime_config`、`retrieval_quality` 和 `security_scan` gate stdout 一致；
+  contract smoke 已覆盖 manifest source snapshot 篡改和 manifest digest 篡改。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
@@ -781,9 +790,10 @@
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
   budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
   与值守验证。
-- 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
-  contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
-  作为最终发布证据。
+- RQA quality gate、saved report validator 和 contract smoke 已进入
+  `verify-tonglingyu-rqa-release-automation.sh` 强制路径；后续 production-ready
+  仍必须在目标 release run 中真实执行该 wrapper，并保存 automation artifact /
+  release report / validator 输出，不能只引用本地人工命令。
 - RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；后续
   production-ready 仍必须补齐 live Open WebUI admin Action、目标环境 live/load
   性能和值守证据；Open WebUI admin Action source/fixture contract 已接入 release
