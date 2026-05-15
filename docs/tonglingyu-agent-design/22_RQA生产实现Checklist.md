@@ -25,26 +25,43 @@ RetrievalQualityReport
 5. 所有新增 schema 采用 additive migration，不重写既有 package/audit 数据；
 6. 每个大节点完成后更新本 checklist，并及时提交。
 
+## 不折中红线
+
+以下情况不能被标记为完成，也不能进入 production-ready 报告：
+
+1. 只写日志、临时 JSON 或脚本输出，没有 Rust 类型、schema version 和 store API；
+2. 只在 fixture/mock gate 下通过，真实 release gate 未接入或可被 override 绕过；
+3. 通过降低阈值让 production-ready 通过；
+4. expected evidence 分母为空或关键 eval case 未分类，却声明 hit@k 达标；
+5. 只有人工操作说明，没有 admin API / Action、权限校验和 audit event；
+6. schema 迁移破坏既有 package、audit、session 或 KB 数据；
+7. 普通用户能看到或修改 RQA 内部字段、failure 状态或治理任务；
+8. Agent 生成的诊断、聚类或修正建议绕过人工状态流转直接写入事实层。
+
 ## 决策基线
 
 | 决策 | 口径 |
 | --- | --- |
 | 第一轮范围 | RQA-1 到 RQA-12 均纳入生产闭环 |
 | release gate | 本轮必须支持质量 gate 作为 blocker |
-| 阈值初始值 | 本轮实现必须内置 production 默认值，并支持配置覆盖 |
+| 阈值配置 | 本轮必须内置 production 默认值；配置只能进入报告并接受校验 |
 | expected evidence | 有标注的 case 进入 hit@k 分母，无标注 case 仍计普通 eval |
 | failure 表 | 独立 `retrieval_failures` 表 |
 | report 落点 | 完整 report 进入 audit/admin，普通响应只出安全摘要 |
 | 人工状态 | retrieval failure 必须有人工处理状态字段 |
+| 治理任务 | RQA-6 到 RQA-12 必须有可持久化任务和状态流转 |
 
 ## Production 默认阈值
 
 本轮默认阈值必须先按严格 production gate 实现。后续可以配置覆盖，但覆盖值必须进入
-release report 和 saved report validator，不能只存在于运行环境中。
+release report 和 saved report validator，不能只存在于运行环境中。低于默认阈值的
+配置只能产生 non-production report，不能关闭 production blocker。
 
 | 指标 | 默认要求 |
 | --- | --- |
 | quality report coverage | 100% eval case 生成 report |
+| eval case classification | 100% release case 标记 expected / not-applicable |
+| expected evidence denominator | release suite 中必须大于 0 |
 | expected_evidence_hit@8 | 有 expected evidence 标注的 case 必须 100% 命中 |
 | required_type_coverage | 100% |
 | exact_term_coverage | 有 protected term 的 case 必须 100% |
@@ -123,6 +140,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 目标：eval 从 pass/fail 扩展为生产质量指标。
 
 - [ ] 扩展 eval case，支持 expected evidence ids / block ids。
+- [ ] 所有 release eval case 必须标记 expected evidence 或 not-applicable reason。
+- [ ] expected evidence 分母为 0 时 release quality gate fail-closed。
 - [ ] 增加 expected_evidence_hit@1。
 - [ ] 增加 expected_evidence_hit@3。
 - [ ] 增加 expected_evidence_hit@8。
@@ -175,12 +194,15 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 新增或扩展 release readiness quality gate。
 - [ ] gate 读取 eval quality summary。
 - [ ] gate 校验 expected_evidence_hit@8 阈值。
+- [ ] gate 校验 eval case classification 为 100%。
+- [ ] gate 校验 expected evidence denominator 大于 0。
 - [ ] gate 校验 required_type_coverage 阈值。
 - [ ] gate 校验 forbidden_conclusion_avoided。
 - [ ] gate 校验 reviewer_status_matched。
 - [ ] gate 校验 open P0 retrieval failures 为 0。
 - [ ] gate 校验 quality report coverage 为 100%。
 - [ ] gate 支持阈值配置，默认值采用本文 Production 默认阈值。
+- [ ] 低于默认阈值的配置必须把报告标记为 non-production。
 - [ ] gate report 记录实际阈值来源和有效阈值。
 - [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
@@ -204,6 +226,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] validator 校验 quality gate stdout JSON schema。
 - [ ] validator 校验 threshold / blocker / ready flag 不漂移。
 - [ ] validator 校验 effective thresholds 与 report 中 gate 输出一致。
+- [ ] validator 校验低于默认阈值的报告不能 production-ready。
 - [ ] validator 继续扫描 secret-like values。
 - [ ] contract smoke 覆盖删除 gate、篡改 passed、篡改 ready flag。
 
@@ -211,7 +234,30 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 - 待实现。
 
-## Milestone H：端到端验证
+## Milestone H：治理任务和反馈闭环
+
+状态：未开始
+
+目标：RQA-6 到 RQA-12 不停留在报告层，必须进入可审计的治理任务流。
+
+- [ ] 新增 `knowledge_governance_tasks` 或等价持久化任务 schema。
+- [ ] 支持从 retrieval failure 生成治理任务。
+- [ ] 支持管理员把 trace / package / failure 标记为待专家复核。
+- [ ] 支持普通用户反馈生成 retrieval failure 候选或治理任务。
+- [ ] 普通用户反馈不能直接修改 source、alias、term、commentary link 或事实层。
+- [ ] Agent 聚类 retrieval failures，并只生成 proposed fix。
+- [ ] proposed alias / term / commentary link / version note 必须进入人工状态流转。
+- [ ] accepted fix 必须绑定 reviewer、note、source 或 evidence ref。
+- [ ] KB rebuild 后生成 kb_version diff report。
+- [ ] kb_version diff report 对比前后 eval quality summary。
+- [ ] release gate 可读取 open P0 governance tasks 并作为 blocker。
+- [ ] 单测覆盖任务创建、状态流转、权限边界、Agent 建议不可直接采纳。
+
+节点总结：
+
+- 待实现。
+
+## Milestone I：端到端验证
 
 状态：未开始
 
@@ -228,6 +274,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] `deploy/scripts/verify-tonglingyu-release-readiness.sh`
 - [ ] `deploy/scripts/verify-tonglingyu-release-readiness-report.sh` fixture path
 - [ ] production-ready report 不允许依赖 mock gate command override。
+- [ ] production-ready report 不允许使用低于默认阈值的 RQA 配置。
+- [ ] production-ready report 必须包含 RQA quality gate 和治理任务 gate。
 - [ ] `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 节点总结：
@@ -241,6 +289,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 3. Milestone C-D 完成后提交 eval/failure 闭环。
 4. Milestone E 完成后提交 admin trace/metrics 边界。
 5. Milestone F-G 完成后提交 release gate 和 saved report validator。
-6. Milestone H 通过后提交最终 production-ready 验证更新。
+6. Milestone H 完成后提交治理任务和反馈闭环。
+7. Milestone I 通过后提交最终 production-ready 验证更新。
 
 每次提交前必须更新本 checklist 的状态和节点总结。
