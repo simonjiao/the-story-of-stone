@@ -746,6 +746,15 @@
   readiness report 和 saved report validator，并记录 run id、git commit、gate
   summary 和 artifact hash。当前执行结果按预期 fail-closed，因为 release readiness
   阻塞仍未关闭。
+- 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
+  live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
+  failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
+  status-history audit。2026-05-16 已对本地默认 RQA DB 执行一次 remediation，
+  审计关闭 182 个旧 eval failure 和 182 个 governance tasks；备份路径为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260515T205220Z.db`。
+- 2026-05-16 重新运行 preflight release readiness 后，`retrieval_quality` 和
+  `rqa_backup_restore_drill` 已通过；剩余 required failures 为 `runtime_config`
+  和 `security_scan`。live gates 仍未执行，因此仍不能声明 production-ready。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。

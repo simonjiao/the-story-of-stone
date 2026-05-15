@@ -13,6 +13,7 @@ load_optional_deploy_env_file
 
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
 RQA_EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
+RQA_UPSTREAM_MODEL="${TONGLINGYU_UPSTREAM_MODEL:-${AGENT_RUNTIME_HERMES_MODEL:-hermes-agent}}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
@@ -163,10 +164,13 @@ failed=0
 run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
 if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
   run_gate "retrieval_quality" "true" env \
+    "TONGLINGYU_UPSTREAM_MODEL=${RQA_UPSTREAM_MODEL}" \
     "TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH=${RQA_EVAL_REPORT_OUTPUT_PATH}" \
     "${RQA_QUALITY_CMD}" || failed=1
 else
-  run_gate "retrieval_quality" "true" "${RQA_QUALITY_CMD}" || failed=1
+  run_gate "retrieval_quality" "true" env \
+    "TONGLINGYU_UPSTREAM_MODEL=${RQA_UPSTREAM_MODEL}" \
+    "${RQA_QUALITY_CMD}" || failed=1
 fi
 run_gate "rqa_backup_restore_drill" "true" env \
   "TONGLINGYU_RQA_RESTORE_DRILL_REQUIRE_LIVE=${require_live}" \
