@@ -40,6 +40,10 @@ RetrievalQualityReport
 9. 写入 quality report、failure、governance task 或 audit 失败后仍把请求标记为
    完整成功；
 10. 没有覆盖并发更新、重复请求、保留清理、备份恢复和真实 live release。
+11. RQA 为了诊断保存完整用户隐私文本、未脱敏 query、未截断 payload 或无界
+    admin list；
+12. Prometheus labels、JSON metrics 或 release report 使用 trace、user、question
+    等高基数字段。
 
 ## 决策基线
 
@@ -55,6 +59,8 @@ RetrievalQualityReport
 | 治理任务 | RQA-6 到 RQA-12 必须有可持久化任务和状态流转 |
 | 写入失败 | RQA 持久化和 audit 失败必须 fail-closed 或返回明确 degraded 状态 |
 | 运维闭环 | backup、restore、retention、prune、live release 均纳入验收 |
+| 隐私边界 | RQA 默认只保存脱敏摘要、hash、枚举和 bounded excerpt |
+| API 契约 | admin API / Action 必须分页、限长、schema version 和兼容校验 |
 
 ## Production 默认阈值
 
@@ -86,6 +92,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 覆盖 `tonglingyu.text.search`。
 - [ ] 覆盖 `tonglingyu.commentary.search`。
 - [ ] 记录 query terms、protected terms、expanded aliases。
+- [ ] query terms 和 question 字段进入 report 前必须脱敏、截断并保留 hash。
+- [ ] report payload 有明确大小上限，超限时记录 truncated 标记。
 - [ ] 记录 required / actual / missing evidence types。
 - [ ] 记录 candidate / selected count 和 channel 分布。
 - [ ] 记录 source diversity、edition diversity、exact term coverage。
@@ -105,13 +113,15 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 - [ ] 添加 additive runtime schema migration。
 - [ ] 新增 `retrieval_failures` 表。
-- [ ] 字段覆盖 failure id、trace id、package id、question、kb version。
-- [ ] 字段覆盖 failure type、query terms、required / actual evidence types。
+- [ ] 字段覆盖 failure id、trace id、package id、question summary/hash、kb version。
+- [ ] 字段覆盖 failure type、redacted query terms、required / actual evidence types。
 - [ ] 字段覆盖 expected / selected evidence ids、missing evidence types。
 - [ ] 字段覆盖 quality issues、agent diagnosis、proposed fix。
 - [ ] 字段覆盖 human review status、reviewer、note、created/resolved time。
 - [ ] 添加必要索引：trace、package、status、failure type、created_at。
 - [ ] 添加 Runtime store API：create/list/update/read。
+- [ ] list API 默认分页，最大 page size 有硬上限。
+- [ ] read/list 输出区分 admin detail 和 safe summary。
 - [ ] schema migration 支持从现有生产 DB 升级，不重建 KB 或删除既有数据。
 - [ ] migration preflight 输出 schema version 和待执行 migration，不输出 secret。
 - [ ] migration 失败时不留下半初始化表或不一致 schema version。
@@ -183,7 +193,11 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] admin package audit 可看到 quality issue 摘要。
 - [ ] JSON metrics 暴露 retrieval failure count by status/type。
 - [ ] Prometheus 暴露有界指标，不暴露 query 原文和 secret。
+- [ ] Prometheus labels 只能使用 bounded enum，不允许 trace/user/question/package id。
+- [ ] JSON metrics 只暴露聚合计数和 bounded histogram，不返回原始 query。
 - [ ] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
+- [ ] admin API / Action 输出带 RQA schema version，字段变更必须有兼容测试。
+- [ ] admin list/read 响应大小有上限，超限必须分页或截断。
 - [ ] retrieval failure 人工状态更新写入 audit event。
 - [ ] 普通用户不能读取或更新 retrieval failure。
 - [ ] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
@@ -219,6 +233,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] gate report 记录实际阈值来源和有效阈值。
 - [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
+- [ ] gate stdout / stderr 不输出原始 question、query terms 或高基数 id 列表。
 - [ ] release readiness report 包含 quality gate record。
 - [ ] production-ready 时 quality gate 必须 passed。
 - [ ] contract smoke 覆盖 passed、threshold failed、open P0 failure、missing report。
@@ -240,6 +255,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] validator 校验 threshold / blocker / ready flag 不漂移。
 - [ ] validator 校验 effective thresholds 与 report 中 gate 输出一致。
 - [ ] validator 校验低于默认阈值的报告不能 production-ready。
+- [ ] validator 校验 report 不包含原始用户问题、未脱敏 query 或高基数字段列表。
 - [ ] validator 继续扫描 secret-like values。
 - [ ] contract smoke 覆盖删除 gate、篡改 passed、篡改 ready flag。
 
@@ -311,7 +327,33 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
+- [ ] admin list/read 必须覆盖分页、最大 page size、payload 截断和 schema version。
+- [ ] performance smoke 记录 RQA 写入、admin 查询、release gate 的耗时摘要。
+- [ ] release gate 在缺少性能摘要或超过默认预算时不能 production-ready。
 - [ ] 单测或 smoke 覆盖 backup/restore、retention/prune、live report freshness。
+
+节点总结：
+
+- 待实现。
+
+## Milestone K：隐私、契约和性能预算
+
+状态：未开始
+
+目标：RQA 诊断能力不能以泄露用户文本、无界 API 或不可观测性能开销为代价。
+
+- [ ] RQA 数据模型区分 `question_summary`、`question_hash` 和 redacted excerpt。
+- [ ] 默认不保存完整用户问题；如需诊断原文，必须另有显式受控配置和审计。
+- [ ] redaction 覆盖疑似 key、token、URL secret、邮箱、手机号和长随机串。
+- [ ] admin detail 只能返回 redacted 字段，不能返回完整隐私文本。
+- [ ] 所有 RQA list API 必须分页、排序稳定、最大 page size 固定。
+- [ ] RQA admin API / Action 响应包含 schema version 和 pagination metadata。
+- [ ] API contract smoke 覆盖旧 report 兼容、新字段兼容和未知字段拒绝/忽略策略。
+- [ ] Prometheus label set 固定且低基数。
+- [ ] JSON metrics 不输出原始 query、完整 question、trace 列表或 package 列表。
+- [ ] 定义 RQA 写入、admin 查询、release gate 默认性能预算。
+- [ ] release report 记录性能预算、实际耗时和是否超限。
+- [ ] 性能预算缺失或超限时，production-ready 必须失败。
 
 节点总结：
 
@@ -326,6 +368,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 5. Milestone F-G 完成后提交 release gate 和 saved report validator。
 6. Milestone H 完成后提交治理任务和反馈闭环。
 7. Milestone I 完成后提交端到端验证。
-8. Milestone J 通过后提交最终 production-ready 验证更新。
+8. Milestone J 完成后提交运维恢复和真实发布。
+9. Milestone K 通过后提交最终 production-ready 验证更新。
 
 每次提交前必须更新本 checklist 的状态和节点总结。
