@@ -19,6 +19,7 @@ CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
 STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
 STREAM_TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-${WORK_DIR}/stream-trace.json}"
+RUNNING_IMAGES_JSON="${TONGLINGYU_GATEWAY_VERIFY_RUNNING_IMAGES_JSON:-${WORK_DIR}/running-images.json}"
 VERIFY_RUN_ID="${TONGLINGYU_GATEWAY_VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 cd "${DEPLOY_DIR}"
@@ -124,9 +125,87 @@ curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0
 ' >"${STREAM_TRACE_JSON}"
 fi
 
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_RUNNING_IMAGES_JSON:-}" ]]; then
+  python3 - "${DEPLOY_DIR}" "${RUNNING_IMAGES_JSON}" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+deploy_dir = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+
+def run_json(args):
+    completed = subprocess.run(
+        args,
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+container_ids_raw = subprocess.run(
+    ["docker", "compose", "ps", "-q"],
+    cwd=deploy_dir,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+container_ids = [
+    line.strip()
+    for line in container_ids_raw.splitlines()
+    if line.strip()
+]
+containers = run_json(["docker", "inspect", *container_ids]) if container_ids else []
+images = []
+for container in containers:
+    labels = (container.get("Config") or {}).get("Labels") or {}
+    service = str(labels.get("com.docker.compose.service") or "")
+    configured_image = str((container.get("Config") or {}).get("Image") or "")
+    image_id = str(container.get("Image") or "")
+    image_info = run_json(["docker", "image", "inspect", image_id])[0] if image_id else {}
+    repo_digests = sorted(
+        str(item)
+        for item in (image_info.get("RepoDigests") or [])
+        if str(item).strip()
+    )
+    images.append({
+        "service": service,
+        "configured_image": configured_image,
+        "image_id": image_id,
+        "image_id_sha256": sha256_text(image_id),
+        "repo_digests": repo_digests,
+        "repo_digests_sha256": sha256_text("\n".join(repo_digests) + "\n"),
+        "container_id_sha256": sha256_text(str(container.get("Id") or "")),
+    })
+
+payload = {
+    "object": "tonglingyu.running_image_inventory",
+    "schema_version": 1,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "image_count": len(images),
+    "images": sorted(images, key=lambda item: item["service"]),
+    "secret_values_printed": False,
+}
+target_path.write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+fi
+
 python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
   "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" \
-  "${REPO_DIR}" <<'PY'
+  "${RUNNING_IMAGES_JSON}" "${REPO_DIR}" <<'PY'
 import hashlib
 import json
 import os
@@ -142,8 +221,9 @@ from pathlib import Path
     stream_path,
     trace_path,
     stream_trace_path,
+    running_images_path,
     repo_dir_raw,
-) = sys.argv[1:10]
+) = sys.argv[1:11]
 repo_dir = Path(repo_dir_raw)
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
@@ -161,6 +241,8 @@ with open(trace_path, "r", encoding="utf-8") as handle:
     trace = json.load(handle)
 with open(stream_trace_path, "r", encoding="utf-8") as handle:
     stream_trace = json.load(handle)
+with open(running_images_path, "r", encoding="utf-8") as handle:
+    running_images = json.load(handle)
 
 errors = []
 forbidden_public_chat_keys = {
@@ -261,6 +343,47 @@ def optional_file_sha256(path):
 def canonical_digest(value):
     encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return sha256_bytes(encoded.encode("utf-8"))
+
+
+def is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value.lower())
+    )
+
+
+if running_images.get("object") != "tonglingyu.running_image_inventory":
+    errors.append("running image inventory object invalid")
+if running_images.get("secret_values_printed") is not False:
+    errors.append("running image inventory must not print secret values")
+running_image_items = running_images.get("images")
+if not isinstance(running_image_items, list) or not running_image_items:
+    errors.append("running image inventory must include running containers")
+else:
+    running_services = {
+        item.get("service")
+        for item in running_image_items
+        if isinstance(item, dict) and item.get("service")
+    }
+    for required_service in ("tonglingyu-gateway", "open-webui"):
+        if required_service not in running_services:
+            errors.append(f"running image inventory missing {required_service}")
+    for index, item in enumerate(running_image_items):
+        if not isinstance(item, dict):
+            errors.append(f"running image inventory item {index} must be object")
+            continue
+        image_id = str(item.get("image_id") or "")
+        if not image_id.startswith("sha256:") or not is_sha256(image_id.removeprefix("sha256:")):
+            errors.append(f"running image inventory item {index} image_id must be sha256")
+        if not item.get("configured_image"):
+            errors.append(f"running image inventory item {index} configured_image missing")
+        if not isinstance(item.get("repo_digests"), list):
+            errors.append(f"running image inventory item {index} repo_digests must be array")
+        if not is_sha256(item.get("image_id_sha256")):
+            errors.append(f"running image inventory item {index} image_id_sha256 invalid")
+        if not is_sha256(item.get("repo_digests_sha256")):
+            errors.append(f"running image inventory item {index} repo_digests_sha256 invalid")
 
 
 def validate_trace_summary_surface(trace_value, expected_trace_id, expected_package_id, label):
@@ -713,6 +836,7 @@ print(json.dumps(
         "stream_trace_id": stream_trace_id,
         "stream_evidence_package_id": stream_package_id,
         "behavior_config": behavior_config,
+        "running_images": running_images,
     },
     ensure_ascii=True,
     sort_keys=True,

@@ -34,6 +34,8 @@ TAMPERED_RELEASE_MANIFEST_REPORT="${WORK_DIR}/tampered-release-manifest-report.j
 TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-digest-report.json"
 TAMPERED_RELEASE_CONTEXT_REPORT="${WORK_DIR}/tampered-release-context-report.json"
 TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT="${WORK_DIR}/tampered-release-context-validity-report.json"
+TAMPERED_RUNTIME_IDENTITY_REPORT="${WORK_DIR}/tampered-runtime-identity-report.json"
+TAMPERED_RUNTIME_IDENTITY_IMAGES_REPORT="${WORK_DIR}/tampered-runtime-identity-images-report.json"
 TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
 TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
@@ -815,7 +817,7 @@ env "${common_env[@]}" \
   TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
   TONGLINGYU_RELEASE_REPORT_PATH="${conditions_report}" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
-assert_report "${conditions_report}" 'report["release_conditions_met"] is True'
+assert_report "${conditions_report}" 'report["release_conditions_met"] is False'
 assert_report "${conditions_report}" 'report["object"] == "tonglingyu.release_readiness_report"'
 assert_report "${conditions_report}" 'report["schema_version"] == 1'
 assert_report "${conditions_report}" 'report["production_release_ready"] is False'
@@ -833,6 +835,10 @@ assert_report "${conditions_report}" 'report["browser_review_validation"]["publi
 assert_report "${conditions_report}" 'len(report["browser_review_validation"]["evidence_sha256"]) == 64'
 assert_report "${conditions_report}" 'len([item for item in report["browser_review_validation"]["validated_evidence_refs"] if item["kind"] == "local_file"]) == 2'
 assert_report "${conditions_report}" '"gate command overrides were used" in report["release_blockers"]'
+assert_report "${conditions_report}" '"live running image inventory was not captured" in report["release_blockers"]'
+assert_report "${conditions_report}" '"live migration preflight was not captured" in report["release_blockers"]'
+assert_report "${conditions_report}" '"pending migrations must be zero for live release" in report["release_blockers"]'
+assert_report "${conditions_report}" '"tracked worktree must be clean for live release" in report["release_blockers"]'
 
 python3 - "${conditions_report}" "${TAMPERED_BROWSER_POINTERS_REPORT}" <<'PY'
 import json
@@ -903,6 +909,7 @@ report["summary_only"] = False
 report["exit_policy"] = "production_release_ready"
 report["status"] = "passed"
 report["release_blockers"] = []
+report["release_conditions_met"] = True
 quality_summary = {
     "blockers": [],
     "eval_case_classification": {"passed": 2, "ratio": 1.0, "total": 2},
@@ -1966,6 +1973,37 @@ gate_stdout = {
         "behavior_config": behavior_config,
         "checked_surfaces": ["tonglingyu-gateway:/healthz"],
         "model_ids": ["tonglingyu"],
+        "running_images": {
+            "generated_at": "2026-05-15T00:00:10+00:00",
+            "image_count": 2,
+            "images": [
+                {
+                    "configured_image": "registry.invalid/open-webui@sha256:" + "d" * 64,
+                    "container_id_sha256": "6" * 64,
+                    "image_id": "sha256:" + "d" * 64,
+                    "image_id_sha256": "7" * 64,
+                    "repo_digests": [
+                        "registry.invalid/open-webui@sha256:" + "d" * 64,
+                    ],
+                    "repo_digests_sha256": "8" * 64,
+                    "service": "open-webui",
+                },
+                {
+                    "configured_image": "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
+                    "container_id_sha256": "9" * 64,
+                    "image_id": "sha256:" + "b" * 64,
+                    "image_id_sha256": "a" * 64,
+                    "repo_digests": [
+                        "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
+                    ],
+                    "repo_digests_sha256": "c" * 64,
+                    "service": "tonglingyu-gateway",
+                },
+            ],
+            "object": "tonglingyu.running_image_inventory",
+            "schema_version": 1,
+            "secret_values_printed": False,
+        },
         "status": "ok",
         "stream_trace_id": "tly-stream",
         "trace_id": "tly-chat",
@@ -2087,6 +2125,48 @@ release_manifest = {
 }
 report["release_manifest"] = release_manifest
 report["release_manifest_digest"] = canonical_digest(release_manifest)
+strict_gate = gate_stdout["strict_gateway"]
+release_runtime_identity = {
+    "object": "tonglingyu.release_runtime_identity",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-release-runtime-identity-v1",
+    "require_live": True,
+    "git": dict(release_manifest["git"]),
+    "image_inventory": {
+        "source_gate": "security_scan",
+        "image_count": image_scan["image_count"],
+        "image_refs": image_scan["image_refs"],
+        "image_refs_sha256": image_scan["image_refs_sha256"],
+        "digest_missing_count": image_scan["digest_missing_count"],
+        "mutable_tag_count": image_scan["mutable_tag_count"],
+        "scanned_image_count": image_scan["scanned_image_count"],
+        "scanned_report_count": image_scan["scanned_report_count"],
+        "scanned_reports_sha256": image_scan["scanned_reports_sha256"],
+    },
+    "running_images": {
+        "source_gate": "strict_gateway",
+        "inventory": strict_gate["running_images"],
+        "inventory_sha256": canonical_digest(strict_gate["running_images"]),
+        "image_count": len(strict_gate["running_images"]["images"]),
+    },
+    "migration": {
+        "source_gate": "rqa_migration_preflight",
+        "policy_version": release_manifest["migration"]["policy_version"],
+        "mode": release_manifest["migration"]["mode"],
+        "source_mode": release_manifest["migration"]["source_mode"],
+        "source_db_sha256": release_manifest["migration"]["source_db_sha256"],
+        "preflight_sha256": release_manifest["migration"]["migration_preflight_sha256"],
+        "backup_artifact_sha256": release_manifest["migration"]["backup_artifact_sha256"],
+        "required_migration_count": release_manifest["migration"]["required_migration_count"],
+        "applied_migration_count": release_manifest["migration"]["applied_migration_count"],
+        "pending_migration_count": release_manifest["migration"]["pending_migration_count"],
+    },
+    "valid": True,
+    "errors": [],
+    "secret_values_printed": False,
+}
+report["release_runtime_identity"] = release_runtime_identity
+report["release_runtime_identity_digest"] = canonical_digest(release_runtime_identity)
 
 
 def artifact_entry(
@@ -2127,6 +2207,14 @@ registry_entries = [
         report["release_context_digest"],
         "release_readiness",
         ref=report["release_context"]["environment"],
+        retention_class="release_manifest",
+    ),
+    artifact_entry(
+        "release_runtime_identity",
+        "inline_json",
+        report["release_runtime_identity_digest"],
+        "release_readiness",
+        ref=release_manifest["git"]["commit"],
         retention_class="release_manifest",
     ),
     artifact_entry(
@@ -2463,6 +2551,83 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_release_context_validity_stdout}" \
   '"release_context_valid_until_not_after_generated_at" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RUNTIME_IDENTITY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report.pop("release_runtime_identity", None)
+report.pop("release_runtime_identity_digest", None)
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_runtime_identity_stdout="${WORK_DIR}/tampered-runtime-identity.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RUNTIME_IDENTITY_REPORT}" >"${tampered_runtime_identity_stdout}"; then
+  echo "production-ready reports must bind runtime identity" >&2
+  exit 1
+fi
+assert_report "${tampered_runtime_identity_stdout}" \
+  '"release_runtime_identity_missing" in report["errors"]'
+assert_report "${tampered_runtime_identity_stdout}" \
+  '"production_ready_requires_valid_runtime_identity" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RUNTIME_IDENTITY_IMAGES_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+identity = report["release_runtime_identity"]
+identity["running_images"]["inventory"]["images"] = []
+identity["running_images"]["inventory"]["image_count"] = 0
+identity["running_images"]["inventory_sha256"] = hashlib.sha256(
+    json.dumps(
+        identity["running_images"]["inventory"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+identity["running_images"]["image_count"] = 0
+report["release_runtime_identity_digest"] = hashlib.sha256(
+    json.dumps(
+        identity,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+for entry in report["release_artifact_registry"]["entries"]:
+    if entry.get("name") == "release_runtime_identity":
+        entry["digest_sha256"] = report["release_runtime_identity_digest"]
+report["release_artifact_registry_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_artifact_registry"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_runtime_identity_images_stdout="${WORK_DIR}/tampered-runtime-identity-images.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RUNTIME_IDENTITY_IMAGES_REPORT}" \
+  >"${tampered_runtime_identity_images_stdout}"; then
+  echo "production-ready reports must bind running image identity" >&2
+  exit 1
+fi
+assert_report "${tampered_runtime_identity_images_stdout}" \
+  '"release_runtime_identity_errors_mismatch" in report["errors"]'
+assert_report "${tampered_runtime_identity_images_stdout}" \
+  '"production_ready_requires_valid_runtime_identity" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
 import json

@@ -489,6 +489,84 @@ def build_release_manifest():
 release_manifest = build_release_manifest()
 release_manifest_digest = canonical_digest(release_manifest)
 release_context_digest = canonical_digest(release_context)
+
+
+def build_release_runtime_identity():
+    security_gate = success_json_from_gate_stdout(
+        "security_scan",
+        "tonglingyu.release_security_gate",
+    ) or {}
+    strict_gate = success_json_from_gate_stdout("strict_gateway") or {}
+    migration_gate = success_json_from_gate_stdout(
+        "rqa_migration_preflight",
+        "tonglingyu.rqa_migration_preflight_gate",
+    ) or {}
+    image_scan = security_gate.get("image_scan") or {}
+    running_images = strict_gate.get("running_images") or {}
+    running_image_items = (
+        running_images.get("images")
+        if isinstance(running_images.get("images"), list)
+        else []
+    )
+    migration_preflight = migration_gate.get("migration_preflight") or {}
+    migration_counts = migration_gate.get("migration_counts") or {}
+    identity_errors = []
+    if require_live and not running_image_items:
+        identity_errors.append("live running image inventory was not captured")
+    if require_live and migration_gate.get("mode") != "live":
+        identity_errors.append("live migration preflight was not captured")
+    if require_live and migration_counts.get("pending") != 0:
+        identity_errors.append("pending migrations must be zero for live release")
+    if require_live and git_tracked_dirty():
+        identity_errors.append("tracked worktree must be clean for live release")
+    return {
+        "object": "tonglingyu.release_runtime_identity",
+        "schema_version": 1,
+        "policy_version": "tonglingyu-release-runtime-identity-v1",
+        "require_live": require_live,
+        "git": {
+            "commit": git_output(["rev-parse", "HEAD"]),
+            "tracked_dirty": git_tracked_dirty(),
+        },
+        "image_inventory": {
+            "source_gate": "security_scan",
+            "image_count": image_scan.get("image_count"),
+            "image_refs": image_scan.get("image_refs"),
+            "image_refs_sha256": image_scan.get("image_refs_sha256"),
+            "digest_missing_count": image_scan.get("digest_missing_count"),
+            "mutable_tag_count": image_scan.get("mutable_tag_count"),
+            "scanned_image_count": image_scan.get("scanned_image_count"),
+            "scanned_report_count": image_scan.get("scanned_report_count"),
+            "scanned_reports_sha256": image_scan.get("scanned_reports_sha256"),
+        },
+        "running_images": {
+            "source_gate": "strict_gateway",
+            "inventory": running_images,
+            "inventory_sha256": canonical_digest(running_images) if running_images else "",
+            "image_count": len(running_image_items),
+        },
+        "migration": {
+            "source_gate": "rqa_migration_preflight",
+            "policy_version": migration_gate.get("policy_version"),
+            "mode": migration_gate.get("mode"),
+            "source_mode": migration_gate.get("source_mode"),
+            "source_db_sha256": (migration_gate.get("db") or {}).get("source_db_sha256"),
+            "preflight_sha256": (
+                canonical_digest(migration_preflight) if migration_preflight else ""
+            ),
+            "backup_artifact_sha256": (migration_gate.get("backup") or {}).get("artifact_sha256"),
+            "required_migration_count": migration_counts.get("required"),
+            "applied_migration_count": migration_counts.get("applied"),
+            "pending_migration_count": migration_counts.get("pending"),
+        },
+        "valid": not identity_errors,
+        "errors": identity_errors,
+        "secret_values_printed": False,
+    }
+
+
+release_runtime_identity = build_release_runtime_identity()
+release_runtime_identity_digest = canonical_digest(release_runtime_identity)
 browser_review_validation = None
 browser_review_gate = gates_by_name.get("openwebui_browser_review") or {}
 for line in reversed(browser_review_gate.get("stdout_tail") or []):
@@ -565,6 +643,14 @@ def build_release_artifact_registry():
         release_context_digest,
         "release_readiness",
         ref=release_context.get("environment"),
+        retention_class="release_manifest",
+    )
+    add_entry(
+        "release_runtime_identity",
+        "inline_json",
+        release_runtime_identity_digest,
+        "release_readiness",
+        ref=release_runtime_identity.get("git", {}).get("commit"),
         retention_class="release_manifest",
     )
     add_entry(
@@ -725,12 +811,16 @@ if summary_only:
     release_blockers.append("summary-only mode was used")
 for error in release_context_errors:
     release_blockers.append(error)
+for error in release_runtime_identity.get("errors") or []:
+    if require_live:
+        release_blockers.append(error)
 release_conditions_met = (
     require_live
     and not required_failures
     and not skipped_live_gates
     and browser_review_acknowledged
     and release_context["valid"]
+    and release_runtime_identity["valid"]
 )
 if gate_cmd_overrides_used:
     release_blockers.append("gate command overrides were used")
@@ -755,6 +845,8 @@ report = {
     "generated_at": release_context["generated_at"],
     "release_context": release_context,
     "release_context_digest": release_context_digest,
+    "release_runtime_identity": release_runtime_identity,
+    "release_runtime_identity_digest": release_runtime_identity_digest,
     "secret_values_printed": False,
     "release_manifest": release_manifest,
     "release_manifest_digest": release_manifest_digest,

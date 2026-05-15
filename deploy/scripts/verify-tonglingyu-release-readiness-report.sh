@@ -325,6 +325,7 @@ gate_stdout_requirements = {
             "behavior_config",
             "checked_surfaces",
             "model_ids",
+            "running_images",
             "stream_trace_id",
             "trace_id",
         ],
@@ -954,6 +955,16 @@ def validate_release_artifact_registry():
             "ref": (
                 report.get("release_context", {}).get("environment")
                 if isinstance(report.get("release_context"), dict)
+                else ""
+            ),
+        },
+        "release_runtime_identity": {
+            "digest": report.get("release_runtime_identity_digest"),
+            "source_gate": "release_readiness",
+            "ref": (
+                report.get("release_runtime_identity", {}).get("git", {}).get("commit")
+                if isinstance(report.get("release_runtime_identity"), dict)
+                and isinstance(report.get("release_runtime_identity", {}).get("git"), dict)
                 else ""
             ),
         },
@@ -2820,6 +2831,8 @@ browser_review_validation = report.get("browser_review_validation")
 generated_at = report.get("generated_at")
 release_context = report.get("release_context")
 release_context_digest = report.get("release_context_digest")
+release_runtime_identity = report.get("release_runtime_identity")
+release_runtime_identity_digest = report.get("release_runtime_identity_digest")
 
 generated_at_dt = None
 if not nonempty(generated_at):
@@ -2908,6 +2921,170 @@ else:
         and release_context_valid_until_dt is not None
     )
 
+computed_runtime_identity_errors = []
+runtime_identity_ready = False
+if not isinstance(release_runtime_identity, dict):
+    errors.append("release_runtime_identity_missing")
+    computed_runtime_identity_errors.append("release runtime identity missing")
+else:
+    if release_runtime_identity.get("object") != "tonglingyu.release_runtime_identity":
+        errors.append("release_runtime_identity_object_invalid")
+    if release_runtime_identity.get("schema_version") != 1:
+        errors.append("release_runtime_identity_schema_version_invalid")
+    if (
+        release_runtime_identity.get("policy_version")
+        != "tonglingyu-release-runtime-identity-v1"
+    ):
+        errors.append("release_runtime_identity_policy_version_invalid")
+    if release_runtime_identity.get("secret_values_printed") is not False:
+        errors.append("release_runtime_identity_secret_values_printed_must_be_false")
+    if not is_sha256(release_runtime_identity_digest):
+        errors.append("release_runtime_identity_digest_invalid")
+    elif release_runtime_identity_digest != canonical_digest(release_runtime_identity):
+        errors.append("release_runtime_identity_digest_mismatch")
+    if release_runtime_identity.get("require_live") is not require_live:
+        errors.append("release_runtime_identity_require_live_mismatch")
+
+    manifest = report.get("release_manifest") if isinstance(report.get("release_manifest"), dict) else {}
+    manifest_git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
+    identity_git = (
+        release_runtime_identity.get("git")
+        if isinstance(release_runtime_identity.get("git"), dict)
+        else {}
+    )
+    if identity_git.get("commit") != manifest_git.get("commit"):
+        errors.append("release_runtime_identity_git_commit_mismatch")
+    if identity_git.get("tracked_dirty") != manifest_git.get("tracked_dirty"):
+        errors.append("release_runtime_identity_git_tracked_dirty_mismatch")
+    if not is_git_commit(identity_git.get("commit")):
+        errors.append("release_runtime_identity_git_commit_invalid")
+    if not isinstance(identity_git.get("tracked_dirty"), bool):
+        errors.append("release_runtime_identity_git_tracked_dirty_invalid")
+    if require_live and identity_git.get("tracked_dirty") is not False:
+        computed_runtime_identity_errors.append("tracked worktree must be clean for live release")
+
+    manifest_security = (
+        manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
+    )
+    image_inventory = (
+        release_runtime_identity.get("image_inventory")
+        if isinstance(release_runtime_identity.get("image_inventory"), dict)
+        else {}
+    )
+    for field in (
+        "image_count",
+        "image_refs",
+        "image_refs_sha256",
+        "digest_missing_count",
+        "mutable_tag_count",
+        "scanned_image_count",
+        "scanned_report_count",
+        "scanned_reports_sha256",
+    ):
+        if image_inventory.get(field) != manifest_security.get(field):
+            errors.append(f"release_runtime_identity_image_{field}_mismatch")
+    if image_inventory.get("source_gate") != "security_scan":
+        errors.append("release_runtime_identity_image_source_gate_invalid")
+
+    manifest_migration = (
+        manifest.get("migration") if isinstance(manifest.get("migration"), dict) else {}
+    )
+    migration = (
+        release_runtime_identity.get("migration")
+        if isinstance(release_runtime_identity.get("migration"), dict)
+        else {}
+    )
+    expected_migration = {
+        "policy_version": manifest_migration.get("policy_version"),
+        "mode": manifest_migration.get("mode"),
+        "source_mode": manifest_migration.get("source_mode"),
+        "source_db_sha256": manifest_migration.get("source_db_sha256"),
+        "preflight_sha256": manifest_migration.get("migration_preflight_sha256"),
+        "backup_artifact_sha256": manifest_migration.get("backup_artifact_sha256"),
+        "required_migration_count": manifest_migration.get("required_migration_count"),
+        "applied_migration_count": manifest_migration.get("applied_migration_count"),
+        "pending_migration_count": manifest_migration.get("pending_migration_count"),
+    }
+    for field, expected in expected_migration.items():
+        if migration.get(field) != expected:
+            errors.append(f"release_runtime_identity_migration_{field}_mismatch")
+    if migration.get("source_gate") != "rqa_migration_preflight":
+        errors.append("release_runtime_identity_migration_source_gate_invalid")
+    if require_live and migration.get("mode") != "live":
+        computed_runtime_identity_errors.append("live migration preflight was not captured")
+    if require_live and migration.get("pending_migration_count") != 0:
+        computed_runtime_identity_errors.append("pending migrations must be zero for live release")
+
+    running = (
+        release_runtime_identity.get("running_images")
+        if isinstance(release_runtime_identity.get("running_images"), dict)
+        else {}
+    )
+    running_inventory = (
+        running.get("inventory") if isinstance(running.get("inventory"), dict) else {}
+    )
+    running_items = (
+        running_inventory.get("images")
+        if isinstance(running_inventory.get("images"), list)
+        else []
+    )
+    if running.get("source_gate") != "strict_gateway":
+        errors.append("release_runtime_identity_running_images_source_gate_invalid")
+    expected_inventory_digest = canonical_digest(running_inventory) if running_inventory else ""
+    if running.get("inventory_sha256") != expected_inventory_digest:
+        errors.append("release_runtime_identity_running_images_digest_mismatch")
+    if running.get("image_count") != len(running_items):
+        errors.append("release_runtime_identity_running_images_count_mismatch")
+    if require_live and not running_items:
+        computed_runtime_identity_errors.append("live running image inventory was not captured")
+    if running_items:
+        running_services = {
+            item.get("service")
+            for item in running_items
+            if isinstance(item, dict) and item.get("service")
+        }
+        if require_live:
+            for required_service in ("tonglingyu-gateway", "open-webui"):
+                if required_service not in running_services:
+                    computed_runtime_identity_errors.append(
+                        f"running image inventory missing {required_service}"
+                    )
+        for index, item in enumerate(running_items):
+            if not isinstance(item, dict):
+                errors.append(f"release_runtime_identity_running_image_{index}_must_be_object")
+                continue
+            image_id = item.get("image_id")
+            if not (
+                isinstance(image_id, str)
+                and image_id.startswith("sha256:")
+                and is_sha256(image_id.removeprefix("sha256:"))
+            ):
+                errors.append(f"release_runtime_identity_running_image_{index}_image_id_invalid")
+            if not nonempty(item.get("configured_image")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_configured_image_missing"
+                )
+            if not is_sha256(item.get("image_id_sha256")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_image_id_sha256_invalid"
+                )
+            if not isinstance(item.get("repo_digests"), list):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_repo_digests_invalid"
+                )
+            if not is_sha256(item.get("repo_digests_sha256")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_repo_digests_sha256_invalid"
+                )
+    if release_runtime_identity.get("errors") != computed_runtime_identity_errors:
+        errors.append("release_runtime_identity_errors_mismatch")
+    if release_runtime_identity.get("valid") != (not computed_runtime_identity_errors):
+        errors.append("release_runtime_identity_valid_mismatch")
+    runtime_identity_ready = (
+        release_runtime_identity.get("valid") is True
+        and not computed_runtime_identity_errors
+    )
+
 computed_required_failures = [
     gate["name"]
     for gate in gates
@@ -2984,12 +3161,16 @@ if summary_only:
     computed_release_blockers.append("summary-only mode was used")
 for error in computed_release_context_errors:
     computed_release_blockers.append(error)
+for error in computed_runtime_identity_errors:
+    if require_live:
+        computed_release_blockers.append(error)
 computed_release_conditions_met = (
     require_live
     and not computed_required_failures
     and not computed_skipped_live_gates
     and computed_browser_review_acknowledged
     and release_context_ready
+    and runtime_identity_ready
 )
 if gate_overrides_used:
     computed_release_blockers.append("gate command overrides were used")
@@ -3055,6 +3236,8 @@ if production_ready:
         errors.append("production_ready_report_expired")
     if not release_context_ready:
         errors.append("production_ready_requires_valid_release_context")
+    if not runtime_identity_ready:
+        errors.append("production_ready_requires_valid_runtime_identity")
 add_if(
     production_ready and report.get("status") != "passed",
     "production_ready_requires_passed_status",
