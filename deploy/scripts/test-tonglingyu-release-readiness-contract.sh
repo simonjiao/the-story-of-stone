@@ -36,6 +36,7 @@ TAMPERED_RELEASE_CONTEXT_REPORT="${WORK_DIR}/tampered-release-context-report.jso
 TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT="${WORK_DIR}/tampered-release-context-validity-report.json"
 TAMPERED_RUNTIME_IDENTITY_REPORT="${WORK_DIR}/tampered-runtime-identity-report.json"
 TAMPERED_RUNTIME_IDENTITY_IMAGES_REPORT="${WORK_DIR}/tampered-runtime-identity-images-report.json"
+TAMPERED_BEHAVIOR_BINDING_REPORT="${WORK_DIR}/tampered-behavior-binding-report.json"
 TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
 TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
@@ -1079,6 +1080,19 @@ conn.execute(
 )
 conn.commit()
 conn.close()
+
+
+def digest_json(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 behavior_config = {
     "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
     "decoding_parameters_source": "gateway_runtime_config",
@@ -1097,14 +1111,46 @@ behavior_config = {
     "tool_policy": "read_only_runtime_tools",
     "tool_policy_digest": "a" * 64,
 }
-behavior_config["behavior_config_digest"] = hashlib.sha256(
-    json.dumps(
-        behavior_config,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-).hexdigest()
+behavior_config["behavior_config_digest"] = digest_json(behavior_config)
+runtime_summary = {
+    "answer_source": "agent-runtime-hermes-draft-with-local-reviewer",
+    "content_used_for_final_answer": True,
+    "draft_consumed": True,
+    "evidence_matches_local": True,
+    "evidence_observation_count": 1,
+    "executed_profile_step_count": 4,
+    "hermes_content_execution_complete": True,
+    "local_governance_enforced": True,
+    "mode": "hermes",
+    "package_matches_local": True,
+    "profile_execution_status": "hermes_profile_observed_with_local_governance",
+    "profile_step_count": 4,
+    "review_local_enforced": True,
+    "tool_audit_event_count": 4,
+    "tool_result_count": 4,
+}
+behavior_config_binding = {
+    "object": "tonglingyu.strict_gateway_behavior_config_binding",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-behavior-config-binding-v1",
+    "behavior_config_digest": behavior_config["behavior_config_digest"],
+    "behavior_config_sha256": digest_json(behavior_config),
+    "admin_trace_id": "tly-chat",
+    "stream_trace_id": "tly-stream",
+    "admin_trace_runtime_summary": runtime_summary,
+    "admin_trace_runtime_summary_sha256": digest_json(runtime_summary),
+    "stream_trace_runtime_summary": runtime_summary,
+    "stream_trace_runtime_summary_sha256": digest_json(runtime_summary),
+    "agent_runtime_mode": "hermes",
+    "profile_execution_status": "hermes_profile_observed_with_local_governance",
+    "hermes_content_execution_complete": True,
+    "local_governance_enforced": True,
+    "profile_step_count": 4,
+    "executed_profile_step_count": 4,
+    "tool_result_count": 4,
+    "tool_audit_event_count": 4,
+    "secret_values_printed": False,
+}
 runbook_sha256 = hashlib.sha256(Path(runbook_path).read_bytes()).hexdigest()
 image_refs = [
     "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
@@ -1971,6 +2017,7 @@ gate_stdout = {
     "strict_gateway": {
         "agent_runtime_mode": "hermes",
         "behavior_config": behavior_config,
+        "behavior_config_binding": behavior_config_binding,
         "checked_surfaces": ["tonglingyu-gateway:/healthz"],
         "model_ids": ["tonglingyu"],
         "running_images": {
@@ -2628,6 +2675,31 @@ assert_report "${tampered_runtime_identity_images_stdout}" \
   '"release_runtime_identity_errors_mismatch" in report["errors"]'
 assert_report "${tampered_runtime_identity_images_stdout}" \
   '"production_ready_requires_valid_runtime_identity" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_BEHAVIOR_BINDING_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") != "strict_gateway":
+        continue
+    gate_json = json.loads(gate["stdout_tail"][-1])
+    gate_json["behavior_config_binding"]["behavior_config_digest"] = "0" * 64
+    gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_behavior_binding_stdout="${WORK_DIR}/tampered-behavior-binding.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_BEHAVIOR_BINDING_REPORT}" >"${tampered_behavior_binding_stdout}"; then
+  echo "production-ready reports must bind behavior config to admin trace summary" >&2
+  exit 1
+fi
+assert_report "${tampered_behavior_binding_stdout}" \
+  '"strict_gateway_behavior_config_binding_behavior_config_digest_mismatch" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_LIVE_GATE_STDOUT_REPORT}" <<'PY'
 import json

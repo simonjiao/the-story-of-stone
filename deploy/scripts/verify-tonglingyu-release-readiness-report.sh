@@ -323,6 +323,7 @@ gate_stdout_requirements = {
         },
         "required_fields": [
             "behavior_config",
+            "behavior_config_binding",
             "checked_surfaces",
             "model_ids",
             "running_images",
@@ -635,6 +636,91 @@ def validate_behavior_config(prefix, behavior_config):
         and behavior_config.get("behavior_config_digest") != canonical_digest(digest_payload)
     ):
         errors.append(f"{prefix}_behavior_config_digest_mismatch")
+
+
+def validate_behavior_config_binding(prefix, binding, behavior_config):
+    if not isinstance(binding, dict):
+        errors.append(f"{prefix}_behavior_config_binding_missing")
+        return
+    if binding.get("object") != "tonglingyu.strict_gateway_behavior_config_binding":
+        errors.append(f"{prefix}_behavior_config_binding_object_invalid")
+    if binding.get("schema_version") != 1:
+        errors.append(f"{prefix}_behavior_config_binding_schema_version_invalid")
+    if binding.get("policy_version") != "tonglingyu-behavior-config-binding-v1":
+        errors.append(f"{prefix}_behavior_config_binding_policy_version_invalid")
+    if binding.get("secret_values_printed") is not False:
+        errors.append(f"{prefix}_behavior_config_binding_secret_values_printed_must_be_false")
+    if not isinstance(behavior_config, dict):
+        errors.append(f"{prefix}_behavior_config_binding_behavior_config_missing")
+    else:
+        expected_digest = behavior_config.get("behavior_config_digest")
+        if binding.get("behavior_config_digest") != expected_digest:
+            errors.append(f"{prefix}_behavior_config_binding_behavior_config_digest_mismatch")
+        if binding.get("behavior_config_sha256") != canonical_digest(behavior_config):
+            errors.append(f"{prefix}_behavior_config_binding_behavior_config_sha256_mismatch")
+    for field in (
+        "behavior_config_digest",
+        "behavior_config_sha256",
+        "admin_trace_runtime_summary_sha256",
+        "stream_trace_runtime_summary_sha256",
+    ):
+        if not is_sha256(binding.get(field)):
+            errors.append(f"{prefix}_behavior_config_binding_{field}_invalid")
+    if not nonempty(binding.get("admin_trace_id")):
+        errors.append(f"{prefix}_behavior_config_binding_admin_trace_id_missing")
+    if not nonempty(binding.get("stream_trace_id")):
+        errors.append(f"{prefix}_behavior_config_binding_stream_trace_id_missing")
+
+    for label, field in (
+        ("admin_trace", "admin_trace_runtime_summary"),
+        ("stream_trace", "stream_trace_runtime_summary"),
+    ):
+        summary = binding.get(field)
+        if not isinstance(summary, dict):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_summary_missing")
+            continue
+        if binding.get(f"{field}_sha256") != canonical_digest(summary):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_summary_digest_mismatch")
+        if summary.get("mode") != "hermes":
+            errors.append(f"{prefix}_behavior_config_binding_{label}_mode_invalid")
+        if (
+            summary.get("profile_execution_status")
+            != "hermes_profile_observed_with_local_governance"
+        ):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_profile_status_invalid")
+        if summary.get("hermes_content_execution_complete") is not True:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_content_incomplete")
+        if summary.get("local_governance_enforced") is not True:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_governance_missing")
+        tool_result_count = summary.get("tool_result_count")
+        tool_audit_event_count = summary.get("tool_audit_event_count")
+        if not isinstance(tool_result_count, int) or tool_result_count <= 0:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_tool_results_invalid")
+        if (
+            not isinstance(tool_audit_event_count, int)
+            or not isinstance(tool_result_count, int)
+            or tool_audit_event_count < tool_result_count
+        ):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_tool_audit_invalid")
+    if binding.get("agent_runtime_mode") != "hermes":
+        errors.append(f"{prefix}_behavior_config_binding_agent_runtime_mode_invalid")
+    if (
+        binding.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(f"{prefix}_behavior_config_binding_profile_status_invalid")
+    if binding.get("hermes_content_execution_complete") is not True:
+        errors.append(f"{prefix}_behavior_config_binding_content_incomplete")
+    if binding.get("local_governance_enforced") is not True:
+        errors.append(f"{prefix}_behavior_config_binding_governance_missing")
+    if not isinstance(binding.get("tool_result_count"), int) or binding.get("tool_result_count") <= 0:
+        errors.append(f"{prefix}_behavior_config_binding_tool_result_count_invalid")
+    if (
+        not isinstance(binding.get("tool_audit_event_count"), int)
+        or not isinstance(binding.get("tool_result_count"), int)
+        or binding.get("tool_audit_event_count") < binding.get("tool_result_count")
+    ):
+        errors.append(f"{prefix}_behavior_config_binding_tool_audit_count_invalid")
 
 
 def is_git_commit(value):
@@ -1579,6 +1665,11 @@ def validate_retrieval_quality_gate_stdout():
     if strict_gate_json is not None:
         strict_behavior_config = strict_gate_json.get("behavior_config")
         validate_behavior_config("strict_gateway", strict_behavior_config)
+        validate_behavior_config_binding(
+            "strict_gateway",
+            strict_gate_json.get("behavior_config_binding"),
+            strict_behavior_config,
+        )
         if isinstance(behavior_config, dict) and isinstance(strict_behavior_config, dict):
             if behavior_config != strict_behavior_config:
                 errors.append("retrieval_quality_behavior_config_strict_gateway_mismatch")

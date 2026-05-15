@@ -798,6 +798,13 @@
   contract smoke 已覆盖缺 runtime identity 和缺运行镜像 inventory；机制已闭合，
   但目标 production-ready 仍必须由真实 live release run 生成并保存 runtime
   identity artifact。
+- Strict Gateway live gate 已新增 `behavior_config_binding`：把
+  `behavior_config_digest` 与普通 chat admin trace、streaming admin trace 的
+  `agent_runtime_summary` digest 绑定，并要求 summary 证明 Hermes content
+  execution complete、local governance enforced、tool result / tool audit 计数
+  一致。saved report validator 会拒绝缺 binding 或 binding 与 strict Gateway
+  行为配置不一致的 production-ready report；contract smoke 已覆盖 binding digest
+  篡改。目标 production-ready 仍必须由真实 live strict Gateway gate 产出该证据。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写

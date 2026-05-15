@@ -810,6 +810,85 @@ for item in runtime_step_events:
         if review_observation.get("local_reviewer_enforced") is not True:
             errors.append(f"runtime step {operation} must enforce local reviewer")
 
+trace_runtime_summary_for_binding = (
+    trace.get("agent_runtime_summary")
+    if isinstance(trace.get("agent_runtime_summary"), dict)
+    else {}
+)
+stream_runtime_summary_for_binding = (
+    stream_trace.get("agent_runtime_summary")
+    if isinstance(stream_trace.get("agent_runtime_summary"), dict)
+    else {}
+)
+behavior_config_binding = {
+    "object": "tonglingyu.strict_gateway_behavior_config_binding",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-behavior-config-binding-v1",
+    "behavior_config_digest": behavior_config.get("behavior_config_digest"),
+    "behavior_config_sha256": canonical_digest(behavior_config),
+    "admin_trace_id": chat_trace_id,
+    "stream_trace_id": stream_trace_id,
+    "admin_trace_runtime_summary": trace_runtime_summary_for_binding,
+    "admin_trace_runtime_summary_sha256": (
+        canonical_digest(trace_runtime_summary_for_binding)
+        if trace_runtime_summary_for_binding
+        else ""
+    ),
+    "stream_trace_runtime_summary": stream_runtime_summary_for_binding,
+    "stream_trace_runtime_summary_sha256": (
+        canonical_digest(stream_runtime_summary_for_binding)
+        if stream_runtime_summary_for_binding
+        else ""
+    ),
+    "agent_runtime_mode": trace_runtime_summary_for_binding.get("mode"),
+    "profile_execution_status": trace_runtime_summary_for_binding.get(
+        "profile_execution_status"
+    ),
+    "hermes_content_execution_complete": trace_runtime_summary_for_binding.get(
+        "hermes_content_execution_complete"
+    ),
+    "local_governance_enforced": trace_runtime_summary_for_binding.get(
+        "local_governance_enforced"
+    ),
+    "profile_step_count": trace_runtime_summary_for_binding.get("profile_step_count"),
+    "executed_profile_step_count": trace_runtime_summary_for_binding.get(
+        "executed_profile_step_count"
+    ),
+    "tool_result_count": trace_runtime_summary_for_binding.get("tool_result_count"),
+    "tool_audit_event_count": trace_runtime_summary_for_binding.get(
+        "tool_audit_event_count"
+    ),
+    "secret_values_printed": False,
+}
+if behavior_config_binding["behavior_config_sha256"] != canonical_digest(behavior_config):
+    errors.append("behavior config binding digest must match behavior_config")
+for label, summary in (
+    ("admin trace", trace_runtime_summary_for_binding),
+    ("stream admin trace", stream_runtime_summary_for_binding),
+):
+    if not summary:
+        errors.append(f"{label} runtime summary missing for behavior config binding")
+        continue
+    if summary.get("mode") != "hermes":
+        errors.append(f"{label} behavior binding runtime mode must be hermes")
+    if (
+        summary.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(
+            f"{label} behavior binding profile execution status must be hermes complete"
+        )
+    if summary.get("hermes_content_execution_complete") is not True:
+        errors.append(f"{label} behavior binding content execution must be complete")
+    if summary.get("local_governance_enforced") is not True:
+        errors.append(f"{label} behavior binding local governance must be enforced")
+    if int(summary.get("tool_result_count") or 0) <= 0:
+        errors.append(f"{label} behavior binding tool result count must be positive")
+    if int(summary.get("tool_audit_event_count") or 0) < int(
+        summary.get("tool_result_count") or 0
+    ):
+        errors.append(f"{label} behavior binding tool audit count must cover results")
+
 if errors:
     for error in errors:
         print(f"strict_gateway_error={error}", file=sys.stderr)
@@ -836,6 +915,7 @@ print(json.dumps(
         "stream_trace_id": stream_trace_id,
         "stream_evidence_package_id": stream_package_id,
         "behavior_config": behavior_config,
+        "behavior_config_binding": behavior_config_binding,
         "running_images": running_images,
     },
     ensure_ascii=True,
