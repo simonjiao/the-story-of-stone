@@ -24,14 +24,14 @@ use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
-    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskUpdateInput,
-    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
-    RetrievalEvidenceTypeCoverage, RetrievalFailureCreateInput, RetrievalFailureListInput,
-    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
-    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, append_runtime_audit_event, execute_agent_runtime_plan_gate,
-    package_json,
+    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
+    KnowledgeGovernanceTaskUpdateInput, RETRIEVAL_FAILURE_SCHEMA_VERSION,
+    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
+    RetrievalFailureCreateInput, RetrievalFailureListInput, RetrievalFailureView,
+    RetrievalQualityReport, RetrievalQuerySummary, RetrievalSourceCoverageBoundary,
+    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
+    append_runtime_audit_event, execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -429,6 +429,16 @@ struct RetrievalFailureUpdateRequest {
 
 #[derive(Debug, Deserialize)]
 struct GovernanceTaskCreateRequest {
+    task_type: Option<String>,
+    priority: Option<String>,
+    proposed_fix: Option<String>,
+    agent_cluster_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GovernanceTaskManualCreateRequest {
+    source_entity_type: String,
+    source_entity_id: String,
     task_type: Option<String>,
     priority: Option<String>,
     proposed_fix: Option<String>,
@@ -1020,7 +1030,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
             "/v1/admin/retrieval-failures/{failure_id}/governance-task",
             post(create_governance_task_from_failure_endpoint),
         )
-        .route("/v1/admin/governance/tasks", get(governance_tasks_endpoint))
+        .route(
+            "/v1/admin/governance/tasks",
+            get(governance_tasks_endpoint).post(create_governance_task_endpoint),
+        )
         .route(
             "/v1/admin/governance/tasks/{task_id}",
             get(governance_task_endpoint).patch(update_governance_task_endpoint),
@@ -3557,6 +3570,155 @@ async fn governance_task_endpoint(
     }
 }
 
+async fn create_governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<GovernanceTaskManualCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_create") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let source_entity_type = payload.source_entity_type.trim().to_string();
+    let source_entity_id = payload.source_entity_id.trim().to_string();
+    let task_type = payload
+        .task_type
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "expert_review".to_string());
+    let create_result = match source_entity_type.as_str() {
+        "retrieval_failure" => state
+            .runtime_store
+            .create_governance_task_from_failure(KnowledgeGovernanceTaskCreateFromFailureInput {
+                source_failure_id: source_entity_id.clone(),
+                task_type: Some(task_type),
+                priority: payload.priority,
+                proposed_fix: payload.proposed_fix,
+                agent_cluster_key: payload.agent_cluster_key,
+            })
+            .and_then(|record| record.ok_or_else(|| anyhow!("source retrieval failure not found"))),
+        "trace" => match load_trace(&state.db, &source_entity_id) {
+            Ok(Some(_)) => {
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "trace".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id: source_entity_id.clone(),
+                        package_id: None,
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source trace not found")),
+            Err(error) => Err(error),
+        },
+        "package" => match state.runtime_store.read_package(&source_entity_id) {
+            Ok(Some(package)) => {
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "package".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id: package.trace_id,
+                        package_id: Some(package.package_id),
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source package not found")),
+            Err(error) => Err(error),
+        },
+        _ => Err(anyhow!("unsupported governance task source entity")),
+    };
+    match create_result {
+        Ok(record) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "created governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "source_entity_type": &record.source_entity_type,
+                    "source_entity_id_sha256": hash_text(&record.source_entity_id),
+                    "trace_id": &record.trace_id,
+                    "task_type": &record.task_type,
+                    "priority": &record.priority,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_create",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "source_entity_type": source_entity_type,
+                    "source_entity_id_sha256": hash_text(&source_entity_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(source_entity_type = %source_entity_type, error = %error, "governance task create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn create_governance_task_from_failure_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4728,7 +4890,14 @@ fn governance_task_list_input(
     for key in params.keys() {
         if !matches!(
             key.as_str(),
-            "status" | "task_type" | "priority" | "source_failure_id" | "limit" | "offset"
+            "status"
+                | "task_type"
+                | "priority"
+                | "source_failure_id"
+                | "source_entity_type"
+                | "source_entity_id"
+                | "limit"
+                | "offset"
         ) {
             return Err(anyhow!("unsupported governance task filter {key}"));
         }
@@ -4749,6 +4918,14 @@ fn governance_task_list_input(
         .get("source_failure_id")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let source_entity_type = params
+        .get("source_entity_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let source_entity_id = params
+        .get("source_entity_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
     let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
     Ok(KnowledgeGovernanceTaskListInput {
@@ -4756,6 +4933,8 @@ fn governance_task_list_input(
         task_type,
         priority,
         source_failure_id,
+        source_entity_type,
+        source_entity_id,
         limit,
         offset,
     })
@@ -4767,6 +4946,8 @@ fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
         "task_type": params.get("task_type"),
         "priority": params.get("priority"),
         "has_source_failure_id": params.contains_key("source_failure_id"),
+        "source_entity_type": params.get("source_entity_type"),
+        "has_source_entity_id": params.contains_key("source_entity_id"),
         "has_limit": params.contains_key("limit"),
         "has_offset": params.contains_key("offset"),
     })
@@ -6103,6 +6284,21 @@ mod tests {
             governance_tasks_endpoint(State(state.clone()), admin_headers(), Query(params)).await;
         assert_eq!(list.status(), StatusCode::OK);
 
+        let create_trace = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "trace".to_string(),
+                source_entity_id: "trace-admin-governance-task".to_string(),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("request expert review".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(create_trace.status(), StatusCode::OK);
+
         let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
         let tasks = runtime_store
             .list_governance_tasks(KnowledgeGovernanceTaskListInput {
@@ -6110,6 +6306,8 @@ mod tests {
                 task_type: None,
                 priority: Some("p0".to_string()),
                 source_failure_id: Some(failure_id),
+                source_entity_type: None,
+                source_entity_id: None,
                 limit: 10,
                 offset: 0,
             })
@@ -6139,7 +6337,7 @@ mod tests {
         assert_eq!(update.status(), StatusCode::OK);
         assert_eq!(
             audit_event_count(&db_path, "governance_task_admin_create"),
-            1
+            2
         );
         assert_eq!(audit_event_count(&db_path, "governance_task_admin_list"), 1);
         assert_eq!(

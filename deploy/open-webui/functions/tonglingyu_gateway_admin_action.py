@@ -41,6 +41,7 @@ class Action:
         {"id": "retrieval_failure_update", "name": "Update RQA failure status"},
         {"id": "governance_tasks", "name": "RQA governance tasks"},
         {"id": "governance_task", "name": "RQA governance task"},
+        {"id": "governance_task_create", "name": "Create governance task"},
         {"id": "governance_task_from_failure", "name": "Create governance task"},
         {"id": "governance_task_update", "name": "Update governance task"},
     ]
@@ -223,6 +224,31 @@ class Action:
                     admin_key,
                     f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}/governance-task",
                     {
+                        "task_type": _deep_get(body, "task_type"),
+                        "priority": _deep_get(body, "priority"),
+                        "proposed_fix": _deep_get(body, "proposed_fix"),
+                        "agent_cluster_key": _deep_get(body, "agent_cluster_key"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task create",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_task_create":
+                source_entity_type = str(_deep_get(body, "source_entity_type") or "").strip()
+                source_entity_id = str(_deep_get(body, "source_entity_id") or "").strip()
+                if not source_entity_type or not source_entity_id:
+                    raise GatewayAdminError("Governance task source entity is required.")
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/governance/tasks",
+                    {
+                        "source_entity_type": source_entity_type,
+                        "source_entity_id": source_entity_id,
                         "task_type": _deep_get(body, "task_type"),
                         "priority": _deep_get(body, "priority"),
                         "proposed_fix": _deep_get(body, "proposed_fix"),
@@ -459,7 +485,16 @@ def _retrieval_failure_query(body: dict) -> str:
 
 def _governance_task_query(body: dict) -> str:
     params = {}
-    for key in ("status", "task_type", "priority", "source_failure_id", "limit", "offset"):
+    for key in (
+        "status",
+        "task_type",
+        "priority",
+        "source_failure_id",
+        "source_entity_type",
+        "source_entity_id",
+        "limit",
+        "offset",
+    ):
         value = _deep_get(body, key)
         if value is not None and str(value).strip():
             params[key] = str(value).strip()

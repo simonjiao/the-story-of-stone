@@ -581,17 +581,20 @@
   `retrieval_quality` 记为 required failure，`production_release_ready=false`。这
   不是测试失败，而是当前现实状态还不能声明 RQA production-ready 的证据。
 - RQA Milestone H 已完成第一批治理任务代码切片：
-  runtime 新增 `knowledge_governance_tasks` schema、open/in_review retrieval failure
-  backfill、新 failure 自动生成 open P0 governance task，以及 governance task
+  runtime 新增 `knowledge_governance_tasks` schema、通用
+  `source_entity_type/source_entity_id`、open/in_review retrieval failure backfill、
+  新 failure 自动生成 open P0 governance task，以及 governance task
   create/list/read/update API；accepted task 必须带 reviewer、review note 和
   evidence ref，closed/rejected 必须带 reviewer 和 review note。Gateway 和 Open
-  WebUI admin Action 新增 governance task list/read/create-from-failure/update；
-  trace/package audit 会返回 governance task ids/tasks，admin 成功、not-found、
-  conflict 和 update 路径写访问审计。RQA quality gate、saved report validator 和
-  release contract smoke 新增 `open_p0_governance_tasks=0` blocker。
-- 该 H 切片仍不等于 H 完成或 production-ready：普通用户反馈入口、trace/package 级
-  expert-review 标记、真实 Agent 聚类、KB diff report、eval 前后对比、retention/
-  restore 和用户数据 lifecycle contract 仍未完成。
+  WebUI admin Action 新增 governance task list/read/create/update 与
+  create-from-failure；管理员可把 trace、package 或 retrieval failure 标记为
+  expert-review 任务。trace/package audit 会返回 governance task ids/tasks，admin
+  成功、not-found、conflict 和 update 路径写访问审计。RQA quality gate、saved
+  report validator 和 release contract smoke 新增 `open_p0_governance_tasks=0`
+  blocker。
+- 该 H 切片仍不等于 H 完成或 production-ready：普通用户反馈入口、真实 Agent
+  聚类、KB diff report、eval 前后对比、retention/restore 和用户数据
+  lifecycle contract 仍未完成。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和

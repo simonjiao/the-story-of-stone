@@ -242,6 +242,8 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
                         "task_type": "expected_evidence_fix",
                         "priority": "p0",
                         "source_failure_id": "rf-1",
+                        "source_entity_type": "retrieval_failure",
+                        "source_entity_id": "rf-1",
                         "limit": 20,
                     },
                     __user__={"id": "admin-1", "role": "admin"},
@@ -251,9 +253,40 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
 
         self.assertEqual(
             urlopen.call_args.args[0].full_url,
-            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks?status=open&task_type=expected_evidence_fix&priority=p0&source_failure_id=rf-1&limit=20",
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks?status=open&task_type=expected_evidence_fix&priority=p0&source_failure_id=rf-1&source_entity_type=retrieval_failure&source_entity_id=rf-1&limit=20",
         )
         self.assertIn("tonglingyu.governance_task_admin_list", result["content"])
+
+    def test_governance_task_manual_create_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_create"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "source_entity_type": "trace",
+                        "source_entity_id": "trace-1",
+                        "task_type": "expert_review",
+                        "priority": "p0",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_create",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks",
+        )
+        self.assertEqual(payload["source_entity_type"], "trace")
+        self.assertEqual(payload["source_entity_id"], "trace-1")
+        self.assertIn("tonglingyu.governance_task_admin_create", result["content"])
 
     def test_governance_task_create_from_failure_uses_post_json(self) -> None:
         action = self.action_with_key()
