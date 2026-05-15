@@ -761,6 +761,11 @@
   `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
   deploy env 后解析 image refs 并检查 mutable tag / digest missing。当前只用
   fixture scan 验证了静态策略，真实 dependency/image scan 仍未生成。
+- `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
+  release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 重新运行
+  preflight release readiness 后，required failure 已收敛为 `security_scan`；
+  skipped live gates 仍包括 model upstream、strict Gateway、Open WebUI Function
+  和 Open WebUI admin Action。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。

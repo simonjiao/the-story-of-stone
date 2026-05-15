@@ -161,7 +161,9 @@ fi
 browser_review_ref="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF:-}"
 
 failed=0
-run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
+run_gate "runtime_config" "true" env \
+  "TONGLINGYU_RUNTIME_CONFIG_REQUIRE_DOCKER=${require_live}" \
+  "${RUNTIME_CONFIG_CMD}" || failed=1
 if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
   run_gate "retrieval_quality" "true" env \
     "TONGLINGYU_UPSTREAM_MODEL=${RQA_UPSTREAM_MODEL}" \

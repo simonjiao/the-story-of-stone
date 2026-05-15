@@ -8,14 +8,122 @@ trap 'rm -f "${CONFIG_JSON}"' EXIT
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
-load_optional_deploy_env_file
+if [[ -n "$(deploy_env_file_path)" ]]; then
+  load_optional_deploy_env_file
+elif [[ -f "${DEPLOY_DIR}/.env" ]]; then
+  source_deploy_env_file "${DEPLOY_DIR}/.env"
+fi
 
 cd "${DEPLOY_DIR}"
 
-if ! docker compose config --format json >"${CONFIG_JSON}"; then
+if command -v docker >/dev/null 2>&1; then
+  if ! docker compose config --format json >"${CONFIG_JSON}"; then
+    echo "compose_config=failed" >&2
+    echo "hint=set the required deploy/.env variables or export dummy values for dry-run verification" >&2
+    exit 1
+  fi
+elif [[ "${TONGLINGYU_RUNTIME_CONFIG_REQUIRE_DOCKER:-false}" == "true" ]]; then
   echo "compose_config=failed" >&2
-  echo "hint=set the required deploy/.env variables or export dummy values for dry-run verification" >&2
+  echo "hint=docker is required for live runtime config verification" >&2
   exit 1
+else
+  python3 - "${DEPLOY_DIR}/docker-compose.yml" "${CONFIG_JSON}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("pyyaml_missing_for_static_compose_parse", file=sys.stderr)
+    raise SystemExit(1)
+
+compose_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+
+def find_expr_end(value, start):
+    index = start + 2
+    depth = 1
+    while index < len(value):
+        if value.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if value[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def resolve_expr(expr):
+    if ":-" in expr:
+        name, default = expr.split(":-", 1)
+        raw = os.environ.get(name)
+        return interpolate(default) if raw is None or raw == "" else raw
+    if ":?" in expr:
+        name, _message = expr.split(":?", 1)
+        raw = os.environ.get(name)
+        return "" if raw is None or raw == "" else raw
+    raw = os.environ.get(expr)
+    return "" if raw is None else raw
+
+
+def interpolate(value):
+    text = str(value)
+    result = []
+    index = 0
+    while index < len(text):
+        start = text.find("${", index)
+        if start < 0:
+            result.append(text[index:])
+            break
+        result.append(text[index:start])
+        end = find_expr_end(text, start)
+        if end < 0:
+            result.append(text[start:])
+            break
+        result.append(resolve_expr(text[start + 2:end]))
+        index = end + 1
+    return "".join(result)
+
+
+raw = yaml.safe_load(compose_path.read_text(encoding="utf-8")) or {}
+services = {}
+for name, service in (raw.get("services") or {}).items():
+    environment = service.get("environment") or {}
+    if isinstance(environment, dict):
+        resolved = {
+            str(key): interpolate("" if value is None else value)
+            for key, value in environment.items()
+        }
+    elif isinstance(environment, list):
+        resolved = {}
+        for item in environment:
+            text = interpolate(item)
+            if "=" in text:
+                key, value = text.split("=", 1)
+                resolved[key] = value
+    else:
+        resolved = {}
+    services[str(name)] = {"environment": resolved}
+
+target_path.write_text(
+    json.dumps(
+        {
+            "_config_mode": "static_compose_parse",
+            "services": services,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 fi
 
 python3 - "${CONFIG_JSON}" <<'PY'
@@ -171,6 +279,7 @@ if errors:
 print(json.dumps(
     {
         "status": "ok",
+        "config_mode": config.get("_config_mode", "docker_compose_config"),
         "checked_services": [
             "hermes",
             "open-webui",
