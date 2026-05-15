@@ -31,6 +31,7 @@ live_gate_names = [
 ]
 required_gate_names = [
     "runtime_config",
+    "rqa_migration_preflight",
     "retrieval_quality",
     "rqa_backup_restore_drill",
     "rqa_performance_budget",
@@ -148,6 +149,25 @@ gate_stdout_requirements = {
             "checked_policy_fields",
             "checked_secret_fields",
             "checked_services",
+        ],
+    },
+    "rqa_migration_preflight": {
+        "object": "tonglingyu.rqa_migration_preflight_gate",
+        "required_fields": [
+            "backup",
+            "checks",
+            "db",
+            "finished_at",
+            "generated_at",
+            "migration_counts",
+            "migration_preflight",
+            "migration_preflight_passed",
+            "migration_preflight_sha256",
+            "mode",
+            "policy_version",
+            "require_live",
+            "source_mode",
+            "started_at",
         ],
     },
     "retrieval_quality": {
@@ -706,6 +726,63 @@ def validate_release_manifest():
         if production_ready and not is_sha256(rqa.get("source_license_summary_digest")):
             errors.append("production_ready_requires_source_license_summary_digest")
 
+    migration_gate = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_migration_preflight"),
+        "tonglingyu.rqa_migration_preflight_gate",
+    )
+    migration = manifest.get("migration")
+    if not isinstance(migration, dict):
+        errors.append("release_manifest_migration_missing")
+    elif migration_gate is not None:
+        migration_backup = migration_gate.get("backup") or {}
+        migration_db = migration_gate.get("db") or {}
+        migration_preflight = migration_gate.get("migration_preflight") or {}
+        migration_counts = migration_gate.get("migration_counts") or {}
+        expected_preflight_digest = (
+            canonical_digest(migration_preflight) if migration_preflight else ""
+        )
+        expected_fields = {
+            "policy_version": migration_gate.get("policy_version"),
+            "mode": migration_gate.get("mode"),
+            "require_live": migration_gate.get("require_live"),
+            "source_mode": migration_gate.get("source_mode"),
+            "source_db_sha256": migration_db.get("source_db_sha256"),
+            "backup_artifact_path": migration_backup.get("artifact_path"),
+            "backup_artifact_path_sha256": migration_backup.get("artifact_path_sha256"),
+            "backup_artifact_sha256": migration_backup.get("artifact_sha256"),
+            "migration_preflight_sha256": expected_preflight_digest,
+            "required_migration_count": migration_counts.get("required"),
+            "applied_migration_count": migration_counts.get("applied"),
+            "pending_migration_count": migration_counts.get("pending"),
+        }
+        for field, expected in expected_fields.items():
+            if migration.get(field) != expected:
+                errors.append(f"release_manifest_migration_{field}_mismatch")
+        for field in (
+            "source_db_sha256",
+            "backup_artifact_path_sha256",
+            "backup_artifact_sha256",
+            "migration_preflight_sha256",
+        ):
+            if not is_sha256(migration.get(field)):
+                errors.append(f"release_manifest_migration_{field}_invalid")
+        for field in (
+            "required_migration_count",
+            "applied_migration_count",
+            "pending_migration_count",
+        ):
+            value = migration.get(field)
+            if not isinstance(value, int) or value < 0:
+                errors.append(f"release_manifest_migration_{field}_invalid")
+        if production_ready and migration.get("mode") != "live":
+            errors.append("production_ready_release_manifest_migration_mode_not_live")
+        if production_ready and migration.get("require_live") is not True:
+            errors.append("production_ready_release_manifest_migration_require_live_missing")
+        if production_ready and migration.get("source_mode") != "existing_db":
+            errors.append("production_ready_release_manifest_migration_source_not_existing_db")
+        if production_ready and not nonempty(migration.get("backup_artifact_path")):
+            errors.append("production_ready_release_manifest_migration_backup_path_missing")
+
     behavior = manifest.get("behavior_config")
     behavior_config = rqa_gate.get("behavior_config") if isinstance(rqa_gate, dict) else None
     if not isinstance(behavior, dict):
@@ -849,6 +926,11 @@ def validate_release_artifact_registry():
         if isinstance(manifest.get("runtime_config"), dict)
         else {}
     )
+    manifest_migration = (
+        manifest.get("migration")
+        if isinstance(manifest.get("migration"), dict)
+        else {}
+    )
     manifest_behavior = (
         manifest.get("behavior_config")
         if isinstance(manifest.get("behavior_config"), dict)
@@ -880,6 +962,17 @@ def validate_release_artifact_registry():
             "digest": manifest_rqa.get("source_license_summary_digest"),
             "source_gate": "retrieval_quality",
             "ref": manifest_rqa.get("source_snapshot_digest") or "",
+        },
+        "migration_preflight": {
+            "digest": manifest_migration.get("migration_preflight_sha256"),
+            "source_gate": "rqa_migration_preflight",
+            "ref": manifest_migration.get("policy_version") or "",
+        },
+        "migration_backup": {
+            "digest": manifest_migration.get("backup_artifact_sha256"),
+            "source_gate": "rqa_migration_preflight",
+            "path": manifest_migration.get("backup_artifact_path") or "",
+            "ref": manifest_migration.get("source_db_sha256") or "",
         },
         "behavior_config": {
             "digest": manifest_behavior.get("behavior_config_digest"),
@@ -1209,6 +1302,128 @@ def validate_production_gate_stdout():
             validate_gate_stdout(name, gate, requirement)
         else:
             errors.append(f"production_ready_requires_{name}_stdout_success_json")
+
+
+def validate_migration_preflight_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_migration_preflight"),
+        "tonglingyu.rqa_migration_preflight_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("migration_preflight_passed") is not True:
+        errors.append("rqa_migration_preflight_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_migration_preflight_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-migration-preflight-v1":
+        errors.append("rqa_migration_preflight_policy_version_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("rqa_migration_preflight_mode_invalid")
+    if not isinstance(gate_json.get("require_live"), bool):
+        errors.append("rqa_migration_preflight_require_live_invalid")
+    if gate_json.get("source_mode") not in {"existing_db", "fixture_built"}:
+        errors.append("rqa_migration_preflight_source_mode_invalid")
+    if production_ready and gate_json.get("mode") != "live":
+        errors.append("production_ready_requires_live_migration_preflight")
+    if production_ready and gate_json.get("require_live") is not True:
+        errors.append("production_ready_requires_migration_preflight_live_flag")
+    if production_ready and gate_json.get("source_mode") != "existing_db":
+        errors.append("production_ready_requires_existing_db_migration_preflight")
+    for field in ("started_at", "finished_at", "generated_at"):
+        if parse_timestamp(gate_json.get(field)) is None:
+            errors.append(f"rqa_migration_preflight_{field}_invalid")
+    if not isinstance(gate_json.get("duration_ms"), int) or gate_json.get("duration_ms") < 0:
+        errors.append("rqa_migration_preflight_duration_ms_invalid")
+
+    db = gate_json.get("db")
+    if not isinstance(db, dict):
+        errors.append("rqa_migration_preflight_db_missing")
+    else:
+        if not nonempty(db.get("path")):
+            errors.append("rqa_migration_preflight_db_path_missing")
+        if not is_sha256(db.get("path_sha256")):
+            errors.append("rqa_migration_preflight_db_path_sha256_invalid")
+        if not is_sha256(db.get("source_db_sha256")):
+            errors.append("rqa_migration_preflight_db_source_db_sha256_invalid")
+        if not isinstance(db.get("size_bytes"), int) or db.get("size_bytes") <= 0:
+            errors.append("rqa_migration_preflight_db_size_bytes_invalid")
+
+    backup = gate_json.get("backup")
+    if not isinstance(backup, dict):
+        errors.append("rqa_migration_preflight_backup_missing")
+    else:
+        if not nonempty(backup.get("artifact_path")):
+            errors.append("rqa_migration_preflight_backup_path_missing")
+        elif production_ready and not Path(backup.get("artifact_path")).is_absolute():
+            errors.append("production_ready_migration_preflight_backup_path_must_be_absolute")
+        if not is_sha256(backup.get("artifact_path_sha256")):
+            errors.append("rqa_migration_preflight_backup_path_sha256_invalid")
+        if not is_sha256(backup.get("artifact_sha256")):
+            errors.append("rqa_migration_preflight_backup_artifact_sha256_invalid")
+        if not is_sha256(backup.get("source_db_sha256")):
+            errors.append("rqa_migration_preflight_backup_source_db_sha256_invalid")
+        if not isinstance(backup.get("size_bytes"), int) or backup.get("size_bytes") <= 0:
+            errors.append("rqa_migration_preflight_backup_size_bytes_invalid")
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(backup.get(field)) is None:
+                errors.append(f"rqa_migration_preflight_backup_{field}_invalid")
+        if backup.get("before_preflight") is not True:
+            errors.append("rqa_migration_preflight_backup_not_before_preflight")
+
+    migration_preflight = gate_json.get("migration_preflight")
+    if not isinstance(migration_preflight, dict):
+        errors.append("rqa_migration_preflight_payload_missing")
+        migration_preflight = {}
+    else:
+        if (
+            migration_preflight.get("object")
+            != "tonglingyu.runtime_schema_migration_preflight"
+        ):
+            errors.append("rqa_migration_preflight_payload_object_invalid")
+        for field in ("required_migrations", "applied_migrations", "pending_migrations"):
+            if not isinstance(migration_preflight.get(field), list):
+                errors.append(f"rqa_migration_preflight_payload_{field}_invalid")
+        if migration_preflight.get("will_rebuild_knowledge_base") is not False:
+            errors.append("rqa_migration_preflight_would_rebuild_kb")
+        if migration_preflight.get("will_delete_runtime_data") is not False:
+            errors.append("rqa_migration_preflight_would_delete_runtime_data")
+        if migration_preflight.get("contains_secret_values") is not False:
+            errors.append("rqa_migration_preflight_contains_secret_values")
+    expected_preflight_digest = canonical_digest(migration_preflight)
+    if gate_json.get("migration_preflight_sha256") != expected_preflight_digest:
+        errors.append("rqa_migration_preflight_digest_mismatch")
+
+    counts = gate_json.get("migration_counts")
+    if not isinstance(counts, dict):
+        errors.append("rqa_migration_preflight_counts_missing")
+        counts = {}
+    expected_counts = {
+        "required": len(migration_preflight.get("required_migrations") or []),
+        "applied": len(migration_preflight.get("applied_migrations") or []),
+        "pending": len(migration_preflight.get("pending_migrations") or []),
+    }
+    for field, expected in expected_counts.items():
+        if counts.get(field) != expected:
+            errors.append(f"rqa_migration_preflight_{field}_count_mismatch")
+    if production_ready and counts.get("pending") != 0:
+        errors.append("production_ready_requires_migration_pending_count_zero")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "backup_created",
+        "backup_before_preflight",
+        "backup_path_recorded",
+        "schema_preflight_ran",
+        "no_runtime_data_rebuild",
+        "no_runtime_data_delete",
+        "no_secret_values",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_migration_preflight_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_migration_preflight_check_failed={check}")
 
 
 def validate_retrieval_quality_gate_stdout():
@@ -2718,6 +2933,7 @@ validate_release_manifest()
 validate_release_artifact_registry()
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
+validate_migration_preflight_gate_stdout()
 validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
 validate_security_scan_gate_stdout()

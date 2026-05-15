@@ -35,6 +35,8 @@ TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-d
 TAMPERED_ARTIFACT_REGISTRY_REPORT="${WORK_DIR}/tampered-artifact-registry-report.json"
 TAMPERED_ARTIFACT_REGISTRY_DIGEST_REPORT="${WORK_DIR}/tampered-artifact-registry-digest-report.json"
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
+TAMPERED_RQA_MIGRATION_PREFLIGHT_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-migration-preflight-stdout-report.json"
+TAMPERED_RQA_MIGRATION_PREFLIGHT_BACKUP_REPORT="${WORK_DIR}/tampered-rqa-migration-preflight-backup-report.json"
 TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_FIXTURE_REPORT="${WORK_DIR}/tampered-rqa-restore-fixture-report.json"
@@ -228,6 +230,7 @@ PY
 common_env=(
   "TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true"
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}"
@@ -773,6 +776,7 @@ env_file_report="${WORK_DIR}/env-file-report.json"
 cat >"${env_file}" <<EOF
 TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}
@@ -1119,6 +1123,68 @@ gate_stdout = {
         "checked_policy_fields": ["TONGLINGYU_AGENT_RUNTIME_MODE"],
         "checked_secret_fields": ["TONGLINGYU_GATEWAY_API_KEY(S)"],
         "checked_services": ["tonglingyu-gateway"],
+        "status": "ok",
+    },
+    "rqa_migration_preflight": {
+        "backup": {
+            "artifact_path": "/tmp/tonglingyu-migration-preflight-backup.db",
+            "artifact_path_sha256": "1" * 64,
+            "artifact_sha256": "2" * 64,
+            "before_preflight": True,
+            "finished_at": "2026-05-15T00:00:02+00:00",
+            "size_bytes": 4096,
+            "source_db_sha256": "3" * 64,
+            "started_at": "2026-05-15T00:00:01+00:00",
+        },
+        "checks": {
+            "backup_before_preflight": True,
+            "backup_created": True,
+            "backup_path_recorded": True,
+            "no_runtime_data_delete": True,
+            "no_runtime_data_rebuild": True,
+            "no_secret_values": True,
+            "schema_preflight_ran": True,
+        },
+        "db": {
+            "path": "/var/lib/tonglingyu/tonglingyu.db",
+            "path_sha256": "4" * 64,
+            "size_bytes": 8192,
+            "source_db_sha256": "3" * 64,
+        },
+        "duration_ms": 3000,
+        "finished_at": "2026-05-15T00:00:03+00:00",
+        "generated_at": "2026-05-15T00:00:03+00:00",
+        "migration_counts": {
+            "applied": 3,
+            "pending": 0,
+            "required": 3,
+        },
+        "migration_preflight": {
+            "applied_migrations": [
+                "tonglingyu-runtime-schema-v1",
+                "tonglingyu-retrieval-failures-v1",
+                "tonglingyu-retrieval-failure-dedupe-v1",
+            ],
+            "contains_secret_values": False,
+            "object": "tonglingyu.runtime_schema_migration_preflight",
+            "pending_migrations": [],
+            "required_migrations": [
+                "tonglingyu-runtime-schema-v1",
+                "tonglingyu-retrieval-failures-v1",
+                "tonglingyu-retrieval-failure-dedupe-v1",
+            ],
+            "will_delete_runtime_data": False,
+            "will_rebuild_knowledge_base": False,
+        },
+        "migration_preflight_passed": True,
+        "mode": "live",
+        "object": "tonglingyu.rqa_migration_preflight_gate",
+        "policy_version": "tonglingyu-rqa-migration-preflight-v1",
+        "require_live": True,
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "source_mode": "existing_db",
+        "started_at": "2026-05-15T00:00:00+00:00",
         "status": "ok",
     },
     "retrieval_quality": {
@@ -1909,6 +1975,14 @@ gate_stdout = {
         "type": "action",
     },
 }
+gate_stdout["rqa_migration_preflight"]["migration_preflight_sha256"] = hashlib.sha256(
+    json.dumps(
+        gate_stdout["rqa_migration_preflight"]["migration_preflight"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 for gate in report["gates"]:
     if gate.get("name") in gate_stdout:
         gate["stdout_tail"] = [json.dumps(gate_stdout[gate["name"]], sort_keys=True)]
@@ -1926,11 +2000,15 @@ def canonical_digest(value):
 
 
 runtime_config = gate_stdout["runtime_config"]
+migration_gate = gate_stdout["rqa_migration_preflight"]
 rqa_gate = gate_stdout["retrieval_quality"]
 security_gate = gate_stdout["security_scan"]
 behavior = rqa_gate["behavior_config"]
 image_scan = security_gate["image_scan"]
 kb_version = rqa_gate["kb_version"]
+migration_backup = migration_gate["backup"]
+migration_db = migration_gate["db"]
+migration_counts = migration_gate["migration_counts"]
 release_manifest = {
     "object": "tonglingyu.release_manifest",
     "schema_version": 1,
@@ -1961,6 +2039,20 @@ release_manifest = {
         "source_license_summary_digest": canonical_digest(
             rqa_gate["source_license_summary"]
         ),
+    },
+    "migration": {
+        "applied_migration_count": migration_counts["applied"],
+        "backup_artifact_path": migration_backup["artifact_path"],
+        "backup_artifact_path_sha256": migration_backup["artifact_path_sha256"],
+        "backup_artifact_sha256": migration_backup["artifact_sha256"],
+        "migration_preflight_sha256": migration_gate["migration_preflight_sha256"],
+        "mode": migration_gate["mode"],
+        "pending_migration_count": migration_counts["pending"],
+        "policy_version": migration_gate["policy_version"],
+        "require_live": migration_gate["require_live"],
+        "required_migration_count": migration_counts["required"],
+        "source_db_sha256": migration_db["source_db_sha256"],
+        "source_mode": migration_gate["source_mode"],
     },
     "behavior_config": {
         "behavior_config_digest": behavior["behavior_config_digest"],
@@ -2044,6 +2136,21 @@ registry_entries = [
         release_manifest["rqa"]["source_license_summary_digest"],
         "retrieval_quality",
         ref=release_manifest["rqa"]["source_snapshot_digest"],
+    ),
+    artifact_entry(
+        "migration_preflight",
+        "inline_json",
+        release_manifest["migration"]["migration_preflight_sha256"],
+        "rqa_migration_preflight",
+        ref=release_manifest["migration"]["policy_version"],
+    ),
+    artifact_entry(
+        "migration_backup",
+        "sqlite_backup",
+        release_manifest["migration"]["backup_artifact_sha256"],
+        "rqa_migration_preflight",
+        ref=release_manifest["migration"]["source_db_sha256"],
+        path=release_manifest["migration"]["backup_artifact_path"],
     ),
     artifact_entry(
         "behavior_config",
@@ -2276,6 +2383,75 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_live_gate_stdout}" \
   '"strict_gateway_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_MIGRATION_PREFLIGHT_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_migration_preflight":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_migration_preflight_stdout="${WORK_DIR}/tampered-rqa-migration-preflight-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_MIGRATION_PREFLIGHT_STDOUT_REPORT}" \
+  >"${tampered_rqa_migration_preflight_stdout}"; then
+  echo "production-ready reports must bind migration preflight status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_migration_preflight_stdout}" \
+  '"rqa_migration_preflight_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_MIGRATION_PREFLIGHT_BACKUP_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_migration_preflight":
+        gate_json = json.loads(gate["stdout_tail"][-1])
+        gate_json["backup"]["artifact_path"] = ""
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+report["release_manifest"]["migration"]["backup_artifact_path"] = ""
+report["release_manifest_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_manifest"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+for entry in report["release_artifact_registry"]["entries"]:
+    if entry.get("name") == "migration_backup":
+        entry["path"] = ""
+report["release_artifact_registry_digest"] = hashlib.sha256(
+    json.dumps(
+        report["release_artifact_registry"],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_migration_preflight_backup_stdout="${WORK_DIR}/tampered-rqa-migration-preflight-backup.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_MIGRATION_PREFLIGHT_BACKUP_REPORT}" \
+  >"${tampered_rqa_migration_preflight_backup_stdout}"; then
+  echo "production-ready reports must bind migration backup path evidence" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_migration_preflight_backup_stdout}" \
+  '"rqa_migration_preflight_backup_path_missing" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_STDOUT_REPORT}" <<'PY'
 import json
@@ -3326,6 +3502,7 @@ failed_report="${WORK_DIR}/live-failed-gate.json"
 if env \
   TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD=${PASS_CMD}" \

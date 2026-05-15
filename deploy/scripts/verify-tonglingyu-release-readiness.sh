@@ -17,6 +17,7 @@ RQA_EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
 RQA_UPSTREAM_MODEL="${TONGLINGYU_UPSTREAM_MODEL:-${AGENT_RUNTIME_HERMES_MODEL:-hermes-agent}}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
+  || [[ -n "${TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD:-}" ]] \
@@ -34,6 +35,7 @@ if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   GATE_CMD_OVERRIDES_USED="true"
 fi
 RUNTIME_CONFIG_CMD="${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-${SCRIPT_DIR}/verify-tonglingyu-runtime-config.sh}"
+RQA_MIGRATION_PREFLIGHT_CMD="${TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-migration-preflight.sh}"
 RQA_QUALITY_CMD="${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-quality-gate.sh}"
 RQA_RESTORE_DRILL_CMD="${TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-backup-restore-drill.sh}"
 RQA_PERFORMANCE_CMD="${TONGLINGYU_RELEASE_RQA_PERFORMANCE_CMD:-${SCRIPT_DIR}/verify-tonglingyu-rqa-performance-budget.sh}"
@@ -165,6 +167,9 @@ failed=0
 run_gate "runtime_config" "true" env \
   "TONGLINGYU_RUNTIME_CONFIG_REQUIRE_DOCKER=${require_live}" \
   "${RUNTIME_CONFIG_CMD}" || failed=1
+run_gate "rqa_migration_preflight" "true" env \
+  "TONGLINGYU_RQA_MIGRATION_PREFLIGHT_REQUIRE_LIVE=${require_live}" \
+  "${RQA_MIGRATION_PREFLIGHT_CMD}" || failed=1
 if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
   run_gate "retrieval_quality" "true" env \
     "TONGLINGYU_UPSTREAM_MODEL=${RQA_UPSTREAM_MODEL}" \
@@ -348,6 +353,10 @@ def build_release_manifest():
         "retrieval_quality",
         "tonglingyu.rqa_quality_gate",
     ) or {}
+    migration_gate = success_json_from_gate_stdout(
+        "rqa_migration_preflight",
+        "tonglingyu.rqa_migration_preflight_gate",
+    ) or {}
     security_gate = success_json_from_gate_stdout(
         "security_scan",
         "tonglingyu.release_security_gate",
@@ -357,6 +366,10 @@ def build_release_manifest():
     behavior_config = rqa_gate.get("behavior_config") or {}
     kb_version = rqa_gate.get("kb_version") or {}
     source_license = rqa_gate.get("source_license_summary") or {}
+    migration_preflight = migration_gate.get("migration_preflight") or {}
+    migration_counts = migration_gate.get("migration_counts") or {}
+    migration_backup = migration_gate.get("backup") or {}
+    migration_db = migration_gate.get("db") or {}
     manifest = {
         "object": "tonglingyu.release_manifest",
         "schema_version": 1,
@@ -387,6 +400,22 @@ def build_release_manifest():
             "source_license_summary_digest": (
                 canonical_digest(source_license) if source_license else ""
             ),
+        },
+        "migration": {
+            "policy_version": migration_gate.get("policy_version"),
+            "mode": migration_gate.get("mode"),
+            "require_live": migration_gate.get("require_live"),
+            "source_mode": migration_gate.get("source_mode"),
+            "source_db_sha256": migration_db.get("source_db_sha256"),
+            "backup_artifact_path": migration_backup.get("artifact_path"),
+            "backup_artifact_path_sha256": migration_backup.get("artifact_path_sha256"),
+            "backup_artifact_sha256": migration_backup.get("artifact_sha256"),
+            "migration_preflight_sha256": (
+                canonical_digest(migration_preflight) if migration_preflight else ""
+            ),
+            "required_migration_count": migration_counts.get("required"),
+            "applied_migration_count": migration_counts.get("applied"),
+            "pending_migration_count": migration_counts.get("pending"),
         },
         "behavior_config": {
             "behavior_config_digest": behavior_config.get("behavior_config_digest"),
@@ -453,6 +482,7 @@ def build_release_artifact_registry():
     ) or {}
     manifest_rqa = release_manifest.get("rqa") or {}
     manifest_runtime = release_manifest.get("runtime_config") or {}
+    manifest_migration = release_manifest.get("migration") or {}
     manifest_behavior = release_manifest.get("behavior_config") or {}
     manifest_security = release_manifest.get("security") or {}
     entries = []
@@ -508,6 +538,21 @@ def build_release_artifact_registry():
         manifest_rqa.get("source_license_summary_digest"),
         "retrieval_quality",
         ref=manifest_rqa.get("source_snapshot_digest"),
+    )
+    add_entry(
+        "migration_preflight",
+        "inline_json",
+        manifest_migration.get("migration_preflight_sha256"),
+        "rqa_migration_preflight",
+        ref=manifest_migration.get("policy_version"),
+    )
+    add_entry(
+        "migration_backup",
+        "sqlite_backup",
+        manifest_migration.get("backup_artifact_sha256"),
+        "rqa_migration_preflight",
+        ref=manifest_migration.get("source_db_sha256"),
+        path=manifest_migration.get("backup_artifact_path") or "",
     )
     add_entry(
         "behavior_config",

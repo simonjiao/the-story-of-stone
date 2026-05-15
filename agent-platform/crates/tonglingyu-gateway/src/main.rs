@@ -83,6 +83,7 @@ enum Command {
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
+    RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
     RqaUserLifecycle(RqaUserLifecycleArgs),
@@ -160,6 +161,16 @@ struct EvalArgs {
     limit: usize,
     #[arg(long)]
     report: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeSchemaPreflightArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1021,6 +1032,12 @@ async fn main() -> Result<()> {
             } else {
                 Err(anyhow!("tonglingyu eval failed"))
             }
+        }
+        Command::RuntimeSchemaPreflight(args) => {
+            let report = TonglingyuRuntimeStore::new(args.db.clone())
+                .runtime_schema_migration_preflight()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
         }
         Command::BackupDb(args) => {
             backup_db(&args)?;

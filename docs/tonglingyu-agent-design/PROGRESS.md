@@ -728,13 +728,17 @@
   恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
   incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
   反向打断恢复演练；2026-05-16 本地 fixture 恢复演练已重新通过。
-- 2026-05-16 最新 preflight release readiness 已消除 required gate failure：
-  runtime config 使用静态 compose/env 解析通过，默认 RQA DB 的旧 eval artifact
-  已审计关闭，`retrieval_quality` open P0 failure/task 为 0，digest image refs
-  加 fixture image scan 下 `security_scan` 通过；当前
-  `required_failures=[]`、状态为 `passed_with_skipped_gates`。仍不能声明
+- 2026-05-16 带 digest image refs 和 fixture image scan 的 preflight release
+  readiness 可消除 required gate failure：runtime config 静态 compose/env 解析通过，
+  默认 RQA DB 的旧 eval artifact 已审计关闭，`retrieval_quality` open P0
+  failure/task 为 0，`security_scan` 在该 fixture 配置下通过。仍不能声明
   production-ready：live mode 未开启，model upstream、strict Gateway、
   Open WebUI Function、Open WebUI admin Action 仍 skipped，browser review 尚未确认。
+- 2026-05-16 默认本地配置复跑 release readiness：新增
+  `rqa_migration_preflight` 通过并写入 release manifest / artifact registry；
+  saved report validator 对失败报告校验通过；但 `security_scan` 因本地 image refs
+  未 digest-pinned 且缺 image scan 证据失败，live gates 仍 skipped。因此默认本地
+  状态仍是 fail-closed，不是 production-ready。
 - 2026-05-16 全量 `docs/tonglingyu-agent-design/*.md` markdownlint 已通过：
   历史表格分隔行已规范化，重复标题规则改为同一父级内不重复，未改变通灵玉
   设计文档的正文语义。
@@ -764,6 +768,16 @@
   digest/source gate/ref/path、365 天保留策略与 legal hold 支持。saved report
   validator 会重算 registry digest，并拒绝 production-ready report 缺关键 registry
   entry；release automation artifact 已记录 registry digest 和 entry count。
+- Release readiness 已新增 `rqa_migration_preflight` 必跑 gate：
+  `tonglingyu-gateway runtime-schema-preflight` 暴露 runtime schema preflight；
+  `verify-tonglingyu-rqa-migration-preflight.sh` 先执行 SQLite 只读 backup，再输出
+  backup path/hash、source DB hash、schema preflight digest、migration count 和
+  no-secret/no-rebuild/no-delete 检查。release manifest / artifact registry 已绑定
+  migration backup 与 preflight digest；saved report validator 会拒绝缺 gate
+  stdout、缺备份路径、preflight digest 不匹配、production-ready 使用非 live
+  preflight 或 pending migration 未清零的报告。2026-05-16 contract smoke、
+  fixture preflight gate、非 live readiness saved report validation 和
+  `cargo check -p tonglingyu-gateway` 已通过。
 - 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
   live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
   failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
@@ -811,9 +825,10 @@
 
 1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
    本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
-2. 实现 RQA Milestone I-J 剩余项：生产 DB migration 备份/preflight、
-   live existing_refs 恢复演练、live report freshness 和目标 release run
-   artifact 留存。
+2. 实现 RQA Milestone J 剩余项：目标 production DB pre-migration
+   backup/preflight artifact、live existing_refs 恢复演练、live report freshness、
+   目标 release run artifact 留存，以及当前运行镜像/代码/migration 状态的 live
+   绑定。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
    post-release monitor、目标环境 capacity/load、incident response drill 和
    audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。
