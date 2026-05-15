@@ -8,7 +8,7 @@ use agent_core::{
 use agent_runtime::{HermesRuntimeClient, MinimalRuntimeClient, RuntimeProfileRegistry};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -184,10 +184,81 @@ pub struct RuntimeStoreStats {
     pub blocks: i64,
     pub evidence_packages: i64,
     pub evidence_cards: i64,
+    pub retrieval_failures: i64,
     pub audit_events: i64,
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
+    pub retrieval_failure_status: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
+}
+
+pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failures-v1";
+pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
+pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalFailureRecord {
+    pub failure_id: String,
+    pub trace_id: String,
+    pub package_id: Option<String>,
+    pub question_sha256: String,
+    pub question_char_count: usize,
+    pub question_summary: String,
+    pub kb_schema_version: String,
+    pub kb_version_id: Option<String>,
+    pub failure_type: String,
+    pub redacted_query_terms: Vec<String>,
+    pub required_evidence_types: Vec<String>,
+    pub actual_evidence_types: Vec<String>,
+    pub expected_evidence_ids: Vec<String>,
+    pub selected_evidence_ids: Vec<String>,
+    pub missing_evidence_types: Vec<String>,
+    pub quality_issues: Vec<String>,
+    pub agent_diagnosis: Option<String>,
+    pub proposed_fix: Option<String>,
+    pub human_review_status: String,
+    pub reviewer: Option<String>,
+    pub review_note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalFailureCreateInput {
+    pub trace_id: String,
+    pub package_id: Option<String>,
+    pub question: String,
+    pub quality_report: RetrievalQualityReport,
+    pub selected_evidence_ids: Vec<String>,
+    pub expected_evidence_ids: Vec<String>,
+    pub agent_diagnosis: Option<String>,
+    pub proposed_fix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalFailureView {
+    SafeSummary,
+    AdminDetail,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalFailureListInput {
+    pub human_review_status: Option<String>,
+    pub failure_type: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+    pub view: RetrievalFailureView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalFailureListResult {
+    pub object: String,
+    pub schema_version: String,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub items: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +567,12 @@ impl TonglingyuRuntimeStore {
         runtime_store_stats(&conn)
     }
 
+    pub fn runtime_schema_migration_preflight(&self) -> Result<Value> {
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("open runtime sqlite db {}", self.db_path.display()))?;
+        runtime_schema_migration_preflight(&conn)
+    }
+
     pub fn package_ids_for_trace(&self, trace_id: &str) -> Result<Vec<String>> {
         let conn = self.open_connection()?;
         runtime_package_ids_for_trace(&conn, trace_id)
@@ -504,6 +581,48 @@ impl TonglingyuRuntimeStore {
     pub fn audit_events_for_trace(&self, trace_id: &str) -> Result<Vec<Value>> {
         let conn = self.open_connection()?;
         runtime_audit_events_for_trace(&conn, trace_id)
+    }
+
+    pub fn create_retrieval_failure(
+        &self,
+        input: RetrievalFailureCreateInput,
+    ) -> Result<RetrievalFailureRecord> {
+        let conn = self.open_connection()?;
+        create_retrieval_failure(&conn, input)
+    }
+
+    pub fn list_retrieval_failures(
+        &self,
+        input: RetrievalFailureListInput,
+    ) -> Result<RetrievalFailureListResult> {
+        let conn = self.open_connection()?;
+        list_retrieval_failures(&conn, input)
+    }
+
+    pub fn read_retrieval_failure(
+        &self,
+        failure_id: &str,
+        view: RetrievalFailureView,
+    ) -> Result<Option<Value>> {
+        let conn = self.open_connection()?;
+        read_retrieval_failure(&conn, failure_id, view)
+    }
+
+    pub fn update_retrieval_failure_status(
+        &self,
+        failure_id: &str,
+        human_review_status: &str,
+        reviewer: Option<&str>,
+        review_note: Option<&str>,
+    ) -> Result<Option<RetrievalFailureRecord>> {
+        let conn = self.open_connection()?;
+        update_retrieval_failure_status(
+            &conn,
+            failure_id,
+            human_review_status,
+            reviewer,
+            review_note,
+        )
     }
 
     pub fn rebuild_knowledge_base_from_snapshots(
@@ -1515,6 +1634,7 @@ pub fn execute_runtime_workflow(
     });
     let mut steps = Vec::new();
     let mut cards = Vec::new();
+    let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
     let mut text_required_types = input
         .required_evidence_types
         .iter()
@@ -1540,6 +1660,7 @@ pub fn execute_runtime_workflow(
         } => (cards, *quality_report),
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
+    retrieval_failure_candidates.push((text_quality_report.clone(), evidence_ids(&text_cards)));
     cards = merge_cards(cards, text_cards.clone());
     let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
     steps.push(workflow_step_report(
@@ -1584,6 +1705,10 @@ pub fn execute_runtime_workflow(
             } => (cards, *quality_report),
             other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
         };
+        retrieval_failure_candidates.push((
+            commentary_quality_report.clone(),
+            evidence_ids(&commentary_cards),
+        ));
         cards = merge_cards(cards, commentary_cards.clone());
         let commentary_plan_step =
             workflow_plan_step(&workflow_plan, "commentary_evidence_search")?;
@@ -1623,6 +1748,16 @@ pub fn execute_runtime_workflow(
         TonglingyuToolOutput::EvidencePackage { package, .. } => *package,
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
+    for (quality_report, selected_evidence_ids) in retrieval_failure_candidates {
+        record_retrieval_failure_if_needed(
+            conn,
+            &input.trace_id,
+            &package.package_id,
+            &input.question,
+            quality_report,
+            selected_evidence_ids,
+        )?;
+    }
     let package_plan_step = workflow_plan_step(&workflow_plan, "evidence_package_create")?;
     let package_step_id = package_plan_step.step_id.clone();
     let package_output_ref = workflow_output_ref(&input.trace_id, &package_step_id);
@@ -3289,6 +3424,25 @@ fn text_stream_chunks(content: &str, max_chars: usize) -> Vec<String> {
 }
 
 pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = apply_runtime_schema(conn);
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        apply_runtime_schema(conn)
+    }
+}
+
+fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -3348,15 +3502,90 @@ pub fn init_runtime_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS retrieval_failures (
+            failure_id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            package_id TEXT,
+            question_sha256 TEXT NOT NULL,
+            question_char_count INTEGER NOT NULL,
+            question_summary TEXT NOT NULL,
+            kb_schema_version TEXT NOT NULL,
+            kb_version_id TEXT,
+            failure_type TEXT NOT NULL,
+            redacted_query_terms_json TEXT NOT NULL,
+            required_evidence_types_json TEXT NOT NULL,
+            actual_evidence_types_json TEXT NOT NULL,
+            expected_evidence_ids_json TEXT NOT NULL,
+            selected_evidence_ids_json TEXT NOT NULL,
+            missing_evidence_types_json TEXT NOT NULL,
+            quality_issues_json TEXT NOT NULL,
+            agent_diagnosis TEXT,
+            proposed_fix TEXT,
+            human_review_status TEXT NOT NULL,
+            reviewer TEXT,
+            review_note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            resolved_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
         CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_failures_trace ON retrieval_failures(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_failures_package ON retrieval_failures(package_id);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_failures_status ON retrieval_failures(human_review_status);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_failures_type ON retrieval_failures(failure_type);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_failures_created ON retrieval_failures(created_at);
         "#,
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-runtime-schema-v1", now_rfc3339()],
     )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![RETRIEVAL_FAILURE_SCHEMA_VERSION, now_rfc3339()],
+    )?;
     Ok(())
+}
+
+pub fn runtime_schema_migration_preflight(conn: &Connection) -> Result<Value> {
+    let required_migrations = runtime_schema_required_migrations();
+    let applied_migrations = if sqlite_table_exists(conn, "schema_migrations")? {
+        collect_schema_migrations(conn)?
+    } else {
+        Vec::new()
+    };
+    let applied_set = applied_migrations.iter().cloned().collect::<BTreeSet<_>>();
+    let pending_migrations = required_migrations
+        .iter()
+        .filter(|migration| !applied_set.contains(*migration))
+        .map(|migration| migration.to_string())
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "object": "tonglingyu.runtime_schema_migration_preflight",
+        "required_migrations": required_migrations,
+        "applied_migrations": applied_migrations,
+        "pending_migrations": pending_migrations,
+        "will_rebuild_knowledge_base": false,
+        "will_delete_runtime_data": false,
+        "contains_secret_values": false,
+    }))
+}
+
+fn runtime_schema_required_migrations() -> Vec<String> {
+    vec![
+        "tonglingyu-runtime-schema-v1".to_string(),
+        RETRIEVAL_FAILURE_SCHEMA_VERSION.to_string(),
+    ]
+}
+
+fn collect_schema_migrations(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT migration_id FROM schema_migrations ORDER BY migration_id")?;
+    stmt.query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub fn has_knowledge_base(path: &Path) -> Result<bool> {
@@ -3387,6 +3616,7 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         blocks: table_count(conn, "blocks")?,
         evidence_packages: table_count(conn, "evidence_packages")?,
         evidence_cards: table_count(conn, "evidence_cards")?,
+        retrieval_failures: table_count(conn, "retrieval_failures")?,
         audit_events: table_count(conn, "audit_events")?,
         review_status: grouped_count_map(
             conn,
@@ -3395,6 +3625,10 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         evidence_types: grouped_count_map(
             conn,
             "SELECT evidence_type, COUNT(*) FROM evidence_cards GROUP BY evidence_type",
+        )?,
+        retrieval_failure_status: grouped_count_map(
+            conn,
+            "SELECT human_review_status, COUNT(*) FROM retrieval_failures GROUP BY human_review_status",
         )?,
         audit_event_types: grouped_count_map(
             conn,
@@ -3416,6 +3650,518 @@ pub fn runtime_audit_events_for_trace(conn: &Connection, trace_id: &str) -> Resu
         "SELECT event_id, event_type, payload_json, created_at FROM audit_events WHERE trace_id = ?1 ORDER BY created_at, event_id",
         trace_id,
     )
+}
+
+pub fn create_retrieval_failure(
+    conn: &Connection,
+    input: RetrievalFailureCreateInput,
+) -> Result<RetrievalFailureRecord> {
+    if input.quality_report.production_ready {
+        return Err(anyhow!(
+            "retrieval failure requires a non-production-ready quality report"
+        ));
+    }
+    if input.quality_report.query_summary.question_sha256 != hash_text(&input.question) {
+        return Err(anyhow!(
+            "retrieval failure question hash does not match quality report"
+        ));
+    }
+    let failure_id = format!("rf-{}", uuid::Uuid::now_v7().simple());
+    let now = now_rfc3339();
+    let failure_type = retrieval_failure_type(&input.quality_report.issues);
+    let question_summary = retrieval_failure_question_summary(&input.quality_report);
+    let kb_version_id = latest_kb_version_id(conn)?;
+    let agent_diagnosis = input.agent_diagnosis.unwrap_or_else(|| {
+        format!(
+            "quality_status={}; production_ready={}; issue_count={}",
+            input.quality_report.quality_status,
+            input.quality_report.production_ready,
+            input.quality_report.issues.len()
+        )
+    });
+    let proposed_fix = input.proposed_fix.or_else(|| {
+        if input.quality_report.recommended_follow_up.is_empty() {
+            None
+        } else {
+            Some(input.quality_report.recommended_follow_up.join(","))
+        }
+    });
+    conn.execute(
+        r#"
+        INSERT INTO retrieval_failures (
+            failure_id, trace_id, package_id, question_sha256, question_char_count,
+            question_summary, kb_schema_version, kb_version_id, failure_type,
+            redacted_query_terms_json, required_evidence_types_json,
+            actual_evidence_types_json, expected_evidence_ids_json,
+            selected_evidence_ids_json, missing_evidence_types_json,
+            quality_issues_json, agent_diagnosis, proposed_fix, human_review_status,
+            reviewer, review_note, created_at, updated_at, resolved_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+        )
+        "#,
+        params![
+            failure_id,
+            input.trace_id,
+            input.package_id,
+            input.quality_report.query_summary.question_sha256,
+            input.quality_report.query_summary.question_char_count as i64,
+            question_summary,
+            input
+                .quality_report
+                .source_coverage_boundary
+                .kb_schema_version,
+            kb_version_id,
+            failure_type,
+            serde_json::to_string(&input.quality_report.query_summary.redacted_terms)?,
+            serde_json::to_string(&input.quality_report.evidence_type_coverage.required)?,
+            serde_json::to_string(&input.quality_report.evidence_type_coverage.selected)?,
+            serde_json::to_string(&input.expected_evidence_ids)?,
+            serde_json::to_string(&input.selected_evidence_ids)?,
+            serde_json::to_string(&input.quality_report.evidence_type_coverage.missing)?,
+            serde_json::to_string(&input.quality_report.issues)?,
+            agent_diagnosis,
+            proposed_fix,
+            "open",
+            Option::<String>::None,
+            Option::<String>::None,
+            now,
+            now,
+            Option::<String>::None,
+        ],
+    )?;
+    let record = load_retrieval_failure(conn, &failure_id)?
+        .ok_or_else(|| anyhow!("retrieval failure was not readable after insert"))?;
+    append_runtime_audit_event(
+        conn,
+        &record.trace_id,
+        "retrieval_failure_recorded",
+        &json!({
+            "failure_id": &record.failure_id,
+            "package_id": &record.package_id,
+            "failure_type": &record.failure_type,
+            "human_review_status": &record.human_review_status,
+            "question_sha256": &record.question_sha256,
+            "missing_evidence_types": &record.missing_evidence_types,
+            "quality_issue_count": record.quality_issues.len(),
+        }),
+    )?;
+    Ok(record)
+}
+
+pub fn list_retrieval_failures(
+    conn: &Connection,
+    input: RetrievalFailureListInput,
+) -> Result<RetrievalFailureListResult> {
+    let limit = retrieval_failure_page_limit(input.limit);
+    let offset = input.offset;
+    let limit_i64 = limit as i64;
+    let offset_i64 = offset as i64;
+    let base_sql = retrieval_failure_select_sql();
+    let records = match (&input.human_review_status, &input.failure_type) {
+        (Some(status), Some(failure_type)) => {
+            validate_human_review_status(status)?;
+            query_retrieval_failure_records(
+                conn,
+                &format!(
+                    "{base_sql} WHERE human_review_status = ?1 AND failure_type = ?2 ORDER BY created_at DESC, failure_id DESC LIMIT ?3 OFFSET ?4"
+                ),
+                &[status as &dyn ToSql, failure_type, &limit_i64, &offset_i64],
+            )?
+        }
+        (Some(status), None) => {
+            validate_human_review_status(status)?;
+            query_retrieval_failure_records(
+                conn,
+                &format!(
+                    "{base_sql} WHERE human_review_status = ?1 ORDER BY created_at DESC, failure_id DESC LIMIT ?2 OFFSET ?3"
+                ),
+                &[status as &dyn ToSql, &limit_i64, &offset_i64],
+            )?
+        }
+        (None, Some(failure_type)) => query_retrieval_failure_records(
+            conn,
+            &format!(
+                "{base_sql} WHERE failure_type = ?1 ORDER BY created_at DESC, failure_id DESC LIMIT ?2 OFFSET ?3"
+            ),
+            &[failure_type as &dyn ToSql, &limit_i64, &offset_i64],
+        )?,
+        (None, None) => query_retrieval_failure_records(
+            conn,
+            &format!("{base_sql} ORDER BY created_at DESC, failure_id DESC LIMIT ?1 OFFSET ?2"),
+            &[&limit_i64 as &dyn ToSql, &offset_i64],
+        )?,
+    };
+    let next_offset = if records.len() == limit {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    Ok(RetrievalFailureListResult {
+        object: "tonglingyu.retrieval_failure_list".to_string(),
+        schema_version: RETRIEVAL_FAILURE_SCHEMA_VERSION.to_string(),
+        limit,
+        offset,
+        next_offset,
+        items: records
+            .iter()
+            .map(|record| retrieval_failure_record_json(record, input.view))
+            .collect(),
+    })
+}
+
+pub fn read_retrieval_failure(
+    conn: &Connection,
+    failure_id: &str,
+    view: RetrievalFailureView,
+) -> Result<Option<Value>> {
+    Ok(load_retrieval_failure(conn, failure_id)?
+        .as_ref()
+        .map(|record| retrieval_failure_record_json(record, view)))
+}
+
+pub fn update_retrieval_failure_status(
+    conn: &Connection,
+    failure_id: &str,
+    human_review_status: &str,
+    reviewer: Option<&str>,
+    review_note: Option<&str>,
+) -> Result<Option<RetrievalFailureRecord>> {
+    validate_human_review_status(human_review_status)?;
+    let now = now_rfc3339();
+    let resolved_at = if matches!(human_review_status, "resolved" | "wontfix") {
+        Some(now.clone())
+    } else {
+        None
+    };
+    let reviewer = reviewer.and_then(|value| bounded_optional_text(value, 80));
+    let review_note = review_note.and_then(|value| bounded_optional_text(value, 480));
+    let updated = conn.execute(
+        r#"
+        UPDATE retrieval_failures
+        SET human_review_status = ?2,
+            reviewer = ?3,
+            review_note = ?4,
+            updated_at = ?5,
+            resolved_at = ?6
+        WHERE failure_id = ?1
+        "#,
+        params![
+            failure_id,
+            human_review_status,
+            reviewer,
+            review_note,
+            now,
+            resolved_at,
+        ],
+    )?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    let record = load_retrieval_failure(conn, failure_id)?
+        .ok_or_else(|| anyhow!("retrieval failure disappeared after update"))?;
+    append_runtime_audit_event(
+        conn,
+        &record.trace_id,
+        "retrieval_failure_status_updated",
+        &json!({
+            "failure_id": &record.failure_id,
+            "human_review_status": &record.human_review_status,
+            "reviewer": &record.reviewer,
+            "review_note_sha256": record.review_note.as_deref().map(hash_text),
+            "resolved_at": &record.resolved_at,
+        }),
+    )?;
+    Ok(Some(record))
+}
+
+fn record_retrieval_failure_if_needed(
+    conn: &Connection,
+    trace_id: &str,
+    package_id: &str,
+    question: &str,
+    quality_report: RetrievalQualityReport,
+    selected_evidence_ids: Vec<String>,
+) -> Result<Option<RetrievalFailureRecord>> {
+    if quality_report.production_ready {
+        return Ok(None);
+    }
+    create_retrieval_failure(
+        conn,
+        RetrievalFailureCreateInput {
+            trace_id: trace_id.to_string(),
+            package_id: Some(package_id.to_string()),
+            question: question.to_string(),
+            quality_report,
+            selected_evidence_ids,
+            expected_evidence_ids: Vec::new(),
+            agent_diagnosis: None,
+            proposed_fix: None,
+        },
+    )
+    .map(Some)
+}
+
+fn retrieval_failure_type(issues: &[String]) -> String {
+    if issues.iter().any(|issue| issue == "no_evidence_selected") {
+        "no_evidence_selected".to_string()
+    } else if issues
+        .iter()
+        .any(|issue| issue.starts_with("missing_required_evidence_type:"))
+    {
+        "missing_required_evidence_type".to_string()
+    } else if issues
+        .iter()
+        .any(|issue| issue.starts_with("required_exact_term_not_selected:"))
+    {
+        "exact_term_missing".to_string()
+    } else if issues
+        .iter()
+        .any(|issue| issue.starts_with("source_usage_metadata_incomplete:"))
+    {
+        "source_usage_metadata_incomplete".to_string()
+    } else {
+        "quality_report_not_passed".to_string()
+    }
+}
+
+fn retrieval_failure_question_summary(report: &RetrievalQualityReport) -> String {
+    if report.query_summary.redacted_terms.is_empty() {
+        return format!("sha256:{}", &report.query_summary.question_sha256[..12]);
+    }
+    trim_text(&report.query_summary.redacted_terms.join(" "), 200)
+}
+
+fn retrieval_failure_page_limit(requested: usize) -> usize {
+    if requested == 0 {
+        RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE
+    } else {
+        requested.min(RETRIEVAL_FAILURE_MAX_PAGE_SIZE)
+    }
+}
+
+fn validate_human_review_status(status: &str) -> Result<()> {
+    if matches!(status, "open" | "in_review" | "resolved" | "wontfix") {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "invalid retrieval failure human_review_status {status}"
+        ))
+    }
+}
+
+fn bounded_optional_text(value: &str, max_chars: usize) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trim_text(trimmed, max_chars))
+    }
+}
+
+fn latest_kb_version_id(conn: &Connection) -> Result<Option<String>> {
+    if !sqlite_table_exists(conn, "kb_version")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT version_id FROM kb_version ORDER BY built_at DESC, version_id DESC LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn sqlite_table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            params![table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
+}
+
+fn retrieval_failure_select_sql() -> &'static str {
+    r#"
+    SELECT
+        failure_id, trace_id, package_id, question_sha256, question_char_count,
+        question_summary, kb_schema_version, kb_version_id, failure_type,
+        redacted_query_terms_json, required_evidence_types_json,
+        actual_evidence_types_json, expected_evidence_ids_json,
+        selected_evidence_ids_json, missing_evidence_types_json,
+        quality_issues_json, agent_diagnosis, proposed_fix, human_review_status,
+        reviewer, review_note, created_at, updated_at, resolved_at
+    FROM retrieval_failures
+    "#
+}
+
+fn load_retrieval_failure(
+    conn: &Connection,
+    failure_id: &str,
+) -> Result<Option<RetrievalFailureRecord>> {
+    let sql = format!("{} WHERE failure_id = ?1", retrieval_failure_select_sql());
+    let mut records = query_retrieval_failure_records(conn, &sql, &[&failure_id])?;
+    Ok(records.pop())
+}
+
+fn query_retrieval_failure_records(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+) -> Result<Vec<RetrievalFailureRecord>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, retrieval_failure_sql_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(retrieval_failure_record_from_sql_row)
+        .collect()
+}
+
+#[derive(Debug)]
+struct RetrievalFailureSqlRow {
+    failure_id: String,
+    trace_id: String,
+    package_id: Option<String>,
+    question_sha256: String,
+    question_char_count: i64,
+    question_summary: String,
+    kb_schema_version: String,
+    kb_version_id: Option<String>,
+    failure_type: String,
+    redacted_query_terms_json: String,
+    required_evidence_types_json: String,
+    actual_evidence_types_json: String,
+    expected_evidence_ids_json: String,
+    selected_evidence_ids_json: String,
+    missing_evidence_types_json: String,
+    quality_issues_json: String,
+    agent_diagnosis: Option<String>,
+    proposed_fix: Option<String>,
+    human_review_status: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    created_at: String,
+    updated_at: String,
+    resolved_at: Option<String>,
+}
+
+fn retrieval_failure_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RetrievalFailureSqlRow> {
+    Ok(RetrievalFailureSqlRow {
+        failure_id: row.get(0)?,
+        trace_id: row.get(1)?,
+        package_id: row.get(2)?,
+        question_sha256: row.get(3)?,
+        question_char_count: row.get(4)?,
+        question_summary: row.get(5)?,
+        kb_schema_version: row.get(6)?,
+        kb_version_id: row.get(7)?,
+        failure_type: row.get(8)?,
+        redacted_query_terms_json: row.get(9)?,
+        required_evidence_types_json: row.get(10)?,
+        actual_evidence_types_json: row.get(11)?,
+        expected_evidence_ids_json: row.get(12)?,
+        selected_evidence_ids_json: row.get(13)?,
+        missing_evidence_types_json: row.get(14)?,
+        quality_issues_json: row.get(15)?,
+        agent_diagnosis: row.get(16)?,
+        proposed_fix: row.get(17)?,
+        human_review_status: row.get(18)?,
+        reviewer: row.get(19)?,
+        review_note: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
+        resolved_at: row.get(23)?,
+    })
+}
+
+fn retrieval_failure_record_from_sql_row(
+    row: RetrievalFailureSqlRow,
+) -> Result<RetrievalFailureRecord> {
+    Ok(RetrievalFailureRecord {
+        failure_id: row.failure_id,
+        trace_id: row.trace_id,
+        package_id: row.package_id,
+        question_sha256: row.question_sha256,
+        question_char_count: usize::try_from(row.question_char_count)
+            .context("retrieval failure question_char_count is negative")?,
+        question_summary: row.question_summary,
+        kb_schema_version: row.kb_schema_version,
+        kb_version_id: row.kb_version_id,
+        failure_type: row.failure_type,
+        redacted_query_terms: serde_json::from_str(&row.redacted_query_terms_json)?,
+        required_evidence_types: serde_json::from_str(&row.required_evidence_types_json)?,
+        actual_evidence_types: serde_json::from_str(&row.actual_evidence_types_json)?,
+        expected_evidence_ids: serde_json::from_str(&row.expected_evidence_ids_json)?,
+        selected_evidence_ids: serde_json::from_str(&row.selected_evidence_ids_json)?,
+        missing_evidence_types: serde_json::from_str(&row.missing_evidence_types_json)?,
+        quality_issues: serde_json::from_str(&row.quality_issues_json)?,
+        agent_diagnosis: row.agent_diagnosis,
+        proposed_fix: row.proposed_fix,
+        human_review_status: row.human_review_status,
+        reviewer: row.reviewer,
+        review_note: row.review_note,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        resolved_at: row.resolved_at,
+    })
+}
+
+fn retrieval_failure_record_json(
+    record: &RetrievalFailureRecord,
+    view: RetrievalFailureView,
+) -> Value {
+    match view {
+        RetrievalFailureView::AdminDetail => json!({
+            "object": "tonglingyu.retrieval_failure",
+            "view": "admin_detail",
+            "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+            "failure_id": &record.failure_id,
+            "trace_id": &record.trace_id,
+            "package_id": &record.package_id,
+            "question_sha256": &record.question_sha256,
+            "question_char_count": record.question_char_count,
+            "question_summary": &record.question_summary,
+            "kb_schema_version": &record.kb_schema_version,
+            "kb_version_id": &record.kb_version_id,
+            "failure_type": &record.failure_type,
+            "redacted_query_terms": &record.redacted_query_terms,
+            "required_evidence_types": &record.required_evidence_types,
+            "actual_evidence_types": &record.actual_evidence_types,
+            "expected_evidence_ids": &record.expected_evidence_ids,
+            "selected_evidence_ids": &record.selected_evidence_ids,
+            "missing_evidence_types": &record.missing_evidence_types,
+            "quality_issues": &record.quality_issues,
+            "agent_diagnosis": &record.agent_diagnosis,
+            "proposed_fix": &record.proposed_fix,
+            "human_review_status": &record.human_review_status,
+            "reviewer": &record.reviewer,
+            "review_note": &record.review_note,
+            "created_at": &record.created_at,
+            "updated_at": &record.updated_at,
+            "resolved_at": &record.resolved_at,
+        }),
+        RetrievalFailureView::SafeSummary => json!({
+            "object": "tonglingyu.retrieval_failure",
+            "view": "safe_summary",
+            "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+            "failure_id": &record.failure_id,
+            "question_sha256": &record.question_sha256,
+            "question_char_count": record.question_char_count,
+            "question_summary": &record.question_summary,
+            "kb_schema_version": &record.kb_schema_version,
+            "failure_type": &record.failure_type,
+            "redacted_query_terms": &record.redacted_query_terms,
+            "missing_evidence_types": &record.missing_evidence_types,
+            "quality_issue_count": record.quality_issues.len(),
+            "human_review_status": &record.human_review_status,
+            "created_at": &record.created_at,
+            "updated_at": &record.updated_at,
+            "resolved_at": &record.resolved_at,
+        }),
+    }
 }
 
 pub fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> Result<Value> {
@@ -6593,6 +7339,141 @@ mod tests {
                 .iter()
                 .any(|issue| { issue == "required_exact_term_not_selected:寳玉" })
         );
+    }
+
+    #[test]
+    fn retrieval_failure_schema_migration_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        let before = runtime_schema_migration_preflight(&conn).expect("preflight before schema");
+        assert!(
+            before["pending_migrations"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.as_str() == Some(RETRIEVAL_FAILURE_SCHEMA_VERSION)))
+        );
+        assert_eq!(before["contains_secret_values"], json!(false));
+        assert_eq!(before["will_delete_runtime_data"], json!(false));
+
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_runtime_schema(&conn).expect("runtime schema idempotent");
+
+        let after = runtime_schema_migration_preflight(&conn).expect("preflight after schema");
+        assert_eq!(after["pending_migrations"], json!([]));
+        let migration_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE migration_id = ?1",
+                params![RETRIEVAL_FAILURE_SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .expect("migration count");
+        assert_eq!(migration_count, 1);
+        assert!(sqlite_table_exists(&conn, "retrieval_failures").expect("table check"));
+    }
+
+    #[test]
+    fn runtime_schema_rolls_back_failed_migration_batch() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute(
+            "CREATE TABLE retrieval_failures (failure_id TEXT PRIMARY KEY)",
+            [],
+        )
+        .expect("create incompatible table");
+
+        let error = init_runtime_schema(&conn).expect_err("incompatible schema should fail");
+        assert!(error.to_string().contains("retrieval_failures"));
+        assert!(!sqlite_table_exists(&conn, "schema_migrations").expect("table check"));
+        assert!(!sqlite_table_exists(&conn, "audit_events").expect("table check"));
+    }
+
+    #[test]
+    fn workflow_records_retrieval_failure_with_admin_and_safe_views() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "source_of_record": "raw MediaWiki wikitext plus revision metadata",
+            }),
+        );
+        let question = "通灵玉 password=SECRET_RUNTIME_TOKEN_01234567890123456789";
+
+        let workflow = execute_runtime_workflow(
+            &conn,
+            RuntimeWorkflowInput {
+                trace_id: "trace-retrieval-failure-test".to_string(),
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+                profiles: RuntimeWorkflowProfiles::default(),
+            },
+        )
+        .expect("workflow executes");
+
+        let list = list_retrieval_failures(
+            &conn,
+            RetrievalFailureListInput {
+                human_review_status: Some("open".to_string()),
+                failure_type: None,
+                limit: 10,
+                offset: 0,
+                view: RetrievalFailureView::AdminDetail,
+            },
+        )
+        .expect("list failures");
+        assert_eq!(list.items.len(), 1);
+        let item = &list.items[0];
+        assert_eq!(
+            item["failure_type"],
+            json!("source_usage_metadata_incomplete")
+        );
+        assert_eq!(item["trace_id"], json!("trace-retrieval-failure-test"));
+        assert_eq!(item["package_id"], json!(workflow.package.package_id));
+        assert_eq!(item["human_review_status"], json!("open"));
+        assert!(item["selected_evidence_ids"].as_array().is_some_and(|ids| {
+            ids.iter()
+                .any(|id| id.as_str().is_some_and(|id| id.starts_with("ev-")))
+        }));
+        let admin_json = serde_json::to_string(item).expect("admin serializes");
+        assert!(!admin_json.contains(question));
+        assert!(!admin_json.contains("SECRET_RUNTIME_TOKEN"));
+
+        let failure_id = item["failure_id"].as_str().expect("failure id");
+        let updated = update_retrieval_failure_status(
+            &conn,
+            failure_id,
+            "resolved",
+            Some("rqa-reviewer"),
+            Some("source metadata follow-up recorded"),
+        )
+        .expect("update failure")
+        .expect("failure exists");
+        assert_eq!(updated.human_review_status, "resolved");
+        assert!(updated.resolved_at.is_some());
+
+        let safe = read_retrieval_failure(&conn, failure_id, RetrievalFailureView::SafeSummary)
+            .expect("read safe failure")
+            .expect("failure exists");
+        assert_eq!(safe["view"], json!("safe_summary"));
+        assert!(safe.get("trace_id").is_none());
+        assert!(safe.get("package_id").is_none());
+        assert!(safe.get("selected_evidence_ids").is_none());
+        assert_eq!(safe["quality_issue_count"], json!(1));
+
+        let stats = runtime_store_stats(&conn).expect("stats");
+        assert_eq!(stats.retrieval_failures, 1);
+        assert_eq!(stats.retrieval_failure_status.get("resolved"), Some(&1_i64));
+        let events = runtime_audit_events_for_trace(&conn, "trace-retrieval-failure-test")
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "retrieval_failure_recorded"
+                && event["payload"]["failure_type"] == json!("source_usage_metadata_incomplete")
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "retrieval_failure_status_updated"
+                && event["payload"]["review_note_sha256"].as_str().is_some()
+        }));
     }
 
     #[test]

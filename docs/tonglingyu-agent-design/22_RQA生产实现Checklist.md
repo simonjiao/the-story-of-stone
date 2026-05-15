@@ -165,29 +165,42 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 ## Milestone B：retrieval_failures schema
 
-状态：未开始
+状态：已完成（2026-05-15；schema、API、preflight、rollback 和基础自动登记已验证）
 
 目标：线上和 eval 的召回失败样本可追踪、可分派、可人工处理。
 
-- [ ] 添加 additive runtime schema migration。
-- [ ] 新增 `retrieval_failures` 表。
-- [ ] 字段覆盖 failure id、trace id、package id、question summary/hash、kb version。
-- [ ] 字段覆盖 failure type、redacted query terms、required / actual evidence types。
-- [ ] 字段覆盖 expected / selected evidence ids、missing evidence types。
-- [ ] 字段覆盖 quality issues、agent diagnosis、proposed fix。
-- [ ] 字段覆盖 human review status、reviewer、note、created/resolved time。
-- [ ] 添加必要索引：trace、package、status、failure type、created_at。
-- [ ] 添加 Runtime store API：create/list/update/read。
-- [ ] list API 默认分页，最大 page size 有硬上限。
-- [ ] read/list 输出区分 admin detail 和 safe summary。
-- [ ] schema migration 支持从现有生产 DB 升级，不重建 KB 或删除既有数据。
-- [ ] migration preflight 输出 schema version 和待执行 migration，不输出 secret。
-- [ ] migration 失败时不留下半初始化表或不一致 schema version。
-- [ ] 单测覆盖迁移幂等、写入、读取、状态更新和失败回滚。
+- [x] 添加 additive runtime schema migration。
+- [x] 新增 `retrieval_failures` 表。
+- [x] 字段覆盖 failure id、trace id、package id、question summary/hash、kb version。
+- [x] 字段覆盖 failure type、redacted query terms、required / actual evidence types。
+- [x] 字段覆盖 expected / selected evidence ids、missing evidence types。
+- [x] 字段覆盖 quality issues、agent diagnosis、proposed fix。
+- [x] 字段覆盖 human review status、reviewer、note、created/resolved time。
+- [x] 添加必要索引：trace、package、status、failure type、created_at。
+- [x] 添加 Runtime store API：create/list/update/read。
+- [x] list API 默认分页，最大 page size 有硬上限。
+- [x] read/list 输出区分 admin detail 和 safe summary。
+- [x] schema migration 支持从现有生产 DB 升级，不重建 KB 或删除既有数据。
+- [x] migration preflight 输出 schema version 和待执行 migration，不输出 secret。
+- [x] migration 失败时不留下半初始化表或不一致 schema version。
+- [x] 单测覆盖迁移幂等、写入、读取、状态更新和失败回滚。
 
 节点总结：
 
-- 待实现。
+- `tonglingyu-runtime` 已新增 `tonglingyu-retrieval-failures-v1` runtime
+  migration、`retrieval_failures` 表和 trace/package/status/type/created_at 索引。
+- 已新增 create/list/read/update API；list 有默认 page size 和最大 page size，
+  read/list 支持 `admin_detail` 与 `safe_summary`，safe summary 不输出 trace、
+  package 或 selected evidence ids。
+- schema preflight 会列出 required/applied/pending migrations，声明不重建 KB、
+  不删除 runtime data、不包含 secret；autocommit 初始化会在 schema apply 失败时
+  rollback，避免留下半初始化 migration 状态。
+- workflow 会在 `RetrievalQualityReport.production_ready=false` 时写入
+  retrieval failure，并追加 `retrieval_failure_recorded` audit event；状态更新会
+  写 `retrieval_failure_status_updated`，audit 中只记录 review note hash。
+- 验证命令：`cargo test -p tonglingyu-runtime`，35 个测试通过。
+- 仍不能宣布整体 RQA production-ready：Milestone C 的完整触发矩阵、去重、
+  eval expected evidence、release gate 和 saved report validator 仍未完成。
 
 ## Milestone C：自动 failure 记录
 
