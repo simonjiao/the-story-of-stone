@@ -48,6 +48,7 @@ RetrievalQualityReport
     RQA production-ready。
 14. 事故期间通过关闭 RQA、跳过持久化、使用无界队列或删除审计历史来维持
     production-ready。
+15. RQA admin read/list 不写访问审计，或允许无界过滤、无界排序、枚举式探测。
 
 ## 决策基线
 
@@ -67,6 +68,7 @@ RetrievalQualityReport
 | API 契约 | admin API / Action 必须分页、限长、schema version 和兼容校验 |
 | 发布值守 | runbook、alert、rollback、post-release monitor 都是 production blocker |
 | 发布安全 | emergency disable / degraded mode 只能产生 non-production 状态 |
+| Admin 访问 | RQA read/list/update 都必须鉴权、限流、审计和防枚举 |
 
 ## Production 默认阈值
 
@@ -204,6 +206,12 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] admin-only API / Action 支持 list/read/update retrieval failure 人工状态。
 - [ ] admin API / Action 输出带 RQA schema version，字段变更必须有兼容测试。
 - [ ] admin list/read 响应大小有上限，超限必须分页或截断。
+- [ ] admin list/read/update 都写访问审计，记录 actor、action、filter summary、
+      page size、result count 和 trace id。
+- [ ] admin list filter 和 sort 只能使用 allowlist 字段，未知字段 fail-closed。
+- [ ] 直接枚举不存在或未授权 RQA id 时返回脱敏错误，不泄露内部存在性细节。
+- [ ] RQA admin endpoints 继承或定义专用 rate limit / body limit。
+- [ ] admin auth failure、role denial 和 rate-limit denial 都写脱敏 audit event。
 - [ ] retrieval failure 人工状态更新写入 audit event。
 - [ ] 普通用户不能读取或更新 retrieval failure。
 - [ ] admin update 使用 version / updated_at compare-and-set，避免并发覆盖。
@@ -212,7 +220,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] streaming response 同样不泄露内部字段。
 - [ ] strict Gateway gate 增加 admin trace quality summary 校验。
 - [ ] 单测覆盖 admin 可见、admin update、并发冲突、重复更新、普通响应不可见、
-      普通用户不可更新。
+      普通用户不可更新、admin read audit、filter allowlist、rate-limit denial。
 
 节点总结：
 
