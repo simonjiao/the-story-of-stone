@@ -44,6 +44,8 @@ RetrievalQualityReport
     admin list；
 12. Prometheus labels、JSON metrics 或 release report 使用 trace、user、question
     等高基数字段。
+13. 没有 operator runbook、告警规则、回滚步骤和 post-release 监控窗口，却声明
+    RQA production-ready。
 
 ## 决策基线
 
@@ -61,6 +63,7 @@ RetrievalQualityReport
 | 运维闭环 | backup、restore、retention、prune、live release 均纳入验收 |
 | 隐私边界 | RQA 默认只保存脱敏摘要、hash、枚举和 bounded excerpt |
 | API 契约 | admin API / Action 必须分页、限长、schema version 和兼容校验 |
+| 发布值守 | runbook、alert、rollback、post-release monitor 都是 production blocker |
 
 ## Production 默认阈值
 
@@ -359,6 +362,34 @@ release report 和 saved report validator，不能只存在于运行环境中。
 
 - 待实现。
 
+## Milestone L：发布值守、告警和回滚
+
+状态：未开始
+
+目标：RQA production-ready 必须能被 operator 接住，而不是只在发布瞬间通过。
+
+- [ ] 在 deploy runbook 或专门文档中写明 RQA release 流程。
+- [ ] runbook 覆盖 migration preflight、backup、deploy、live gate、saved report
+      validation。
+- [ ] runbook 覆盖回滚到上一镜像/配置的步骤。
+- [ ] runbook 覆盖 DB restore 或 additive schema 保留后的降级处理。
+- [ ] rollback 后必须重新运行 release readiness 或明确标记 non-production。
+- [ ] 定义 RQA 写入失败率、admin API 5xx、admin API latency、open P0 failure、
+      quality gate failure 的告警条件。
+- [ ] 告警指标必须低基数且不包含 query、question、trace 或 package id。
+- [ ] post-release 监控窗口至少覆盖一次真实 live gate 和一次 admin Action/API
+      查询。
+- [ ] post-release 监控记录 operator、时间、环境、报告路径和结论。
+- [ ] production-ready report 必须引用 runbook / rollback / post-release 证据。
+- [ ] release gate 或 saved report validator 缺少值守证据时不能
+      production-ready。
+- [ ] smoke 覆盖告警字段存在性、runbook ref、rollback evidence ref 和
+      post-release monitor ref。
+
+节点总结：
+
+- 待实现。
+
 ## 提交节奏
 
 1. Checklist 基线单独提交。
@@ -369,6 +400,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 6. Milestone H 完成后提交治理任务和反馈闭环。
 7. Milestone I 完成后提交端到端验证。
 8. Milestone J 完成后提交运维恢复和真实发布。
-9. Milestone K 通过后提交最终 production-ready 验证更新。
+9. Milestone K 完成后提交隐私契约和性能预算。
+10. Milestone L 通过后提交最终 production-ready 验证更新。
 
 每次提交前必须更新本 checklist 的状态和节点总结。
