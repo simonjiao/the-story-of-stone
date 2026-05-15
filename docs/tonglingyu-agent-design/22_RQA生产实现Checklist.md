@@ -109,6 +109,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 | 指标 | 默认要求 |
 | --- | --- |
 | quality report coverage | 100% eval case 生成 report |
+| quality_report_production_ready | 100% report production-ready |
 | eval case classification | 100% release case 标记 expected / not-applicable |
 | expected evidence denominator | release suite 中必须大于 0 |
 | expected_evidence_hit@8 | 有 expected evidence 标注的 case 必须 100% 命中 |
@@ -239,34 +240,59 @@ Milestone D）
 
 ## Milestone D：eval 质量指标
 
-状态：未开始
+状态：已完成代码切片（2026-05-15；当前 live KB 因 source usage metadata
+缺失仍 fail-closed，不能声明 RQA production-ready）
 
 目标：eval 从 pass/fail 扩展为生产质量指标。
 
-- [ ] 扩展 eval case，支持 expected evidence ids / block ids。
-- [ ] 所有 release eval case 必须标记 expected evidence 或 not-applicable reason。
-- [ ] expected evidence 分母为 0 时 release quality gate fail-closed。
-- [ ] 增加 expected_evidence_hit@1。
-- [ ] 增加 expected_evidence_hit@3。
-- [ ] 增加 expected_evidence_hit@8。
-- [ ] 增加 required_type_coverage。
-- [ ] 增加 exact_term_coverage。
-- [ ] 增加 source_diversity。
-- [ ] 增加 edition_diversity。
-- [ ] source / edition diversity 标明当前只覆盖 Wikisource source snapshot，
+- [x] 扩展 eval case，支持 expected evidence ids / block ids。
+- [x] 所有 release eval case 必须标记 expected evidence 或 not-applicable reason。
+- [x] expected evidence 分母为 0 时 release quality gate fail-closed。
+- [x] 增加 expected_evidence_hit@1。
+- [x] 增加 expected_evidence_hit@3。
+- [x] 增加 expected_evidence_hit@8。
+- [x] 增加 required_type_coverage。
+- [x] 增加 exact_term_coverage。
+- [x] 增加 source_diversity。
+- [x] 增加 edition_diversity。
+- [x] source / edition diversity 标明当前只覆盖 Wikisource source snapshot，
       不等同于影印或权威校注本复核。
-- [ ] eval case 覆盖需要影印件、权威校注或专家校勘才能确认的问题，并要求
+- [x] eval case 覆盖需要影印件、权威校注或专家校勘才能确认的问题，并要求
       reviewer 降级为资料不足。
-- [ ] 增加 forbidden_conclusion_avoided。
-- [ ] 增加 reviewer_status_matched。
-- [ ] 无 expected evidence 标注的 case 不计入 hit@k 分母。
-- [ ] eval report 输出 quality summary 和 case-level quality details。
-- [ ] eval failure 自动写入 `retrieval_failures`。
-- [ ] 单测覆盖有标注、无标注、阈值达标和阈值失败。
+- [x] 增加 forbidden_conclusion_avoided。
+- [x] 增加 reviewer_status_matched。
+- [x] 无 expected evidence 标注的 case 不计入 hit@k 分母。
+- [x] eval report 输出 quality summary 和 case-level quality details。
+- [x] eval failure 自动写入 `retrieval_failures`。
+- [x] 单测覆盖有标注、无标注、阈值达标和阈值失败。
 
 节点总结：
 
-- 待实现。
+- `tonglingyu-gateway eval` 已输出 `tonglingyu-eval-quality-v1`
+  `quality_summary` 和 case-level `quality`：包含 expected evidence
+  classification、hit@1/@3/@8、required type、exact term、source/edition
+  diversity、source coverage boundary、forbidden conclusion 和 reviewer status。
+- expected evidence hit@k 采用严格口径：一个 case 若标注多个 expected block，
+  必须全部在 top-k 中命中才计为通过；无 expected 标注的 case 只进入普通 eval
+  和 classification，不进入 hit@k 分母。
+- eval case 显式携带 expected ids/block ids 或 not-applicable reason；新增未分类
+  case 不再被默认兜底为 not-applicable。
+- 新增影印件、权威校注本、专家校勘边界 case；Runtime reviewer 对这类确认性
+  问题降级为资料不足，防止把当前 Wikisource snapshot 包装成校勘完成。
+- eval case 失败会通过 `retrieval_failures` API 写入失败样本；本地 live
+  eval 已写入 103 条 failure 记录。
+- 验证命令：
+  `cargo test -p tonglingyu-runtime`（39 个测试通过）；
+  `cargo test -p tonglingyu-gateway`（18 个测试通过）；
+  `cargo run -p tonglingyu-gateway -- eval`，参数为
+  `--db ../data/tonglingyu/tonglingyu.db`、`--limit 8` 和
+  `--report /tmp/tonglingyu-eval-quality-check.json`，当前按 production 口径
+  返回失败。
+- 当前 eval 结果：103 个 case 全部生成 report，expected evidence 分母为 5，
+  expected_evidence_hit@8 为 5/5；但 `quality_report_production_ready=0/103`，
+  blocker 为 `quality_report_production_ready_below_100_percent`，原因是当前
+  source 缺少机器可读 license / attribution metadata。该结果是正确的
+  fail-closed，不是 production-ready 通过。
 
 ## Milestone E：admin trace 和 metrics
 

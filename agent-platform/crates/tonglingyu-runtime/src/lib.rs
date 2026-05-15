@@ -5879,6 +5879,18 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     {
         issues.push("版本边界问题缺少版本证据，必须标注限制。".to_string());
     }
+    if question.contains("影印")
+        || question.contains("校注")
+        || question.contains("校勘")
+        || question.contains("专家")
+        || question.contains("權威")
+        || question.contains("权威")
+    {
+        issues.push(
+            "source coverage boundary 缺少影印件、权威校注本或专家校勘复核，必须降级为资料不足。"
+                .to_string(),
+        );
+    }
     let status = if issues.is_empty() {
         "passed"
     } else {
@@ -7908,6 +7920,23 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| issue.contains("当前证据全为脂批"))
+        );
+    }
+
+    #[test]
+    fn reviewer_downgrades_facsimile_authoritative_collation_claim() {
+        let cards = vec![sample_card("base_text")];
+        let question = "请确认通灵玉铭文在影印件、权威校注本和专家校勘中完全一致吗？";
+        let claims = claims_from_cards(question, &cards);
+        let review = review(question, &cards, &claims);
+
+        assert_eq!(review.status, "needs_revision");
+        assert_eq!(review.severity, "medium");
+        assert!(
+            review
+                .issues
+                .iter()
+                .any(|issue| issue.contains("缺少影印件、权威校注本或专家校勘复核"))
         );
     }
 

@@ -503,6 +503,21 @@
   rollback。`cargo test -p tonglingyu-runtime` 已通过 38 个测试。该结果仍不等于
   完整 production-ready，因为 eval quality metrics、release quality gate 和 saved
   report validator 尚未完成。
+- RQA Milestone D 已完成代码切片：
+  `tonglingyu-gateway eval` 已输出 `tonglingyu-eval-quality-v1` quality summary
+  和 case-level quality details，覆盖 expected evidence classification、hit@1/@3/@8、
+  required type、exact term、source/edition diversity、source coverage boundary、
+  forbidden conclusion、reviewer status 和 eval failure 写入
+  `retrieval_failures`。expected evidence 分母当前为 5，hit@8 为 5/5；新增
+  影印件、权威校注本、专家校勘边界 case，并由 Runtime reviewer 降级为资料不足。
+  `cargo test -p tonglingyu-runtime` 已通过 39 个测试，
+  `cargo test -p tonglingyu-gateway` 已通过 18 个测试。
+- 当前 RQA eval 的 production blocker 已被明确暴露：
+  本地 live eval 生成 103 个 case report，但
+  `quality_report_production_ready=0/103`，`quality_summary.status=failed`，
+  blocker 为 `quality_report_production_ready_below_100_percent`；主要原因是当前
+  source 缺少机器可读 license / attribution metadata。该失败是正确的
+  fail-closed，不允许被解释为 RQA production-ready 已通过。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。
@@ -523,9 +538,10 @@
 
 ## 下一步
 
-1. 实现 RQA Milestone D：eval quality metrics、expected evidence case
-   classification、case-level quality details 和 eval failure 写入。
-2. 串接 RQA release gate 和 saved report validator，使
+1. 补齐当前 live KB 的 source license / usage / attribution metadata，并重建后
+   重跑 RQA eval，目标是 `quality_report_production_ready=100%`。
+2. 实现 RQA Milestone E/F/G：admin trace / metrics、release quality gate 和
+   saved report validator，使
    production-ready artifact 由自动化 gate 生成，而不是人工本地命令证明。
 3. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 4. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
