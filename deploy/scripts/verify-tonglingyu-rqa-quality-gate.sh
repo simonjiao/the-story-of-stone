@@ -9,10 +9,15 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 DB_PATH="${TONGLINGYU_RQA_DB_PATH:-${REPO_DIR}/data/tonglingyu/tonglingyu.db}"
 EVAL_LIMIT="${TONGLINGYU_RQA_EVAL_LIMIT:-8}"
 EVAL_REPORT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_PATH:-}"
+EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
 GENERATED_REPORT="false"
 
 if [[ -z "${EVAL_REPORT_PATH}" ]]; then
-  EVAL_REPORT_PATH="${WORK_DIR}/tonglingyu-rqa-eval-report.json"
+  if [[ -n "${EVAL_REPORT_OUTPUT_PATH}" ]]; then
+    EVAL_REPORT_PATH="${EVAL_REPORT_OUTPUT_PATH}"
+  else
+    EVAL_REPORT_PATH="${WORK_DIR}/tonglingyu-rqa-eval-report.json"
+  fi
   GENERATED_REPORT="true"
   if ! (
     cd "${REPO_DIR}/agent-platform"
@@ -298,6 +303,7 @@ quality_summary_public = {
 }
 eval_report_sha256 = file_sha256(eval_report_path) if eval_report_path.is_file() else ""
 eval_run_id = f"rqa-eval-{eval_report_sha256[:16]}" if eval_report_sha256 else ""
+eval_report_resolved_path = str(eval_report_path.expanduser().resolve())
 runtime_policy_digest = optional_file_sha256(
     repo_dir / "agent-platform" / "crates" / "tonglingyu-runtime" / "src" / "lib.rs"
 )
@@ -323,6 +329,7 @@ gate = {
     "eval_suite_version": summary.get("schema_version"),
     "eval_run_id": eval_run_id,
     "eval_report_sha256": eval_report_sha256,
+    "eval_report_path": eval_report_resolved_path,
     "eval_report_generated_by_gate": generated_report_raw == "true",
     "eval_limit": int(eval_limit_raw),
     "source_snapshot_digest": source_snapshot_digest,

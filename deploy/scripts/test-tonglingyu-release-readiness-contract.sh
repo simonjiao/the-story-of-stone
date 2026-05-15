@@ -31,6 +31,10 @@ TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.jso
 TAMPERED_LIVE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-live-gate-stdout-report.json"
 TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
+TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
+TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
+TAMPERED_RQA_GATE_MISSING_EVAL_REPORT="${WORK_DIR}/tampered-rqa-gate-missing-eval-report.json"
+TAMPERED_PRIVACY_REPORT="${WORK_DIR}/tampered-privacy-report.json"
 TAMPERED_BROWSER_STDOUT_REPORT="${WORK_DIR}/tampered-browser-stdout-report.json"
 TAMPERED_BROWSER_BINDING_REPORT="${WORK_DIR}/tampered-browser-binding-report.json"
 TAMPERED_BROWSER_VALIDATION_REPORT="${WORK_DIR}/tampered-browser-validation-report.json"
@@ -40,6 +44,7 @@ TAMPERED_BROWSER_CHECKED_ITEMS_REPORT="${WORK_DIR}/tampered-browser-checked-item
 TAMPERED_BROWSER_EVIDENCE_HASH_REPORT="${WORK_DIR}/tampered-browser-evidence-hash-report.json"
 TAMPERED_BROWSER_LOCAL_REF_HASH_REPORT="${WORK_DIR}/tampered-browser-local-ref-hash-report.json"
 REVIEWED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+SYNTHETIC_RQA_EVAL_REPORT="${WORK_DIR}/synthetic-rqa-eval-report.json"
 
 mkdir -p "${WORK_DIR}/screenshots"
 : >"${WORK_DIR}/screenshots/models.png"
@@ -759,11 +764,13 @@ assert_report "${tampered_browser_relative_evidence_stdout}" \
 assert_report "${tampered_browser_relative_evidence_stdout}" \
   '"browser_review_validation_evidence_path_must_be_absolute" in report["errors"]'
 
-python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" <<'PY'
+python3 - "${conditions_report}" "${SYNTHETIC_READY_REPORT}" \
+  "${SYNTHETIC_RQA_EVAL_REPORT}" <<'PY'
+import hashlib
 import json
 import sys
 
-source, target = sys.argv[1:3]
+source, target, eval_report_path = sys.argv[1:4]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
 report["production_release_ready"] = True
@@ -772,6 +779,80 @@ report["summary_only"] = False
 report["exit_policy"] = "production_release_ready"
 report["status"] = "passed"
 report["release_blockers"] = []
+quality_summary = {
+    "blockers": [],
+    "eval_case_classification": {"passed": 1, "ratio": 1.0, "total": 1},
+    "eval_failure_records": 0,
+    "exact_term_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
+    "expected_evidence_denominator": 1,
+    "expected_evidence_hit_at_1": {"passed": 1, "ratio": 1.0, "total": 1},
+    "expected_evidence_hit_at_3": {"passed": 1, "ratio": 1.0, "total": 1},
+    "expected_evidence_hit_at_8": {"passed": 1, "ratio": 1.0, "total": 1},
+    "forbidden_conclusion_avoided": {"passed": 1, "ratio": 1.0, "total": 1},
+    "quality_report_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
+    "quality_report_production_ready": {"passed": 1, "ratio": 1.0, "total": 1},
+    "required_type_coverage": {"passed": 1, "ratio": 1.0, "total": 1},
+    "reviewer_status_matched": {"passed": 1, "ratio": 1.0, "total": 1},
+    "schema_version": "tonglingyu-eval-quality-v1",
+    "source_coverage_boundary": {
+        "authoritative_edition_review_status": "not_reviewed",
+        "expert_collation_status": "not_reviewed",
+        "facsimile_review_status": "not_reviewed",
+        "source_snapshot_status": "wikisource_source_snapshot",
+    },
+    "source_diversity": {
+        "boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+        "count": 1,
+        "source_ids": ["hongloumeng-wikisource-120"],
+    },
+    "status": "passed",
+}
+eval_report = {
+    "object": "tonglingyu.eval_report",
+    "status": "passed",
+    "summary": {"failed": 0, "passed": 1, "total": 1},
+    "quality_summary": quality_summary,
+    "cases": [{
+        "block_ids": ["synthetic-block"],
+        "card_count": 1,
+        "evidence_ids": ["synthetic-evidence"],
+        "expected_review_status": "passed",
+        "failures": [],
+        "forbidden_conclusion_count": 0,
+        "id": "synthetic-ready-case",
+        "package_id": "pkg-synthetic",
+        "passed": True,
+        "quality": {
+            "classification": {
+                "classification": "expected_evidence",
+                "expected_block_ids": ["synthetic-block"],
+                "expected_evidence_ids": ["synthetic-evidence"],
+            },
+            "edition_labels": ["synthetic-edition"],
+            "exact_term_coverage": {"passed": 1, "total": 1},
+            "expected_evidence_hit_at_1": True,
+            "expected_evidence_hit_at_3": True,
+            "expected_evidence_hit_at_8": True,
+            "quality_report_count": 1,
+            "quality_report_production_ready_required": True,
+            "quality_report_unallowed_non_production_issues": [],
+            "required_type_required": True,
+            "required_type_passed": True,
+            "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+            "source_ids": ["hongloumeng-wikisource-120"],
+        },
+        "question": "synthetic release eval case",
+        "required_evidence_type": "base_text",
+        "review_severity": "none",
+        "review_status": "passed",
+        "trace_id": "eval-synthetic",
+    }],
+}
+with open(eval_report_path, "w", encoding="utf-8") as handle:
+    json.dump(eval_report, handle, sort_keys=True)
+    handle.write("\n")
+with open(eval_report_path, "rb") as handle:
+    eval_report_sha256 = hashlib.sha256(handle.read()).hexdigest()
 gate_stdout = {
     "runtime_config": {
         "checked_policy_fields": ["TONGLINGYU_AGENT_RUNTIME_MODE"],
@@ -812,8 +893,9 @@ gate_stdout = {
         },
         "errors": [],
         "eval_report_generated_by_gate": True,
-        "eval_report_sha256": "1" * 64,
-        "eval_run_id": "rqa-eval-synthetic",
+        "eval_report_path": eval_report_path,
+        "eval_report_sha256": eval_report_sha256,
+        "eval_run_id": f"rqa-eval-{eval_report_sha256[:16]}",
         "eval_suite_version": "tonglingyu-eval-quality-v1",
         "kb_build_hash": "2" * 64,
         "kb_version": {
@@ -828,24 +910,20 @@ gate_stdout = {
         "open_p0_retrieval_failures": 0,
         "quality_gate_passed": True,
         "quality_summary": {
-            "blockers": [],
-            "eval_case_classification": {"passed": 103, "ratio": 1.0, "total": 103},
-            "eval_failure_records": 0,
-            "exact_term_coverage": {"passed": 3, "ratio": 1.0, "total": 3},
-            "expected_evidence_denominator": 5,
-            "expected_evidence_hit_at_8": {"passed": 5, "ratio": 1.0, "total": 5},
-            "forbidden_conclusion_avoided": {"passed": 103, "ratio": 1.0, "total": 103},
-            "quality_report_coverage": {"passed": 103, "ratio": 1.0, "total": 103},
-            "quality_report_production_ready": {"passed": 86, "ratio": 1.0, "total": 86},
-            "required_type_coverage": {"passed": 33, "ratio": 1.0, "total": 33},
-            "reviewer_status_matched": {"passed": 103, "ratio": 1.0, "total": 103},
-            "source_coverage_boundary": {
-                "authoritative_edition_review_status": "not_reviewed",
-                "expert_collation_status": "not_reviewed",
-                "facsimile_review_status": "not_reviewed",
-                "source_snapshot_status": "wikisource_source_snapshot",
-            },
-            "status": "passed",
+            "blockers": quality_summary["blockers"],
+            "eval_case_classification": quality_summary["eval_case_classification"],
+            "eval_failure_records": quality_summary["eval_failure_records"],
+            "exact_term_coverage": quality_summary["exact_term_coverage"],
+            "expected_evidence_denominator": quality_summary["expected_evidence_denominator"],
+            "expected_evidence_hit_at_8": quality_summary["expected_evidence_hit_at_8"],
+            "forbidden_conclusion_avoided": quality_summary["forbidden_conclusion_avoided"],
+            "quality_report_coverage": quality_summary["quality_report_coverage"],
+            "quality_report_production_ready": quality_summary["quality_report_production_ready"],
+            "required_type_coverage": quality_summary["required_type_coverage"],
+            "reviewer_status_matched": quality_summary["reviewer_status_matched"],
+            "source_coverage_boundary": quality_summary["source_coverage_boundary"],
+            "source_diversity": quality_summary["source_diversity"],
+            "status": quality_summary["status"],
         },
         "rqa_schema_version": "tonglingyu-retrieval-failures-v1",
         "schema_version": 1,
@@ -989,6 +1067,104 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_gate_threshold_stdout}" \
   '"retrieval_quality_threshold_expected_evidence_hit_at_8_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_OPEN_P0_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["open_p0_retrieval_failures"] = 1
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_open_p0_stdout="${WORK_DIR}/tampered-rqa-gate-open-p0.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_GATE_OPEN_P0_REPORT}" >"${tampered_rqa_gate_open_p0_stdout}"; then
+  echo "production-ready reports must reject open RQA retrieval failures" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_open_p0_stdout}" \
+  '"retrieval_quality_open_p0_retrieval_failures_not_zero" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_SUMMARY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["quality_summary"]["expected_evidence_denominator"] = 2
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_summary_stdout="${WORK_DIR}/tampered-rqa-gate-summary.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_GATE_SUMMARY_REPORT}" >"${tampered_rqa_gate_summary_stdout}"; then
+  echo "production-ready reports must bind RQA gate summary to the eval artifact" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_summary_stdout}" \
+  '"retrieval_quality_eval_report_expected_evidence_denominator_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_MISSING_EVAL_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["eval_report_path"] = "/tmp/tonglingyu-rqa-missing-eval-report.json"
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_missing_eval_stdout="${WORK_DIR}/tampered-rqa-gate-missing-eval.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_GATE_MISSING_EVAL_REPORT}" \
+  >"${tampered_rqa_gate_missing_eval_stdout}"; then
+  echo "production-ready reports must keep the RQA eval artifact readable" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_missing_eval_stdout}" \
+  '"retrieval_quality_eval_report_file_not_found" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRIVACY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+report["rqa_debug_leak"] = {
+    "question": "raw user question must not appear in release report",
+    "trace_ids": ["trace-a", "trace-b"],
+}
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_privacy_stdout="${WORK_DIR}/tampered-privacy.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_PRIVACY_REPORT}" >"${tampered_privacy_stdout}"; then
+  echo "release reports must reject raw questions and high-cardinality id lists" >&2
+  exit 1
+fi
+assert_report "${tampered_privacy_stdout}" \
+  'any(error.startswith("privacy_sensitive_fields_present=") for error in report["errors"])'
+assert_report "${tampered_privacy_stdout}" \
+  'any(error.startswith("high_cardinality_fields_present=") for error in report["errors"])'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_PRODUCTION_FLAG_REPORT}" <<'PY'
 import json

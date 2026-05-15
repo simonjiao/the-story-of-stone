@@ -12,6 +12,7 @@ READY_STATUS="${WORK_DIR}/production-ready.status"
 load_optional_deploy_env_file
 
 REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-}"
+RQA_EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
 GATE_CMD_OVERRIDES_USED="false"
 if [[ -n "${TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD:-}" ]] \
   || [[ -n "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
@@ -30,6 +31,24 @@ OPENWEBUI_FUNCTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD:-${SCRIPT_DI
 OPENWEBUI_ADMIN_ACTION_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD:-${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh}"
 OPENWEBUI_BROWSER_REVIEW_CMD="${TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_CMD:-${SCRIPT_DIR}/verify-openwebui-browser-review-evidence.sh}"
 trap 'rm -rf "${WORK_DIR}"' EXIT
+
+if [[ -z "${TONGLINGYU_RELEASE_RQA_QUALITY_CMD:-}" ]] \
+  && [[ -z "${TONGLINGYU_RQA_EVAL_REPORT_PATH:-}" ]] \
+  && [[ -z "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]] \
+  && [[ -n "${REPORT_PATH}" ]]; then
+  RQA_EVAL_REPORT_OUTPUT_PATH="$(
+    python3 - "${REPORT_PATH}" "${DEPLOY_DIR}" <<'PY'
+import sys
+from pathlib import Path
+
+report_path = Path(sys.argv[1])
+deploy_dir = Path(sys.argv[2])
+if not report_path.is_absolute():
+    report_path = deploy_dir / report_path
+print(str(Path(str(report_path) + ".rqa-eval.json")))
+PY
+  )"
+fi
 
 cd "${DEPLOY_DIR}"
 
@@ -116,7 +135,13 @@ skip_gate() {
 
 failed=0
 run_gate "runtime_config" "true" "${RUNTIME_CONFIG_CMD}" || failed=1
-run_gate "retrieval_quality" "true" "${RQA_QUALITY_CMD}" || failed=1
+if [[ -n "${RQA_EVAL_REPORT_OUTPUT_PATH}" ]]; then
+  run_gate "retrieval_quality" "true" env \
+    "TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH=${RQA_EVAL_REPORT_OUTPUT_PATH}" \
+    "${RQA_QUALITY_CMD}" || failed=1
+else
+  run_gate "retrieval_quality" "true" "${RQA_QUALITY_CMD}" || failed=1
+fi
 
 require_live="false"
 if is_true "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}"; then

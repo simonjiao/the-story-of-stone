@@ -544,7 +544,23 @@
   open retrieval failures、source coverage boundary、source license/attribution
   metadata、source snapshot digest、KB build hash、kb_version、eval run id、
   runtime profile/prompt/tool/reviewer policy digest、model upstream id 和 decoding
-  参数摘要。contract smoke 已覆盖 RQA gate stdout 缺失和阈值被降低的篡改路径。
+  参数摘要，并输出可复核的 `eval_report_path`。当 release report path 已设置且
+  未显式指定 eval report path 时，release readiness 会为真实 RQA gate 生成同目录
+  `.rqa-eval.json` artifact，避免 production-ready report 绑定临时文件。
+- RQA Milestone G 已完成 saved report validator 的 artifact 复核：
+  validator 会读取 `eval_report_path`，校验 `eval_report_sha256`、`eval_run_id`
+  和 `eval_suite_version`，并从原始 eval cases 重算 quality report coverage、
+  production-ready quality report coverage、eval classification、expected
+  evidence hit@1/@3/@8、required type coverage、exact term coverage、forbidden
+  conclusion avoided、reviewer status matched、eval failure records 和 source
+  diversity。为支持完整重算，`tonglingyu-gateway eval` 的 case result 已新增
+  `expected_review_status`、`required_evidence_type` 和
+  `quality.required_type_required`。
+- Saved report validator 还会扫描 release report 中的 raw question/query/prompt
+  字段、stdout JSON 字符串泄露，以及 trace/package/evidence/block/case/user 等
+  高基数 id 列表。contract smoke 已覆盖 RQA gate stdout 缺失、阈值被降低、
+  open P0 tamper、eval artifact 缺失、summary tamper、privacy leak 和
+  high-cardinality list leak。
 - 当前本地 RQA quality gate 正确 fail-closed：`quality_summary.status=passed`，
   但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures，
   因此 release readiness 报告会把 `retrieval_quality` 记为 required failure，
@@ -552,8 +568,7 @@
   RQA production-ready 的证据。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
-- 后续 RQA production-ready 还必须让 saved report validator 从 eval report 原始
-  文件重算全部 RQA gate 派生字段，并逐字段校验 RQA eval 行为配置与 strict live
+- 后续 RQA production-ready 还必须逐字段校验 RQA eval 行为配置与 strict live
   gate 读取的运行配置一致；仅记录摘要还不等于最终完成。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
@@ -564,9 +579,8 @@
 
 ## 下一步
 
-1. 继续收紧 RQA Milestone F/G：补 saved report validator 从 eval report 原始文件
-   重算派生字段、补 missing-report/open-P0 独立 contract smoke，并校验 RQA eval
-   行为配置与 strict live gate 配置一致。
+1. 继续收紧 RQA Milestone F：补阈值运行时配置，并校验 RQA eval 行为配置与
+   strict live gate 配置一致。
 2. 清理或分派当前 open retrieval failures，使 quality gate 的 open failure
    blocker 能由真实治理状态关闭，而不是绕过阈值。
 3. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、

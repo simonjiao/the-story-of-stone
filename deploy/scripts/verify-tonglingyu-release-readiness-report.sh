@@ -81,6 +81,59 @@ secret_value_needles = [
     "x-api-key:",
     "xoxb-",
 ]
+privacy_sensitive_keys = {
+    "messages",
+    "prompt",
+    "query",
+    "queries",
+    "query_text",
+    "query_terms",
+    "question",
+    "questions",
+    "raw_query",
+    "raw_question",
+    "raw_question_included",
+    "user_query",
+    "user_question",
+}
+high_cardinality_list_keys = {
+    "block_ids",
+    "case_ids",
+    "cases",
+    "edition_labels",
+    "evidence_ids",
+    "message_ids",
+    "package_ids",
+    "request_ids",
+    "session_ids",
+    "trace_ids",
+    "user_ids",
+}
+json_privacy_needles = [
+    '"messages"',
+    '"prompt"',
+    '"query"',
+    '"query_text"',
+    '"query_terms"',
+    '"question"',
+    '"raw_query"',
+    '"raw_question"',
+    '"user_query"',
+    '"user_question"',
+]
+json_high_cardinality_needles = [
+    '"block_ids"',
+    '"case_ids"',
+    '"cases"',
+    '"edition_labels"',
+    '"evidence_ids"',
+    '"message_ids"',
+    '"package_ids"',
+    '"request_ids"',
+    '"session_ids"',
+    '"trace_ids"',
+    '"user_ids"',
+]
 gate_stdout_requirements = {
     "runtime_config": {
         "required_fields": [
@@ -95,6 +148,7 @@ gate_stdout_requirements = {
             "behavior_config",
             "effective_thresholds",
             "eval_report_sha256",
+            "eval_report_path",
             "eval_run_id",
             "eval_suite_version",
             "kb_build_hash",
@@ -231,6 +285,40 @@ def secret_value_paths(value, prefix="$"):
     return paths
 
 
+def release_report_privacy_paths(value, prefix="$"):
+    sensitive_paths = []
+    high_cardinality_paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}"
+            normalized_key = str(key).lower()
+            if normalized_key in privacy_sensitive_keys:
+                sensitive_paths.append(child_prefix)
+            if normalized_key in high_cardinality_list_keys and isinstance(child, list):
+                high_cardinality_paths.append(child_prefix)
+            child_sensitive, child_high_cardinality = release_report_privacy_paths(
+                child,
+                child_prefix,
+            )
+            sensitive_paths.extend(child_sensitive)
+            high_cardinality_paths.extend(child_high_cardinality)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_sensitive, child_high_cardinality = release_report_privacy_paths(
+                child,
+                f"{prefix}[{index}]",
+            )
+            sensitive_paths.extend(child_sensitive)
+            high_cardinality_paths.extend(child_high_cardinality)
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(needle in lowered for needle in json_privacy_needles):
+            sensitive_paths.append(prefix)
+        if any(needle in lowered for needle in json_high_cardinality_needles):
+            high_cardinality_paths.append(prefix)
+    return sensitive_paths, high_cardinality_paths
+
+
 def validate_gate_tail(name, gate, field):
     tail = gate.get(field)
     if not isinstance(tail, list):
@@ -297,6 +385,226 @@ def ratio_is_one(value):
 
 def nonempty_dict(value):
     return isinstance(value, dict) and bool(value)
+
+
+def ratio_json(passed, total):
+    return {
+        "passed": passed,
+        "total": total,
+        "ratio": None if total == 0 else passed / total,
+    }
+
+
+def recompute_eval_quality_from_cases(cases):
+    if not isinstance(cases, list) or not cases:
+        return None
+    total_cases = len(cases)
+    quality_report_cases = 0
+    quality_report_production_ready_required_cases = 0
+    quality_report_production_ready_cases = 0
+    classified_cases = 0
+    expected_evidence_cases = 0
+    expected_hit_at_1 = 0
+    expected_hit_at_3 = 0
+    expected_hit_at_8 = 0
+    required_type_cases = 0
+    required_type_passed = 0
+    exact_term_total = 0
+    exact_term_passed = 0
+    forbidden_conclusion_avoided = 0
+    reviewer_status_matched = 0
+    eval_failure_records = 0
+    source_ids = set()
+
+    for case in cases:
+        if not isinstance(case, dict):
+            return None
+        quality = case.get("quality")
+        if not isinstance(quality, dict):
+            return None
+        quality_report_count = quality.get("quality_report_count")
+        if isinstance(quality_report_count, int) and quality_report_count > 0:
+            quality_report_cases += 1
+        requires_production_ready = (
+            quality.get("quality_report_production_ready_required") is True
+        )
+        if requires_production_ready:
+            quality_report_production_ready_required_cases += 1
+            unallowed_issues = quality.get(
+                "quality_report_unallowed_non_production_issues",
+            )
+            if (
+                isinstance(quality_report_count, int)
+                and quality_report_count > 0
+                and unallowed_issues == []
+            ):
+                quality_report_production_ready_cases += 1
+        classification = quality.get("classification")
+        classification_name = (
+            classification.get("classification")
+            if isinstance(classification, dict)
+            else None
+        )
+        if classification_name in {"expected_evidence", "not_applicable"}:
+            classified_cases += 1
+        if classification_name == "expected_evidence":
+            expected_evidence_cases += 1
+            if quality.get("expected_evidence_hit_at_1") is True:
+                expected_hit_at_1 += 1
+            if quality.get("expected_evidence_hit_at_3") is True:
+                expected_hit_at_3 += 1
+            if quality.get("expected_evidence_hit_at_8") is True:
+                expected_hit_at_8 += 1
+        required_type_required = quality.get("required_type_required")
+        if required_type_required not in (True, False):
+            return None
+        if required_type_required:
+            required_type_cases += 1
+            if quality.get("required_type_passed") is True:
+                required_type_passed += 1
+        exact_term_coverage = quality.get("exact_term_coverage")
+        if isinstance(exact_term_coverage, dict):
+            exact_passed = exact_term_coverage.get("passed")
+            exact_total = exact_term_coverage.get("total")
+            if isinstance(exact_passed, int) and isinstance(exact_total, int):
+                exact_term_passed += exact_passed
+                exact_term_total += exact_total
+        failures = case.get("failures")
+        if not isinstance(failures, list):
+            return None
+        if not any(
+            isinstance(failure, str)
+            and failure.startswith("forbidden conclusion appeared in replay:")
+            for failure in failures
+        ):
+            forbidden_conclusion_avoided += 1
+        if case.get("passed") is not True:
+            eval_failure_records += 1
+        if not nonempty(case.get("expected_review_status")):
+            return None
+        if case.get("review_status") == case.get("expected_review_status"):
+            reviewer_status_matched += 1
+        for source_id in quality.get("source_ids") or []:
+            if isinstance(source_id, str):
+                source_ids.add(source_id)
+
+    return {
+        "quality_report_coverage": ratio_json(quality_report_cases, total_cases),
+        "quality_report_production_ready": ratio_json(
+            quality_report_production_ready_cases,
+            quality_report_production_ready_required_cases,
+        ),
+        "eval_case_classification": ratio_json(classified_cases, total_cases),
+        "expected_evidence_denominator": expected_evidence_cases,
+        "expected_evidence_hit_at_1": ratio_json(expected_hit_at_1, expected_evidence_cases),
+        "expected_evidence_hit_at_3": ratio_json(expected_hit_at_3, expected_evidence_cases),
+        "expected_evidence_hit_at_8": ratio_json(expected_hit_at_8, expected_evidence_cases),
+        "required_type_coverage": ratio_json(required_type_passed, required_type_cases),
+        "exact_term_coverage": ratio_json(exact_term_passed, exact_term_total),
+        "forbidden_conclusion_avoided": ratio_json(
+            forbidden_conclusion_avoided,
+            total_cases,
+        ),
+        "reviewer_status_matched": ratio_json(reviewer_status_matched, total_cases),
+        "eval_failure_records": eval_failure_records,
+        "source_diversity": {
+            "count": len(source_ids),
+            "source_ids": sorted(source_ids),
+        },
+    }
+
+
+def add_eval_summary_mismatch(field, expected, actual):
+    if expected != actual:
+        errors.append(f"retrieval_quality_eval_report_{field}_mismatch")
+
+
+def validate_retrieval_quality_eval_report_artifact(gate_json):
+    eval_report_path = gate_json.get("eval_report_path")
+    if not nonempty(eval_report_path):
+        errors.append("retrieval_quality_eval_report_path_missing")
+        return
+    artifact_path = Path(eval_report_path)
+    if not artifact_path.is_absolute():
+        errors.append("retrieval_quality_eval_report_path_must_be_absolute")
+        return
+    if not artifact_path.is_file():
+        errors.append("retrieval_quality_eval_report_file_not_found")
+        return
+    actual_sha256 = file_sha256(artifact_path)
+    if actual_sha256 != gate_json.get("eval_report_sha256"):
+        errors.append("retrieval_quality_eval_report_sha256_mismatch")
+    try:
+        eval_report = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        errors.append("retrieval_quality_eval_report_json_invalid")
+        return
+    if not isinstance(eval_report, dict):
+        errors.append("retrieval_quality_eval_report_must_be_object")
+        return
+    if eval_report.get("object") != "tonglingyu.eval_report":
+        errors.append("retrieval_quality_eval_report_object_invalid")
+    if eval_report.get("status") != "passed":
+        errors.append("retrieval_quality_eval_report_status_not_passed")
+    eval_summary = eval_report.get("quality_summary")
+    gate_summary = gate_json.get("quality_summary")
+    if not isinstance(eval_summary, dict):
+        errors.append("retrieval_quality_eval_report_quality_summary_missing")
+        return
+    if not isinstance(gate_summary, dict):
+        errors.append("retrieval_quality_summary_missing")
+        return
+    if gate_json.get("eval_suite_version") != eval_summary.get("schema_version"):
+        errors.append("retrieval_quality_eval_suite_version_mismatch")
+    if gate_json.get("eval_run_id") != f"rqa-eval-{actual_sha256[:16]}":
+        errors.append("retrieval_quality_eval_run_id_mismatch")
+    for field in (
+        "status",
+        "blockers",
+        "quality_report_coverage",
+        "quality_report_production_ready",
+        "eval_case_classification",
+        "expected_evidence_denominator",
+        "expected_evidence_hit_at_8",
+        "required_type_coverage",
+        "exact_term_coverage",
+        "forbidden_conclusion_avoided",
+        "reviewer_status_matched",
+        "eval_failure_records",
+        "source_coverage_boundary",
+        "source_diversity",
+    ):
+        add_eval_summary_mismatch(field, eval_summary.get(field), gate_summary.get(field))
+
+    recomputed = recompute_eval_quality_from_cases(eval_report.get("cases"))
+    if recomputed is None:
+        errors.append("retrieval_quality_eval_report_cases_unusable")
+        return
+    for field in (
+        "quality_report_coverage",
+        "quality_report_production_ready",
+        "eval_case_classification",
+        "expected_evidence_denominator",
+        "expected_evidence_hit_at_1",
+        "expected_evidence_hit_at_3",
+        "expected_evidence_hit_at_8",
+        "required_type_coverage",
+        "exact_term_coverage",
+        "forbidden_conclusion_avoided",
+        "reviewer_status_matched",
+        "eval_failure_records",
+    ):
+        if eval_summary.get(field) != recomputed.get(field):
+            errors.append(f"retrieval_quality_eval_report_{field}_recompute_mismatch")
+    eval_source_diversity = eval_summary.get("source_diversity")
+    if not isinstance(eval_source_diversity, dict):
+        errors.append("retrieval_quality_eval_report_source_diversity_missing")
+    else:
+        recomputed_sources = recomputed["source_diversity"]
+        if eval_source_diversity.get("count") != recomputed_sources["count"]:
+            errors.append("retrieval_quality_eval_report_source_diversity_count_recompute_mismatch")
+        if eval_source_diversity.get("source_ids") != recomputed_sources["source_ids"]:
+            errors.append("retrieval_quality_eval_report_source_ids_recompute_mismatch")
 
 
 def validate_gate_stdout(name, gate, requirement):
@@ -466,6 +774,7 @@ def validate_retrieval_quality_gate_stdout():
                 errors.append(f"retrieval_quality_behavior_config_{field}_invalid")
         if not isinstance(behavior_config.get("decoding_parameters_summary"), dict):
             errors.append("retrieval_quality_behavior_config_decoding_parameters_summary_missing")
+    validate_retrieval_quality_eval_report_artifact(gate_json)
 
 
 if not report_path:
@@ -518,6 +827,11 @@ add_if(
 secret_value_hits = secret_value_paths(report)
 if secret_value_hits:
     errors.append("secret_like_values_present=" + ",".join(secret_value_hits[:8]))
+privacy_sensitive_hits, high_cardinality_hits = release_report_privacy_paths(report)
+if privacy_sensitive_hits:
+    errors.append("privacy_sensitive_fields_present=" + ",".join(privacy_sensitive_hits[:8]))
+if high_cardinality_hits:
+    errors.append("high_cardinality_fields_present=" + ",".join(high_cardinality_hits[:8]))
 
 required_lists = [
     "gates",

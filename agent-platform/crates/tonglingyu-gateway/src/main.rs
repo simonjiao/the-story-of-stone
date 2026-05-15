@@ -1739,6 +1739,8 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             "question": case.question,
             "passed": case_passed,
             "failures": failures,
+            "expected_review_status": case.expected_review_status,
+            "required_evidence_type": case.required_evidence_type,
             "quality": {
                 "classification": case_classification,
                 "quality_report_count": quality_reports.len(),
@@ -1747,6 +1749,7 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                 "expected_evidence_hit_at_1": expected_hit_at_1,
                 "expected_evidence_hit_at_3": expected_hit_at_3,
                 "expected_evidence_hit_at_8": expected_hit_at_8,
+                "required_type_required": case.required_evidence_type.is_some(),
                 "required_type_passed": case.required_evidence_type.is_none_or(|required_type| {
                     package.cards.iter().any(|card| card.evidence_type == required_type)
                 }),
