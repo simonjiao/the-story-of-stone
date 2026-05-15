@@ -741,6 +741,11 @@
   上运行 eval；gate 仍从 live DB 检查发布前真实 open P0 failure/task。这样 release
   eval 的负向/降级用例不会写入生产 RQA 队列。2026-05-16 已用干净 KB 验证：
   quality gate 通过后原 DB 的 retrieval_failures 和 governance tasks 仍为 0。
+- 已新增 `deploy/scripts/verify-tonglingyu-rqa-release-automation.sh` 作为 RQA
+  release automation wrapper：强制串联 release readiness contract smoke、release
+  readiness report 和 saved report validator，并记录 run id、git commit、gate
+  summary 和 artifact hash。当前执行结果按预期 fail-closed，因为 release readiness
+  阻塞仍未关闭。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
