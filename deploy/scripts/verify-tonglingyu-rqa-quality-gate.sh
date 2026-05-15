@@ -11,6 +11,7 @@ EVAL_LIMIT="${TONGLINGYU_RQA_EVAL_LIMIT:-8}"
 EVAL_REPORT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_PATH:-}"
 EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
 GENERATED_REPORT="false"
+EVAL_DB_PATH="${DB_PATH}"
 
 if [[ -z "${EVAL_REPORT_PATH}" ]]; then
   if [[ -n "${EVAL_REPORT_OUTPUT_PATH}" ]]; then
@@ -19,10 +20,43 @@ if [[ -z "${EVAL_REPORT_PATH}" ]]; then
     EVAL_REPORT_PATH="${WORK_DIR}/tonglingyu-rqa-eval-report.json"
   fi
   GENERATED_REPORT="true"
+  EVAL_DB_PATH="${WORK_DIR}/tonglingyu-rqa-eval-input.db"
+  if ! python3 - "${DB_PATH}" "${EVAL_DB_PATH}" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+if not source_path.is_file():
+    raise SystemExit("source_db_missing")
+target_path.parent.mkdir(parents=True, exist_ok=True)
+source = sqlite3.connect(str(source_path))
+target = sqlite3.connect(str(target_path))
+try:
+    source.backup(target)
+finally:
+    target.close()
+    source.close()
+PY
+  then
+    python3 - <<'PY'
+import json
+
+print(json.dumps({
+    "object": "tonglingyu.rqa_quality_gate",
+    "schema_version": 1,
+    "status": "failed",
+    "errors": ["eval_db_snapshot_failed"],
+    "secret_values_printed": False,
+}, ensure_ascii=True, sort_keys=True))
+PY
+    exit 1
+  fi
   if ! (
     cd "${REPO_DIR}/agent-platform"
     cargo run -p tonglingyu-gateway -- eval \
-      --db "${DB_PATH}" \
+      --db "${EVAL_DB_PATH}" \
       --limit "${EVAL_LIMIT}" \
       --report "${EVAL_REPORT_PATH}" \
       >"${WORK_DIR}/eval.stdout" \
@@ -442,6 +476,10 @@ gate = {
     "eval_report_sha256": eval_report_sha256,
     "eval_report_path": eval_report_resolved_path,
     "eval_report_generated_by_gate": generated_report_raw == "true",
+    "eval_report_db_source": (
+        "snapshot_copy" if generated_report_raw == "true" else "provided_report"
+    ),
+    "live_db_mutated_by_eval": False,
     "eval_limit": int(eval_limit_raw),
     "source_snapshot_digest": source_snapshot_digest,
     "kb_build_hash": kb_build_hash,

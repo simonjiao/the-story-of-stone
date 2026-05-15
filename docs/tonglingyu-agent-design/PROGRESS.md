@@ -737,6 +737,10 @@
 - 2026-05-16 全量 `docs/tonglingyu-agent-design/*.md` markdownlint 已通过：
   历史表格分隔行已规范化，重复标题规则改为同一父级内不重复，未改变通灵玉
   设计文档的正文语义。
+- RQA quality gate 生成 eval report 时已改为先创建 SQLite snapshot，并在 snapshot
+  上运行 eval；gate 仍从 live DB 检查发布前真实 open P0 failure/task。这样 release
+  eval 的负向/降级用例不会写入生产 RQA 队列。2026-05-16 已用干净 KB 验证：
+  quality gate 通过后原 DB 的 retrieval_failures 和 governance tasks 仍为 0。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
