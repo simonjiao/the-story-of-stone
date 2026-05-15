@@ -49,6 +49,8 @@ RetrievalQualityReport
 14. 事故期间通过关闭 RQA、跳过持久化、使用无界队列或删除审计历史来维持
     production-ready。
 15. RQA admin read/list 不写访问审计，或允许无界过滤、无界排序、枚举式探测。
+16. release report 无法指出通过 gate 的 git commit、镜像 digest、schema version、
+    eval suite version 和有效配置摘要。
 
 ## 决策基线
 
@@ -69,6 +71,7 @@ RetrievalQualityReport
 | 发布值守 | runbook、alert、rollback、post-release monitor 都是 production blocker |
 | 发布安全 | emergency disable / degraded mode 只能产生 non-production 状态 |
 | Admin 访问 | RQA read/list/update 都必须鉴权、限流、审计和防枚举 |
+| 发布溯源 | git commit、image digest、schema/eval/config digest 必须进入 release report |
 
 ## Production 默认阈值
 
@@ -245,6 +248,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] gate 支持阈值配置，默认值采用本文 Production 默认阈值。
 - [ ] 低于默认阈值的配置必须把报告标记为 non-production。
 - [ ] gate report 记录实际阈值来源和有效阈值。
+- [ ] gate report 记录 RQA schema version、eval suite version 和有效配置摘要。
 - [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
 - [ ] gate stdout / stderr 不输出原始 question、query terms 或高基数 id 列表。
@@ -268,6 +272,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] validator 校验 quality gate stdout JSON schema。
 - [ ] validator 校验 threshold / blocker / ready flag 不漂移。
 - [ ] validator 校验 effective thresholds 与 report 中 gate 输出一致。
+- [ ] validator 校验 RQA schema version、eval suite version 和有效配置摘要不缺失。
 - [ ] validator 校验低于默认阈值的报告不能 production-ready。
 - [ ] validator 校验 report 不包含原始用户问题、未脱敏 query 或高基数字段列表。
 - [ ] validator 继续扫描 secret-like values。
@@ -319,6 +324,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] production-ready report 不允许依赖 mock gate command override。
 - [ ] production-ready report 不允许使用低于默认阈值的 RQA 配置。
 - [ ] production-ready report 必须包含 RQA quality gate 和治理任务 gate。
+- [ ] production-ready report 必须包含 git commit、image digest、RQA schema version、
+      eval suite version 和有效配置摘要。
 - [ ] `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 节点总结：
@@ -338,6 +345,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 生产 DB migration 前必须有备份路径和 schema preflight 输出。
 - [ ] live release mode 必须生成真实 RQA quality gate，不接受 fixture-only report。
 - [ ] production-ready report 必须绑定当前 live environment、generated_at 和有效期。
+- [ ] production-ready report 必须绑定当前运行镜像 digest、代码版本和 migration 状态。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
@@ -392,6 +400,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
       查询。
 - [ ] post-release 监控记录 operator、时间、环境、报告路径和结论。
 - [ ] production-ready report 必须引用 runbook / rollback / post-release 证据。
+- [ ] runbook 必须说明如何按 release report 的 commit/image/config 摘要复现本次发布。
 - [ ] release gate 或 saved report validator 缺少值守证据时不能
       production-ready。
 - [ ] smoke 覆盖告警字段存在性、runbook ref、rollback evidence ref 和
