@@ -68,6 +68,8 @@ production-ready 的替代验收。
 23. production-ready report 没有绑定 Runtime profile、prompt、tool policy、
     reviewer policy、model upstream 和 decoding 参数摘要，或 RQA eval 与 live gate
     使用的行为配置不一致。
+24. RQA 保存了可关联用户、session、trace 或 package 的数据，但没有导出、
+    删除/匿名化、retention、legal hold 和 audit tombstone 策略。
 
 ## 决策基线
 
@@ -96,6 +98,7 @@ production-ready 的替代验收。
 | 恢复目标 | RTO/RPO、恢复演练和恢复后 gate 复核必须进入 production report |
 | 供应链安全 | 依赖、运行镜像和发布脚本扫描必须进入 release automation |
 | 行为配置 | profile、prompt、tool policy、reviewer policy、model upstream 必须绑定 |
+| 数据生命周期 | RQA 用户相关数据必须有导出、删除/匿名化、保留和 tombstone 规则 |
 
 ## Production 默认阈值
 
@@ -408,6 +411,7 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 定义 RQA 数据的 RTO 和 RPO 默认目标，并写入 release report。
 - [ ] RQA 表纳入 retention / prune dry-run 和实际 prune 路径。
 - [ ] prune 不删除仍被 open failure、open governance task 或 production report 引用的数据。
+- [ ] retention / prune 与用户 delete/anonymize 策略一致，并保留 audit tombstone。
 - [ ] restore 后 admin trace、failure、governance task 和 quality gate 可继续读取。
 - [ ] restore 后必须重新运行 RQA quality gate 和 saved report validator。
 - [ ] 最近一次恢复演练必须记录 started_at、finished_at、RTO/RPO 是否满足、
@@ -426,6 +430,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
       risk exception。
 - [ ] production-ready report 必须绑定当前 live Runtime profile、prompt、tool
       policy、reviewer policy、model upstream 和 decoding 参数摘要。
+- [ ] production-ready report 必须包含 RQA 用户数据生命周期策略版本和最近一次
+      lifecycle contract smoke 结果。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
@@ -448,6 +454,11 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 默认不保存完整用户问题；如需诊断原文，必须另有显式受控配置和审计。
 - [ ] redaction 覆盖疑似 key、token、URL secret、邮箱、手机号和长随机串。
 - [ ] admin detail 只能返回 redacted 字段，不能返回完整隐私文本。
+- [ ] 定义 RQA 用户数据生命周期：export、delete/anonymize、retention、legal hold
+      和 audit tombstone。
+- [ ] 删除或匿名化用户相关 RQA 数据时，不能破坏 production report、open failure、
+      governance task 或审计历史的可追责性；必须用 tombstone 记录处理结果。
+- [ ] 用户数据生命周期操作必须写 audit event，且输出不包含原始问题或 secret。
 - [ ] 所有 RQA list API 必须分页、排序稳定、最大 page size 固定。
 - [ ] RQA admin API / Action 响应包含 schema version 和 pagination metadata。
 - [ ] API contract smoke 覆盖旧 report 兼容、新字段兼容和未知字段拒绝/忽略策略。
@@ -516,7 +527,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
       证据时不能
       production-ready。
 - [ ] saved report validator 校验 emergency disabled、capacity missing、audit history
-      missing、RTO/RPO missing、security scan missing 不能 production-ready。
+      missing、RTO/RPO missing、security scan missing、data lifecycle missing 不能
+      production-ready。
 
 节点总结：
 

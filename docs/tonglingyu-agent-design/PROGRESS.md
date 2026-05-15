@@ -493,6 +493,9 @@
 - 后续 RQA production-ready 还必须绑定 Runtime profile、prompt、tool policy、
   reviewer policy、model upstream 和 decoding 参数摘要；RQA eval 与 live gate
   行为配置不一致时不能声明当前线上 production-ready。
+- 后续 RQA production-ready 还必须定义 RQA 用户数据生命周期：export、
+  delete/anonymize、retention、legal hold 和 audit tombstone；缺少策略版本或
+  lifecycle contract smoke 时不能生成 production-ready artifact。
 
 ## 下一步
 
