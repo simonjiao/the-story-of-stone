@@ -725,6 +725,15 @@
   validator 会拒绝缺 gate stdout、emergency/degraded/persistence-degraded
   状态、非 live 模式、缺代表性数量、缺 load measurement 或缺 incident/audit
   evidence 的 production-ready report。
+- RQA backup/restore drill 的嵌套 release report 已同步新增 gate 边界：
+  恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
+  incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
+  反向打断恢复演练；2026-05-16 本地 fixture 恢复演练已重新通过。
+- 2026-05-16 最新 preflight release readiness 仍失败，不能声明
+  production-ready：本机缺 docker 使 runtime config gate 失败；当前默认 RQA DB
+  仍有 182 个 open P0 retrieval failures 和 182 个 open P0 governance tasks；
+  `model_upstream_id` 未绑定；security gate 缺真实 dependency/image scan 且 compose
+  image 存在 mutable tag / digest missing；live gates 和 browser review 尚未执行。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。
