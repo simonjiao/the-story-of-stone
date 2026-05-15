@@ -766,7 +766,9 @@
   `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
   lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
   扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
-  fixture image scan 和 digest refs 通过；生产镜像的真实 Trivy artifact 仍未生成。
+  fixture image scan 和 digest refs 通过；image scan artifact 已绑定当前 compose
+  image inventory hash，saved report validator 会拒绝 scan refs 与 release refs
+  不一致的报告。生产镜像的真实 Trivy artifact 仍未生成。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，

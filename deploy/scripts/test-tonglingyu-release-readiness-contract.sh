@@ -36,6 +36,7 @@ TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.jso
 TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-report.json"
 TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
 TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
+TAMPERED_SECURITY_GATE_IMAGE_INVENTORY_REPORT="${WORK_DIR}/tampered-security-gate-image-inventory-report.json"
 TAMPERED_RELEASE_OPS_STDOUT_REPORT="${WORK_DIR}/tampered-release-ops-stdout-report.json"
 TAMPERED_RELEASE_OPS_MONITOR_REPORT="${WORK_DIR}/tampered-release-ops-monitor-report.json"
 TAMPERED_RELEASE_OPS_ALERT_REPORT="${WORK_DIR}/tampered-release-ops-alert-report.json"
@@ -1423,9 +1424,12 @@ gate_stdout = {
             "digest_missing_count": 0,
             "high_count": 0,
             "image_count": 6,
+            "image_refs_sha256": "c" * 64,
             "mutable_tag_count": 0,
             "report_sha256": "b" * 64,
             "scanner": "trivy",
+            "scanned_image_count": 6,
+            "scanned_image_refs_sha256": "c" * 64,
             "status": "passed",
         },
         "object": "tonglingyu.release_security_gate",
@@ -2066,6 +2070,30 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_security_gate_script_stdout}" \
   '"security_scan_release_scripts_not_passed" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_IMAGE_INVENTORY_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "security_scan":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["image_scan"]["scanned_image_refs_sha256"] = "0" * 64
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_security_gate_image_inventory_stdout="${WORK_DIR}/tampered-security-gate-image-inventory.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECURITY_GATE_IMAGE_INVENTORY_REPORT}" >"${tampered_security_gate_image_inventory_stdout}"; then
+  echo "production-ready reports must reject image scans not bound to release image refs" >&2
+  exit 1
+fi
+assert_report "${tampered_security_gate_image_inventory_stdout}" \
+  '"security_scan_image_inventory_mismatch" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_STDOUT_REPORT}" <<'PY'
 import json

@@ -43,16 +43,40 @@ elif is_true "${RUN_TRIVY}" && command -v trivy >/dev/null 2>&1; then
   python3 - "${REPO_DIR}" "${WORK_DIR}/images.txt" <<'PY'
 import re
 import sys
+import os
 from pathlib import Path
 
 repo_dir = Path(sys.argv[1])
 target = Path(sys.argv[2])
 compose = repo_dir / "deploy" / "docker-compose.yml"
 images = []
+
+
+def resolve_compose_var(token):
+    name = token
+    default = ""
+    if ":-" in token:
+        name, default = token.split(":-", 1)
+    value = os.environ.get(name)
+    if value is None or value == "":
+        value = default
+    return resolve_compose_image_ref(value)
+
+
+def resolve_compose_image_ref(raw_ref):
+    value = str(raw_ref or "").strip().strip('"').strip("'")
+    pattern = re.compile(r"\$\{([^{}]+)\}")
+    previous = None
+    while previous != value:
+        previous = value
+        value = pattern.sub(lambda match: resolve_compose_var(match.group(1)), value)
+    return value.strip()
+
+
 for raw_line in compose.read_text(encoding="utf-8").splitlines():
     match = re.match(r"\s*image:\s+(.+?)\s*$", raw_line)
     if match:
-        images.append(match.group(1).strip().strip('"').strip("'"))
+        images.append(resolve_compose_image_ref(match.group(1)))
 target.write_text("\n".join(images) + "\n", encoding="utf-8")
 PY
   trivy_status="passed"
@@ -75,12 +99,16 @@ PY
       critical_count=$((critical_count + 1))
     fi
   done <"${WORK_DIR}/images.txt"
-  python3 - "${IMAGE_SCAN_REPORT}" "${trivy_status}" "${critical_count}" "${high_count}" <<'PY'
+  python3 - "${IMAGE_SCAN_REPORT}" "${trivy_status}" "${critical_count}" "${high_count}" \
+    "${WORK_DIR}/images.txt" <<'PY'
+import hashlib
 import json
 import sys
 
-target, status, critical_count, high_count = sys.argv[1:5]
+target, status, critical_count, high_count, image_refs_path = sys.argv[1:6]
 Path = __import__("pathlib").Path
+image_refs_raw = Path(image_refs_path).read_text(encoding="utf-8")
+image_refs = [line for line in image_refs_raw.splitlines() if line.strip()]
 Path(target).write_text(
     json.dumps(
         {
@@ -90,6 +118,10 @@ Path(target).write_text(
             "scanner": "trivy",
             "critical_count": int(critical_count),
             "high_count": int(high_count),
+            "scanned_image_count": len(image_refs),
+            "scanned_image_refs_sha256": hashlib.sha256(
+                image_refs_raw.encode("utf-8")
+            ).hexdigest(),
             "secret_values_printed": False,
         },
         ensure_ascii=True,
@@ -216,6 +248,11 @@ def safe_scan_result(path, scan_type):
         "high_count": high_count if isinstance(high_count, int) else None,
         "report_sha256": file_sha256(path),
     }
+    if scan_type == "image":
+        result["scanned_image_count"] = value.get("scanned_image_count")
+        result["scanned_image_refs_sha256"] = str(
+            value.get("scanned_image_refs_sha256") or ""
+        )
     result_errors = []
     if value.get("secret_values_printed") is True:
         result_errors.append(f"{scan_type}_scan_secret_values_printed")
@@ -315,6 +352,7 @@ def compose_image_policy():
         match = re.match(r"\s*image:\s+(.+?)\s*$", raw_line)
         if match:
             refs.append(resolve_compose_image_ref(match.group(1)))
+    encoded_refs = ("\n".join(refs) + "\n") if refs else ""
     mutable = []
     digest_missing = []
     for ref in refs:
@@ -324,6 +362,9 @@ def compose_image_policy():
             mutable.append(ref)
     return {
         "image_count": len(refs),
+        "image_refs_sha256": hashlib.sha256(
+            encoded_refs.encode("utf-8")
+        ).hexdigest(),
         "mutable_tag_count": len(mutable),
         "digest_missing_count": len(digest_missing),
     }
@@ -393,6 +434,19 @@ if image_policy["mutable_tag_count"] > 0:
 if image_policy["digest_missing_count"] > 0:
     image_errors.append("image_digest_missing")
 image_scan.update(image_policy)
+if image_scan["status"] == "passed":
+    scanned_image_count = image_scan.get("scanned_image_count")
+    if not isinstance(scanned_image_count, int) or scanned_image_count < 0:
+        image_errors.append("image_scan_scanned_image_count_invalid")
+    elif scanned_image_count != image_policy["image_count"]:
+        image_errors.append("image_scan_image_count_mismatch")
+    scanned_image_refs_sha256 = image_scan.get("scanned_image_refs_sha256")
+    if not isinstance(scanned_image_refs_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", scanned_image_refs_sha256
+    ):
+        image_errors.append("image_scan_inventory_digest_invalid")
+    elif scanned_image_refs_sha256 != image_policy["image_refs_sha256"]:
+        image_errors.append("image_scan_inventory_mismatch")
 
 risk_acceptance, risk_errors = load_risk_acceptance()
 coverable_errors = dependency_errors + image_errors + script_errors
