@@ -9,6 +9,8 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ACTION_FILE="${FUNCTION_DIR}/tonglingyu_gateway_admin_action.py"
 ACTION_TEST="${FUNCTION_DIR}/test_tonglingyu_gateway_admin_action.py"
+FEEDBACK_ACTION_FILE="${FUNCTION_DIR}/tonglingyu_gateway_feedback_action.py"
+FEEDBACK_ACTION_TEST="${FUNCTION_DIR}/test_tonglingyu_gateway_feedback_action.py"
 VERIFY_SCRIPT="${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh"
 OK_FIXTURE="${WORK_DIR}/gateway-admin-action-ok.json"
 EMPTY_KEY_FIXTURE="${WORK_DIR}/gateway-admin-action-empty-key.json"
@@ -17,8 +19,12 @@ OK_OUT="${WORK_DIR}/ok.out"
 EMPTY_OUT="${WORK_DIR}/empty.out"
 MISSING_GUARD_OUT="${WORK_DIR}/missing-guard.out"
 
-python3 -m py_compile "${ACTION_FILE}" "${ACTION_TEST}"
-python3 -m unittest "${ACTION_TEST}"
+python3 -m py_compile \
+  "${ACTION_FILE}" \
+  "${ACTION_TEST}" \
+  "${FEEDBACK_ACTION_FILE}" \
+  "${FEEDBACK_ACTION_TEST}"
+python3 -m unittest "${ACTION_TEST}" "${FEEDBACK_ACTION_TEST}"
 
 python3 - "${ACTION_FILE}" "${OK_FIXTURE}" "${EMPTY_KEY_FIXTURE}" "${MISSING_GUARD_FIXTURE}" <<'PY'
 import json

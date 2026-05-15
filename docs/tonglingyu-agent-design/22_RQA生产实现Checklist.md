@@ -502,15 +502,15 @@ RQA quality gate 正确 fail-closed）
 ## Milestone H：治理任务和反馈闭环
 
 状态：进行中（2026-05-15；治理任务 schema、通用 source entity、failure-to-task、
-admin API/Action 和 release gate blocker 已完成第一批代码切片）
+普通用户反馈、admin API/Action 和 release gate blocker 已完成第一批代码切片）
 
 目标：RQA-6 到 RQA-12 不停留在报告层，必须进入可审计的治理任务流。
 
 - [x] 新增 `knowledge_governance_tasks` 或等价持久化任务 schema。
 - [x] 支持从 retrieval failure 生成治理任务。
 - [x] 支持管理员把 trace / package / failure 标记为待专家复核。
-- [ ] 支持普通用户反馈生成 retrieval failure 候选或治理任务。
-- [ ] 普通用户反馈不能直接修改 source、alias、term、commentary link 或事实层。
+- [x] 支持普通用户反馈生成 retrieval failure 候选或治理任务。
+- [x] 普通用户反馈不能直接修改 source、alias、term、commentary link 或事实层。
 - [ ] Agent 聚类 retrieval failures，并只生成 proposed fix。
 - [ ] proposed alias / term / commentary link / version note 必须进入人工状态流转。
 - [x] accepted fix 必须绑定 reviewer、note、source 或 evidence ref。
@@ -535,10 +535,14 @@ admin API/Action 和 release gate blocker 已完成第一批代码切片）
   expert-review 任务。Open WebUI admin Action 暴露同等入口；trace/package audit 会
   返回 `governance_task_ids` 和 `governance_tasks`。访问、not-found、update 和冲突
   路径均写 admin audit。
+- Gateway 新增普通用户 `/v1/feedback` 入口和 Open WebUI feedback Action；反馈必须
+  绑定用户可访问的 trace 或 package，只生成 `source_entity_type=user_feedback` 的
+  `expert_review` governance task，并写 `user_feedback_received` audit，不接受
+  source/alias/term/commentary/fact mutation 字段。
 - RQA quality gate 新增 `open_p0_governance_tasks` Production 默认阈值 0；saved
   report validator 和 release contract smoke 会拒绝 open P0 governance task tamper。
-- 仍不能宣布 H 或整体 RQA production-ready：普通用户反馈入口、真实 Agent 聚类、
-  KB diff report、eval 前后对比、retention/restore 和 lifecycle contract 仍未完成。
+- 仍不能宣布 H 或整体 RQA production-ready：真实 Agent 聚类、KB diff report、
+  eval 前后对比、retention/restore 和 lifecycle contract 仍未完成。
 
 ## Milestone I：端到端验证
 

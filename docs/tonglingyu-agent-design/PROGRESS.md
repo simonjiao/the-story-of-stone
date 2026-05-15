@@ -592,9 +592,12 @@
   成功、not-found、conflict 和 update 路径写访问审计。RQA quality gate、saved
   report validator 和 release contract smoke 新增 `open_p0_governance_tasks=0`
   blocker。
-- 该 H 切片仍不等于 H 完成或 production-ready：普通用户反馈入口、真实 Agent
-  聚类、KB diff report、eval 前后对比、retention/restore 和用户数据
-  lifecycle contract 仍未完成。
+- 普通用户反馈入口已完成第一批代码切片：Gateway 新增 `/v1/feedback`，Open
+  WebUI 新增 feedback Action；反馈必须绑定用户可访问的 trace/package，只生成
+  `source_entity_type=user_feedback` 的 `expert_review` governance task，并写
+  `user_feedback_received` audit，不接受事实层 mutation 字段。
+- 该 H 切片仍不等于 H 完成或 production-ready：真实 Agent 聚类、KB diff
+  report、eval 前后对比、retention/restore 和用户数据 lifecycle contract 仍未完成。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和

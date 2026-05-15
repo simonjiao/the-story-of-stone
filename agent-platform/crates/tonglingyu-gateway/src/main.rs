@@ -25,13 +25,14 @@ use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
     KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
-    KnowledgeGovernanceTaskUpdateInput, RETRIEVAL_FAILURE_SCHEMA_VERSION,
-    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
-    RetrievalFailureCreateInput, RetrievalFailureListInput, RetrievalFailureView,
-    RetrievalQualityReport, RetrievalQuerySummary, RetrievalSourceCoverageBoundary,
-    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
-    RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
-    append_runtime_audit_event, execute_agent_runtime_plan_gate, package_json,
+    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
+    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureCreateInput, RetrievalFailureListInput,
+    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    TonglingyuRuntimeStore, append_runtime_audit_event, execute_agent_runtime_plan_gate,
+    package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -60,6 +61,9 @@ const EVAL_NOT_APPLICABLE_NEGATIVE: &str = "negative_case_without_expected_block
 const EVAL_NOT_APPLICABLE_CONTROL: &str = "control_safety_case_without_expected_block";
 const EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY: &str =
     "source_boundary_requires_facsimile_authoritative_or_expert_review";
+const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
+const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
+const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -420,6 +424,15 @@ struct SearchParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserFeedbackRequest {
+    trace_id: Option<String>,
+    package_id: Option<String>,
+    feedback_type: Option<String>,
+    feedback_text: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RetrievalFailureUpdateRequest {
     human_review_status: String,
     reviewer: Option<String>,
@@ -465,6 +478,23 @@ struct AdminAccessDenialRequest {
 struct PackageAccessContext {
     subject: String,
     user_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserFeedbackSource {
+    trace_id: String,
+    package_id: Option<String>,
+}
+
+struct UserFeedbackTaskInput<'a> {
+    feedback_id: &'a str,
+    trace_id: &'a str,
+    package_id: Option<&'a str>,
+    feedback_type: &'a str,
+    feedback_text: &'a str,
+    feedback_char_count: usize,
+    access: &'a PackageAccessContext,
+    proposed_fix: String,
 }
 
 type AuthResult<T> = std::result::Result<T, Box<Response>>;
@@ -997,6 +1027,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
         .route("/v1/evidence/packages/{package_id}", get(package_endpoint))
         .route(
@@ -3067,6 +3098,143 @@ async fn replay_package_endpoint(
     }
 }
 
+async fn user_feedback_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<UserFeedbackRequest>,
+) -> Response {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let access = package_access_context(&headers, subject);
+    let feedback_text = payload.feedback_text.trim();
+    if feedback_text.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_text_required",
+            "feedback_text is required",
+            None,
+        );
+    }
+    let feedback_char_count = feedback_text.chars().count();
+    if feedback_char_count > USER_FEEDBACK_MAX_CHARS {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_text_too_long",
+            "feedback_text is too long",
+            None,
+        );
+    }
+    let feedback_type = match normalize_user_feedback_type(payload.feedback_type.as_deref()) {
+        Ok(feedback_type) => feedback_type,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_feedback_type",
+                &error.to_string(),
+                None,
+            );
+        }
+    };
+    let requested_trace_id = payload
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested_package_id = payload
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_source_required",
+            "trace_id or package_id is required",
+            None,
+        );
+    }
+    let source = match resolve_user_feedback_source(
+        &state.db,
+        &state.runtime_store,
+        &access,
+        requested_trace_id,
+        requested_package_id,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "feedback_source_not_found",
+                "feedback source was not found for this user",
+                None,
+            );
+        }
+        Err(error) => {
+            if error.to_string().contains("mismatch") {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "feedback_source_mismatch",
+                    "feedback trace and package do not match",
+                    None,
+                );
+            }
+            tracing::warn!(error = %error, "user feedback source resolution failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "feedback_source_failed",
+                "feedback source lookup failed",
+                None,
+            );
+        }
+    };
+
+    let feedback_id = format!("uf-{}", uuid::Uuid::now_v7().simple());
+    let proposed_fix = user_feedback_proposed_fix(&feedback_type, feedback_text);
+    match create_user_feedback_governance_task(
+        &state.db,
+        UserFeedbackTaskInput {
+            feedback_id: &feedback_id,
+            trace_id: &source.trace_id,
+            package_id: source.package_id.as_deref(),
+            feedback_type: &feedback_type,
+            feedback_text,
+            feedback_char_count,
+            access: &access,
+            proposed_fix,
+        },
+    ) {
+        Ok(record) => Json(json!({
+            "object": "tonglingyu.user_feedback",
+            "schema_version": USER_FEEDBACK_SCHEMA_VERSION,
+            "feedback_id": feedback_id,
+            "status": "queued_for_human_review",
+            "direct_fact_mutation": false,
+            "task": {
+                "task_id": record.task_id,
+                "status": record.status,
+                "priority": record.priority,
+                "source_entity_type": record.source_entity_type,
+                "source_entity_id": record.source_entity_id,
+                "task_type": record.task_type,
+            },
+            "trace_id": source.trace_id,
+            "package_id": source.package_id,
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "user feedback task create failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "feedback_create_failed",
+                "feedback could not be queued",
+                None,
+            )
+        }
+    }
+}
+
 async fn trace_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4835,6 +5003,150 @@ fn package_owned_by_subject(
     Ok(owned > 0)
 }
 
+fn trace_owned_by_subject(
+    conn: &Connection,
+    trace_id: &str,
+    access: &PackageAccessContext,
+) -> Result<bool> {
+    let owned: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM gateway_messages AS gm
+        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
+        WHERE gm.trace_id = ?1
+          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        "#,
+        params![trace_id, &access.user_ref, &access.subject],
+        |row| row.get(0),
+    )?;
+    Ok(owned > 0)
+}
+
+fn resolve_user_feedback_source(
+    db: &Path,
+    runtime_store: &TonglingyuRuntimeStore,
+    access: &PackageAccessContext,
+    trace_id: Option<&str>,
+    package_id: Option<&str>,
+) -> Result<Option<UserFeedbackSource>> {
+    let requested_trace_id = trace_id.map(str::trim).filter(|value| !value.is_empty());
+    let requested_package_id = package_id.map(str::trim).filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return Err(anyhow!(
+            "feedback source trace_id or package_id is required"
+        ));
+    }
+    let conn = open_db(db)?;
+    if let Some(package_id) = requested_package_id {
+        if !package_owned_by_subject(&conn, package_id, access)? {
+            return Ok(None);
+        }
+        let Some(package) = runtime_store.read_package(package_id)? else {
+            return Ok(None);
+        };
+        if requested_trace_id.is_some_and(|trace_id| trace_id != package.trace_id.as_str()) {
+            return Err(anyhow!("feedback source trace/package mismatch"));
+        }
+        return Ok(Some(UserFeedbackSource {
+            trace_id: package.trace_id,
+            package_id: Some(package.package_id),
+        }));
+    }
+    let trace_id = requested_trace_id.expect("checked trace_id presence");
+    if !trace_owned_by_subject(&conn, trace_id, access)? {
+        return Ok(None);
+    }
+    Ok(Some(UserFeedbackSource {
+        trace_id: trace_id.to_string(),
+        package_id: None,
+    }))
+}
+
+fn normalize_user_feedback_type(value: Option<&str>) -> Result<String> {
+    let feedback_type = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("other");
+    if matches!(
+        feedback_type,
+        "missing_evidence" | "wrong_evidence" | "wrong_answer" | "source_request" | "other"
+    ) {
+        Ok(feedback_type.to_string())
+    } else {
+        Err(anyhow!("unsupported feedback_type {feedback_type}"))
+    }
+}
+
+fn user_feedback_proposed_fix(feedback_type: &str, feedback_text: &str) -> String {
+    let summary = feedback_text
+        .chars()
+        .take(USER_FEEDBACK_TASK_TEXT_MAX_CHARS)
+        .collect::<String>();
+    format!("user_feedback_type={feedback_type}; requires_human_review=true; feedback={summary}")
+}
+
+fn create_user_feedback_governance_task(
+    db: &Path,
+    input: UserFeedbackTaskInput<'_>,
+) -> Result<KnowledgeGovernanceTaskRecord> {
+    let UserFeedbackTaskInput {
+        feedback_id,
+        trace_id,
+        package_id,
+        feedback_type,
+        feedback_text,
+        feedback_char_count,
+        access,
+        proposed_fix,
+    } = input;
+    let conn = open_db(db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<KnowledgeGovernanceTaskRecord> {
+        let record = tonglingyu_runtime::create_governance_task(
+            &conn,
+            KnowledgeGovernanceTaskCreateInput {
+                source_entity_type: "user_feedback".to_string(),
+                source_entity_id: feedback_id.to_string(),
+                trace_id: trace_id.to_string(),
+                package_id: package_id.map(ToOwned::to_owned),
+                source_failure_id: None,
+                task_type: "expert_review".to_string(),
+                priority: Some("p1".to_string()),
+                proposed_fix: Some(proposed_fix),
+                agent_cluster_key: Some(format!("user_feedback:{feedback_id}")),
+            },
+        )?;
+        append_runtime_audit_event(
+            &conn,
+            trace_id,
+            "user_feedback_received",
+            &json!({
+                "feedback_id": feedback_id,
+                "feedback_type": feedback_type,
+                "feedback_text_sha256": hash_text(feedback_text),
+                "feedback_char_count": feedback_char_count,
+                "subject_ref": audit_subject_ref(&access.subject),
+                "user_ref": audit_subject_ref(&access.user_ref),
+                "package_id_sha256": package_id.map(hash_text),
+                "task_id": &record.task_id,
+                "direct_fact_mutation": false,
+            }),
+        )?;
+        Ok(record)
+    })();
+    match result {
+        Ok(record) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(record)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 fn retrieval_failure_list_input(
     params: &BTreeMap<String, String>,
 ) -> Result<RetrievalFailureListInput> {
@@ -5371,6 +5683,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "governance_task_admin_read",
             "governance_task_admin_create",
             "governance_task_admin_update",
+            "user_feedback_received",
             "rqa_admin_access_denied",
             "reviewer_completed",
             "runtime_profile_step_completed",
@@ -5681,6 +5994,49 @@ mod tests {
         headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());
         headers.insert("x-tonglingyu-subject", "admin-1".parse().unwrap());
         headers
+    }
+
+    fn gateway_headers(user_id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", user_id.parse().unwrap());
+        headers.insert("x-open-webui-user-id", user_id.parse().unwrap());
+        headers
+    }
+
+    fn seed_owned_gateway_package(db_path: &Path, user_id: &str) -> EvidencePackage {
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let package = runtime_store
+            .create_package(
+                "trace-user-feedback-test",
+                "通灵玉回答是否有证据？",
+                vec![eval_test_card("block-user-feedback-test")],
+            )
+            .expect("package creates");
+        let conn = open_db(db_path).expect("gateway db opens");
+        let context = GatewayRequestContext {
+            user_ref: user_id.to_string(),
+            chat_ref: "chat-user-feedback-test".to_string(),
+            external_message_id: "message-user-feedback-test".to_string(),
+            external_message_id_provided: true,
+            auth_subject: user_id.to_string(),
+        };
+        let session_id =
+            get_or_create_session(&conn, &context, DEFAULT_MODEL_ID).expect("session creates");
+        store_gateway_message(
+            &conn,
+            GatewayMessageRecord {
+                session_id: &session_id,
+                context: &context,
+                trace_id: &package.trace_id,
+                package_id: Some(&package.package_id),
+                request_hash: &hash_text("通灵玉回答是否有证据？"),
+                question: "通灵玉回答是否有证据？",
+                response: &json!({"object": "chat.completion", "id": "cmpl-user-feedback-test"}),
+            },
+        )
+        .expect("gateway message stores");
+        package
     }
 
     fn audit_event_count(db_path: &Path, event_type: &str) -> i64 {
@@ -6348,6 +6704,107 @@ mod tests {
             audit_event_count(&db_path, "governance_task_status_updated"),
             1
         );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn user_feedback_endpoint_queues_governance_task_without_fact_mutation() {
+        let db_path = temp_gateway_db_path("tonglingyu-user-feedback");
+        let package = seed_owned_gateway_package(&db_path, "user-1");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = user_feedback_endpoint(
+            State(state.clone()),
+            gateway_headers("user-1"),
+            Json(UserFeedbackRequest {
+                trace_id: None,
+                package_id: Some(package.package_id.clone()),
+                feedback_type: Some("missing_evidence".to_string()),
+                feedback_text: "这条回答缺少直接证据，请专家复核。".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("feedback response json");
+        assert_eq!(body["object"], json!("tonglingyu.user_feedback"));
+        assert_eq!(body["direct_fact_mutation"], json!(false));
+        assert_eq!(body["task"]["source_entity_type"], json!("user_feedback"));
+        assert_eq!(body["task"]["task_type"], json!("expert_review"));
+        assert_eq!(body["task"]["priority"], json!("p1"));
+
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p1".to_string()),
+                source_failure_id: None,
+                source_entity_type: Some("user_feedback".to_string()),
+                source_entity_id: Some(
+                    body["task"]["source_entity_id"]
+                        .as_str()
+                        .expect("feedback source id")
+                        .to_string(),
+                ),
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list user feedback governance tasks");
+        assert_eq!(tasks.items.len(), 1);
+        assert_eq!(tasks.items[0]["package_id"], json!(package.package_id));
+        assert_eq!(tasks.items[0]["source_failure_id"], Value::Null);
+        assert!(
+            tasks.items[0]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("user_feedback_type=missing_evidence"))
+        );
+        assert_eq!(audit_event_count(&db_path, "user_feedback_received"), 1);
+        assert_eq!(audit_event_count(&db_path, "governance_task_created"), 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn user_feedback_endpoint_rejects_unowned_package() {
+        let db_path = temp_gateway_db_path("tonglingyu-user-feedback-unowned");
+        let package = seed_owned_gateway_package(&db_path, "owner-1");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = user_feedback_endpoint(
+            State(state),
+            gateway_headers("user-2"),
+            Json(UserFeedbackRequest {
+                trace_id: None,
+                package_id: Some(package.package_id),
+                feedback_type: Some("wrong_answer".to_string()),
+                feedback_text: "这条回答可能有问题。".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(audit_event_count(&db_path, "user_feedback_received"), 0);
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: None,
+                task_type: None,
+                priority: None,
+                source_failure_id: None,
+                source_entity_type: Some("user_feedback".to_string()),
+                source_entity_id: None,
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list user feedback governance tasks");
+        assert!(tasks.items.is_empty());
+
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
