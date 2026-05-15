@@ -6557,6 +6557,29 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
             note TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS terms (
+            term_id TEXT PRIMARY KEY,
+            term TEXT NOT NULL,
+            category TEXT,
+            usage_boundary TEXT NOT NULL,
+            note TEXT,
+            source_ref TEXT NOT NULL,
+            accepted_task_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(term, usage_boundary)
+        );
+
+        CREATE TABLE IF NOT EXISTS commentary_links (
+            link_id TEXT PRIMARY KEY,
+            commentary_ref TEXT NOT NULL,
+            block_id TEXT NOT NULL REFERENCES blocks(block_id),
+            source_ref TEXT NOT NULL,
+            usage_boundary TEXT NOT NULL,
+            accepted_task_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(commentary_ref, block_id)
+        );
+
         CREATE TABLE IF NOT EXISTS people (
             person_id TEXT PRIMARY KEY,
             canonical_name TEXT NOT NULL,
@@ -6618,10 +6641,28 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS knowledge_patch_applications (
+            application_id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            proposal_type TEXT NOT NULL,
+            target_table TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            payload_sha256 TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            evidence_ref TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            UNIQUE(proposal_id, target_table, target_key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
         CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
         CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
+        CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
+        CREATE INDEX IF NOT EXISTS idx_commentary_links_block ON commentary_links(block_id);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_patch_applications_task
+            ON knowledge_patch_applications(task_id);
         CREATE INDEX IF NOT EXISTS idx_kb_version_diff_reports_after
             ON kb_version_diff_reports(after_version_id);
         CREATE INDEX IF NOT EXISTS idx_kb_version_diff_reports_created
@@ -6671,10 +6712,16 @@ pub fn rebuild_knowledge_base_from_snapshots(
     for source_dir in source_dirs {
         load_source_snapshot(conn, &source_dir)?;
     }
+    let patch_application_report = apply_accepted_knowledge_patch_proposals(conn)?;
     let mut report = write_kb_version(conn, source_root)?;
     let after_summary = knowledge_base_summary(conn)?
         .ok_or_else(|| anyhow!("knowledge base summary missing after rebuild"))?;
-    report.diff_report = write_kb_version_diff_report(conn, before_summary, after_summary)?;
+    report.diff_report = write_kb_version_diff_report(
+        conn,
+        before_summary,
+        after_summary,
+        patch_application_report,
+    )?;
     Ok(report)
 }
 
@@ -6692,6 +6739,9 @@ fn clear_knowledge_base_rows(conn: &Connection) -> Result<()> {
         DELETE FROM aliases;
         DELETE FROM people;
         DELETE FROM version_differences;
+        DELETE FROM terms;
+        DELETE FROM commentary_links;
+        DELETE FROM knowledge_patch_applications;
         DELETE FROM version_notes;
         DELETE FROM commentaries;
         DELETE FROM rare_char_annotations;
@@ -6900,6 +6950,333 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+struct AcceptedKnowledgePatchProposal {
+    record: KnowledgePatchProposalRecord,
+    evidence_ref: String,
+}
+
+fn apply_accepted_knowledge_patch_proposals(conn: &Connection) -> Result<Value> {
+    if !sqlite_table_exists(conn, "knowledge_patch_proposals")?
+        || !sqlite_table_exists(conn, "knowledge_governance_tasks")?
+    {
+        return Ok(json!({
+            "object": "tonglingyu.knowledge_patch_application_report",
+            "accepted_proposal_count": 0,
+            "applied_count": 0,
+            "by_type": {},
+            "applications": [],
+        }));
+    }
+    let proposals = accepted_knowledge_patch_proposals(conn)?;
+    let mut by_type = BTreeMap::<String, i64>::new();
+    let mut applications = Vec::new();
+    for proposal in &proposals {
+        let (target_table, target_key) = apply_accepted_knowledge_patch_proposal(conn, proposal)?;
+        *by_type
+            .entry(proposal.record.proposal_type.clone())
+            .or_default() += 1;
+        record_knowledge_patch_application(conn, proposal, &target_table, &target_key)?;
+        applications.push(json!({
+            "proposal_id": &proposal.record.proposal_id,
+            "task_id": &proposal.record.task_id,
+            "proposal_type": &proposal.record.proposal_type,
+            "target_table": target_table,
+            "target_key": target_key,
+            "payload_sha256": &proposal.record.payload_sha256,
+            "source_ref_sha256": hash_text(&proposal.record.source_ref),
+            "evidence_ref_sha256": hash_text(&proposal.evidence_ref),
+        }));
+    }
+    let report = json!({
+        "object": "tonglingyu.knowledge_patch_application_report",
+        "accepted_proposal_count": proposals.len(),
+        "applied_count": applications.len(),
+        "by_type": by_type,
+        "applications": applications,
+        "direct_agent_fact_mutation": false,
+    });
+    if !proposals.is_empty() {
+        append_runtime_audit_event(
+            conn,
+            "kb-rebuild",
+            "knowledge_patch_proposals_applied",
+            &json!({
+                "accepted_proposal_count": proposals.len(),
+                "applied_count": report["applied_count"],
+                "by_type": report["by_type"],
+                "direct_agent_fact_mutation": false,
+            }),
+        )?;
+    }
+    Ok(report)
+}
+
+fn accepted_knowledge_patch_proposals(
+    conn: &Connection,
+) -> Result<Vec<AcceptedKnowledgePatchProposal>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            p.proposal_id, p.proposal_type, p.trace_id, p.package_id,
+            p.source_ref, p.payload_json, p.payload_sha256, p.task_id,
+            p.created_by, p.created_at, p.updated_at, t.evidence_ref
+        FROM knowledge_patch_proposals AS p
+        JOIN knowledge_governance_tasks AS t ON t.task_id = p.task_id
+        WHERE t.status = 'accepted'
+        ORDER BY COALESCE(t.accepted_at, t.updated_at), p.proposal_id
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let payload_json: String = row.get(5)?;
+        let payload = serde_json::from_str(&payload_json)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        Ok(AcceptedKnowledgePatchProposal {
+            record: KnowledgePatchProposalRecord {
+                proposal_id: row.get(0)?,
+                proposal_type: row.get(1)?,
+                trace_id: row.get(2)?,
+                package_id: row.get(3)?,
+                source_ref: row.get(4)?,
+                payload,
+                payload_sha256: row.get(6)?,
+                task_id: row.get(7)?,
+                created_by: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            },
+            evidence_ref: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        })
+    })?;
+    let proposals = rows
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    for proposal in &proposals {
+        if proposal.evidence_ref.trim().is_empty() {
+            return Err(anyhow!(
+                "accepted knowledge patch proposal {} is missing evidence_ref",
+                proposal.record.proposal_id
+            ));
+        }
+    }
+    Ok(proposals)
+}
+
+fn apply_accepted_knowledge_patch_proposal(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+) -> Result<(String, String)> {
+    match proposal.record.proposal_type.as_str() {
+        "alias" => apply_alias_patch(conn, proposal),
+        "term" => apply_term_patch(conn, proposal),
+        "commentary_link" => apply_commentary_link_patch(conn, proposal),
+        "version_note" => apply_version_note_patch(conn, proposal),
+        proposal_type => Err(anyhow!(
+            "unsupported accepted knowledge patch proposal_type {proposal_type}"
+        )),
+    }
+}
+
+fn apply_alias_patch(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+) -> Result<(String, String)> {
+    let payload = &proposal.record.payload;
+    let alias = required_payload_string(payload, "alias")?.to_string();
+    let person_id = required_payload_string(payload, "target_ref")?.to_string();
+    ensure_row_exists(
+        conn,
+        "people",
+        "person_id",
+        &person_id,
+        "accepted alias proposal target person does not exist",
+    )?;
+    let existing_person_id: Option<String> = conn
+        .query_row(
+            "SELECT person_id FROM aliases WHERE alias = ?1",
+            params![&alias],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(existing_person_id) = existing_person_id {
+        if existing_person_id != person_id {
+            return Err(anyhow!(
+                "accepted alias proposal conflicts with existing alias {alias}"
+            ));
+        }
+    } else {
+        let scope = payload_optional_string(payload, "scope", 240).unwrap_or_else(|| {
+            format!(
+                "accepted_knowledge_patch:{}",
+                proposal.record.task_id.as_str()
+            )
+        });
+        conn.execute(
+            "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
+            params![&alias, &person_id, scope],
+        )?;
+    }
+    Ok(("aliases".to_string(), alias))
+}
+
+fn apply_term_patch(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+) -> Result<(String, String)> {
+    let payload = &proposal.record.payload;
+    let term = required_payload_string(payload, "term")?.to_string();
+    let usage_boundary = required_payload_string(payload, "usage_boundary")?.to_string();
+    let category = payload_optional_string(payload, "category", 120);
+    let note = payload_optional_string(payload, "note", 480);
+    let term_id = format!("term:proposal:{}", proposal.record.proposal_id);
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO terms (
+            term_id, term, category, usage_boundary, note, source_ref,
+            accepted_task_id, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "#,
+        params![
+            &term_id,
+            &term,
+            &category,
+            &usage_boundary,
+            &note,
+            &proposal.record.source_ref,
+            &proposal.record.task_id,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(("terms".to_string(), term))
+}
+
+fn apply_commentary_link_patch(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+) -> Result<(String, String)> {
+    let payload = &proposal.record.payload;
+    let commentary_ref = required_payload_string(payload, "commentary_ref")?.to_string();
+    let block_id = required_payload_string(payload, "block_id")?.to_string();
+    ensure_row_exists(
+        conn,
+        "blocks",
+        "block_id",
+        &block_id,
+        "accepted commentary link proposal block does not exist",
+    )?;
+    let usage_boundary = payload_optional_string(payload, "usage_boundary", 480)
+        .unwrap_or_else(|| "accepted expert-reviewed commentary link".to_string());
+    let link_id = format!("commentary-link:proposal:{}", proposal.record.proposal_id);
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO commentary_links (
+            link_id, commentary_ref, block_id, source_ref, usage_boundary,
+            accepted_task_id, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+        params![
+            &link_id,
+            &commentary_ref,
+            &block_id,
+            &proposal.record.source_ref,
+            &usage_boundary,
+            &proposal.record.task_id,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(("commentary_links".to_string(), link_id))
+}
+
+fn apply_version_note_patch(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+) -> Result<(String, String)> {
+    let payload = &proposal.record.payload;
+    let source_id = required_payload_string(payload, "source_id")?.to_string();
+    let note = required_payload_string(payload, "note")?.to_string();
+    ensure_row_exists(
+        conn,
+        "sources",
+        "source_id",
+        &source_id,
+        "accepted version note proposal source does not exist",
+    )?;
+    let source_status = payload_optional_string(payload, "source_status", 120)
+        .unwrap_or_else(|| "accepted_knowledge_patch".to_string());
+    let usage_limit = payload_optional_string(payload, "usage_boundary", 480)
+        .unwrap_or_else(|| "accepted expert-reviewed version note".to_string());
+    let version_note_id = format!("version-note:proposal:{}", proposal.record.proposal_id);
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO version_notes (
+            version_note_id, source_id, note, source_status, usage_limit
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![
+            &version_note_id,
+            &source_id,
+            &note,
+            &source_status,
+            &usage_limit,
+        ],
+    )?;
+    Ok(("version_notes".to_string(), version_note_id))
+}
+
+fn record_knowledge_patch_application(
+    conn: &Connection,
+    proposal: &AcceptedKnowledgePatchProposal,
+    target_table: &str,
+    target_key: &str,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO knowledge_patch_applications (
+            application_id, proposal_id, task_id, proposal_type, target_table,
+            target_key, payload_sha256, source_ref, evidence_ref, applied_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            format!("kpa-{}", uuid::Uuid::now_v7().simple()),
+            &proposal.record.proposal_id,
+            &proposal.record.task_id,
+            &proposal.record.proposal_type,
+            target_table,
+            target_key,
+            &proposal.record.payload_sha256,
+            &proposal.record.source_ref,
+            &proposal.evidence_ref,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn payload_optional_string(payload: &Value, field: &str, max_chars: usize) -> Option<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(max_chars).collect::<String>())
+}
+
+fn ensure_row_exists(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    value: &str,
+    message: &str,
+) -> Result<()> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+    let count: i64 = conn.query_row(&sql, params![value], |row| row.get(0))?;
+    if count == 0 {
+        Err(anyhow!("{message}: {value}"))
+    } else {
+        Ok(())
+    }
+}
+
 fn write_kb_version(conn: &Connection, source_root: &Path) -> Result<KnowledgeBaseBuildReport> {
     let source_count: i64 = conn.query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))?;
     let block_count: i64 = conn.query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
@@ -6952,6 +7329,9 @@ fn knowledge_base_summary(conn: &Connection) -> Result<Option<Value>> {
         "commentaries": table_count_if_exists(conn, "commentaries")?,
         "version_notes": table_count_if_exists(conn, "version_notes")?,
         "aliases": table_count_if_exists(conn, "aliases")?,
+        "terms": table_count_if_exists(conn, "terms")?,
+        "commentary_links": table_count_if_exists(conn, "commentary_links")?,
+        "knowledge_patch_applications": table_count_if_exists(conn, "knowledge_patch_applications")?,
         "rare_char_annotations": table_count_if_exists(conn, "rare_char_annotations")?,
     });
     let kb_build_hash = hash_text(&serde_json::to_string(&canonical_json_value(&json!({
@@ -7030,6 +7410,7 @@ fn write_kb_version_diff_report(
     conn: &Connection,
     before_summary: Option<Value>,
     after_summary: Value,
+    patch_application_report: Value,
 ) -> Result<Value> {
     let after_version_id = after_summary["kb_version"]["version_id"]
         .as_str()
@@ -7043,7 +7424,13 @@ fn write_kb_version_diff_report(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let diff = kb_version_summary_diff(before_summary.as_ref(), &after_summary);
+    let mut diff = kb_version_summary_diff(before_summary.as_ref(), &after_summary);
+    if let Some(object) = diff.as_object_mut() {
+        object.insert(
+            "knowledge_patch_application".to_string(),
+            patch_application_report,
+        );
+    }
     let report_id = format!("kb-diff-{}", uuid::Uuid::now_v7().simple());
     let now = now_rfc3339();
     conn.execute(
@@ -7189,6 +7576,9 @@ fn kb_version_summary_diff(before: Option<&Value>, after: &Value) -> Value {
         "commentaries",
         "version_notes",
         "aliases",
+        "terms",
+        "commentary_links",
+        "knowledge_patch_applications",
         "rare_char_annotations",
     ] {
         let before_value = before_counts
@@ -10872,9 +11262,19 @@ mod tests {
         let after_summary = knowledge_base_summary(&conn)
             .expect("after summary loads")
             .expect("after summary exists");
-        build_report.diff_report =
-            write_kb_version_diff_report(&conn, Some(before_summary), after_summary)
-                .expect("diff report writes");
+        build_report.diff_report = write_kb_version_diff_report(
+            &conn,
+            Some(before_summary),
+            after_summary,
+            json!({
+                "object": "tonglingyu.knowledge_patch_application_report",
+                "accepted_proposal_count": 0,
+                "applied_count": 0,
+                "by_type": {},
+                "applications": [],
+            }),
+        )
+        .expect("diff report writes");
 
         assert_eq!(
             build_report.diff_report["schema_version"],
@@ -10907,6 +11307,81 @@ mod tests {
         .expect("diff report still exists");
         assert_eq!(updated["eval_after_summary"]["status"], json!("passed"));
         assert_eq!(updated["eval_diff"]["after_status"], json!("passed"));
+    }
+
+    #[test]
+    fn accepted_knowledge_patch_proposal_applies_during_kb_rebuild_stage() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_aliases(&conn).expect("seed aliases");
+        let result = create_knowledge_patch_proposal(
+            &conn,
+            KnowledgePatchProposalCreateInput {
+                proposal_type: "alias".to_string(),
+                trace_id: "trace-accepted-patch".to_string(),
+                package_id: None,
+                source_ref: Some("trace:trace-accepted-patch".to_string()),
+                payload: json!({
+                    "alias": "玉兄",
+                    "target_ref": "person:baoyu",
+                    "scope": "expert accepted alias test",
+                }),
+                created_by: Some("agent-rqa".to_string()),
+                priority: Some("p1".to_string()),
+            },
+        )
+        .expect("proposal creates");
+        update_governance_task(
+            &conn,
+            result["task"]["task_id"].as_str().expect("task id"),
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "accepted".to_string(),
+                reviewer: Some("expert-reviewer".to_string()),
+                review_note: Some("accepted alias patch for rebuild".to_string()),
+                evidence_ref: Some("source://expert-review/alias/002".to_string()),
+                expected_updated_at: Some(
+                    result["task"]["updated_at"]
+                        .as_str()
+                        .expect("task updated_at")
+                        .to_string(),
+                ),
+            },
+        )
+        .expect("proposal task accepts")
+        .expect("task exists");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM aliases WHERE alias = '玉兄'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("alias count before apply"),
+            0
+        );
+
+        let application_report =
+            apply_accepted_knowledge_patch_proposals(&conn).expect("accepted proposal applies");
+
+        assert_eq!(application_report["accepted_proposal_count"], json!(1));
+        assert_eq!(application_report["applied_count"], json!(1));
+        let person_id: String = conn
+            .query_row(
+                "SELECT person_id FROM aliases WHERE alias = '玉兄'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("alias applied");
+        assert_eq!(person_id, "person:baoyu");
+        assert_eq!(
+            table_count(&conn, "knowledge_patch_applications").expect("application count"),
+            1
+        );
+        let events = runtime_audit_events_for_trace(&conn, "kb-rebuild").expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_patch_proposals_applied"
+                && event["payload"]["direct_agent_fact_mutation"] == json!(false)
+        }));
     }
 
     #[test]

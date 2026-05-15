@@ -618,9 +618,14 @@
   和 KB build hash；Gateway `build-kb` 默认在临时 SQLite 副本上运行 rebuild 前后
   eval，只把 `quality_summary` 写回 diff report，post-rebuild eval 不通过时
   fail-closed，且不把 eval package/failure 污染 live DB。
-- 该 H 切片仍不等于 H 完成或 production-ready：accepted proposal 到 KB rebuild
-  输入、retention/restore 和用户数据 lifecycle contract 仍未完成；accepted 状态不能
-  直接等同为事实层已更新。
+- accepted knowledge patch proposal 已接入 KB rebuild 输入：rebuild 只应用
+  `accepted` 且带 evidence ref 的 proposal，按类型写入 aliases、terms、
+  commentary_links 或 version_notes，并记录 `knowledge_patch_applications` 与
+  `knowledge_patch_proposals_applied` audit；不满足目标表约束或引用不存在时
+  rebuild fail-closed。
+- 该 H 切片仍不等于 H 完成或 production-ready：retention/restore 和用户数据
+  lifecycle contract 仍未完成；accepted 状态本身仍不能直接等同为事实层已更新，必须
+  经过 rebuild application、diff report 和 eval gate。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
