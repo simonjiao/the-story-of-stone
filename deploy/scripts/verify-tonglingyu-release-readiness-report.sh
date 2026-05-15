@@ -2195,6 +2195,26 @@ def validate_release_ops_gate_stdout():
             "release_ops_post_release_admin_action",
             monitor.get("admin_action_or_api_evidence_ref"),
         )
+        evidence_path = monitor.get("evidence_path")
+        evidence_sha256 = monitor.get("evidence_sha256")
+        evidence_errors = monitor.get("evidence_errors")
+        if not isinstance(monitor.get("evidence_validated"), bool):
+            errors.append("release_ops_post_release_evidence_validated_must_be_bool")
+        if not isinstance(evidence_errors, list):
+            errors.append("release_ops_post_release_evidence_errors_must_be_array")
+        elif evidence_errors:
+            errors.append("release_ops_post_release_evidence_errors_present")
+        if nonempty(evidence_path):
+            evidence_file = Path(evidence_path)
+            if not evidence_file.is_absolute():
+                errors.append("release_ops_post_release_evidence_path_must_be_absolute")
+            elif production_ready:
+                if not evidence_file.is_file():
+                    errors.append("release_ops_post_release_evidence_file_not_found")
+                elif is_sha256(evidence_sha256) and file_sha256(evidence_file) != evidence_sha256:
+                    errors.append("release_ops_post_release_evidence_sha256_mismatch")
+        if nonempty(evidence_sha256) and not is_sha256(evidence_sha256):
+            errors.append("release_ops_post_release_evidence_sha256_invalid")
         if production_ready:
             if gate_json.get("mode") != "live":
                 errors.append("production_ready_requires_release_ops_live_mode")
@@ -2211,6 +2231,12 @@ def validate_release_ops_gate_stdout():
                 errors.append("release_ops_post_release_live_gate_ref_missing")
             if not release_ops_ref_valid(admin_action_ref):
                 errors.append("release_ops_post_release_admin_action_ref_missing")
+            if monitor.get("evidence_validated") is not True:
+                errors.append("release_ops_post_release_evidence_not_validated")
+            if not nonempty(evidence_path):
+                errors.append("release_ops_post_release_evidence_path_missing")
+            if not is_sha256(evidence_sha256):
+                errors.append("release_ops_post_release_evidence_sha256_missing")
 
     reproduction = gate_json.get("reproduction")
     required_reproduction_inputs = {
@@ -2251,6 +2277,8 @@ def validate_release_ops_gate_stdout():
         ):
             if not release_ops_ref_valid(evidence.get(field)):
                 errors.append(f"release_ops_{field}_missing")
+        if not is_sha256(evidence.get("post_release_monitor_evidence_sha256")):
+            errors.append("release_ops_post_release_monitor_evidence_sha256_missing")
 
 
 def validate_incident_capacity_gate_stdout():

@@ -14,6 +14,7 @@ ROLLBACK_EVIDENCE_REF="${TONGLINGYU_RELEASE_ROLLBACK_EVIDENCE_REF:-}"
 RTO_RPO_EVIDENCE_REF="${TONGLINGYU_RELEASE_RTO_RPO_EVIDENCE_REF:-}"
 ALERT_EVIDENCE_REF="${TONGLINGYU_RELEASE_ALERT_EVIDENCE_REF:-}"
 POST_RELEASE_MONITOR_REF="${TONGLINGYU_RELEASE_POST_RELEASE_MONITOR_REF:-}"
+POST_RELEASE_MONITOR_EVIDENCE="${TONGLINGYU_RELEASE_POST_RELEASE_MONITOR_EVIDENCE:-}"
 POST_RELEASE_LIVE_GATE_REF="${TONGLINGYU_RELEASE_POST_RELEASE_LIVE_GATE_REF:-}"
 POST_RELEASE_ADMIN_ACTION_REF="${TONGLINGYU_RELEASE_POST_RELEASE_ADMIN_ACTION_REF:-}"
 POST_RELEASE_CONCLUSION="${TONGLINGYU_RELEASE_POST_RELEASE_CONCLUSION:-}"
@@ -24,9 +25,9 @@ RPO_TARGET_SECONDS="${TONGLINGYU_RELEASE_RPO_TARGET_SECONDS:-3600}"
 python3 - "${RUNBOOK_PATH}" "${REPORT_PATH}" "${REQUIRE_LIVE}" "${OPERATOR}" \
   "${ENVIRONMENT}" "${RELEASE_REPORT_PATH}" "${ROLLBACK_EVIDENCE_REF}" \
   "${RTO_RPO_EVIDENCE_REF}" "${ALERT_EVIDENCE_REF}" \
-  "${POST_RELEASE_MONITOR_REF}" "${POST_RELEASE_LIVE_GATE_REF}" \
-  "${POST_RELEASE_ADMIN_ACTION_REF}" "${POST_RELEASE_CONCLUSION}" \
-  "${POST_RELEASE_WINDOW_MINUTES}" "${RTO_TARGET_SECONDS}" \
+  "${POST_RELEASE_MONITOR_REF}" "${POST_RELEASE_MONITOR_EVIDENCE}" \
+  "${POST_RELEASE_LIVE_GATE_REF}" "${POST_RELEASE_ADMIN_ACTION_REF}" \
+  "${POST_RELEASE_CONCLUSION}" "${POST_RELEASE_WINDOW_MINUTES}" "${RTO_TARGET_SECONDS}" \
   "${RPO_TARGET_SECONDS}" <<'PY'
 import hashlib
 import json
@@ -47,13 +48,14 @@ from urllib.parse import urlparse
     rto_rpo_evidence_ref,
     alert_evidence_ref,
     post_release_monitor_ref,
+    post_release_monitor_evidence_raw,
     post_release_live_gate_ref,
     post_release_admin_action_ref,
     post_release_conclusion,
     post_release_window_minutes_raw,
     rto_target_seconds_raw,
     rpo_target_seconds_raw,
-) = sys.argv[1:17]
+) = sys.argv[1:18]
 
 errors = []
 runbook_path = Path(runbook_path_raw)
@@ -75,6 +77,13 @@ def file_sha256(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def load_json_file(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def positive_int(value, default):
@@ -133,6 +142,16 @@ def checked_ref(value):
         "kind": ref_kind(value),
         "valid": ref_valid(value),
     }
+
+
+def resolve_evidence_path(path_raw):
+    value = str(path_raw or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
 
 
 def required_ref(name, value):
@@ -304,6 +323,135 @@ production_refs = {
     "post_release_live_gate_ref": checked_ref(post_release_live_gate_ref),
     "post_release_admin_action_ref": checked_ref(post_release_admin_action_ref),
 }
+post_release_monitor_evidence_path = resolve_evidence_path(
+    post_release_monitor_evidence_raw,
+)
+post_release_monitor_evidence = None
+post_release_monitor_evidence_sha256 = ""
+post_release_monitor_evidence_valid = False
+post_release_monitor_evidence_errors = []
+if post_release_monitor_evidence_path is not None:
+    if not post_release_monitor_evidence_path.is_file():
+        post_release_monitor_evidence_errors.append("post_release_monitor_evidence_not_found")
+    else:
+        post_release_monitor_evidence_sha256 = file_sha256(
+            post_release_monitor_evidence_path,
+        )
+        post_release_monitor_evidence = load_json_file(post_release_monitor_evidence_path)
+        if not isinstance(post_release_monitor_evidence, dict):
+            post_release_monitor_evidence_errors.append(
+                "post_release_monitor_evidence_json_invalid",
+            )
+if isinstance(post_release_monitor_evidence, dict):
+    if post_release_monitor_evidence.get("object") != "tonglingyu.post_release_monitor":
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_object_invalid",
+        )
+    if post_release_monitor_evidence.get("schema_version") != 1:
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_schema_version_invalid",
+        )
+    if post_release_monitor_evidence.get("status") != "ok":
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_status_invalid",
+        )
+    if post_release_monitor_evidence.get("secret_values_printed") is not False:
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_secret_values_printed",
+        )
+    if post_release_monitor_evidence.get("operator") != operator.strip():
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_operator_mismatch",
+        )
+    if post_release_monitor_evidence.get("environment") != environment.strip():
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_environment_mismatch",
+        )
+    if post_release_monitor_evidence.get("conclusion") != post_release_conclusion.strip():
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_conclusion_mismatch",
+        )
+    if post_release_monitor_evidence.get("window_minutes") != post_release_window_minutes:
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_window_mismatch",
+        )
+    release_report = post_release_monitor_evidence.get("release_report")
+    if not isinstance(release_report, dict):
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_release_report_missing",
+        )
+    else:
+        if release_report.get("path") != release_report_path.strip():
+            post_release_monitor_evidence_errors.append(
+                "post_release_monitor_evidence_release_report_path_mismatch",
+            )
+        if release_report.get("require_live") is not True:
+            post_release_monitor_evidence_errors.append(
+                "post_release_monitor_evidence_release_report_not_live",
+            )
+        failed_live_gates = release_report.get("failed_live_gates")
+        missing_live_gates = release_report.get("missing_live_gates")
+        if failed_live_gates not in ([], None):
+            post_release_monitor_evidence_errors.append(
+                "post_release_monitor_evidence_failed_live_gates_present",
+            )
+        if missing_live_gates not in ([], None):
+            post_release_monitor_evidence_errors.append(
+                "post_release_monitor_evidence_missing_live_gates_present",
+            )
+    evidence_refs = post_release_monitor_evidence.get("evidence_refs")
+    if not isinstance(evidence_refs, dict):
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_refs_missing",
+        )
+    else:
+        expected_refs = {
+            "monitor_ref": production_refs["post_release_monitor_ref"],
+            "live_gate_evidence_ref": production_refs["post_release_live_gate_ref"],
+            "admin_action_or_api_evidence_ref": production_refs[
+                "post_release_admin_action_ref"
+            ],
+        }
+        for field, expected_ref in expected_refs.items():
+            actual_ref = evidence_refs.get(field)
+            if not isinstance(actual_ref, dict):
+                post_release_monitor_evidence_errors.append(
+                    f"post_release_monitor_evidence_{field}_missing",
+                )
+                continue
+            if actual_ref.get("ref") != expected_ref["ref"]:
+                post_release_monitor_evidence_errors.append(
+                    f"post_release_monitor_evidence_{field}_mismatch",
+                )
+            if actual_ref.get("valid") is not True:
+                post_release_monitor_evidence_errors.append(
+                    f"post_release_monitor_evidence_{field}_invalid",
+                )
+    checks_from_monitor = post_release_monitor_evidence.get("checks")
+    if not isinstance(checks_from_monitor, dict):
+        post_release_monitor_evidence_errors.append(
+            "post_release_monitor_evidence_checks_missing",
+        )
+    else:
+        for check in (
+            "release_report_exists",
+            "release_report_requires_live",
+            "live_gate_statuses_passed",
+            "admin_action_or_api_evidence_ref_valid",
+            "monitor_window_at_least_60_minutes",
+            "operator_environment_recorded",
+            "conclusion_passed",
+        ):
+            if checks_from_monitor.get(check) is not True:
+                post_release_monitor_evidence_errors.append(
+                    f"post_release_monitor_evidence_check_failed={check}",
+                )
+post_release_monitor_evidence_valid = (
+    post_release_monitor_evidence_path is not None
+    and isinstance(post_release_monitor_evidence, dict)
+    and not post_release_monitor_evidence_errors
+)
+
 if require_live:
     for field, ref in production_refs.items():
         required_ref(field, ref["ref"])
@@ -317,6 +465,10 @@ if require_live:
         errors.append("post_release_conclusion_not_passed")
     if post_release_window_minutes < 60:
         errors.append("post_release_window_too_short")
+    if post_release_monitor_evidence_path is None:
+        errors.append("post_release_monitor_evidence_missing")
+    if not post_release_monitor_evidence_valid:
+        errors.extend(post_release_monitor_evidence_errors)
 
 production_evidence_complete = (
     bool(operator.strip())
@@ -325,6 +477,7 @@ production_evidence_complete = (
     and post_release_conclusion.strip() == "passed"
     and post_release_window_minutes >= 60
     and all(item["valid"] for item in production_refs.values())
+    and post_release_monitor_evidence_valid
 )
 if not require_live:
     production_evidence_complete = False
@@ -390,6 +543,14 @@ payload = {
         "environment": environment.strip(),
         "release_report_path": release_report_path.strip(),
         "monitor_ref": production_refs["post_release_monitor_ref"],
+        "evidence_path": (
+            str(post_release_monitor_evidence_path)
+            if post_release_monitor_evidence_path is not None
+            else ""
+        ),
+        "evidence_sha256": post_release_monitor_evidence_sha256,
+        "evidence_validated": post_release_monitor_evidence_valid,
+        "evidence_errors": post_release_monitor_evidence_errors,
         "live_gate_evidence_ref": production_refs["post_release_live_gate_ref"],
         "admin_action_or_api_evidence_ref": production_refs[
             "post_release_admin_action_ref"
@@ -418,6 +579,7 @@ payload = {
         "rto_rpo_evidence_ref": production_refs["rto_rpo_evidence_ref"]["ref"],
         "alert_evidence_ref": production_refs["alert_evidence_ref"]["ref"],
         "post_release_monitor_ref": production_refs["post_release_monitor_ref"]["ref"],
+        "post_release_monitor_evidence_sha256": post_release_monitor_evidence_sha256,
     },
     "errors": errors,
     "secret_values_printed": False,

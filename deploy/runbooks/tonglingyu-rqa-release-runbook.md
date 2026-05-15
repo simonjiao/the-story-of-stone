@@ -229,6 +229,25 @@ The post-release window is at least 60 minutes. Evidence must record:
 The release report cannot be marked production-ready if this monitor evidence
 is missing or if the conclusion is not `passed`.
 
+Generate the monitor evidence as a JSON artifact, then bind it into the live
+ops gate with `TONGLINGYU_RELEASE_POST_RELEASE_MONITOR_EVIDENCE`:
+
+<!-- markdownlint-disable MD013 -->
+```bash
+TONGLINGYU_POST_RELEASE_MONITOR_REPORT_PATH="${POST_RELEASE_MONITOR_REPORT_PATH:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_OPERATOR="${TONGLINGYU_RELEASE_OPERATOR:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_ENVIRONMENT="${TONGLINGYU_RELEASE_ENVIRONMENT:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_REF="file:${POST_RELEASE_MONITOR_REPORT_PATH:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_LIVE_GATE_REF="${TONGLINGYU_RELEASE_POST_RELEASE_LIVE_GATE_REF:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_ADMIN_ACTION_REF="${TONGLINGYU_RELEASE_POST_RELEASE_ADMIN_ACTION_REF:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_STARTED_AT="${POST_RELEASE_MONITOR_STARTED_AT:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_FINISHED_AT="${POST_RELEASE_MONITOR_FINISHED_AT:?}" \
+TONGLINGYU_POST_RELEASE_MONITOR_CONCLUSION=passed \
+./scripts/verify-tonglingyu-post-release-monitor.sh
+```
+<!-- markdownlint-enable MD013 -->
+
 <!-- tonglingyu:release-runbook:release_report_reproduction -->
 
 ## Release Report Reproduction

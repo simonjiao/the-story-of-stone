@@ -1154,6 +1154,70 @@ behavior_config_binding = {
     "secret_values_printed": False,
 }
 runbook_sha256 = hashlib.sha256(Path(runbook_path).read_bytes()).hexdigest()
+post_release_monitor_evidence_path = Path(str(target) + ".post-release-monitor.json")
+post_release_monitor_evidence = {
+    "checks": {
+        "admin_action_or_api_evidence_ref_valid": True,
+        "conclusion_passed": True,
+        "live_gate_statuses_passed": True,
+        "monitor_window_at_least_60_minutes": True,
+        "operator_environment_recorded": True,
+        "release_report_exists": True,
+        "release_report_requires_live": True,
+    },
+    "conclusion": "passed",
+    "environment": "production",
+    "errors": [],
+    "evidence_refs": {
+        "admin_action_or_api_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:live-admin-action-query",
+            "valid": True,
+        },
+        "live_gate_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:live-release-gate",
+            "valid": True,
+        },
+        "monitor_ref": {
+            "kind": "artifact",
+            "ref": "artifact:post-release-monitor",
+            "valid": True,
+        },
+    },
+    "finished_at": "2026-05-15T01:00:00+00:00",
+    "generated_at": "2026-05-15T01:00:01+00:00",
+    "monitor_policy_version": "tonglingyu-post-release-monitor-v1",
+    "object": "tonglingyu.post_release_monitor",
+    "operator": "release-reviewer",
+    "release_report": {
+        "failed_live_gates": [],
+        "generated_at": "2026-05-15T00:00:00+00:00",
+        "live_gate_statuses": {
+            "model_upstream_network": "passed",
+            "openwebui_admin_action": "passed",
+            "openwebui_function": "passed",
+            "strict_gateway": "passed",
+        },
+        "missing_live_gates": [],
+        "path": target,
+        "production_release_ready": True,
+        "require_live": True,
+        "sha256": "8" * 64,
+    },
+    "schema_version": 1,
+    "secret_values_printed": False,
+    "started_at": "2026-05-15T00:00:00+00:00",
+    "status": "ok",
+    "window_minutes": 60,
+}
+post_release_monitor_evidence_path.write_text(
+    json.dumps(post_release_monitor_evidence, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+post_release_monitor_evidence_sha256 = hashlib.sha256(
+    post_release_monitor_evidence_path.read_bytes(),
+).hexdigest()
 image_refs = [
     "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
     "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
@@ -1759,6 +1823,7 @@ gate_stdout = {
         "errors": [],
         "evidence": {
             "alert_evidence_ref": "artifact:release-alert-config",
+            "post_release_monitor_evidence_sha256": post_release_monitor_evidence_sha256,
             "post_release_monitor_ref": "artifact:post-release-monitor",
             "production_evidence_complete": True,
             "rollback_evidence_ref": "artifact:rollback-drill",
@@ -1776,6 +1841,10 @@ gate_stdout = {
             },
             "conclusion": "passed",
             "environment": "production",
+            "evidence_errors": [],
+            "evidence_path": str(post_release_monitor_evidence_path),
+            "evidence_sha256": post_release_monitor_evidence_sha256,
+            "evidence_validated": True,
             "live_gate_evidence_ref": {
                 "kind": "artifact",
                 "ref": "artifact:live-release-gate",
@@ -3121,6 +3190,10 @@ for gate in report["gates"]:
             "ref": "",
             "valid": False,
         }
+        gate_json["post_release_monitor"]["evidence_validated"] = False
+        gate_json["post_release_monitor"]["evidence_errors"] = [
+            "post_release_monitor_evidence_failed_live_gates_present"
+        ]
         gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
@@ -3135,6 +3208,10 @@ assert_report "${tampered_release_ops_monitor_stdout}" \
   '"release_ops_production_evidence_incomplete" in report["errors"]'
 assert_report "${tampered_release_ops_monitor_stdout}" \
   '"release_ops_post_release_live_gate_ref_missing" in report["errors"]'
+assert_report "${tampered_release_ops_monitor_stdout}" \
+  '"release_ops_post_release_evidence_not_validated" in report["errors"]'
+assert_report "${tampered_release_ops_monitor_stdout}" \
+  '"release_ops_post_release_evidence_errors_present" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_ALERT_REPORT}" <<'PY'
 import json

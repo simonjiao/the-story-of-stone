@@ -952,6 +952,8 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 - [ ] post-release 监控窗口至少覆盖一次真实 live gate 和一次 admin Action/API
       查询。
 - [ ] post-release 监控记录 operator、时间、环境、报告路径和结论。
+- [x] post-release monitor 必须生成可复核 JSON evidence，并由 live ops gate
+      与 saved report validator 绑定哈希。
 - [x] production-ready report 必须引用 runbook / rollback / post-release 证据。
 - [x] runbook 必须说明如何按 release report 的 commit/image/config/KB/security
       摘要复现本次发布。
@@ -972,6 +974,12 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   就绪；live 模式缺 rollback evidence、RTO/RPO evidence、alert evidence、
   post-release monitor、operator、environment、report path 或 `passed` 结论会
   fail-closed。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-post-release-monitor.sh`：
+  生成并校验 `tonglingyu.post_release_monitor` JSON，要求 monitor 窗口至少 60
+  分钟、operator/environment/report path/结论完整、release report 为 live 且
+  live gates passed、admin Action/API 证据 ref 有效。live ops gate 现在必须绑定
+  该 evidence path/hash；saved report validator 会拒绝未校验、缺失或哈希不匹配的
+  production-ready 报告。
 - Saved report validator 已要求 production-ready report 绑定
   `release_ops_readiness` stdout，并验证 runbook sha、低基数告警标签、rollback
   evidence、RTO/RPO evidence、post-release live gate/admin Action 证据和

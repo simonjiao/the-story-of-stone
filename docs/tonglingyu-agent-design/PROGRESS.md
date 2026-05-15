@@ -865,6 +865,13 @@
   live/load 性能和值守证据；Open WebUI admin Action source/fixture contract 与
   live Action gate schema 已接入 release readiness，不能替代真实 live Action
   执行证据。
+- Post-release monitor 已有可复核 evidence 机制：
+  `deploy/scripts/verify-tonglingyu-post-release-monitor.sh` 会生成
+  `tonglingyu.post_release_monitor` JSON，校验 60 分钟窗口、operator/environment、
+  live release report、live gates passed、admin Action/API evidence ref 和 `passed`
+  结论；live `release_ops_readiness` 必须绑定该 evidence path/hash，saved report
+  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境
+  真实 post-release monitor 仍未执行。
 
 ## 下一步
 
@@ -875,8 +882,8 @@
    automation 持久 artifact 目录保存目标 live release report、validator JSON
    和 live runtime identity artifact。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
-   post-release monitor、目标环境 capacity/load、incident response drill 和
-   audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。
+   post-release monitor JSON artifact、目标环境 capacity/load、incident response
+   drill 和 audit-history evidence；本地 gate 已 fail-closed，但不能替代真实环境证据。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
