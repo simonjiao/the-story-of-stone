@@ -485,6 +485,9 @@
 - 后续 RQA production-ready 还必须绑定当前 live KB 的 source snapshot digest、
   KB build hash、kb_version 和 eval run id；不能使用另一个 KB 构建的评测结果
   证明当前线上知识库 production-ready。
+- 后续 RQA production-ready 还必须验证进入 production evidence chain 的 source
+  都具备机器可读 license、usage boundary 和 attribution metadata；缺失时不能把
+  该来源作为生产证据。
 
 ## 下一步
 

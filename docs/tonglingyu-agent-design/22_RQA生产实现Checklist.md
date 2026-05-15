@@ -59,6 +59,8 @@ production-ready 的替代验收。
     执行，没有进入 CI 或 release automation 的强制路径。
 19. production-ready report 没有绑定当前 live KB 的 source snapshot digest、
     KB build hash、kb_version 和 eval run id，或使用了另一个 KB 构建的 RQA 指标。
+20. production evidence chain 使用的 source 缺少机器可读 license、usage boundary
+    或 attribution metadata。
 
 ## 决策基线
 
@@ -83,6 +85,7 @@ production-ready 的替代验收。
 | 资料覆盖 | source coverage boundary 必须进入 report、公共回答边界和 release gate |
 | 强制执行 | CI 或 release automation 必须运行 RQA gate、validator 和 contract smoke |
 | KB 绑定 | live KB、source snapshot、eval run 和 release report 必须同源可复现 |
+| 来源许可 | production source 必须具备可核验 license / usage / attribution metadata |
 
 ## Production 默认阈值
 
@@ -122,6 +125,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] 记录 source diversity、edition diversity、exact term coverage。
 - [ ] 记录 source coverage boundary，区分当前 source snapshot、影印件复核、
       权威校注本复核和专家校勘状态。
+- [ ] 记录 source license refs、usage boundary 和 attribution refs，不把缺失
+      许可/署名 metadata 的 source 用作 production evidence。
 - [ ] 记录 expected evidence hit 结果。
 - [ ] 记录 quality status、issues、recommended follow-up。
 - [ ] 单测覆盖完整、缺证据、缺 required type、exact term missing。
@@ -270,7 +275,10 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] gate report 记录 RQA schema version、eval suite version 和有效配置摘要。
 - [ ] gate report 记录 source snapshot digest、KB build hash、kb_version 和
       eval run id。
+- [ ] gate report 记录 source license summary 和 attribution summary。
 - [ ] gate 校验 eval quality summary 与当前 live KB 的 kb_version / build hash 一致。
+- [ ] gate 校验 production evidence chain 中的 source 都有 license / usage /
+      attribution metadata；缺失时 fail-closed。
 - [ ] 缺少 quality summary、缺少 report 或阈值配置不可解析时 fail-closed。
 - [ ] gate 输出不泄露 secret 和过长日志。
 - [ ] gate stdout / stderr 不输出原始 question、query terms 或高基数 id 列表。
@@ -299,6 +307,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
       实际登记范围。
 - [ ] validator 校验 source snapshot digest、KB build hash、kb_version 和 eval run id
       不缺失，且 RQA 指标绑定同一个 KB 构建。
+- [ ] validator 校验 source license summary / attribution summary 不缺失，且引用的
+      source id 都存在于当前 source snapshot metadata。
 - [ ] validator 校验低于默认阈值的报告不能 production-ready。
 - [ ] validator 校验 report 不包含原始用户问题、未脱敏 query 或高基数字段列表。
 - [ ] validator 继续扫描 secret-like values。
@@ -354,6 +364,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
       eval suite version 和有效配置摘要。
 - [ ] production-ready report 必须包含 source snapshot digest、KB build hash、
       kb_version 和 eval run id，且与 live gate 读取的当前 KB 一致。
+- [ ] production-ready report 必须包含 source license summary 和 attribution
+      summary，缺失 source 许可/署名 metadata 时不能生成 ready artifact。
 - [ ] CI 或 release automation 必须强制运行 RQA quality gate、saved report
       validator 和 contract smoke；失败时不能生成 production-ready artifact。
 - [ ] 自动化产物必须记录 workflow/job id 或 release run id、触发 commit 和 gate
@@ -380,6 +392,8 @@ release report 和 saved report validator，不能只存在于运行环境中。
 - [ ] production-ready report 必须绑定当前运行镜像 digest、代码版本和 migration 状态。
 - [ ] production-ready report 必须绑定当前 live KB 的 source snapshot digest、
       KB build hash、kb_version 和 eval run id。
+- [ ] production-ready report 必须绑定当前 live KB 的 source license summary 和
+      attribution summary。
 - [ ] live gate 必须验证 RQA admin Action/API 权限边界。
 - [ ] live gate 必须验证 RQA metrics 和 Prometheus 不泄露 query 原文或 secret。
 - [ ] RQA 写入、查询和 release gate 的耗时必须有 bounded timeout 或明确上限。
