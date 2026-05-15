@@ -649,8 +649,16 @@
   RTO/RPO、backup/restore hash、恢复后 checks；production-ready report 若使用
   fixture-only restore drill 会失败，live release 必须提供真实 trace/package/failure/
   governance task restore refs。
-- 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据、依赖/镜像/
-  发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
+- Release security gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-release-security.sh` 会记录 dependency scan、
+  image scan、release script static scan 和 risk acceptance。缺依赖扫描、镜像扫描、
+  镜像 digest、存在 `latest/main` 等可变 tag 或未审批风险时 fail-closed；已审批
+  risk exception 必须包含 risk owner、accepted risk id、approved/expires 时间和
+  accepted findings。saved report validator 会拒绝缺 `security_scan` gate stdout、
+  缺 scan 且无 risk acceptance、release script finding 等篡改。
+- 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
+  scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
+  artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
   contract smoke 接入 CI 或 release automation 的强制路径；只靠人工本地命令不能
   作为最终发布证据。

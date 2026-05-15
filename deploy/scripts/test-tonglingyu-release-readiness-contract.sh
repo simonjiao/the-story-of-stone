@@ -33,6 +33,9 @@ TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.jso
 TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_FIXTURE_REPORT="${WORK_DIR}/tampered-rqa-restore-fixture-report.json"
 TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.json"
+TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-report.json"
+TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
+TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
 TAMPERED_RQA_GATE_THRESHOLD_REPORT="${WORK_DIR}/tampered-rqa-gate-threshold-report.json"
 TAMPERED_RQA_GATE_OPEN_P0_REPORT="${WORK_DIR}/tampered-rqa-gate-open-p0-report.json"
 TAMPERED_RQA_GATE_SUMMARY_REPORT="${WORK_DIR}/tampered-rqa-gate-summary-report.json"
@@ -163,6 +166,7 @@ common_env=(
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}"
+  "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}"
@@ -678,6 +682,7 @@ TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true
 TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}
+TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}
 TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}
@@ -1129,6 +1134,51 @@ gate_stdout = {
         "started_at": "2026-05-15T00:00:00+00:00",
         "status": "ok",
     },
+    "security_scan": {
+        "accepted_error_count": 0,
+        "dependency_scan": {
+            "critical_count": 0,
+            "high_count": 0,
+            "report_sha256": "a" * 64,
+            "scanner": "cargo-audit",
+            "status": "passed",
+        },
+        "errors": [],
+        "generated_at": "2026-05-15T00:00:05+00:00",
+        "image_scan": {
+            "critical_count": 0,
+            "digest_missing_count": 0,
+            "high_count": 0,
+            "image_count": 6,
+            "mutable_tag_count": 0,
+            "report_sha256": "b" * 64,
+            "scanner": "trivy",
+            "status": "passed",
+        },
+        "object": "tonglingyu.release_security_gate",
+        "release_script_scan": {
+            "finding_count": 0,
+            "finding_types": [],
+            "scanned_file_count": 18,
+            "scanner": "tonglingyu-release-script-static-policy-v1",
+            "status": "passed",
+        },
+        "risk_acceptance": {
+            "accepted_findings": [],
+            "present": False,
+        },
+        "risk_conclusion": "no_unaccepted_findings",
+        "scan_coverage": {
+            "dependency_scan": True,
+            "image_scan": True,
+            "release_script_scan": True,
+        },
+        "schema_version": 1,
+        "secret_values_printed": False,
+        "security_scan_passed": True,
+        "status": "ok",
+        "unaccepted_error_count": 0,
+    },
     "model_upstream_network": {
         "errors": [],
         "object": "tonglingyu.model_upstream_network_gate",
@@ -1327,6 +1377,79 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_restore_rto_stdout}" \
   '"rqa_backup_restore_drill_rto_not_met" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_STDOUT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "security_scan":
+        gate["stdout_tail"] = []
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_security_gate_stdout="${WORK_DIR}/tampered-security-gate-stdout.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECURITY_GATE_STDOUT_REPORT}" >"${tampered_security_gate_stdout}"; then
+  echo "production-ready reports must bind security scan status to gate stdout" >&2
+  exit 1
+fi
+assert_report "${tampered_security_gate_stdout}" \
+  '"security_scan_stdout_success_json_missing" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_RISK_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "security_scan":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["scan_coverage"]["image_scan"] = False
+        gate_json["image_scan"]["status"] = "missing"
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_security_gate_risk_stdout="${WORK_DIR}/tampered-security-gate-risk.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECURITY_GATE_RISK_REPORT}" >"${tampered_security_gate_risk_stdout}"; then
+  echo "production-ready reports must reject missing security scans without risk acceptance" >&2
+  exit 1
+fi
+assert_report "${tampered_security_gate_risk_stdout}" \
+  '"security_scan_without_risk_acceptance_requires_image_scan" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_SCRIPT_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "security_scan":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["release_script_scan"]["status"] = "failed"
+        gate_json["release_script_scan"]["finding_count"] = 1
+        gate_json["release_script_scan"]["finding_types"] = ["curl_pipe_shell"]
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_security_gate_script_stdout="${WORK_DIR}/tampered-security-gate-script.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECURITY_GATE_SCRIPT_REPORT}" >"${tampered_security_gate_script_stdout}"; then
+  echo "production-ready reports must reject release script security findings" >&2
+  exit 1
+fi
+assert_report "${tampered_security_gate_script_stdout}" \
+  '"security_scan_release_scripts_not_passed" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_THRESHOLD_REPORT}" <<'PY'
 import json
@@ -1700,6 +1823,7 @@ if env \
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_RQA_RESTORE_DRILL_CMD=${PASS_CMD}" \
+  "TONGLINGYU_RELEASE_SECURITY_SCAN_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_MODEL_UPSTREAM_CMD=${PASS_CMD}" \
   "TONGLINGYU_RELEASE_STRICT_GATEWAY_CMD=${FAIL_CMD}" \
   "TONGLINGYU_RELEASE_OPENWEBUI_FUNCTION_CMD=${PASS_CMD}" \

@@ -33,6 +33,7 @@ required_gate_names = [
     "runtime_config",
     "retrieval_quality",
     "rqa_backup_restore_drill",
+    "security_scan",
     *live_gate_names,
     "openwebui_browser_review",
 ]
@@ -183,6 +184,21 @@ gate_stdout_requirements = {
             "rto",
             "source_mode",
             "started_at",
+        ],
+    },
+    "security_scan": {
+        "object": "tonglingyu.release_security_gate",
+        "required_fields": [
+            "accepted_error_count",
+            "dependency_scan",
+            "generated_at",
+            "image_scan",
+            "release_script_scan",
+            "risk_acceptance",
+            "risk_conclusion",
+            "scan_coverage",
+            "security_scan_passed",
+            "unaccepted_error_count",
         ],
     },
     "model_upstream_network": {
@@ -1027,6 +1043,105 @@ def validate_restore_drill_gate_stdout():
                 errors.append(f"rqa_backup_restore_drill_{field}_invalid")
 
 
+def validate_security_scan_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("security_scan"),
+        "tonglingyu.release_security_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("security_scan_passed") is not True:
+        errors.append("security_scan_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("security_scan_secret_values_printed_must_be_false")
+    if gate_json.get("risk_conclusion") != "no_unaccepted_findings":
+        errors.append("security_scan_risk_conclusion_invalid")
+    if gate_json.get("unaccepted_error_count") != 0:
+        errors.append("security_scan_unaccepted_errors_present")
+    if not isinstance(gate_json.get("accepted_error_count"), int) or gate_json.get("accepted_error_count") < 0:
+        errors.append("security_scan_accepted_error_count_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("security_scan_generated_at_invalid")
+
+    scan_coverage = gate_json.get("scan_coverage")
+    if not isinstance(scan_coverage, dict):
+        errors.append("security_scan_coverage_missing")
+        scan_coverage = {}
+    for field in ("dependency_scan", "image_scan", "release_script_scan"):
+        if not isinstance(scan_coverage.get(field), bool):
+            errors.append(f"security_scan_coverage_{field}_invalid")
+
+    for field in ("dependency_scan", "image_scan"):
+        scan = gate_json.get(field)
+        if not isinstance(scan, dict):
+            errors.append(f"security_scan_{field}_missing")
+            continue
+        status = scan.get("status")
+        if status not in {"passed", "missing", "failed"}:
+            errors.append(f"security_scan_{field}_status_invalid")
+        if not isinstance(scan.get("scanner"), str):
+            errors.append(f"security_scan_{field}_scanner_invalid")
+        for count_field in ("critical_count", "high_count"):
+            count_value = scan.get(count_field)
+            if count_value is not None and (
+                not isinstance(count_value, int) or count_value < 0
+            ):
+                errors.append(f"security_scan_{field}_{count_field}_invalid")
+        report_sha256 = scan.get("report_sha256")
+        if report_sha256 not in ("", None) and not is_sha256(report_sha256):
+            errors.append(f"security_scan_{field}_report_sha256_invalid")
+    image_scan = gate_json.get("image_scan")
+    if isinstance(image_scan, dict):
+        for count_field in ("image_count", "mutable_tag_count", "digest_missing_count"):
+            count_value = image_scan.get(count_field)
+            if not isinstance(count_value, int) or count_value < 0:
+                errors.append(f"security_scan_image_{count_field}_invalid")
+
+    script_scan = gate_json.get("release_script_scan")
+    if not isinstance(script_scan, dict):
+        errors.append("security_scan_release_script_scan_missing")
+    else:
+        if script_scan.get("status") != "passed":
+            errors.append("security_scan_release_scripts_not_passed")
+        if script_scan.get("scanner") != "tonglingyu-release-script-static-policy-v1":
+            errors.append("security_scan_release_script_scanner_invalid")
+        if not isinstance(script_scan.get("scanned_file_count"), int) or script_scan.get("scanned_file_count") <= 0:
+            errors.append("security_scan_release_script_scanned_file_count_invalid")
+        if script_scan.get("finding_count") != 0:
+            errors.append("security_scan_release_script_findings_present")
+        if script_scan.get("finding_types") not in ([], None):
+            errors.append("security_scan_release_script_finding_types_present")
+
+    risk_acceptance = gate_json.get("risk_acceptance")
+    if not isinstance(risk_acceptance, dict):
+        errors.append("security_scan_risk_acceptance_missing")
+        return
+    risk_present = risk_acceptance.get("present") is True
+    if risk_present:
+        if not nonempty(risk_acceptance.get("accepted_risk_id")):
+            errors.append("security_scan_risk_acceptance_id_missing")
+        if not nonempty(risk_acceptance.get("risk_owner")):
+            errors.append("security_scan_risk_acceptance_owner_missing")
+        if parse_timestamp(risk_acceptance.get("approved_at")) is None:
+            errors.append("security_scan_risk_acceptance_approved_at_invalid")
+        expires_at = parse_timestamp(risk_acceptance.get("expires_at"))
+        if expires_at is None:
+            errors.append("security_scan_risk_acceptance_expires_at_invalid")
+        elif expires_at <= datetime.now(timezone.utc):
+            errors.append("security_scan_risk_acceptance_expired")
+        accepted_findings = risk_acceptance.get("accepted_findings")
+        if not isinstance(accepted_findings, list) or not accepted_findings:
+            errors.append("security_scan_risk_acceptance_findings_missing")
+        elif not all(isinstance(item, str) and item for item in accepted_findings):
+            errors.append("security_scan_risk_acceptance_findings_invalid")
+        if not is_sha256(risk_acceptance.get("report_sha256")):
+            errors.append("security_scan_risk_acceptance_report_sha256_invalid")
+    else:
+        for field in ("dependency_scan", "image_scan", "release_script_scan"):
+            if scan_coverage.get(field) is not True:
+                errors.append(f"security_scan_without_risk_acceptance_requires_{field}")
+
+
 if not report_path:
     errors.append("report_path_missing")
     emit("failed")
@@ -1266,6 +1381,7 @@ validate_non_override_gate_stdout()
 validate_production_gate_stdout()
 validate_retrieval_quality_gate_stdout()
 validate_restore_drill_gate_stdout()
+validate_security_scan_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,
@@ -1321,7 +1437,7 @@ for name in live_gate_names:
             f"production_ready_requires_{name}_required",
         )
 
-for name in ("runtime_config", "retrieval_quality", "rqa_backup_restore_drill"):
+for name in ("runtime_config", "retrieval_quality", "rqa_backup_restore_drill", "security_scan"):
     gate = gates_by_name.get(name)
     add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
     if isinstance(gate, dict):
