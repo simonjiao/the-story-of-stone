@@ -139,6 +139,7 @@ def sha256_file(path: str) -> str:
 ok_report = json.loads(Path(ok_out).read_text(encoding="utf-8"))
 empty_report = json.loads(Path(empty_out).read_text(encoding="utf-8"))
 missing_guard_report = json.loads(Path(missing_guard_out).read_text(encoding="utf-8"))
+action_test_content = Path(action_test).read_text(encoding="utf-8")
 required_actions = [
     "metrics",
     "trace",
@@ -168,6 +169,14 @@ checks = {
     in missing_guard_report.get("errors", []),
     "required_valves_present": set(ok_report.get("valve_keys", []))
     >= {"GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"},
+    "rqa_list_response_contract_tested": all(
+        token in action_test_content
+        for token in (
+            "tonglingyu-retrieval-failures-v1",
+            "tonglingyu-knowledge-governance-tasks-v2",
+            '"next_offset": 20',
+        )
+    ),
 }
 errors = [f"check_failed={name}" for name, passed in checks.items() if passed is not True]
 payload = {

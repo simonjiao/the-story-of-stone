@@ -1321,6 +1321,7 @@ def validate_api_contract_gate_stdout():
         "retrieval_failure_list_schema",
         "retrieval_failure_list_pagination",
         "retrieval_failure_max_page_clamped",
+        "retrieval_failure_stable_sort",
         "retrieval_failure_unknown_filter_rejected",
         "retrieval_failure_invalid_status_rejected",
         "retrieval_failure_read_schema",
@@ -1328,6 +1329,7 @@ def validate_api_contract_gate_stdout():
         "governance_task_list_schema",
         "governance_task_list_pagination",
         "governance_task_max_page_clamped",
+        "governance_task_stable_sort",
         "governance_task_unknown_filter_rejected",
         "governance_task_invalid_status_rejected",
         "governance_task_invalid_priority_rejected",
@@ -1548,6 +1550,7 @@ def validate_openwebui_admin_action_contract_gate_stdout():
         "admin_role_guard_required",
         "admin_actions_required",
         "required_valves_present",
+        "rqa_list_response_contract_tested",
     )
     if not isinstance(checks, dict):
         errors.append("openwebui_admin_action_contract_checks_missing")

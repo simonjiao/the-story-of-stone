@@ -152,7 +152,21 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         action = self.action_with_key()
         with patch(
             "tonglingyu_gateway_admin_action.urllib.request.urlopen",
-            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_list"}'),
+            return_value=FakeResponse(
+                json.dumps(
+                    {
+                        "object": "tonglingyu.retrieval_failure_admin_list",
+                        "list": {
+                            "object": "tonglingyu.retrieval_failure_list",
+                            "schema_version": "tonglingyu-retrieval-failures-v1",
+                            "limit": 20,
+                            "offset": 0,
+                            "next_offset": 20,
+                            "items": [],
+                        },
+                    }
+                )
+            ),
         ) as urlopen:
             result = asyncio.run(
                 action.action(
@@ -172,6 +186,8 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures?status=open&failure_type=quality_report_not_passed&limit=20",
         )
         self.assertIn("tonglingyu.retrieval_failure_admin_list", result["content"])
+        self.assertIn("tonglingyu-retrieval-failures-v1", result["content"])
+        self.assertIn('"next_offset": 20', result["content"])
 
     def test_retrieval_failure_id_can_be_extracted_from_message_content(self) -> None:
         action = self.action_with_key()
@@ -232,7 +248,21 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         action = self.action_with_key()
         with patch(
             "tonglingyu_gateway_admin_action.urllib.request.urlopen",
-            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_list"}'),
+            return_value=FakeResponse(
+                json.dumps(
+                    {
+                        "object": "tonglingyu.governance_task_admin_list",
+                        "list": {
+                            "object": "tonglingyu.knowledge_governance_task_list",
+                            "schema_version": "tonglingyu-knowledge-governance-tasks-v2",
+                            "limit": 20,
+                            "offset": 0,
+                            "next_offset": 20,
+                            "items": [],
+                        },
+                    }
+                )
+            ),
         ) as urlopen:
             result = asyncio.run(
                 action.action(
@@ -256,6 +286,8 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             "http://tonglingyu-gateway:8090/v1/admin/governance/tasks?status=open&task_type=expected_evidence_fix&priority=p0&source_failure_id=rf-1&source_entity_type=retrieval_failure&source_entity_id=rf-1&limit=20",
         )
         self.assertIn("tonglingyu.governance_task_admin_list", result["content"])
+        self.assertIn("tonglingyu-knowledge-governance-tasks-v2", result["content"])
+        self.assertIn('"next_offset": 20', result["content"])
 
     def test_retrieval_failure_cluster_uses_post_json(self) -> None:
         action = self.action_with_key()

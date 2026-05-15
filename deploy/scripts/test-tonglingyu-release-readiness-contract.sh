@@ -1245,6 +1245,7 @@ gate_stdout = {
             "governance_task_list_schema": True,
             "governance_task_max_page_clamped": True,
             "governance_task_read_schema": True,
+            "governance_task_stable_sort": True,
             "governance_task_unknown_filter_rejected": True,
             "old_client_governance_task_list_compatible": True,
             "old_client_governance_task_read_compatible": True,
@@ -1254,6 +1255,7 @@ gate_stdout = {
             "retrieval_failure_max_page_clamped": True,
             "retrieval_failure_read_schema": True,
             "retrieval_failure_storage_minimized": True,
+            "retrieval_failure_stable_sort": True,
             "retrieval_failure_unknown_filter_rejected": True,
             "old_client_retrieval_failure_list_compatible": True,
             "old_client_retrieval_failure_read_compatible": True,
@@ -1467,6 +1469,7 @@ gate_stdout = {
             "empty_admin_key_rejected": True,
             "py_compile_passed": True,
             "required_valves_present": True,
+            "rqa_list_response_contract_tested": True,
             "unit_tests_passed": True,
             "valid_fixture_passed": True,
         },
@@ -2055,6 +2058,7 @@ for gate in report["gates"]:
     if gate.get("name") == "openwebui_admin_action_contract":
         gate_json = json.loads(gate["stdout_tail"][0])
         gate_json["checks"]["admin_role_guard_required"] = False
+        gate_json["checks"]["rqa_list_response_contract_tested"] = False
         gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
@@ -2067,6 +2071,8 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_openwebui_admin_action_contract_check_stdout}" \
   '"openwebui_admin_action_contract_check_failed=admin_role_guard_required" in report["errors"]'
+assert_report "${tampered_openwebui_admin_action_contract_check_stdout}" \
+  '"openwebui_admin_action_contract_check_failed=rqa_list_response_contract_tested" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_OPENWEBUI_ADMIN_ACTION_CONTRACT_ACTION_REPORT}" <<'PY'
 import json

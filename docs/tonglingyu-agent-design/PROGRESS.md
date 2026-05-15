@@ -670,10 +670,11 @@
 - RQA API contract gate 已接入 release readiness 必跑路径：
   `deploy/scripts/verify-tonglingyu-rqa-api-contract.sh` 会启动本地 Gateway，验证
   retrieval failure 与 governance task 的 admin list/read schema version、pagination
-  metadata、max page size clamp、未知 filter 和非法 enum filter 的 400 边界，以及
-  旧客户端解析、响应新增字段容忍、RQA admin mutation 未知 request body 字段 422
-  拒绝、admin metrics/Prometheus 不输出原始 prompt、trace/package id 或 secret、
-  Prometheus label set 只使用低基数字段、admin payload 不返回完整原始 prompt。
+  metadata、max page size clamp、稳定排序、未知 filter 和非法 enum filter 的 400
+  边界，以及旧客户端解析、响应新增字段容忍、RQA admin mutation 未知 request body
+  字段 422 拒绝、admin metrics/Prometheus 不输出原始 prompt、trace/package id 或
+  secret、Prometheus label set 只使用低基数字段、admin payload 不返回完整原始
+  prompt。
   兼容策略版本为
   `tonglingyu-rqa-api-compatibility-v1`；saved report validator 会拒绝缺 gate
   stdout、contract check 失败、兼容策略漂移、metrics 边界漂移、未知 request body
@@ -692,6 +693,10 @@
   原始 question、response、user_ref、chat_ref 或 secret。saved report validator
   会拒绝缺 `rqa_user_lifecycle` gate stdout、关键 check 失败和 action status drift
   的 production-ready report。
+- Open WebUI admin Action source/fixture contract 现在要求 Action 单测覆盖
+  retrieval failure / governance task list 响应保留 `schema_version`、`limit`、
+  `offset` 和 `next_offset`；saved report validator 会拒绝缺少该 Action 响应契约
+  check 的 production-ready report。
 - 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
   scanner artifact 或已审批 risk exception；缺失时不能生成 production-ready
   artifact。

@@ -308,6 +308,21 @@ def prometheus_label_set_bounded(metrics_text):
     return True
 
 
+def stable_desc_page(items, *, primary_field, id_field):
+    if not isinstance(items, list) or len(items) < 2:
+        return False
+    pairs = []
+    for item in items:
+        if not isinstance(item, dict):
+            return False
+        primary = item.get(primary_field)
+        item_id = item.get(id_field)
+        if not isinstance(primary, str) or not isinstance(item_id, str):
+            return False
+        pairs.append((primary, item_id))
+    return all(left >= right for left, right in zip(pairs, pairs[1:]))
+
+
 chat_refs = []
 for index, prompt in enumerate(raw_prompts):
     status, payload = request_json(
@@ -525,6 +540,11 @@ checks = {
         and isinstance(max_failure_list, dict)
         and max_failure_list.get("limit") == 100
     ),
+    "retrieval_failure_stable_sort": stable_desc_page(
+        max_failure_list.get("items") if isinstance(max_failure_list, dict) else None,
+        primary_field="created_at",
+        id_field="failure_id",
+    ),
     "retrieval_failure_unknown_filter_rejected": status_unknown == 400,
     "retrieval_failure_invalid_status_rejected": status_invalid == 400,
     "retrieval_failure_read_schema": (
@@ -565,6 +585,11 @@ checks = {
         tasks_max_status == 200
         and isinstance(max_task_list, dict)
         and max_task_list.get("limit") == 100
+    ),
+    "governance_task_stable_sort": stable_desc_page(
+        max_task_list.get("items") if isinstance(max_task_list, dict) else None,
+        primary_field="updated_at",
+        id_field="task_id",
     ),
     "governance_task_unknown_filter_rejected": tasks_unknown_status == 400,
     "governance_task_invalid_status_rejected": tasks_invalid_status == 400,
