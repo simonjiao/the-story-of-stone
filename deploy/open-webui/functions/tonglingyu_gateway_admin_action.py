@@ -39,6 +39,10 @@ class Action:
         {"id": "retrieval_failures", "name": "RQA retrieval failures"},
         {"id": "retrieval_failure", "name": "RQA retrieval failure"},
         {"id": "retrieval_failure_update", "name": "Update RQA failure status"},
+        {"id": "governance_tasks", "name": "RQA governance tasks"},
+        {"id": "governance_task", "name": "RQA governance task"},
+        {"id": "governance_task_from_failure", "name": "Create governance task"},
+        {"id": "governance_task_update", "name": "Update governance task"},
     ]
 
     class Valves(BaseModel):
@@ -184,6 +188,81 @@ class Action:
                 )
                 return _json_message(
                     "RQA retrieval failure update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_tasks":
+                return await self._lookup_json(
+                    "RQA governance tasks",
+                    f"/v1/admin/governance/tasks{_governance_task_query(body)}",
+                    subject,
+                )
+            if action_id == "governance_task":
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "RQA governance task",
+                    f"/v1/admin/governance/tasks/{urllib.parse.quote(task_id, safe='')}",
+                    subject,
+                )
+            if action_id == "governance_task_from_failure":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}/governance-task",
+                    {
+                        "task_type": _deep_get(body, "task_type"),
+                        "priority": _deep_get(body, "priority"),
+                        "proposed_fix": _deep_get(body, "proposed_fix"),
+                        "agent_cluster_key": _deep_get(body, "agent_cluster_key"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task create",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_task_update":
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                status = str(_deep_get(body, "status") or "").strip()
+                if not status:
+                    raise GatewayAdminError("Governance task status is required.")
+                result = await _gateway_patch_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/governance/tasks/{urllib.parse.quote(task_id, safe='')}",
+                    {
+                        "status": status,
+                        "reviewer": _deep_get(body, "reviewer"),
+                        "review_note": _deep_get(body, "review_note"),
+                        "evidence_ref": _deep_get(body, "evidence_ref"),
+                        "if_match_updated_at": _deep_get(body, "if_match_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task update",
                     result,
                     self.valves.RESPONSE_MAX_CHARS,
                 )
@@ -370,6 +449,17 @@ def _gateway_json_blocking(
 def _retrieval_failure_query(body: dict) -> str:
     params = {}
     for key in ("human_review_status", "status", "failure_type", "limit", "offset"):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
+
+
+def _governance_task_query(body: dict) -> str:
+    params = {}
+    for key in ("status", "task_type", "priority", "source_failure_id", "limit", "offset"):
         value = _deep_get(body, key)
         if value is not None and str(value).strip():
             params[key] = str(value).strip()

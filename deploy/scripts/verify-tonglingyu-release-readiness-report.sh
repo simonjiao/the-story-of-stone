@@ -153,6 +153,8 @@ gate_stdout_requirements = {
             "eval_suite_version",
             "kb_build_hash",
             "kb_version",
+            "open_p0_governance_tasks",
+            "open_p0_retrieval_failures",
             "quality_gate_passed",
             "quality_summary",
             "production_default_thresholds",
@@ -402,7 +404,7 @@ def nonempty_dict(value):
 def threshold_below_production_default(key, actual, default):
     if not isinstance(actual, (int, float)) or not isinstance(default, (int, float)):
         return True
-    if key == "open_p0_retrieval_failures":
+    if key in ("open_p0_retrieval_failures", "open_p0_governance_tasks"):
         return actual > default
     return actual < default
 
@@ -410,7 +412,7 @@ def threshold_below_production_default(key, actual, default):
 def threshold_invalid(key, actual):
     if not isinstance(actual, (int, float)):
         return True
-    if key == "open_p0_retrieval_failures":
+    if key in ("open_p0_retrieval_failures", "open_p0_governance_tasks"):
         return int(actual) != actual or actual < 0
     if key == "expected_evidence_denominator_min":
         return int(actual) != actual or actual < 0
@@ -779,6 +781,7 @@ def validate_retrieval_quality_gate_stdout():
         "forbidden_conclusion_avoided": 1.0,
         "reviewer_status_matched": 1.0,
         "open_p0_retrieval_failures": 0,
+        "open_p0_governance_tasks": 0,
     }
     if gate_json.get("production_default_thresholds") != production_thresholds:
         errors.append("retrieval_quality_production_default_thresholds_mismatch")
@@ -867,6 +870,8 @@ def validate_retrieval_quality_gate_stdout():
             errors.append("retrieval_quality_source_license_sources_missing")
     if gate_json.get("open_p0_retrieval_failures") != 0:
         errors.append("retrieval_quality_open_p0_retrieval_failures_not_zero")
+    if gate_json.get("open_p0_governance_tasks") != 0:
+        errors.append("retrieval_quality_open_p0_governance_tasks_not_zero")
     if production_ready and gate_json.get("eval_report_generated_by_gate") is not True:
         errors.append("retrieval_quality_eval_report_must_be_generated_by_gate")
     behavior_config = gate_json.get("behavior_config")

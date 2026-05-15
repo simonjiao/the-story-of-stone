@@ -920,6 +920,10 @@ conn.executescript(
     CREATE TABLE retrieval_failures (
         human_review_status TEXT
     );
+    CREATE TABLE knowledge_governance_tasks (
+        status TEXT,
+        priority TEXT
+    );
     """
 )
 conn.execute(
@@ -980,6 +984,7 @@ production_default_thresholds = {
     "expected_evidence_hit_at_8": 1.0,
     "forbidden_conclusion_avoided": 1.0,
     "open_p0_retrieval_failures": 0,
+    "open_p0_governance_tasks": 0,
     "quality_report_coverage": 1.0,
     "quality_report_production_ready": 1.0,
     "required_type_coverage": 1.0,
@@ -1012,6 +1017,7 @@ gate_stdout = {
             "version_id": "kb-synthetic",
         },
         "object": "tonglingyu.rqa_quality_gate",
+        "open_p0_governance_tasks": 0,
         "open_p0_retrieval_failures": 0,
         "production_default_thresholds": production_default_thresholds,
         "quality_gate_passed": True,
@@ -1235,6 +1241,30 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_gate_open_p0_stdout}" \
   '"retrieval_quality_open_p0_retrieval_failures_not_zero" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${WORK_DIR}/tampered-rqa-gate-open-governance.json" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["open_p0_governance_tasks"] = 1
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_gate_open_governance_stdout="${WORK_DIR}/tampered-rqa-gate-open-governance.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${WORK_DIR}/tampered-rqa-gate-open-governance.json" >"${tampered_rqa_gate_open_governance_stdout}"; then
+  echo "production-ready reports must reject open RQA governance tasks" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_gate_open_governance_stdout}" \
+  '"retrieval_quality_open_p0_governance_tasks_not_zero" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_GATE_SUMMARY_REPORT}" <<'PY'
 import json

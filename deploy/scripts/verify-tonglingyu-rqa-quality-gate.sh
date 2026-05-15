@@ -69,6 +69,7 @@ production_default_thresholds = {
     "forbidden_conclusion_avoided": 1.0,
     "reviewer_status_matched": 1.0,
     "open_p0_retrieval_failures": 0,
+    "open_p0_governance_tasks": 0,
 }
 threshold_env = {
     "quality_report_coverage": ("TONGLINGYU_RQA_THRESHOLD_QUALITY_REPORT_COVERAGE", float),
@@ -82,6 +83,7 @@ threshold_env = {
     "forbidden_conclusion_avoided": ("TONGLINGYU_RQA_THRESHOLD_FORBIDDEN_CONCLUSION_AVOIDED", float),
     "reviewer_status_matched": ("TONGLINGYU_RQA_THRESHOLD_REVIEWER_STATUS_MATCHED", float),
     "open_p0_retrieval_failures": ("TONGLINGYU_RQA_THRESHOLD_OPEN_P0_RETRIEVAL_FAILURES", int),
+    "open_p0_governance_tasks": ("TONGLINGYU_RQA_THRESHOLD_OPEN_P0_GOVERNANCE_TASKS", int),
 }
 
 
@@ -111,7 +113,7 @@ def parse_thresholds():
         thresholds[key] = parsed
         overrides.append({"key": key, "env": env_name, "value": parsed})
         default = production_default_thresholds[key]
-        if key == "open_p0_retrieval_failures":
+        if key in ("open_p0_retrieval_failures", "open_p0_governance_tasks"):
             if parsed > default:
                 less_strict_overrides.append(key)
         elif parsed < default:
@@ -258,6 +260,7 @@ source_license_summary = {
     "missing_metadata": [],
 }
 open_retrieval_failures = None
+open_governance_tasks = None
 source_snapshot_digest = ""
 kb_build_hash = ""
 if not db_path.is_file():
@@ -344,6 +347,27 @@ else:
         ).fetchone()[0]
         if open_retrieval_failures != thresholds["open_p0_retrieval_failures"]:
             errors.append("open_retrieval_failures_present")
+        governance_tasks_table = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'knowledge_governance_tasks'
+            LIMIT 1
+            """
+        ).fetchone()
+        if governance_tasks_table is None:
+            errors.append("governance_tasks_table_missing")
+        else:
+            open_governance_tasks = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM knowledge_governance_tasks
+                WHERE priority = 'p0'
+                  AND status IN ('open', 'in_review', 'accepted')
+                """
+            ).fetchone()[0]
+            if open_governance_tasks != thresholds["open_p0_governance_tasks"]:
+                errors.append("open_governance_tasks_present")
     except sqlite3.Error:
         errors.append("db_query_failed")
 
@@ -429,6 +453,7 @@ gate = {
     "source_license_summary": source_license_summary,
     "quality_summary": quality_summary_public,
     "open_p0_retrieval_failures": open_retrieval_failures,
+    "open_p0_governance_tasks": open_governance_tasks,
     "behavior_config": behavior_config,
     "secret_values_printed": False,
 }

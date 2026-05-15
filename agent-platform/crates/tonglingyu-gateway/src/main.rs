@@ -23,6 +23,8 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
+    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskUpdateInput,
     RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
     RetrievalEvidenceTypeCoverage, RetrievalFailureCreateInput, RetrievalFailureListInput,
     RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
@@ -422,6 +424,23 @@ struct RetrievalFailureUpdateRequest {
     human_review_status: String,
     reviewer: Option<String>,
     review_note: Option<String>,
+    if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GovernanceTaskCreateRequest {
+    task_type: Option<String>,
+    priority: Option<String>,
+    proposed_fix: Option<String>,
+    agent_cluster_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GovernanceTaskUpdateRequest {
+    status: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    evidence_ref: Option<String>,
     if_match_updated_at: Option<String>,
 }
 
@@ -996,6 +1015,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/retrieval-failures/{failure_id}",
             get(retrieval_failure_endpoint).patch(update_retrieval_failure_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/{failure_id}/governance-task",
+            post(create_governance_task_from_failure_endpoint),
+        )
+        .route("/v1/admin/governance/tasks", get(governance_tasks_endpoint))
+        .route(
+            "/v1/admin/governance/tasks/{task_id}",
+            get(governance_task_endpoint).patch(update_governance_task_endpoint),
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(args.max_body_bytes))
@@ -3393,6 +3421,376 @@ async fn update_retrieval_failure_endpoint(
     }
 }
 
+async fn governance_tasks_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match governance_task_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_governance_task_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_governance_tasks(input) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": governance_task_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_list",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "governance task list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "governance_task_list_failed",
+                "governance task list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state.runtime_store.read_governance_task(&task_id) {
+        Ok(Some(task)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "task_id": task_id,
+                    "trace_id": task.get("trace_id").and_then(Value::as_str),
+                    "result_count": 1,
+                    "result": "found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_read",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "task_id_sha256": hash_text(&task_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "governance task read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "governance_task_read_failed",
+                "governance task read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn create_governance_task_from_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+    Json(payload): Json<GovernanceTaskCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_create") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = KnowledgeGovernanceTaskCreateFromFailureInput {
+        source_failure_id: failure_id.clone(),
+        task_type: payload.task_type,
+        priority: payload.priority,
+        proposed_fix: payload.proposed_fix,
+        agent_cluster_key: payload.agent_cluster_key,
+    };
+    match state
+        .runtime_store
+        .create_governance_task_from_failure(input)
+    {
+        Ok(Some(record)) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "created governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create_from_failure",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "trace_id": &record.trace_id,
+                    "task_type": &record.task_type,
+                    "priority": &record.priority,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_create",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create_from_failure",
+                    "source_failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "source_failure_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "governance task create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn update_governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+    Json(payload): Json<GovernanceTaskUpdateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_update") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = KnowledgeGovernanceTaskUpdateInput {
+        status: payload.status,
+        reviewer: payload.reviewer,
+        review_note: payload.review_note,
+        evidence_ref: payload.evidence_ref,
+        expected_updated_at: payload.if_match_updated_at,
+    };
+    match state.runtime_store.update_governance_task(&task_id, input) {
+        Ok(Some(record)) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "updated governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "trace_id": &record.trace_id,
+                    "status": &record.status,
+                    "result_count": 1,
+                    "result": "updated",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_update",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id_sha256": hash_text(&task_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) if error.to_string().contains("update conflict") => {
+            let trace_id = state
+                .runtime_store
+                .read_governance_task(&task_id)
+                .ok()
+                .flatten()
+                .and_then(|task| {
+                    task.get("trace_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                });
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id": &task_id,
+                    "trace_id": trace_id,
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "governance_task_update_conflict",
+                "governance task update conflict",
+                None,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "governance task update failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_update_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn prometheus_metrics_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4324,6 +4722,56 @@ fn retrieval_failure_filter_summary(params: &BTreeMap<String, String>) -> Value 
     })
 }
 
+fn governance_task_list_input(
+    params: &BTreeMap<String, String>,
+) -> Result<KnowledgeGovernanceTaskListInput> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "status" | "task_type" | "priority" | "source_failure_id" | "limit" | "offset"
+        ) {
+            return Err(anyhow!("unsupported governance task filter {key}"));
+        }
+    }
+    let status = params
+        .get("status")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let task_type = params
+        .get("task_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let priority = params
+        .get("priority")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let source_failure_id = params
+        .get("source_failure_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(KnowledgeGovernanceTaskListInput {
+        status,
+        task_type,
+        priority,
+        source_failure_id,
+        limit,
+        offset,
+    })
+}
+
+fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "status": params.get("status"),
+        "task_type": params.get("task_type"),
+        "priority": params.get("priority"),
+        "has_source_failure_id": params.contains_key("source_failure_id"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
 fn append_admin_audit_event(
     db: &Path,
     event_type: &str,
@@ -4362,6 +4810,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         RetrievalFailureView::AdminDetail,
         100,
     )?;
+    let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
     let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let messages = load_rows_json(
         &conn,
@@ -4390,6 +4839,8 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "retrieval_quality_summary": retrieval_quality_summary,
         "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
         "retrieval_failures": retrieval_failures,
+        "governance_task_ids": governance_task_ids(&governance_tasks),
+        "governance_tasks": governance_tasks,
         "messages": messages,
         "packages": packages,
     })))
@@ -4417,6 +4868,7 @@ fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
         RetrievalFailureView::AdminDetail,
         100,
     )?;
+    let governance_tasks = runtime_store.list_governance_tasks_for_package(package_id, 100)?;
     let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let trace = load_trace(db, &package.trace_id)?;
     Ok(Some(json!({
@@ -4427,6 +4879,8 @@ fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
         "retrieval_quality_summary": retrieval_quality_summary,
         "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
         "retrieval_failures": retrieval_failures,
+        "governance_task_ids": governance_task_ids(&governance_tasks),
+        "governance_tasks": governance_tasks,
         "trace": trace,
     })))
 }
@@ -4481,6 +4935,14 @@ fn retrieval_failure_ids(failures: &[Value]) -> Vec<String> {
     failures
         .iter()
         .filter_map(|failure| failure.get("failure_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn governance_task_ids(tasks: &[Value]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter_map(|task| task.get("task_id").and_then(Value::as_str))
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -4577,6 +5039,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
             "retrieval_failures": runtime_stats.retrieval_failures,
+            "governance_tasks": runtime_stats.governance_tasks,
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
@@ -4588,6 +5051,13 @@ fn load_metrics(state: &AppState) -> Result<Value> {
                 "total": runtime_stats.retrieval_failures,
                 "by_status": runtime_stats.retrieval_failure_status,
                 "by_type": runtime_stats.retrieval_failure_type,
+            },
+            "governance_tasks": {
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "total": runtime_stats.governance_tasks,
+                "by_status": runtime_stats.governance_task_status,
+                "by_type": runtime_stats.governance_task_type,
+                "by_priority": runtime_stats.governance_task_priority,
             },
         },
         "workflow_status": workflow_status_counts,
@@ -4623,6 +5093,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         (
             "tonglingyu_retrieval_failures_total",
             runtime_stats.retrieval_failures,
+        ),
+        (
+            "tonglingyu_governance_tasks_total",
+            runtime_stats.governance_tasks,
         ),
         ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
@@ -4663,6 +5137,40 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             failure_type, count
         ));
     }
+    for (status, count) in bounded_metric_count_map(
+        runtime_stats.governance_task_status,
+        &["open", "in_review", "accepted", "rejected", "closed"],
+    ) {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_status_total{{status=\"{}\"}} {}",
+            status, count
+        ));
+    }
+    for (task_type, count) in bounded_metric_count_map(
+        runtime_stats.governance_task_type,
+        &[
+            "source_metadata_fix",
+            "expected_evidence_fix",
+            "retrieval_policy_fix",
+            "alias_term_review",
+            "commentary_link_review",
+            "version_note_review",
+            "expert_review",
+        ],
+    ) {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_type_total{{task_type=\"{}\"}} {}",
+            task_type, count
+        ));
+    }
+    for (priority, count) in
+        bounded_metric_count_map(runtime_stats.governance_task_priority, &["p0", "p1", "p2"])
+    {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_priority_total{{priority=\"{}\"}} {}",
+            priority, count
+        ));
+    }
     for (event_type, count) in bounded_metric_count_map(
         runtime_stats.audit_event_types,
         &[
@@ -4676,6 +5184,12 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "retrieval_failure_admin_list",
             "retrieval_failure_admin_read",
             "retrieval_failure_admin_update",
+            "governance_task_created",
+            "governance_task_status_updated",
+            "governance_task_admin_list",
+            "governance_task_admin_read",
+            "governance_task_admin_create",
+            "governance_task_admin_update",
             "rqa_admin_access_denied",
             "reviewer_completed",
             "runtime_profile_step_completed",
@@ -5193,6 +5707,11 @@ mod tests {
         );
         assert_eq!(trace["retrieval_failure_ids"], json!([failure_id]));
         assert_eq!(trace["retrieval_failures"][0]["view"], "admin_detail");
+        assert_eq!(trace["governance_tasks"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            trace["governance_tasks"][0]["source_failure_id"],
+            json!(failure_id)
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -5210,6 +5729,7 @@ mod tests {
         let prometheus = load_prometheus_metrics(&state).expect("prometheus metrics load");
 
         assert_eq!(metrics["counts"]["retrieval_failures"], json!(1));
+        assert_eq!(metrics["counts"]["governance_tasks"], json!(1));
         assert_eq!(
             metrics["rqa"]["schema_version"],
             RETRIEVAL_FAILURE_SCHEMA_VERSION
@@ -5222,13 +5742,25 @@ mod tests {
             metrics["rqa"]["retrieval_failures"]["by_type"]["quality_report_not_passed"],
             json!(1)
         );
+        assert_eq!(
+            metrics["rqa"]["governance_tasks"]["by_status"]["open"],
+            json!(1)
+        );
+        assert_eq!(
+            metrics["rqa"]["governance_tasks"]["by_priority"]["p0"],
+            json!(1)
+        );
         assert!(prometheus.contains("tonglingyu_retrieval_failures_total 1"));
+        assert!(prometheus.contains("tonglingyu_governance_tasks_total 1"));
         assert!(
             prometheus.contains("tonglingyu_retrieval_failures_by_status_total{status=\"open\"} 1")
         );
         assert!(prometheus.contains(
             "tonglingyu_retrieval_failures_by_type_total{failure_type=\"quality_report_not_passed\"} 1"
         ));
+        assert!(
+            prometheus.contains("tonglingyu_governance_tasks_by_status_total{status=\"open\"} 1")
+        );
         assert!(prometheus.contains("tonglingyu_gateway_info{agent_runtime_mode="));
         assert!(!prometheus.contains("main_profile="));
         assert!(!prometheus.contains("reviewer_profile="));
@@ -5537,6 +6069,85 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(
             audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn governance_task_endpoints_create_list_update_and_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-governance-task");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-governance-task");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let create = create_governance_task_from_failure_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(failure_id.clone()),
+            Json(GovernanceTaskCreateRequest {
+                task_type: None,
+                priority: None,
+                proposed_fix: None,
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let mut params = BTreeMap::new();
+        params.insert("status".to_string(), "open".to_string());
+        params.insert("source_failure_id".to_string(), failure_id.clone());
+        let list =
+            governance_tasks_endpoint(State(state.clone()), admin_headers(), Query(params)).await;
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: None,
+                priority: Some("p0".to_string()),
+                source_failure_id: Some(failure_id),
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list governance tasks");
+        let task_id = tasks.items[0]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let updated_at = tasks.items[0]["updated_at"]
+            .as_str()
+            .expect("updated_at")
+            .to_string();
+        let update = update_governance_task_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(task_id),
+            Json(GovernanceTaskUpdateRequest {
+                status: "accepted".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("accepted for source patch".to_string()),
+                evidence_ref: Some("source://review-note/001".to_string()),
+                if_match_updated_at: Some(updated_at),
+            }),
+        )
+        .await;
+
+        assert_eq!(update.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_admin_create"),
+            1
+        );
+        assert_eq!(audit_event_count(&db_path, "governance_task_admin_list"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_admin_update"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_status_updated"),
             1
         );
         let _ = std::fs::remove_file(&db_path);

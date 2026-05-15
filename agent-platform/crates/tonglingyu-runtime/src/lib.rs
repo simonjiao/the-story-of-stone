@@ -188,11 +188,15 @@ pub struct RuntimeStoreStats {
     pub evidence_packages: i64,
     pub evidence_cards: i64,
     pub retrieval_failures: i64,
+    pub governance_tasks: i64,
     pub audit_events: i64,
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
     pub retrieval_failure_status: BTreeMap<String, i64>,
     pub retrieval_failure_type: BTreeMap<String, i64>,
+    pub governance_task_status: BTreeMap<String, i64>,
+    pub governance_task_type: BTreeMap<String, i64>,
+    pub governance_task_priority: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
 }
 
@@ -200,6 +204,12 @@ pub const RETRIEVAL_FAILURE_SCHEMA_VERSION: &str = "tonglingyu-retrieval-failure
 pub const RETRIEVAL_FAILURE_DEDUPE_MIGRATION: &str = "tonglingyu-retrieval-failure-dedupe-v1";
 pub const RETRIEVAL_FAILURE_DEFAULT_PAGE_SIZE: usize = 50;
 pub const RETRIEVAL_FAILURE_MAX_PAGE_SIZE: usize = 100;
+pub const KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION: &str =
+    "tonglingyu-knowledge-governance-tasks-v1";
+pub const KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION: &str =
+    "tonglingyu-knowledge-governance-tasks-backfill-v1";
+pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
+pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalFailureRecord {
@@ -258,6 +268,64 @@ pub struct RetrievalFailureListInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalFailureListResult {
+    pub object: String,
+    pub schema_version: String,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub items: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeGovernanceTaskRecord {
+    pub task_id: String,
+    pub source_failure_id: String,
+    pub trace_id: String,
+    pub package_id: Option<String>,
+    pub task_type: String,
+    pub status: String,
+    pub priority: String,
+    pub agent_cluster_key: String,
+    pub proposed_fix: String,
+    pub reviewer: Option<String>,
+    pub review_note: Option<String>,
+    pub evidence_ref: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub accepted_at: Option<String>,
+    pub closed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeGovernanceTaskCreateFromFailureInput {
+    pub source_failure_id: String,
+    pub task_type: Option<String>,
+    pub priority: Option<String>,
+    pub proposed_fix: Option<String>,
+    pub agent_cluster_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeGovernanceTaskListInput {
+    pub status: Option<String>,
+    pub task_type: Option<String>,
+    pub priority: Option<String>,
+    pub source_failure_id: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeGovernanceTaskUpdateInput {
+    pub status: String,
+    pub reviewer: Option<String>,
+    pub review_note: Option<String>,
+    pub evidence_ref: Option<String>,
+    pub expected_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeGovernanceTaskListResult {
     pub object: String,
     pub schema_version: String,
     pub limit: usize,
@@ -667,6 +735,54 @@ impl TonglingyuRuntimeStore {
             review_note,
             expected_updated_at,
         )
+    }
+
+    pub fn create_governance_task_from_failure(
+        &self,
+        input: KnowledgeGovernanceTaskCreateFromFailureInput,
+    ) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+        let conn = self.open_connection()?;
+        create_governance_task_from_failure(&conn, input)
+    }
+
+    pub fn list_governance_tasks(
+        &self,
+        input: KnowledgeGovernanceTaskListInput,
+    ) -> Result<KnowledgeGovernanceTaskListResult> {
+        let conn = self.open_connection()?;
+        list_governance_tasks(&conn, input)
+    }
+
+    pub fn list_governance_tasks_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        list_governance_tasks_for_trace(&conn, trace_id, limit)
+    }
+
+    pub fn list_governance_tasks_for_package(
+        &self,
+        package_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        list_governance_tasks_for_package(&conn, package_id, limit)
+    }
+
+    pub fn read_governance_task(&self, task_id: &str) -> Result<Option<Value>> {
+        let conn = self.open_connection()?;
+        read_governance_task(&conn, task_id)
+    }
+
+    pub fn update_governance_task(
+        &self,
+        task_id: &str,
+        input: KnowledgeGovernanceTaskUpdateInput,
+    ) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+        let conn = self.open_connection()?;
+        update_governance_task(&conn, task_id, input)
     }
 
     pub fn rebuild_knowledge_base_from_snapshots(
@@ -3572,6 +3688,25 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             resolved_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS knowledge_governance_tasks (
+            task_id TEXT PRIMARY KEY,
+            source_failure_id TEXT NOT NULL REFERENCES retrieval_failures(failure_id),
+            trace_id TEXT NOT NULL,
+            package_id TEXT,
+            task_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            agent_cluster_key TEXT NOT NULL,
+            proposed_fix TEXT NOT NULL,
+            reviewer TEXT,
+            review_note TEXT,
+            evidence_ref TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            accepted_at TEXT,
+            closed_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
         CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_trace ON retrieval_failures(trace_id);
@@ -3581,8 +3716,71 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_retrieval_failures_created ON retrieval_failures(created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_retrieval_failures_dedupe
             ON retrieval_failures(trace_id, IFNULL(package_id, ''), failure_type);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_governance_tasks_failure_type
+            ON knowledge_governance_tasks(source_failure_id, task_type);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_trace
+            ON knowledge_governance_tasks(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_package
+            ON knowledge_governance_tasks(package_id);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_status
+            ON knowledge_governance_tasks(status);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_type
+            ON knowledge_governance_tasks(task_type);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_priority
+            ON knowledge_governance_tasks(priority);
+        CREATE INDEX IF NOT EXISTS idx_governance_tasks_updated
+            ON knowledge_governance_tasks(updated_at);
         "#,
     )?;
+    let backfilled_governance_tasks = conn.execute(
+        r#"
+        INSERT OR IGNORE INTO knowledge_governance_tasks (
+            task_id, source_failure_id, trace_id, package_id, task_type, status,
+            priority, agent_cluster_key, proposed_fix, reviewer, review_note,
+            evidence_ref, created_at, updated_at, accepted_at, closed_at
+        )
+        SELECT
+            'kgt-' || lower(hex(randomblob(16))),
+            failure_id,
+            trace_id,
+            package_id,
+            CASE
+                WHEN failure_type = 'source_usage_metadata_incomplete'
+                    THEN 'source_metadata_fix'
+                WHEN failure_type = 'expected_evidence_missing'
+                    THEN 'expected_evidence_fix'
+                WHEN failure_type = 'reviewer_evidence_insufficient'
+                    THEN 'expert_review'
+                ELSE 'retrieval_policy_fix'
+            END,
+            'open',
+            'p0',
+            'rf:' || failure_type || ':q:' || substr(question_sha256, 1, 16),
+            COALESCE(proposed_fix, agent_diagnosis, 'review_retrieval_failure_and_prepare_human_fix'),
+            NULL,
+            NULL,
+            NULL,
+            ?1,
+            ?1,
+            NULL,
+            NULL
+        FROM retrieval_failures
+        WHERE human_review_status IN ('open', 'in_review')
+        "#,
+        params![now_rfc3339()],
+    )?;
+    if backfilled_governance_tasks > 0 {
+        append_runtime_audit_event(
+            conn,
+            "governance-backfill",
+            "governance_tasks_backfilled",
+            &json!({
+                "task_count": backfilled_governance_tasks,
+                "source": "runtime_schema_migration",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+            }),
+        )?;
+    }
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-runtime-schema-v1", now_rfc3339()],
@@ -3594,6 +3792,14 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![RETRIEVAL_FAILURE_DEDUPE_MIGRATION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION, now_rfc3339()],
     )?;
     Ok(())
 }
@@ -3627,6 +3833,8 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         "tonglingyu-runtime-schema-v1".to_string(),
         RETRIEVAL_FAILURE_SCHEMA_VERSION.to_string(),
         RETRIEVAL_FAILURE_DEDUPE_MIGRATION.to_string(),
+        KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
+        KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION.to_string(),
     ]
 }
 
@@ -3667,6 +3875,7 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         evidence_packages: table_count(conn, "evidence_packages")?,
         evidence_cards: table_count(conn, "evidence_cards")?,
         retrieval_failures: table_count(conn, "retrieval_failures")?,
+        governance_tasks: table_count(conn, "knowledge_governance_tasks")?,
         audit_events: table_count(conn, "audit_events")?,
         review_status: grouped_count_map(
             conn,
@@ -3683,6 +3892,18 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         retrieval_failure_type: grouped_count_map(
             conn,
             "SELECT failure_type, COUNT(*) FROM retrieval_failures GROUP BY failure_type",
+        )?,
+        governance_task_status: grouped_count_map(
+            conn,
+            "SELECT status, COUNT(*) FROM knowledge_governance_tasks GROUP BY status",
+        )?,
+        governance_task_type: grouped_count_map(
+            conn,
+            "SELECT task_type, COUNT(*) FROM knowledge_governance_tasks GROUP BY task_type",
+        )?,
+        governance_task_priority: grouped_count_map(
+            conn,
+            "SELECT priority, COUNT(*) FROM knowledge_governance_tasks GROUP BY priority",
         )?,
         audit_event_types: grouped_count_map(
             conn,
@@ -3760,6 +3981,9 @@ fn create_retrieval_failure_inner(
         input.package_id.as_deref(),
         &failure_type,
     )? {
+        if governance_task_required_for_failure(&existing) {
+            let _ = ensure_governance_task_for_failure(conn, &existing)?;
+        }
         return Ok(existing);
     }
     let question_summary = retrieval_failure_question_summary(&input.quality_report);
@@ -3826,6 +4050,7 @@ fn create_retrieval_failure_inner(
     )?;
     let record = load_retrieval_failure(conn, &failure_id)?
         .ok_or_else(|| anyhow!("retrieval failure was not readable after insert"))?;
+    let governance_task = ensure_governance_task_for_failure(conn, &record)?;
     append_runtime_audit_event(
         conn,
         &record.trace_id,
@@ -3838,6 +4063,7 @@ fn create_retrieval_failure_inner(
             "question_sha256": &record.question_sha256,
             "missing_evidence_types": &record.missing_evidence_types,
             "quality_issue_count": record.quality_issues.len(),
+            "governance_task_id": governance_task.as_ref().map(|task| &task.task_id),
         }),
     )?;
     Ok(record)
@@ -4035,6 +4261,346 @@ pub fn update_retrieval_failure_status_checked(
             "reviewer": &record.reviewer,
             "review_note_sha256": record.review_note.as_deref().map(hash_text),
             "resolved_at": &record.resolved_at,
+        }),
+    )?;
+    Ok(Some(record))
+}
+
+pub fn create_governance_task_from_failure(
+    conn: &Connection,
+    input: KnowledgeGovernanceTaskCreateFromFailureInput,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = create_governance_task_from_failure_inner(conn, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        create_governance_task_from_failure_inner(conn, input)
+    }
+}
+
+fn create_governance_task_from_failure_inner(
+    conn: &Connection,
+    input: KnowledgeGovernanceTaskCreateFromFailureInput,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    let Some(failure) = load_retrieval_failure(conn, &input.source_failure_id)? else {
+        return Ok(None);
+    };
+    create_governance_task_for_failure_inner(conn, &failure, input).map(Some)
+}
+
+fn ensure_governance_task_for_failure(
+    conn: &Connection,
+    failure: &RetrievalFailureRecord,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    if !governance_task_required_for_failure(failure) {
+        return Ok(None);
+    }
+    create_governance_task_for_failure_inner(
+        conn,
+        failure,
+        KnowledgeGovernanceTaskCreateFromFailureInput {
+            source_failure_id: failure.failure_id.clone(),
+            task_type: None,
+            priority: None,
+            proposed_fix: None,
+            agent_cluster_key: None,
+        },
+    )
+    .map(Some)
+}
+
+fn create_governance_task_for_failure_inner(
+    conn: &Connection,
+    failure: &RetrievalFailureRecord,
+    input: KnowledgeGovernanceTaskCreateFromFailureInput,
+) -> Result<KnowledgeGovernanceTaskRecord> {
+    let task_type = input
+        .task_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_governance_task_type(failure));
+    validate_governance_task_type(&task_type)?;
+    let priority = input
+        .priority
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "p0".to_string());
+    validate_governance_task_priority(&priority)?;
+    if let Some(existing) =
+        load_governance_task_by_failure_type(conn, &failure.failure_id, &task_type)?
+    {
+        return Ok(existing);
+    }
+    let agent_cluster_key = input
+        .agent_cluster_key
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 160))
+        .unwrap_or_else(|| default_governance_cluster_key(failure));
+    let proposed_fix = input
+        .proposed_fix
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 480))
+        .or_else(|| {
+            failure
+                .proposed_fix
+                .as_deref()
+                .and_then(|value| bounded_optional_text(value, 480))
+        })
+        .or_else(|| {
+            failure
+                .agent_diagnosis
+                .as_deref()
+                .and_then(|value| bounded_optional_text(value, 480))
+        })
+        .unwrap_or_else(|| "review_retrieval_failure_and_prepare_human_fix".to_string());
+    let task_id = format!("kgt-{}", uuid::Uuid::now_v7().simple());
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_governance_tasks (
+            task_id, source_failure_id, trace_id, package_id, task_type, status,
+            priority, agent_cluster_key, proposed_fix, reviewer, review_note,
+            evidence_ref, created_at, updated_at, accepted_at, closed_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, 'open', ?6, ?7, ?8, NULL, NULL, NULL, ?9, ?9, NULL, NULL
+        )
+        "#,
+        params![
+            &task_id,
+            &failure.failure_id,
+            &failure.trace_id,
+            &failure.package_id,
+            &task_type,
+            &priority,
+            &agent_cluster_key,
+            &proposed_fix,
+            &now,
+        ],
+    )?;
+    let record = load_governance_task(conn, &task_id)?
+        .ok_or_else(|| anyhow!("governance task was not readable after insert"))?;
+    append_runtime_audit_event(
+        conn,
+        &record.trace_id,
+        "governance_task_created",
+        &json!({
+            "task_id": &record.task_id,
+            "source_failure_id": &record.source_failure_id,
+            "package_id": &record.package_id,
+            "task_type": &record.task_type,
+            "status": &record.status,
+            "priority": &record.priority,
+            "agent_cluster_key": &record.agent_cluster_key,
+            "proposed_fix_sha256": hash_text(&record.proposed_fix),
+        }),
+    )?;
+    Ok(record)
+}
+
+pub fn list_governance_tasks(
+    conn: &Connection,
+    input: KnowledgeGovernanceTaskListInput,
+) -> Result<KnowledgeGovernanceTaskListResult> {
+    let limit = governance_task_page_limit(input.limit);
+    let offset = input.offset;
+    let mut predicates = Vec::new();
+    let mut sql_params = Vec::<rusqlite::types::Value>::new();
+    if let Some(status) = input.status.as_ref() {
+        validate_governance_task_status(status)?;
+        predicates.push("status = ?".to_string());
+        sql_params.push(rusqlite::types::Value::Text(status.clone()));
+    }
+    if let Some(task_type) = input.task_type.as_ref() {
+        validate_governance_task_type(task_type)?;
+        predicates.push("task_type = ?".to_string());
+        sql_params.push(rusqlite::types::Value::Text(task_type.clone()));
+    }
+    if let Some(priority) = input.priority.as_ref() {
+        validate_governance_task_priority(priority)?;
+        predicates.push("priority = ?".to_string());
+        sql_params.push(rusqlite::types::Value::Text(priority.clone()));
+    }
+    if let Some(source_failure_id) = input.source_failure_id.as_ref() {
+        predicates.push("source_failure_id = ?".to_string());
+        sql_params.push(rusqlite::types::Value::Text(source_failure_id.clone()));
+    }
+    let mut sql = governance_task_select_sql().to_string();
+    if !predicates.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&predicates.join(" AND "));
+    }
+    sql.push_str(" ORDER BY updated_at DESC, task_id DESC LIMIT ? OFFSET ?");
+    sql_params.push(rusqlite::types::Value::Integer(limit as i64));
+    sql_params.push(rusqlite::types::Value::Integer(offset as i64));
+    let records = query_governance_task_records_dynamic(conn, &sql, sql_params)?;
+    let next_offset = if records.len() == limit {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    Ok(KnowledgeGovernanceTaskListResult {
+        object: "tonglingyu.knowledge_governance_task_list".to_string(),
+        schema_version: KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
+        limit,
+        offset,
+        next_offset,
+        items: records.iter().map(governance_task_record_json).collect(),
+    })
+}
+
+pub fn read_governance_task(conn: &Connection, task_id: &str) -> Result<Option<Value>> {
+    Ok(load_governance_task(conn, task_id)?
+        .as_ref()
+        .map(governance_task_record_json))
+}
+
+pub fn list_governance_tasks_for_trace(
+    conn: &Connection,
+    trace_id: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let limit = governance_task_page_limit(limit);
+    let limit_i64 = limit as i64;
+    let sql = format!(
+        "{} WHERE trace_id = ?1 ORDER BY updated_at DESC, task_id DESC LIMIT ?2",
+        governance_task_select_sql()
+    );
+    Ok(
+        query_governance_task_records(conn, &sql, &[&trace_id, &limit_i64])?
+            .iter()
+            .map(governance_task_record_json)
+            .collect(),
+    )
+}
+
+pub fn list_governance_tasks_for_package(
+    conn: &Connection,
+    package_id: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    let limit = governance_task_page_limit(limit);
+    let limit_i64 = limit as i64;
+    let sql = format!(
+        "{} WHERE package_id = ?1 ORDER BY updated_at DESC, task_id DESC LIMIT ?2",
+        governance_task_select_sql()
+    );
+    Ok(
+        query_governance_task_records(conn, &sql, &[&package_id, &limit_i64])?
+            .iter()
+            .map(governance_task_record_json)
+            .collect(),
+    )
+}
+
+pub fn update_governance_task(
+    conn: &Connection,
+    task_id: &str,
+    input: KnowledgeGovernanceTaskUpdateInput,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    validate_governance_task_status(&input.status)?;
+    let reviewer = input
+        .reviewer
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 80));
+    let review_note = input
+        .review_note
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 480));
+    let evidence_ref = input
+        .evidence_ref
+        .as_deref()
+        .and_then(|value| bounded_optional_text(value, 240));
+    if input.status == "accepted"
+        && (reviewer.is_none() || review_note.is_none() || evidence_ref.is_none())
+    {
+        return Err(anyhow!(
+            "accepted governance task requires reviewer, review_note, and evidence_ref"
+        ));
+    }
+    if matches!(input.status.as_str(), "closed" | "rejected")
+        && (reviewer.is_none() || review_note.is_none())
+    {
+        return Err(anyhow!(
+            "closed or rejected governance task requires reviewer and review_note"
+        ));
+    }
+    if let Some(current) = load_governance_task(conn, task_id)? {
+        let same_payload = current.status == input.status
+            && current.reviewer == reviewer
+            && current.review_note == review_note
+            && current.evidence_ref == evidence_ref;
+        if same_payload && input.expected_updated_at.is_none() {
+            return Ok(Some(current));
+        }
+    }
+    let now = now_rfc3339();
+    let updated = conn.execute(
+        r#"
+        UPDATE knowledge_governance_tasks
+        SET status = ?2,
+            reviewer = ?3,
+            review_note = ?4,
+            evidence_ref = ?5,
+            updated_at = ?6,
+            accepted_at = CASE
+                WHEN ?2 = 'accepted' THEN COALESCE(accepted_at, ?6)
+                WHEN ?2 IN ('open', 'in_review') THEN NULL
+                ELSE accepted_at
+            END,
+            closed_at = CASE
+                WHEN ?2 IN ('closed', 'rejected') THEN COALESCE(closed_at, ?6)
+                WHEN ?2 IN ('open', 'in_review', 'accepted') THEN NULL
+                ELSE closed_at
+            END
+        WHERE task_id = ?1
+          AND (?7 IS NULL OR updated_at = ?7)
+        "#,
+        params![
+            task_id,
+            input.status,
+            reviewer,
+            review_note,
+            evidence_ref,
+            now,
+            input.expected_updated_at,
+        ],
+    )?;
+    if updated == 0 {
+        if input.expected_updated_at.is_some() && load_governance_task(conn, task_id)?.is_some() {
+            return Err(anyhow!("governance task update conflict"));
+        }
+        return Ok(None);
+    }
+    let record = load_governance_task(conn, task_id)?
+        .ok_or_else(|| anyhow!("governance task disappeared after update"))?;
+    append_runtime_audit_event(
+        conn,
+        &record.trace_id,
+        "governance_task_status_updated",
+        &json!({
+            "task_id": &record.task_id,
+            "source_failure_id": &record.source_failure_id,
+            "status": &record.status,
+            "priority": &record.priority,
+            "reviewer": &record.reviewer,
+            "review_note_sha256": record.review_note.as_deref().map(hash_text),
+            "evidence_ref_sha256": record.evidence_ref.as_deref().map(hash_text),
+            "accepted_at": &record.accepted_at,
+            "closed_at": &record.closed_at,
         }),
     )?;
     Ok(Some(record))
@@ -4488,6 +5054,222 @@ fn retrieval_failure_record_json(
             "resolved_at": &record.resolved_at,
         }),
     }
+}
+
+fn governance_task_required_for_failure(failure: &RetrievalFailureRecord) -> bool {
+    matches!(failure.human_review_status.as_str(), "open" | "in_review")
+}
+
+fn default_governance_task_type(failure: &RetrievalFailureRecord) -> String {
+    match failure.failure_type.as_str() {
+        "source_usage_metadata_incomplete" => "source_metadata_fix",
+        "expected_evidence_missing" => "expected_evidence_fix",
+        "reviewer_evidence_insufficient" => "expert_review",
+        _ => "retrieval_policy_fix",
+    }
+    .to_string()
+}
+
+fn default_governance_cluster_key(failure: &RetrievalFailureRecord) -> String {
+    let missing_digest = hash_text(&failure.missing_evidence_types.join("|"));
+    format!(
+        "rf:{}:q:{}:missing:{}",
+        failure.failure_type,
+        &failure.question_sha256[..16],
+        &missing_digest[..12]
+    )
+}
+
+fn governance_task_page_limit(requested: usize) -> usize {
+    if requested == 0 {
+        GOVERNANCE_TASK_DEFAULT_PAGE_SIZE
+    } else {
+        requested.min(GOVERNANCE_TASK_MAX_PAGE_SIZE)
+    }
+}
+
+fn validate_governance_task_type(task_type: &str) -> Result<()> {
+    if matches!(
+        task_type,
+        "source_metadata_fix"
+            | "expected_evidence_fix"
+            | "retrieval_policy_fix"
+            | "alias_term_review"
+            | "commentary_link_review"
+            | "version_note_review"
+            | "expert_review"
+    ) {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid governance task_type {task_type}"))
+    }
+}
+
+fn validate_governance_task_status(status: &str) -> Result<()> {
+    if matches!(
+        status,
+        "open" | "in_review" | "accepted" | "rejected" | "closed"
+    ) {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid governance task status {status}"))
+    }
+}
+
+fn validate_governance_task_priority(priority: &str) -> Result<()> {
+    if matches!(priority, "p0" | "p1" | "p2") {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid governance task priority {priority}"))
+    }
+}
+
+fn governance_task_select_sql() -> &'static str {
+    r#"
+    SELECT
+        task_id, source_failure_id, trace_id, package_id, task_type, status,
+        priority, agent_cluster_key, proposed_fix, reviewer, review_note,
+        evidence_ref, created_at, updated_at, accepted_at, closed_at
+    FROM knowledge_governance_tasks
+    "#
+}
+
+fn load_governance_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    let sql = format!("{} WHERE task_id = ?1", governance_task_select_sql());
+    let mut records = query_governance_task_records(conn, &sql, &[&task_id])?;
+    Ok(records.pop())
+}
+
+fn load_governance_task_by_failure_type(
+    conn: &Connection,
+    source_failure_id: &str,
+    task_type: &str,
+) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
+    let sql = format!(
+        "{} WHERE source_failure_id = ?1 AND task_type = ?2 LIMIT 1",
+        governance_task_select_sql()
+    );
+    let mut records = query_governance_task_records(conn, &sql, &[&source_failure_id, &task_type])?;
+    Ok(records.pop())
+}
+
+fn query_governance_task_records(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+) -> Result<Vec<KnowledgeGovernanceTaskRecord>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params, governance_task_sql_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(governance_task_record_from_sql_row)
+        .collect()
+}
+
+fn query_governance_task_records_dynamic(
+    conn: &Connection,
+    sql: &str,
+    params: Vec<rusqlite::types::Value>,
+) -> Result<Vec<KnowledgeGovernanceTaskRecord>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(params.iter()),
+        governance_task_sql_row,
+    )?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(governance_task_record_from_sql_row)
+        .collect()
+}
+
+#[derive(Debug)]
+struct GovernanceTaskSqlRow {
+    task_id: String,
+    source_failure_id: String,
+    trace_id: String,
+    package_id: Option<String>,
+    task_type: String,
+    status: String,
+    priority: String,
+    agent_cluster_key: String,
+    proposed_fix: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    evidence_ref: Option<String>,
+    created_at: String,
+    updated_at: String,
+    accepted_at: Option<String>,
+    closed_at: Option<String>,
+}
+
+fn governance_task_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GovernanceTaskSqlRow> {
+    Ok(GovernanceTaskSqlRow {
+        task_id: row.get(0)?,
+        source_failure_id: row.get(1)?,
+        trace_id: row.get(2)?,
+        package_id: row.get(3)?,
+        task_type: row.get(4)?,
+        status: row.get(5)?,
+        priority: row.get(6)?,
+        agent_cluster_key: row.get(7)?,
+        proposed_fix: row.get(8)?,
+        reviewer: row.get(9)?,
+        review_note: row.get(10)?,
+        evidence_ref: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+        accepted_at: row.get(14)?,
+        closed_at: row.get(15)?,
+    })
+}
+
+fn governance_task_record_from_sql_row(
+    row: GovernanceTaskSqlRow,
+) -> Result<KnowledgeGovernanceTaskRecord> {
+    Ok(KnowledgeGovernanceTaskRecord {
+        task_id: row.task_id,
+        source_failure_id: row.source_failure_id,
+        trace_id: row.trace_id,
+        package_id: row.package_id,
+        task_type: row.task_type,
+        status: row.status,
+        priority: row.priority,
+        agent_cluster_key: row.agent_cluster_key,
+        proposed_fix: row.proposed_fix,
+        reviewer: row.reviewer,
+        review_note: row.review_note,
+        evidence_ref: row.evidence_ref,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        accepted_at: row.accepted_at,
+        closed_at: row.closed_at,
+    })
+}
+
+fn governance_task_record_json(record: &KnowledgeGovernanceTaskRecord) -> Value {
+    json!({
+        "object": "tonglingyu.knowledge_governance_task",
+        "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+        "task_id": &record.task_id,
+        "source_failure_id": &record.source_failure_id,
+        "trace_id": &record.trace_id,
+        "package_id": &record.package_id,
+        "task_type": &record.task_type,
+        "status": &record.status,
+        "priority": &record.priority,
+        "agent_cluster_key": &record.agent_cluster_key,
+        "proposed_fix": &record.proposed_fix,
+        "reviewer": &record.reviewer,
+        "review_note": &record.review_note,
+        "evidence_ref": &record.evidence_ref,
+        "created_at": &record.created_at,
+        "updated_at": &record.updated_at,
+        "accepted_at": &record.accepted_at,
+        "closed_at": &record.closed_at,
+    })
 }
 
 pub fn prune_runtime_data(conn: &Connection, retention_days: u32, dry_run: bool) -> Result<Value> {
@@ -7921,6 +8703,7 @@ mod tests {
             .expect("migration count");
         assert_eq!(migration_count, 1);
         assert!(sqlite_table_exists(&conn, "retrieval_failures").expect("table check"));
+        assert!(sqlite_table_exists(&conn, "knowledge_governance_tasks").expect("table check"));
     }
 
     #[test]
@@ -8015,7 +8798,9 @@ mod tests {
 
         let stats = runtime_store_stats(&conn).expect("stats");
         assert_eq!(stats.retrieval_failures, 1);
+        assert_eq!(stats.governance_tasks, 1);
         assert_eq!(stats.retrieval_failure_status.get("resolved"), Some(&1_i64));
+        assert_eq!(stats.governance_task_status.get("open"), Some(&1_i64));
         let events = runtime_audit_events_for_trace(&conn, "trace-retrieval-failure-test")
             .expect("audit events");
         assert!(events.iter().any(|event| {
@@ -8026,6 +8811,28 @@ mod tests {
             event["event_type"] == "retrieval_failure_status_updated"
                 && event["payload"]["review_note_sha256"].as_str().is_some()
         }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event_type"] == "governance_task_created")
+        );
+        let governance_tasks = list_governance_tasks(
+            &conn,
+            KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: Some("source_metadata_fix".to_string()),
+                priority: Some("p0".to_string()),
+                source_failure_id: Some(failure_id.to_string()),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list governance tasks");
+        assert_eq!(governance_tasks.items.len(), 1);
+        assert_eq!(
+            governance_tasks.items[0]["source_failure_id"],
+            json!(failure_id)
+        );
     }
 
     #[test]
@@ -8122,6 +8929,131 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "governance_task_created")
+                .count(),
+            1
+        );
+        let governance_tasks = list_governance_tasks(
+            &conn,
+            KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: Some("expected_evidence_fix".to_string()),
+                priority: Some("p0".to_string()),
+                source_failure_id: Some(first.failure_id.clone()),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list governance tasks");
+        assert_eq!(governance_tasks.items.len(), 1);
+        assert_eq!(
+            governance_tasks.items[0]["task_type"],
+            json!("expected_evidence_fix")
+        );
+    }
+
+    #[test]
+    fn governance_task_status_flow_requires_human_acceptance_metadata() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        let question = "通灵玉是什么？";
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: question.to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        let failure = create_retrieval_failure(
+            &conn,
+            RetrievalFailureCreateInput {
+                trace_id: "trace-governance-task-test".to_string(),
+                package_id: Some("pkg-governance-task-test".to_string()),
+                question: question.to_string(),
+                quality_report: (*quality_report).clone(),
+                selected_evidence_ids: evidence_ids(&cards),
+                expected_evidence_ids: vec!["ev-expected-missing".to_string()],
+                agent_diagnosis: Some("expected evidence absent".to_string()),
+                proposed_fix: Some("review_expected_evidence_fixture".to_string()),
+            },
+        )
+        .expect("failure creates governance task");
+        let task = create_governance_task_from_failure(
+            &conn,
+            KnowledgeGovernanceTaskCreateFromFailureInput {
+                source_failure_id: failure.failure_id.clone(),
+                task_type: None,
+                priority: None,
+                proposed_fix: None,
+                agent_cluster_key: None,
+            },
+        )
+        .expect("governance task loads")
+        .expect("governance task exists");
+
+        let rejected = update_governance_task(
+            &conn,
+            &task.task_id,
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "accepted".to_string(),
+                reviewer: Some("rqa-reviewer".to_string()),
+                review_note: Some("accepted".to_string()),
+                evidence_ref: None,
+                expected_updated_at: None,
+            },
+        )
+        .expect_err("accepted task requires evidence ref");
+        assert!(rejected.to_string().contains("requires reviewer"));
+
+        let accepted = update_governance_task(
+            &conn,
+            &task.task_id,
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "accepted".to_string(),
+                reviewer: Some("rqa-reviewer".to_string()),
+                review_note: Some("accepted with source patch".to_string()),
+                evidence_ref: Some("source://review-note/001".to_string()),
+                expected_updated_at: Some(task.updated_at.clone()),
+            },
+        )
+        .expect("governance task updates")
+        .expect("governance task exists");
+        assert_eq!(accepted.status, "accepted");
+        assert!(accepted.accepted_at.is_some());
+        assert_eq!(
+            accepted.evidence_ref.as_deref(),
+            Some("source://review-note/001")
+        );
+        let events =
+            runtime_audit_events_for_trace(&conn, "trace-governance-task-test").expect("events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "governance_task_status_updated"
+                && event["payload"]["evidence_ref_sha256"].as_str().is_some()
+        }));
     }
 
     #[test]

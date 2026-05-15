@@ -574,10 +574,24 @@
   会逐字段比较 RQA eval gate 与 strict live gate 的 Runtime profile、prompt、
   tool policy、reviewer policy、model upstream 和 decoding 参数摘要。
 - 当前本地 RQA quality gate 正确 fail-closed：`quality_summary.status=passed`，
-  但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures，
-  因此 release readiness 报告会把 `retrieval_quality` 记为 required failure，
-  `production_release_ready=false`。这不是测试失败，而是当前现实状态还不能声明
-  RQA production-ready 的证据。
+  但 `data/tonglingyu/tonglingyu.db` 里仍有 157 个 open retrieval failures。对该
+  DB 的临时副本执行真实 RQA gate 时，schema migration 会 backfill governance
+  tasks，eval 运行后 gate 输出 `open_p0_retrieval_failures=182` 和
+  `open_p0_governance_tasks=182`，因此 release readiness 报告会把
+  `retrieval_quality` 记为 required failure，`production_release_ready=false`。这
+  不是测试失败，而是当前现实状态还不能声明 RQA production-ready 的证据。
+- RQA Milestone H 已完成第一批治理任务代码切片：
+  runtime 新增 `knowledge_governance_tasks` schema、open/in_review retrieval failure
+  backfill、新 failure 自动生成 open P0 governance task，以及 governance task
+  create/list/read/update API；accepted task 必须带 reviewer、review note 和
+  evidence ref，closed/rejected 必须带 reviewer 和 review note。Gateway 和 Open
+  WebUI admin Action 新增 governance task list/read/create-from-failure/update；
+  trace/package audit 会返回 governance task ids/tasks，admin 成功、not-found、
+  conflict 和 update 路径写访问审计。RQA quality gate、saved report validator 和
+  release contract smoke 新增 `open_p0_governance_tasks=0` blocker。
+- 该 H 切片仍不等于 H 完成或 production-ready：普通用户反馈入口、trace/package 级
+  expert-review 标记、真实 Agent 聚类、KB diff report、eval 前后对比、retention/
+  restore 和用户数据 lifecycle contract 仍未完成。
 - 后续 RQA production-ready 还必须提供 RTO/RPO、最近一次恢复演练、恢复后 gate
   复核、依赖/镜像/发布脚本安全扫描摘要；缺失时不能生成 production-ready artifact。
 - 后续 RQA production-ready 还必须把 RQA quality gate、saved report validator 和
@@ -589,8 +603,8 @@
 
 ## 下一步
 
-1. 清理或分派当前 open retrieval failures，使 quality gate 的 open failure
-   blocker 能由真实治理状态关闭，而不是绕过阈值。
+1. 清理或分派当前 open retrieval failures / open governance tasks，使 quality
+   gate 的 blocker 能由真实治理状态关闭，而不是绕过阈值。
 2. 实现 RQA Milestone H-J：治理任务/反馈闭环、端到端自动化、backup/restore、
    retention/prune、runbook/alert/rollback 和 production report 运维证据。
 3. 补齐 RQA Milestone K-M：隐私生命周期、API 契约、性能预算、发布值守、

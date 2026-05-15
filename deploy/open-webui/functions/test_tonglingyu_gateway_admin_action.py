@@ -228,6 +228,96 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         self.assertEqual(request.get_header("X-tonglingyu-subject"), "admin-1")
         self.assertIn("tonglingyu.retrieval_failure_admin_update", result["content"])
 
+    def test_governance_tasks_list_supports_bounded_filters(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_list"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "task_type": "expected_evidence_fix",
+                        "priority": "p0",
+                        "source_failure_id": "rf-1",
+                        "limit": 20,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_tasks",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks?status=open&task_type=expected_evidence_fix&priority=p0&source_failure_id=rf-1&limit=20",
+        )
+        self.assertIn("tonglingyu.governance_task_admin_list", result["content"])
+
+    def test_governance_task_create_from_failure_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_create"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "failure_id": "rf-1",
+                        "task_type": "expected_evidence_fix",
+                        "priority": "p0",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_from_failure",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1/governance-task",
+        )
+        self.assertEqual(payload["task_type"], "expected_evidence_fix")
+        self.assertEqual(payload["priority"], "p0")
+        self.assertIn("tonglingyu.governance_task_admin_create", result["content"])
+
+    def test_governance_task_update_uses_patch_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_update"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "task_id": "kgt-1",
+                        "status": "accepted",
+                        "reviewer": "admin-1",
+                        "review_note": "accepted",
+                        "evidence_ref": "source://review-note/001",
+                        "if_match_updated_at": "2026-05-15T00:00:00Z",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_update",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks/kgt-1",
+        )
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["evidence_ref"], "source://review-note/001")
+        self.assertIn("tonglingyu.governance_task_admin_update", result["content"])
+
     def test_target_model_guard_skips_non_tonglingyu_model(self) -> None:
         action = self.action_with_key()
         with patch("tonglingyu_gateway_admin_action.urllib.request.urlopen") as urlopen:
