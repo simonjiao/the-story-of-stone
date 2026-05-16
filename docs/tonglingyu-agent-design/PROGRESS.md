@@ -1092,6 +1092,15 @@
   high 通过但记录 nonblocking risk”；使用最新远端 Trivy raw reports 本地复核时，
   自有镜像为 0 critical / 0 high，第三方镜像为 63 critical / 714 high，security
   gate 在新策略下通过。
+- 最终 live release readiness 已在提交
+  `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上复核通过：远端报告
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
+  显示 `status=passed`、`production_release_ready=true`、
+  `release_conditions_met=true`、`required_failures=[]`、`release_blockers=[]`，
+  并绑定 `git.tracked_dirty=false`。saved report validator 输出
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
+  为 `status=ok`、`errors=[]`。因此通灵玉 RQA production-ready release gate
+  已闭合。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1100,21 +1109,20 @@
   `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report validator
   会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境真实
   incident drill、capacity/load 和 audit-history evidence 已在
-  `remote-release-20260516T055004Z-50395` 中执行并通过该 gate；最终
-  production-ready 仍取决于其他 required gate 全部通过。
+  `remote-release-20260516T055004Z-50395` 和最终
+  `remote-release-20260516T074522Z-71051` 复核中执行并通过该 gate。
 
 ## 下一步
 
-1. 在包含第三方镜像非阻塞策略的干净提交上复核最终 live release readiness；该复核必须
-   证明 `security_scan`、`release_ops_readiness`、`rqa_incident_capacity`、
-   `openwebui_browser_review` 和 live gates 均通过，且 `production_release_ready=true`。
+1. 保持 RQA release gate 闭环：后续正式 release 仍必须在当前代码策略下绑定当次
+   dependency/image scan、release ops、incident/capacity、browser review 和 live gate
+   evidence，并由 saved report validator 复核 `production_release_ready=true`。
 2. 保持 RQA Milestone L 值守证据闭环：后续正式 release 仍必须绑定当次
    post-release monitor JSON artifact、60 分钟窗口、operator/environment、live gate
    evidence 和 admin Action/API evidence；当前
    `remote-release-20260516T074522Z-71051` 已证明该路径可通过。
 3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
-   最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
-   当次 release run 的证据。
+   最终 production-ready report 已证明当前为 0，后续 release 仍必须绑定当次证据。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

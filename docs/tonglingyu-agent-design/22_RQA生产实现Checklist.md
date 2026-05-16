@@ -1045,8 +1045,8 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 状态：已完成本 milestone gate（2026-05-16；runbook、static ops gate、saved report
 validator、60 分钟目标环境 post-release monitor、rollback/RTO-RPO/alert/operator/admin
 Action evidence 已在 `remote-release-20260516T074522Z-71051` 绑定并通过
-`release_ops_readiness`；整体 RQA production-ready 仍以当前干净提交上的最终 live
-release readiness report 为准）
+`release_ops_readiness`；最终 live release readiness report 已在提交
+`ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
 
 目标：RQA production-ready 必须能被 operator 接住，而不是只在发布瞬间通过。
 
@@ -1101,19 +1101,22 @@ release readiness report 为准）
   evidence：60 分钟窗口、13 条 monitor 样本、operator/environment、live gate、
   admin Action/API、rollback、RTO/RPO、alert policy 和 report path 均通过
   `release_ops_readiness` 复核。
-- Milestone L 可以标记为完成；但整体 RQA production-ready 仍必须由当前干净提交上的
-  最终 live release readiness report 证明。`security_scan` 已在提交
+- Milestone L 可以标记为完成。`security_scan` 已在提交
   `8aea6545aa9917b850701c3239c2f018eb01bd35` 改为按镜像所有权分类：自有镜像
   high/critical findings 仍 fail-closed，第三方镜像 findings 只作为 nonblocking
   risk 记录。
+- 最终 live release readiness report 已在提交
+  `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过：
+  `production_release_ready=true`、`required_failures=[]`、`release_blockers=[]`；
+  saved report validator 为 `status=ok`、`errors=[]`。
 
 ## Milestone M：事故响应、容量和审计完整性
 
 状态：已完成本 milestone gate（2026-05-16；目标环境 live runner、默认 10 分钟
 capacity/load 窗口、incident/audit evidence 和 `rqa_incident_capacity` release
 gate 已在 `remote-release-20260516T055004Z-50395` 和后续
-`remote-release-20260516T074522Z-71051` 复核中通过；这不代表整体
-RQA production-ready，最终结论仍以当前干净提交上的 live release readiness report 为准）
+`remote-release-20260516T074522Z-71051` 复核中通过；最终 live release readiness
+report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
 
 目标：事故或压力场景下仍保持可追责、可降级、可恢复，不能用关闭治理来伪装可用。
 
@@ -1255,6 +1258,11 @@ RQA production-ready，最终结论仍以当前干净提交上的 live release r
   nonblocking risk：自有镜像 high/critical 仍阻塞，第三方镜像 high/critical 不阻塞
   production-ready，但必须绑定 Trivy raw reports、ownership 分类和 nonblocking
   errors。
+- 最终 live release readiness report 已在提交
+  `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过：
+  `security_scan`、`release_ops_readiness`、`rqa_incident_capacity`、
+  `openwebui_browser_review` 和 live gates 均为 `passed`，`production_release_ready=true`；
+  saved report validator 为 `status=ok`。
 
 ## 提交节奏
 
