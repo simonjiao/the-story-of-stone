@@ -963,9 +963,11 @@
   WebUI Function 和 Open WebUI admin Action 通过，但这些结果尚未进入当前
   release report。
 - 目标环境 live `existing_refs` 恢复演练已在 release automation 中执行并保留
-  持久备份 artifact；后续 RQA production-ready 仍必须处理当前真实 image scan
-  high/critical findings，并在干净 release commit 上复跑 dependency/image scan
-  且绑定报告 hash。
+  持久备份 artifact；后续 RQA production-ready 仍必须保证自有镜像
+  (`AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical
+  findings，并在干净 release commit 上复跑 dependency/image scan 且绑定报告 hash。
+  第三方镜像 high/critical findings 不作为 production-ready blocker，但必须保留
+  Trivy raw reports、ownership 分类和 nonblocking 风险摘要。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
   budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
   与值守验证。
@@ -983,15 +985,22 @@
   `tonglingyu.post_release_monitor` JSON，校验 60 分钟窗口、operator/environment、
   live release report、live gates passed、admin Action/API evidence ref 和 `passed`
   结论；live `release_ops_readiness` 必须绑定该 evidence path/hash，saved report
-  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境
-  真实 post-release monitor 仍未执行。
+  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。2026-05-16
+  目标环境 run `remote-release-20260516T074522Z-71051` 已执行 60 分钟
+  post-release monitor，生成 13 条样本，artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
+  `post-release-monitor-evidence.json` 为 `status=ok`，live gates、admin
+  Action/API evidence、operator/environment 和 report path 校验均通过。该 evidence
+  已绑定进同一 artifact 目录的 `release_ops_readiness` 复核；Milestone L 的值守证据
+  blocker 已关闭。
 - Capacity/load smoke 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-capacity-load-evidence.sh` 会生成
   `tonglingyu.rqa_capacity_load_evidence` JSON，校验代表性 eval report、failure、
   admin list 翻页、RQA 写入、admin 查询、metrics 查询和 release gate 预算；
   live `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report
-  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境
-  真实 capacity/load、incident drill 和 audit-history evidence 仍未执行。
+  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。早期本地
+  smoke 不能替代目标环境真实 capacity/load、incident drill 和 audit-history evidence；
+  当前目标环境执行状态见后续 live runner/result 记录。
 - Capacity/load smoke 现在已有真实执行 runner：
   `deploy/scripts/verify-tonglingyu-rqa-capacity-load-smoke.sh` 会实际运行本地
   performance budget gate，提取代表性 counts、admin pagination、metrics read、
@@ -1033,9 +1042,9 @@
   `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
   artifact 位于
   `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
-  因此 RQA incident/capacity 性能 blocker 已关闭；但整体 production-ready
-  仍失败，剩余 required failures 为 `security_scan`、`release_ops_readiness` 和
-  `openwebui_browser_review`。
+  因此 RQA incident/capacity 性能 blocker 已关闭；该 run 当时仍失败，剩余
+  required failures 为 `security_scan`、`release_ops_readiness` 和
+  `openwebui_browser_review`，后续记录已继续收敛这些 blocker。
 - 2026-05-16 已修复 Open WebUI 普通用户模型可见性：新增
   `deploy/scripts/ensure-openwebui-tonglingyu-model-access.sh`，在 live Open WebUI
   DB 中确保 `model:tonglingyu` active 且存在 `access_grant user:* read`。远端执行
@@ -1065,16 +1074,24 @@
   远端 metadata smoke 证明 title prompt 返回 JSON、没有
   `evidence_package_id`，trace 为 `tly-019e2f90fc947651abccbdb2b91f6f00`；随后 live
   DB 复核 `open_failures=0`、`open_p0_tasks=0`、metadata audit events `>=1`。
-- 最新完整远端 release automation
-  `remote-release-20260516T071215Z-62555` 已在提交
-  `dd80c124acc25360c5e7a5e737998e8ab2d74976` 并重同步远端后执行，确认
-  clean-worktree blocker 已消失。该 run 已证明 browser/RQA 队列 blocker 关闭：
-  `openwebui_browser_review.status=passed`，open P0 retrieval failures /
-  governance tasks 均为 0，required failures 只剩 `security_scan` 和
-  `release_ops_readiness`。该 run 仍不是 production-ready：`security_scan`
-  因真实 image scan 中 `critical_count=63`、`high_count=714` fail-closed；
-  `release_ops_readiness` 仍缺 rollback/RTO-RPO/alert/post-release
-  monitor/operator/admin-action evidence。
+- 最新 release evidence baseline 为
+  `remote-release-20260516T074522Z-71051`。该完整远端 automation 已生成 live
+  capacity/load evidence 和 60 分钟 post-release ops evidence；初次收尾暴露出第二次
+  readiness 复核复用 migration backup path 的脚本问题，已在提交
+  `ab9ce22d503c97daa2678529762f6da523b4eb8c` 修复为独立 backup/restore artifact
+  path 并重同步远端。使用同一 artifact 目录、原 `release-readiness.json` report path、
+  live capacity env 和 post-release ops env 复核后，`rqa_migration_preflight`、
+  `rqa_incident_capacity`、`release_ops_readiness`、`openwebui_browser_review` 均
+  `passed`，open P0 retrieval failures / governance tasks 均为 0；当时
+  `required_failures=["security_scan"]`，`production_release_ready=false`。
+- 2026-05-16 已在提交 `8aea6545aa9917b850701c3239c2f018eb01bd35` 中调整
+  release security policy：镜像扫描按所有权分类，`AGENT_PLATFORM_IMAGE_REF` 和
+  `TONGLINGYU_GATEWAY_IMAGE_REF` 的 high/critical findings 仍 fail-closed，第三方
+  镜像 findings 进入 `nonblocking_errors` 和 ownership summary，不再阻塞
+  production-ready。contract smoke 已覆盖“自有镜像 high 仍失败”和“仅第三方镜像
+  high 通过但记录 nonblocking risk”；使用最新远端 Trivy raw reports 本地复核时，
+  自有镜像为 0 critical / 0 high，第三方镜像为 63 critical / 714 high，security
+  gate 在新策略下通过。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1088,13 +1105,13 @@
 
 ## 下一步
 
-1. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
-   reports 已持久化，但 image scan 仍有 63 critical / 714 high；需要替换/重建
-   镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的审批风险例外。
-2. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
-   窗口、operator/environment、live gate evidence 和 admin Action/API evidence 必须
-   绑定进最终 live release report；browser review evidence 已绑定，不再作为当前
-   blocker。
+1. 在包含第三方镜像非阻塞策略的干净提交上复核最终 live release readiness；该复核必须
+   证明 `security_scan`、`release_ops_readiness`、`rqa_incident_capacity`、
+   `openwebui_browser_review` 和 live gates 均通过，且 `production_release_ready=true`。
+2. 保持 RQA Milestone L 值守证据闭环：后续正式 release 仍必须绑定当次
+   post-release monitor JSON artifact、60 分钟窗口、operator/environment、live gate
+   evidence 和 admin Action/API evidence；当前
+   `remote-release-20260516T074522Z-71051` 已证明该路径可通过。
 3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
