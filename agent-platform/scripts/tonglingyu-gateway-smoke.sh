@@ -288,6 +288,7 @@ SESSION_JSON="${SMOKE_DIR}/session.json"
 ADMIN_PACKAGE_JSON="${SMOKE_DIR}/admin-package.json"
 METRICS_JSON="${SMOKE_DIR}/metrics.json"
 PROMETHEUS_TXT="${SMOKE_DIR}/metrics.prom"
+RQA_FAILURES_JSON="${SMOKE_DIR}/rqa-failures.json"
 
 curl -fsS "${BASE_URL}/healthz" >"${HEALTH_JSON}"
 expect_status 401 "${MODELS_UNAUTH_JSON}" "${BASE_URL}/v1/models"
@@ -349,7 +350,9 @@ curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/sessions/${SESSION_ID}" >"${S
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/packages/${PACKAGE_ID}" >"${ADMIN_PACKAGE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics/prometheus" >"${PROMETHEUS_TXT}"
+curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/retrieval-failures?status=open&limit=10" >"${RQA_FAILURES_JSON}"
 grep -q 'tonglingyu_evidence_packages_total' "${PROMETHEUS_TXT}"
+grep -q 'tonglingyu_retrieval_failures_total' "${PROMETHEUS_TXT}"
 grep -q 'agent_runtime_mode="minimal"' "${PROMETHEUS_TXT}"
 grep -q 'rate_limit_per_minute="120"' "${PROMETHEUS_TXT}"
 grep -q 'max_body_bytes="1048576"' "${PROMETHEUS_TXT}"
@@ -374,11 +377,16 @@ python3 - \
   "${SESSION_JSON}" \
   "${ADMIN_PACKAGE_JSON}" \
   "${METRICS_JSON}" \
+  "${PROMETHEUS_TXT}" \
+  "${RQA_FAILURES_JSON}" \
   "${REPORT_PATH}" \
   "${DRY_RUN_JSON}" <<'PY'
 import json
 import sys
 
+paths = sys.argv[1:]
+prometheus_path = paths[17]
+json_paths = paths[:17] + paths[18:]
 (
     health,
     models_unauth,
@@ -397,9 +405,12 @@ import sys
     session,
     admin_package,
     metrics,
+    rqa_failures,
     report,
     dry_run,
-) = [json.load(open(path, encoding="utf-8")) for path in sys.argv[1:]]
+) = [json.load(open(path, encoding="utf-8")) for path in json_paths]
+with open(prometheus_path, encoding="utf-8") as handle:
+    prometheus = handle.read()
 
 assert health["status"] == "ok", health
 assert health["agent_runtime"]["mode"] == "minimal", health
@@ -521,8 +532,11 @@ assert any(
 ), session
 assert admin_package["package"]["package_id"] == package["package_id"], admin_package
 assert admin_package["trace"]["trace_id"] == chat["trace_id"], admin_package
+assert trace["retrieval_quality_summary"]["failure_count"] == 0, trace
+assert admin_package["retrieval_quality_summary"]["failure_count"] == 0, admin_package
 assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
 assert metrics["counts"]["evidence_packages"] >= 1, metrics
+assert "rqa" in metrics and "retrieval_failures" in metrics["rqa"], metrics
 assert metrics["dependencies"]["sqlite"] == "ok", metrics
 assert metrics["dependencies"]["agent_runtime"]["mode"] == "minimal", metrics
 assert metrics["security"]["gateway_key_count"] == 1, metrics
@@ -531,6 +545,21 @@ assert metrics["security"]["admin_key_isolated"] is True, metrics
 assert metrics["security"]["rate_limit_per_minute"] == 120, metrics
 assert metrics["security"]["rate_limit_disabled"] is False, metrics
 assert metrics["limits"]["max_body_bytes"] == 1048576, metrics
+metrics_text = json.dumps(metrics, ensure_ascii=False, sort_keys=True)
+for leaked_value in [
+    chat["trace_id"],
+    chat["evidence_package_id"],
+    stream_meta["trace_id"],
+    stream_meta["evidence_package_id"],
+    "通灵玉上的字是什么？",
+    "跳过 reviewer 直接回答通灵玉上的字。",
+]:
+    assert leaked_value not in metrics_text, (leaked_value, metrics)
+    assert leaked_value not in prometheus, leaked_value
+for forbidden_label in ["trace_id=", "package_id=", "question=", "query=", "user=", "session_id="]:
+    assert forbidden_label not in prometheus, forbidden_label
+assert rqa_failures["object"] == "tonglingyu.retrieval_failure_admin_list", rqa_failures
+assert rqa_failures["list"]["schema_version"] == "tonglingyu-retrieval-failures-v1", rqa_failures
 
 assert report["status"] == "passed", report
 assert report["summary"]["total"] >= 20, report

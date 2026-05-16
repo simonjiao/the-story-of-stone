@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::header;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -22,9 +22,19 @@ use std::{
 };
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
-    AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, RuntimeWorkflowInput,
+    AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
+    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
+    KnowledgeGovernanceTaskUpdateInput, KnowledgePatchProposalCreateInput,
+    RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
+    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
+    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
     RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, execute_agent_runtime_plan_gate, package_json,
+    TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
+    execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -36,6 +46,27 @@ use crate::plan::{
 
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
 const DEFAULT_MODEL_NAME: &str = "通灵玉";
+const EVAL_QUALITY_SCHEMA_VERSION: &str = "tonglingyu-eval-quality-v1";
+const EXPECTED_TLY_INSCRIPTION_BLOCKS: &[&str] = &[
+    "hongloumeng-wikisource-120:page:0010:block:0010",
+    "hongloumeng-wikisource-120:page:0010:block:0013",
+];
+const EXPECTED_TLY_FRONT_INSCRIPTION_BLOCKS: &[&str] =
+    &["hongloumeng-wikisource-120:page:0010:block:0010"];
+const EXPECTED_TLY_BACK_INSCRIPTION_BLOCKS: &[&str] =
+    &["hongloumeng-wikisource-120:page:0010:block:0013"];
+const EXPECTED_QINGGENGFENG_BLOCKS: &[&str] = &["hongloumeng-wikisource-120:page:0007:block:0007"];
+const EXPECTED_JIAXU_COMMENTARY_TLY_BLOCKS: &[&str] =
+    &["shitouji-wikisource-jiaxu:page:0010:block:0013"];
+const EVAL_NOT_APPLICABLE_COVERAGE_SMOKE: &str = "coverage_smoke_without_stable_expected_block";
+const EVAL_NOT_APPLICABLE_NEGATIVE: &str = "negative_case_without_expected_block";
+const EVAL_NOT_APPLICABLE_CONTROL: &str = "control_safety_case_without_expected_block";
+const EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY: &str =
+    "source_boundary_requires_facsimile_authoritative_or_expert_review";
+const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
+const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
+const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
+const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -49,12 +80,17 @@ struct Args {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     BuildKb(BuildKbArgs),
+    KbSourceMetadataBackfill(KbSourceMetadataBackfillArgs),
     Query(QueryArgs),
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
+    RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
+    RqaRestoreCanary(RqaRestoreCanaryArgs),
+    RqaUserLifecycle(RqaUserLifecycleArgs),
+    Healthcheck(HealthcheckArgs),
     Serve(ServeArgs),
 }
 
@@ -74,6 +110,28 @@ struct BuildKbArgs {
     db: PathBuf,
     #[arg(long, default_value_t = false)]
     rebuild: bool,
+    #[arg(long, default_value_t = 8)]
+    eval_limit: usize,
+    #[arg(long, default_value_t = false)]
+    skip_diff_eval: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct KbSourceMetadataBackfillArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_SOURCE_ROOT",
+        default_value = "resources/sources/wiki"
+    )]
+    source_root: PathBuf,
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -125,6 +183,22 @@ struct EvalArgs {
     limit: usize,
     #[arg(long)]
     report: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "TONGLINGYU_EVAL_ALLOW_DB_MUTATION",
+        default_value_t = false
+    )]
+    allow_db_mutation: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeSchemaPreflightArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -151,6 +225,54 @@ struct PruneRuntimeArgs {
     retention_days: u32,
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RqaRestoreCanaryArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    package_id: Option<String>,
+    #[arg(long, default_value = "restore-drill")]
+    reviewer: String,
+    #[arg(long, default_value = "closed restore drill canary")]
+    review_note: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RqaUserLifecycleArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    user_ref: String,
+    #[arg(long, value_enum)]
+    action: RqaUserLifecycleAction,
+    #[arg(long, default_value = "operator_requested")]
+    reason: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct HealthcheckArgs {
+    #[arg(long, default_value = "http://127.0.0.1:8090/healthz")]
+    url: String,
+    #[arg(long, default_value_t = 5)]
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RqaUserLifecycleAction {
+    Export,
+    Anonymize,
+    LegalHold,
+    ReleaseLegalHold,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -250,6 +372,7 @@ struct AppState {
     max_body_bytes: usize,
     rate_limit_per_minute: usize,
     rate_limiter: Arc<GatewayRateLimiter>,
+    admin_rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
     profiles: InternalProfiles,
     started_at: String,
@@ -394,10 +517,109 @@ struct SearchParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserFeedbackRequest {
+    trace_id: Option<String>,
+    package_id: Option<String>,
+    feedback_type: Option<String>,
+    feedback_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalFailureUpdateRequest {
+    human_review_status: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetrievalFailureClusterRequest {
+    human_review_status: Option<String>,
+    failure_type: Option<String>,
+    min_cluster_size: Option<usize>,
+    limit: Option<usize>,
+    create_tasks: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernanceTaskCreateRequest {
+    task_type: Option<String>,
+    priority: Option<String>,
+    proposed_fix: Option<String>,
+    agent_cluster_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernanceTaskManualCreateRequest {
+    source_entity_type: String,
+    source_entity_id: String,
+    task_type: Option<String>,
+    priority: Option<String>,
+    proposed_fix: Option<String>,
+    agent_cluster_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgePatchProposalCreateRequest {
+    proposal_type: String,
+    trace_id: Option<String>,
+    package_id: Option<String>,
+    source_ref: Option<String>,
+    payload: Value,
+    priority: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GovernanceTaskUpdateRequest {
+    status: String,
+    reviewer: Option<String>,
+    review_note: Option<String>,
+    evidence_ref: Option<String>,
+    if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminAccessDenialRequest {
+    action: Option<String>,
+    denial: String,
+    model: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PackageAccessContext {
     subject: String,
     user_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserFeedbackSource {
+    trace_id: String,
+    package_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgePatchProposalSource {
+    trace_id: String,
+    package_id: Option<String>,
+}
+
+struct UserFeedbackTaskInput<'a> {
+    feedback_id: &'a str,
+    trace_id: &'a str,
+    package_id: Option<&'a str>,
+    feedback_type: &'a str,
+    feedback_text: &'a str,
+    feedback_char_count: usize,
+    access: &'a PackageAccessContext,
+    proposed_fix: String,
 }
 
 type AuthResult<T> = std::result::Result<T, Box<Response>>;
@@ -425,6 +647,50 @@ fn gateway_auth_and_rate_limit(
     }
 }
 
+fn admin_auth_and_rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+) -> AuthResult<String> {
+    let request_subject = request_subject(headers);
+    let subject = match admin_auth_subject(state, headers) {
+        Ok(subject) => subject,
+        Err(response) => {
+            let subject_ref = audit_subject_ref(&request_subject);
+            let _ = append_admin_audit_event(
+                &state.db,
+                "rqa_admin_access_denied",
+                &subject_ref,
+                json!({
+                    "action": action,
+                    "denial": "auth_failed",
+                    "subject_ref": subject_ref,
+                }),
+            );
+            return Err(response);
+        }
+    };
+    let decision = state.admin_rate_limiter.check(&subject);
+    if decision.allowed {
+        Ok(subject)
+    } else {
+        let subject_ref = audit_subject_ref(&subject);
+        let _ = append_admin_audit_event(
+            &state.db,
+            "rqa_admin_access_denied",
+            &subject_ref,
+            json!({
+                "action": action,
+                "denial": "rate_limited",
+                "subject_ref": subject_ref,
+                "limit_per_minute": decision.limit,
+                "retry_after_secs": decision.retry_after_secs,
+            }),
+        );
+        Err(Box::new(rate_limit_response(&decision, None)))
+    }
+}
+
 fn admin_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
     let keys = if state.admin_api_keys.is_empty() && state.allow_admin_with_gateway_key {
         &state.gateway_api_keys
@@ -440,9 +706,7 @@ fn authorize_with_keys(
     code: &str,
     require_configured_key: bool,
 ) -> AuthResult<String> {
-    let subject = header_value(headers, "x-tonglingyu-subject")
-        .or_else(|| header_value(headers, "x-open-webui-user-id"))
-        .unwrap_or_else(|| "open-webui".to_string());
+    let subject = request_subject(headers);
     if expected_keys.is_empty() && !require_configured_key {
         return Ok(subject);
     }
@@ -472,6 +736,17 @@ fn authorize_with_keys(
             None,
         )))
     }
+}
+
+fn request_subject(headers: &HeaderMap) -> String {
+    header_value(headers, "x-tonglingyu-subject")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .unwrap_or_else(|| "open-webui".to_string())
+}
+
+fn audit_subject_ref(subject: &str) -> String {
+    let digest = hash_text(subject);
+    format!("sha256:{}", &digest[..16])
 }
 
 fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
@@ -754,6 +1029,15 @@ fn safe_error_detail(_error: &anyhow::Error) -> &'static str {
     "internal details are hidden"
 }
 
+fn bounded_audit_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(max_chars).collect())
+    }
+}
+
 fn elapsed_ms(started: Instant) -> u128 {
     started.elapsed().as_millis()
 }
@@ -793,12 +1077,32 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Eval(args) => {
-            let report = run_eval(&args)?;
+            let report = run_eval_command(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report["status"] == "passed" {
                 Ok(())
             } else {
                 Err(anyhow!("tonglingyu eval failed"))
+            }
+        }
+        Command::RuntimeSchemaPreflight(args) => {
+            let report = TonglingyuRuntimeStore::new(args.db.clone())
+                .runtime_schema_migration_preflight()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::KbSourceMetadataBackfill(args) => {
+            let conn = open_db(&args.db)?;
+            let report = tonglingyu_runtime::backfill_source_metadata_from_snapshots(
+                &conn,
+                &args.source_root,
+                !args.dry_run,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.get("status").and_then(Value::as_str) == Some("ok") {
+                Ok(())
+            } else {
+                Err(anyhow!("kb source metadata backfill failed"))
             }
         }
         Command::BackupDb(args) => {
@@ -810,8 +1114,51 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::RqaRestoreCanary(args) => {
+            let report = rqa_restore_canary_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("rqa restore canary did not complete"))
+            }
+        }
+        Command::RqaUserLifecycle(args) => {
+            let report = rqa_user_lifecycle_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("rqa user lifecycle action did not complete"))
+            }
+        }
+        Command::Healthcheck(args) => {
+            let report = healthcheck_command(&args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Command::Serve(args) => serve(args).await,
     }
+}
+
+async fn healthcheck_command(args: &HealthcheckArgs) -> Result<Value> {
+    let response = reqwest::Client::new()
+        .get(&args.url)
+        .timeout(Duration::from_secs(args.timeout_seconds))
+        .send()
+        .await
+        .context("healthcheck request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("healthcheck returned {status}: {}", body.trim()));
+    }
+    Ok(json!({
+        "object": "tonglingyu.healthcheck",
+        "status": "ok",
+        "url": args.url,
+        "http_status": status.as_u16(),
+    }))
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
@@ -827,6 +1174,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
             source_root: args.source_root.clone(),
             db: args.db.clone(),
             rebuild: false,
+            eval_limit: args.max_evidence,
+            skip_diff_eval: true,
         };
         build_kb(&build)?;
     }
@@ -854,6 +1203,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         max_body_bytes: args.max_body_bytes,
         rate_limit_per_minute: args.rate_limit_per_minute,
         rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
+        admin_rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
         profiles: InternalProfiles {
             main: args.profile_main,
@@ -867,6 +1217,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
         .route("/v1/evidence/packages/{package_id}", get(package_endpoint))
         .route(
@@ -884,6 +1235,38 @@ async fn serve(args: ServeArgs) -> Result<()> {
             "/v1/admin/metrics/prometheus",
             get(prometheus_metrics_endpoint),
         )
+        .route(
+            "/v1/admin/access-denials",
+            post(admin_access_denial_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures",
+            get(retrieval_failures_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/cluster",
+            post(cluster_retrieval_failures_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/{failure_id}",
+            get(retrieval_failure_endpoint).patch(update_retrieval_failure_endpoint),
+        )
+        .route(
+            "/v1/admin/retrieval-failures/{failure_id}/governance-task",
+            post(create_governance_task_from_failure_endpoint),
+        )
+        .route(
+            "/v1/admin/governance/tasks",
+            get(governance_tasks_endpoint).post(create_governance_task_endpoint),
+        )
+        .route(
+            "/v1/admin/governance/proposals",
+            post(create_knowledge_patch_proposal_endpoint),
+        )
+        .route(
+            "/v1/admin/governance/tasks/{task_id}",
+            get(governance_task_endpoint).patch(update_governance_task_endpoint),
+        )
         .with_state(state)
         .layer(DefaultBodyLimit::max(args.max_body_bytes))
         .layer(TraceLayer::new_for_http());
@@ -894,6 +1277,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 fn build_kb(args: &BuildKbArgs) -> Result<()> {
+    let before_eval_report = if args.skip_diff_eval {
+        None
+    } else {
+        eval_report_on_db_copy(&args.db, "before-kb-rebuild", args.eval_limit)?
+    };
     if args.rebuild && args.db.exists() {
         fs::remove_file(&args.db)
             .with_context(|| format!("remove existing db {}", args.db.display()))?;
@@ -904,17 +1292,81 @@ fn build_kb(args: &BuildKbArgs) -> Result<()> {
 
     let conn = open_db(&args.db)?;
     clear_gateway_generated_rows(&conn)?;
-    let report = TonglingyuRuntimeStore::new(args.db.clone())
-        .rebuild_knowledge_base_from_snapshots(&args.source_root)?;
+    let runtime_store = TonglingyuRuntimeStore::new(args.db.clone());
+    let mut report = runtime_store.rebuild_knowledge_base_from_snapshots(&args.source_root)?;
+    let after_eval_report = if args.skip_diff_eval {
+        None
+    } else {
+        eval_report_on_db_copy(&args.db, "after-kb-rebuild", args.eval_limit)?
+    };
+    if let Some(after_eval_report) = after_eval_report.as_ref() {
+        let before_eval_summary = before_eval_report
+            .as_ref()
+            .and_then(|report| report.get("quality_summary"))
+            .cloned();
+        let after_eval_summary = after_eval_report
+            .get("quality_summary")
+            .cloned()
+            .ok_or_else(|| anyhow!("after rebuild eval report missing quality_summary"))?;
+        let report_id = report
+            .diff_report
+            .get("report_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("kb diff report missing report_id"))?;
+        report.diff_report = runtime_store
+            .record_kb_version_diff_eval_summaries(
+                report_id,
+                before_eval_summary,
+                after_eval_summary,
+            )?
+            .ok_or_else(|| anyhow!("kb diff report not found after eval summary update"))?;
+        if after_eval_report.get("status").and_then(Value::as_str) != Some("passed") {
+            return Err(anyhow!("post-rebuild eval quality failed"));
+        }
+    }
     println!(
-        "OK build_kb db={} source_root={} sources={} blocks={} schema={}",
+        "OK build_kb db={} source_root={} kb_version={} sources={} blocks={} schema={} kb_build_hash={} diff_report={} eval_diff={}",
         args.db.display(),
         report.source_root,
+        report.version_id,
         report.source_count,
         report.block_count,
-        report.schema_version
+        report.schema_version,
+        report.kb_build_hash,
+        report
+            .diff_report
+            .get("report_id")
+            .and_then(Value::as_str)
+            .unwrap_or("missing"),
+        if args.skip_diff_eval {
+            "skipped"
+        } else {
+            "recorded"
+        }
     );
     Ok(())
+}
+
+fn eval_report_on_db_copy(db: &Path, label: &str, limit: usize) -> Result<Option<Value>> {
+    if !TonglingyuRuntimeStore::new(db.to_path_buf()).has_knowledge_base()? {
+        return Ok(None);
+    }
+    run_eval_on_db_copy(
+        &EvalArgs {
+            db: db.to_path_buf(),
+            limit,
+            report: None,
+            allow_db_mutation: false,
+        },
+        label,
+    )
+    .map(Some)
+}
+
+fn remove_sqlite_file_set(path: &Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(path.with_extension("db-wal"));
+    let _ = fs::remove_file(path.with_extension("db-shm"));
 }
 
 fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
@@ -946,6 +1398,257 @@ fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
     prune_gateway_and_runtime_data(&args.db, args.retention_days, args.dry_run)
 }
 
+fn rqa_restore_canary_command(args: &RqaRestoreCanaryArgs) -> Result<Value> {
+    if !args.db.is_file() {
+        return Err(anyhow!(
+            "restore canary db not found: {}",
+            args.db.display()
+        ));
+    }
+    let reviewer = args.reviewer.trim();
+    if reviewer.is_empty() {
+        return Err(anyhow!("--reviewer must not be empty"));
+    }
+    let review_note = args.review_note.trim();
+    if review_note.is_empty() {
+        return Err(anyhow!("--review-note must not be empty"));
+    }
+
+    let conn = open_db(&args.db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    let package = resolve_restore_canary_package(&args.db, args.package_id.as_deref())?;
+    let package_id = package.package_id.clone();
+    let trace_id = package.trace_id.clone();
+    let started_at = now_rfc3339();
+    let (failure, task) = run_immediate_transaction(&conn, |tx| {
+        let report = restore_canary_quality_report(&package);
+        let selected_evidence_ids = package
+            .cards
+            .iter()
+            .map(|card| card.evidence_id.clone())
+            .collect::<Vec<_>>();
+        let failure = tonglingyu_runtime::create_retrieval_failure(
+            tx,
+            RetrievalFailureCreateInput {
+                trace_id: trace_id.clone(),
+                package_id: Some(package_id.clone()),
+                question: restore_canary_question(),
+                quality_report: report,
+                selected_evidence_ids: selected_evidence_ids.clone(),
+                expected_evidence_ids: selected_evidence_ids,
+                agent_diagnosis: Some(
+                    "restore_drill_canary_reference_only; no_direct_fact_mutation=true".to_string(),
+                ),
+                proposed_fix: Some(
+                    "close restore drill canary after backup/restore reference verification"
+                        .to_string(),
+                ),
+            },
+        )?;
+        let task = tonglingyu_runtime::create_governance_task_from_failure(
+            tx,
+            KnowledgeGovernanceTaskCreateFromFailureInput {
+                source_failure_id: failure.failure_id.clone(),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p1".to_string()),
+                proposed_fix: Some(
+                    "restore drill canary closed after verification; no knowledge mutation required"
+                        .to_string(),
+                ),
+                agent_cluster_key: Some(format!(
+                    "restore-drill-canary:{}",
+                    &hash_text(&package_id)[..16]
+                )),
+            },
+        )?
+        .ok_or_else(|| anyhow!("restore canary governance task was not created"))?;
+        let failure = tonglingyu_runtime::update_retrieval_failure_status(
+            tx,
+            &failure.failure_id,
+            "resolved",
+            Some(reviewer),
+            Some(review_note),
+        )?
+        .ok_or_else(|| anyhow!("restore canary retrieval failure was not readable"))?;
+        let task = tonglingyu_runtime::update_governance_task(
+            tx,
+            &task.task_id,
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "closed".to_string(),
+                reviewer: Some(reviewer.to_string()),
+                review_note: Some(review_note.to_string()),
+                evidence_ref: Some(format!("package:{package_id}")),
+                expected_updated_at: Some(task.updated_at.clone()),
+            },
+        )?
+        .ok_or_else(|| anyhow!("restore canary governance task was not readable"))?;
+        append_runtime_audit_event(
+            tx,
+            &trace_id,
+            "rqa_restore_canary_recorded",
+            &json!({
+                "failure_id": &failure.failure_id,
+                "task_id": &task.task_id,
+                "package_id": &package_id,
+                "failure_type": &failure.failure_type,
+                "failure_status": &failure.human_review_status,
+                "task_status": &task.status,
+                "task_priority": &task.priority,
+                "reviewer": reviewer,
+                "review_note_sha256": hash_text(review_note),
+                "direct_fact_mutation": false,
+                "raw_question_included": false,
+                "secret_values_printed": false,
+            }),
+        )?;
+        Ok((failure, task))
+    })?;
+    let open_p0 = restore_canary_open_p0_counts(&conn)?;
+
+    Ok(json!({
+        "object": "tonglingyu.rqa_restore_canary",
+        "schema_version": RQA_RESTORE_CANARY_SCHEMA_VERSION,
+        "status": "ok",
+        "started_at": started_at,
+        "finished_at": now_rfc3339(),
+        "db_path_sha256": hash_text(&args.db.display().to_string()),
+        "refs": {
+            "trace_id": trace_id,
+            "package_id": package_id,
+            "failure_id": failure.failure_id,
+            "task_id": task.task_id,
+        },
+        "checks": {
+            "failure_type": failure.failure_type,
+            "failure_status": failure.human_review_status,
+            "task_status": task.status,
+            "task_priority": task.priority,
+            "open_p0_retrieval_failures": open_p0.0,
+            "open_p0_governance_tasks": open_p0.1,
+            "direct_fact_mutation": false,
+        },
+        "raw_question_included": false,
+        "secret_values_printed": false,
+    }))
+}
+
+fn resolve_restore_canary_package(
+    db: &Path,
+    requested_package_id: Option<&str>,
+) -> Result<EvidencePackage> {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    if let Some(package_id) = requested_package_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return runtime_store
+            .read_package(package_id)?
+            .ok_or_else(|| anyhow!("restore canary package not found: {package_id}"));
+    }
+    runtime_store
+        .latest_package()?
+        .ok_or_else(|| anyhow!("restore canary requires at least one evidence package"))
+}
+
+fn restore_canary_question() -> String {
+    "restore drill canary reference".to_string()
+}
+
+fn restore_canary_quality_report(package: &EvidencePackage) -> RetrievalQualityReport {
+    let question = restore_canary_question();
+    let selected_types = package
+        .cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let channel_distribution =
+        package
+            .cards
+            .iter()
+            .fold(BTreeMap::<String, usize>::new(), |mut counts, card| {
+                *counts.entry(card.evidence_type.clone()).or_insert(0) += 1;
+                counts
+            });
+    RetrievalQualityReport {
+        object: "tonglingyu.retrieval_quality_report".to_string(),
+        schema_version: RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION.to_string(),
+        tool_name: "tonglingyu.rqa_restore_canary".to_string(),
+        quality_status: "failed".to_string(),
+        production_ready: false,
+        truncated: false,
+        query_summary: RetrievalQuerySummary {
+            question_sha256: hash_text(&question),
+            question_char_count: question.chars().count(),
+            raw_question_included: false,
+            redacted_terms: vec!["restore-drill-canary".to_string()],
+        },
+        expanded_terms: Vec::new(),
+        protected_terms: Vec::new(),
+        expanded_aliases: Vec::new(),
+        candidate_count: package.cards.len(),
+        selected_count: package.cards.len(),
+        channel_distribution,
+        evidence_type_coverage: RetrievalEvidenceTypeCoverage {
+            required: selected_types.clone(),
+            selected: selected_types,
+            missing: Vec::new(),
+        },
+        exact_match_coverage: Vec::new(),
+        expected_evidence_hit: Some(true),
+        expected_evidence_status: "restore_drill_canary".to_string(),
+        source_coverage_boundary: RetrievalSourceCoverageBoundary {
+            source_ids: package
+                .cards
+                .iter()
+                .map(|card| card.source_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            source_categories: package
+                .cards
+                .iter()
+                .map(|card| card.evidence_type.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            edition_boundaries: package
+                .cards
+                .iter()
+                .map(|card| card.source_title.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            kb_schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+            source_snapshot_status: "source_snapshot_ready".to_string(),
+            facsimile_review_status: "not_reviewed".to_string(),
+            authoritative_edition_review_status: "not_reviewed".to_string(),
+            scholarly_collation_status: "not_scholarly_collated".to_string(),
+            expert_collation_status: "restore_drill_canary_reviewed".to_string(),
+        },
+        source_usage_refs: Vec::new(),
+        issues: vec!["restore_drill_canary".to_string()],
+        recommended_follow_up: vec![
+            "restore_drill_canary_closed_no_knowledge_mutation".to_string(),
+        ],
+    }
+}
+
+fn restore_canary_open_p0_counts(conn: &Connection) -> Result<(i64, i64)> {
+    let open_failures = conn.query_row(
+        "SELECT COUNT(*) FROM retrieval_failures WHERE human_review_status IN ('open', 'in_review')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let open_tasks = conn.query_row(
+        "SELECT COUNT(*) FROM knowledge_governance_tasks WHERE priority = 'p0' AND status IN ('open', 'in_review', 'accepted')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok((open_failures, open_tasks))
+}
+
 fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool) -> Result<Value> {
     let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
     if retention_days == 0 {
@@ -958,36 +1661,909 @@ fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("runtime prune report missing cutoff"))?
         .to_string();
-    let gateway_counts = json!({
-        "gateway_messages": count_where(&conn, "gateway_messages", "created_at < ?1", &cutoff)?,
-        "workflow_states": count_where(&conn, "workflow_states", "created_at < ?1", &cutoff)?,
-    });
-    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
-        counts.insert(
-            "gateway_messages".to_string(),
-            gateway_counts["gateway_messages"].clone(),
-        );
-        counts.insert(
-            "workflow_states".to_string(),
-            gateway_counts["workflow_states"].clone(),
-        );
-    }
     if dry_run {
+        let plan = build_gateway_prune_plan(&conn, &cutoff)?;
+        merge_gateway_prune_counts(&mut report, &plan, 0);
         return Ok(report);
     }
-    conn.execute(
-        "DELETE FROM gateway_messages WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
-        "DELETE FROM workflow_states WHERE created_at < ?1",
-        params![&cutoff],
-    )?;
-    conn.execute(
-        "DELETE FROM gateway_sessions WHERE updated_at < ?1 AND NOT EXISTS (SELECT 1 FROM gateway_messages WHERE gateway_messages.session_id = gateway_sessions.session_id)",
-        params![&cutoff],
-    )?;
+    let (plan, gateway_tombstones) = run_immediate_transaction(&conn, |tx| {
+        let plan = build_gateway_prune_plan(tx, &cutoff)?;
+        let mut gateway_tombstones = 0_i64;
+        if plan.prunable_messages > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "gateway_message_batch",
+                &format!("gateway_messages:{}:{}", cutoff, plan.prunable_messages),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "gateway_message_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_messages,
+                    "protected_row_count": plan.message_candidates - plan.prunable_messages,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_question_included": false,
+                    "raw_response_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM gateway_messages WHERE {}",
+                plan.message_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        if plan.prunable_workflow_states > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "workflow_state_batch",
+                &format!(
+                    "workflow_states:{}:{}",
+                    cutoff, plan.prunable_workflow_states
+                ),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "workflow_state_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_workflow_states,
+                    "protected_row_count": plan.workflow_candidates - plan.prunable_workflow_states,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_detail_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM workflow_states WHERE {}",
+                plan.workflow_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        if plan.prunable_sessions > 0 {
+            append_rqa_lifecycle_tombstone(
+                tx,
+                "gateway_session_batch",
+                &format!("gateway_sessions:{}:{}", cutoff, plan.prunable_sessions),
+                "retention_prune",
+                "retention_expired",
+                &json!({
+                    "object_type": "gateway_session_batch",
+                    "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                    "row_count": plan.prunable_sessions,
+                    "protected_row_count": plan.session_candidates - plan.prunable_sessions,
+                    "retention_days": retention_days,
+                    "cutoff": cutoff,
+                    "raw_user_ref_included": false,
+                    "raw_chat_ref_included": false,
+                    "secret_values_printed": false,
+                }),
+            )?;
+            gateway_tombstones += 1;
+        }
+        tx.execute(
+            &format!(
+                "DELETE FROM gateway_sessions WHERE {}",
+                plan.session_prune_predicate
+            ),
+            params![&cutoff],
+        )?;
+        Ok((plan, gateway_tombstones))
+    })?;
+    merge_gateway_prune_counts(&mut report, &plan, gateway_tombstones);
     Ok(report)
+}
+
+#[derive(Debug, Clone)]
+struct LifecycleSessionRef {
+    session_id: String,
+    user_ref: String,
+    chat_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct LifecycleMessageRef {
+    message_id: String,
+    external_message_id: String,
+    trace_id: String,
+    package_id: Option<String>,
+    question: String,
+    response_json: String,
+}
+
+#[derive(Debug, Clone)]
+struct RqaUserLifecyclePlan {
+    subject_sha256: String,
+    sessions: Vec<LifecycleSessionRef>,
+    messages: Vec<LifecycleMessageRef>,
+    trace_ids: BTreeSet<String>,
+    package_ids: BTreeSet<String>,
+    workflow_state_ids: BTreeSet<String>,
+    audit_event_ids: BTreeSet<String>,
+    retrieval_failure_ids: BTreeSet<String>,
+    governance_task_ids: BTreeSet<String>,
+    active_legal_holds: i64,
+}
+
+fn rqa_user_lifecycle_command(args: &RqaUserLifecycleArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    let user_ref = args.user_ref.trim();
+    if user_ref.is_empty() {
+        return Err(anyhow!("--user-ref must not be empty"));
+    }
+    let reason = args.reason.trim();
+    if reason.is_empty() {
+        return Err(anyhow!("--reason must not be empty"));
+    }
+    let plan = build_rqa_user_lifecycle_plan(&conn, user_ref)?;
+    match args.action {
+        RqaUserLifecycleAction::Export => rqa_user_lifecycle_export(&conn, &plan, reason),
+        RqaUserLifecycleAction::LegalHold => rqa_user_lifecycle_legal_hold(&conn, &plan, reason),
+        RqaUserLifecycleAction::ReleaseLegalHold => {
+            rqa_user_lifecycle_release_legal_hold(&conn, &plan, reason)
+        }
+        RqaUserLifecycleAction::Anonymize => {
+            rqa_user_lifecycle_anonymize(&conn, user_ref, &plan, reason)
+        }
+    }
+}
+
+fn build_rqa_user_lifecycle_plan(
+    conn: &Connection,
+    user_ref: &str,
+) -> Result<RqaUserLifecyclePlan> {
+    let subject_sha256 = hash_text(user_ref);
+    let sessions = query_lifecycle_sessions(conn, user_ref)?;
+    let messages = query_lifecycle_messages(conn, user_ref)?;
+    let trace_ids = messages
+        .iter()
+        .map(|message| message.trace_id.clone())
+        .collect::<BTreeSet<_>>();
+    let package_ids = messages
+        .iter()
+        .filter_map(|message| message.package_id.clone())
+        .collect::<BTreeSet<_>>();
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.session_id.clone())
+        .collect::<BTreeSet<_>>();
+    let workflow_state_ids = query_lifecycle_workflow_state_ids(conn, &trace_ids, &session_ids)?;
+    let audit_event_ids = query_lifecycle_audit_event_ids(conn, &trace_ids)?;
+    let retrieval_failure_ids =
+        query_lifecycle_retrieval_failure_ids(conn, &trace_ids, &package_ids)?;
+    let governance_task_ids = query_lifecycle_governance_task_ids(conn, &trace_ids, &package_ids)?;
+    let active_legal_holds = conn.query_row(
+        "SELECT COUNT(*) FROM rqa_user_legal_holds WHERE user_ref_sha256 = ?1 AND active = 1",
+        params![&subject_sha256],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(RqaUserLifecyclePlan {
+        subject_sha256,
+        sessions,
+        messages,
+        trace_ids,
+        package_ids,
+        workflow_state_ids,
+        audit_event_ids,
+        retrieval_failure_ids,
+        governance_task_ids,
+        active_legal_holds,
+    })
+}
+
+fn query_lifecycle_sessions(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleSessionRef>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT session_id, user_ref, chat_ref
+        FROM gateway_sessions
+        WHERE user_ref = ?1
+        ORDER BY session_id
+        "#,
+    )?;
+    stmt.query_map(params![user_ref], |row| {
+        Ok(LifecycleSessionRef {
+            session_id: row.get(0)?,
+            user_ref: row.get(1)?,
+            chat_ref: row.get(2)?,
+        })
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(Into::into)
+}
+
+fn query_lifecycle_messages(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleMessageRef>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT gm.message_id, gm.external_message_id, gm.trace_id,
+               gm.package_id, gm.question, gm.response_json
+        FROM gateway_messages AS gm
+        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
+        WHERE gs.user_ref = ?1
+        ORDER BY gm.created_at, gm.message_id
+        "#,
+    )?;
+    stmt.query_map(params![user_ref], |row| {
+        Ok(LifecycleMessageRef {
+            message_id: row.get(0)?,
+            external_message_id: row.get(1)?,
+            trace_id: row.get(2)?,
+            package_id: row.get(3)?,
+            question: row.get(4)?,
+            response_json: row.get(5)?,
+        })
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(Into::into)
+}
+
+fn query_lifecycle_workflow_state_ids(
+    conn: &Connection,
+    trace_ids: &BTreeSet<String>,
+    session_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_trace = conn.prepare("SELECT state_id FROM workflow_states WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in by_trace.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_session =
+        conn.prepare("SELECT state_id FROM workflow_states WHERE session_id = ?1")?;
+    for session_id in session_ids {
+        for id in by_session.query_map(params![session_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_audit_event_ids(
+    conn: &Connection,
+    trace_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut stmt = conn.prepare("SELECT event_id FROM audit_events WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_retrieval_failure_ids(
+    conn: &Connection,
+    trace_ids: &BTreeSet<String>,
+    package_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_trace =
+        conn.prepare("SELECT failure_id FROM retrieval_failures WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in by_trace.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_package =
+        conn.prepare("SELECT failure_id FROM retrieval_failures WHERE package_id = ?1")?;
+    for package_id in package_ids {
+        for id in by_package.query_map(params![package_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_governance_task_ids(
+    conn: &Connection,
+    trace_ids: &BTreeSet<String>,
+    package_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_trace =
+        conn.prepare("SELECT task_id FROM knowledge_governance_tasks WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in by_trace.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_package =
+        conn.prepare("SELECT task_id FROM knowledge_governance_tasks WHERE package_id = ?1")?;
+    for package_id in package_ids {
+        for id in by_package.query_map(params![package_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn rqa_user_lifecycle_export(
+    conn: &Connection,
+    plan: &RqaUserLifecyclePlan,
+    reason: &str,
+) -> Result<Value> {
+    append_runtime_audit_event(
+        conn,
+        "rqa-user-lifecycle",
+        "rqa_user_data_exported",
+        &json!({
+            "subject_sha256": &plan.subject_sha256,
+            "reason": reason,
+            "counts": lifecycle_counts(plan),
+            "source_text_included": false,
+            "secret_values_printed": false,
+        }),
+    )?;
+    Ok(lifecycle_report(
+        "export",
+        "ok",
+        plan,
+        json!({
+            "export_manifest": lifecycle_export_manifest(plan),
+        }),
+    ))
+}
+
+fn lifecycle_export_manifest(plan: &RqaUserLifecyclePlan) -> Value {
+    let sessions = plan
+        .sessions
+        .iter()
+        .map(|session| {
+            json!({
+                "session_sha256": hash_text(&session.session_id),
+                "user_ref_sha256": hash_text(&session.user_ref),
+                "chat_ref_sha256": hash_text(&session.chat_ref),
+            })
+        })
+        .collect::<Vec<_>>();
+    let messages = plan
+        .messages
+        .iter()
+        .map(|message| {
+            json!({
+                "message_sha256": hash_text(&message.message_id),
+                "external_message_sha256": hash_text(&message.external_message_id),
+                "trace_sha256": hash_text(&message.trace_id),
+                "package_sha256": message.package_id.as_ref().map(|package_id| hash_text(package_id)),
+                "input_sha256": hash_text(&message.question),
+                "response_sha256": hash_text(&message.response_json),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "export_format_version": "tonglingyu-rqa-user-export-v1",
+        "content_mode": "redacted_hash_manifest_only",
+        "counts": lifecycle_counts(plan),
+        "subject_sha256": &plan.subject_sha256,
+        "sessions": sessions,
+        "messages": messages,
+        "trace_sha256": hashed_values(&plan.trace_ids),
+        "package_sha256": hashed_values(&plan.package_ids),
+        "retrieval_failure_sha256": hashed_values(&plan.retrieval_failure_ids),
+        "governance_task_sha256": hashed_values(&plan.governance_task_ids),
+        "source_text_included": false,
+        "response_body_included": false,
+        "secret_values_printed": false,
+    })
+}
+
+fn hashed_values(values: &BTreeSet<String>) -> Vec<String> {
+    values.iter().map(|value| hash_text(value)).collect()
+}
+
+fn rqa_user_lifecycle_legal_hold(
+    conn: &Connection,
+    plan: &RqaUserLifecyclePlan,
+    reason: &str,
+) -> Result<Value> {
+    run_immediate_transaction(conn, |tx| {
+        tx.execute(
+            r#"
+            INSERT INTO rqa_user_legal_holds (
+                hold_id, user_ref_sha256, reason, active, created_at, released_at
+            ) VALUES (?1, ?2, ?3, 1, ?4, NULL)
+            "#,
+            params![
+                format!("rqa-hold-{}", uuid::Uuid::now_v7().simple()),
+                &plan.subject_sha256,
+                reason,
+                now_rfc3339(),
+            ],
+        )?;
+        append_rqa_lifecycle_tombstone(
+            tx,
+            "rqa_user_data_subject",
+            &plan.subject_sha256,
+            "legal_hold",
+            reason,
+            &json!({
+                "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                "subject_sha256": &plan.subject_sha256,
+                "counts": lifecycle_counts(plan),
+                "source_text_included": false,
+                "secret_values_printed": false,
+            }),
+        )?;
+        append_runtime_audit_event(
+            tx,
+            "rqa-user-lifecycle",
+            "rqa_user_data_legal_hold_added",
+            &json!({
+                "subject_sha256": &plan.subject_sha256,
+                "reason": reason,
+                "counts": lifecycle_counts(plan),
+                "secret_values_printed": false,
+            }),
+        )?;
+        Ok(())
+    })?;
+    Ok(lifecycle_report_with_active_legal_hold_count(
+        "legal_hold",
+        "ok",
+        plan,
+        json!({"legal_hold_active": true}),
+        plan.active_legal_holds.saturating_add(1),
+    ))
+}
+
+fn rqa_user_lifecycle_release_legal_hold(
+    conn: &Connection,
+    plan: &RqaUserLifecyclePlan,
+    reason: &str,
+) -> Result<Value> {
+    let released = run_immediate_transaction(conn, |tx| {
+        let released = tx.execute(
+            r#"
+            UPDATE rqa_user_legal_holds
+            SET active = 0, released_at = ?1
+            WHERE user_ref_sha256 = ?2 AND active = 1
+            "#,
+            params![now_rfc3339(), &plan.subject_sha256],
+        )?;
+        append_rqa_lifecycle_tombstone(
+            tx,
+            "rqa_user_data_subject",
+            &plan.subject_sha256,
+            "release_legal_hold",
+            reason,
+            &json!({
+                "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                "subject_sha256": &plan.subject_sha256,
+                "released_hold_count": released,
+                "source_text_included": false,
+                "secret_values_printed": false,
+            }),
+        )?;
+        append_runtime_audit_event(
+            tx,
+            "rqa-user-lifecycle",
+            "rqa_user_data_legal_hold_released",
+            &json!({
+                "subject_sha256": &plan.subject_sha256,
+                "reason": reason,
+                "released_hold_count": released,
+                "secret_values_printed": false,
+            }),
+        )?;
+        Ok(released)
+    })?;
+    let released_count = i64::try_from(released).unwrap_or(i64::MAX);
+    Ok(lifecycle_report_with_active_legal_hold_count(
+        "release_legal_hold",
+        "ok",
+        plan,
+        json!({"released_hold_count": released}),
+        plan.active_legal_holds.saturating_sub(released_count),
+    ))
+}
+
+fn rqa_user_lifecycle_anonymize(
+    conn: &Connection,
+    user_ref: &str,
+    plan: &RqaUserLifecyclePlan,
+    reason: &str,
+) -> Result<Value> {
+    if plan.active_legal_holds > 0 {
+        append_runtime_audit_event(
+            conn,
+            "rqa-user-lifecycle",
+            "rqa_user_data_anonymize_blocked",
+            &json!({
+                "subject_sha256": &plan.subject_sha256,
+                "reason": reason,
+                "active_legal_hold_count": plan.active_legal_holds,
+                "secret_values_printed": false,
+            }),
+        )?;
+        return Ok(lifecycle_report(
+            "anonymize",
+            "blocked",
+            plan,
+            json!({"blocked_by_legal_hold": true}),
+        ));
+    }
+
+    let sensitive_values = lifecycle_sensitive_values(user_ref, plan);
+    run_immediate_transaction(conn, |tx| {
+        append_rqa_lifecycle_tombstone(
+            tx,
+            "rqa_user_data_subject",
+            &plan.subject_sha256,
+            "user_anonymize",
+            reason,
+            &json!({
+                "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+                "subject_sha256": &plan.subject_sha256,
+                "counts": lifecycle_counts(plan),
+                "delete_anonymize_strategy": "anonymize_in_place_to_preserve_rqa_traceability",
+                "source_text_included": false,
+                "response_body_included": false,
+                "secret_values_printed": false,
+            }),
+        )?;
+        for session in &plan.sessions {
+            let anonymized_user = format!("anonymized-user:{}", &plan.subject_sha256[..16]);
+            let anonymized_chat =
+                format!("anonymized-chat:{}", &hash_text(&session.session_id)[..16]);
+            tx.execute(
+                "UPDATE gateway_sessions SET user_ref = ?1, chat_ref = ?2 WHERE session_id = ?3",
+                params![anonymized_user, anonymized_chat, &session.session_id],
+            )?;
+        }
+        for message in &plan.messages {
+            let response_json = redact_json_string(&message.response_json, &sensitive_values)?;
+            let anonymized_external_message = format!(
+                "anonymized-message:{}",
+                &hash_text(&message.message_id)[..16]
+            );
+            tx.execute(
+                "UPDATE gateway_messages SET external_message_id = ?1, question = ?2, response_json = ?3 WHERE message_id = ?4",
+                params![
+                    anonymized_external_message,
+                    format!(
+                        "[redacted:rqa-user-lifecycle:{}]",
+                        &hash_text(&message.question)[..12]
+                    ),
+                    response_json,
+                    &message.message_id,
+                ],
+            )?;
+        }
+        for package_id in &plan.package_ids {
+            tx.execute(
+                "UPDATE evidence_packages SET question = ?1 WHERE package_id = ?2",
+                params![
+                    format!(
+                        "[redacted:rqa-user-lifecycle:{}]",
+                        &hash_text(package_id)[..12]
+                    ),
+                    package_id,
+                ],
+            )?;
+        }
+        redact_json_column_by_ids(
+            tx,
+            "workflow_states",
+            "state_id",
+            "detail_json",
+            &plan.workflow_state_ids,
+            &sensitive_values,
+        )?;
+        redact_json_column_by_ids(
+            tx,
+            "audit_events",
+            "event_id",
+            "payload_json",
+            &plan.audit_event_ids,
+            &sensitive_values,
+        )?;
+        append_runtime_audit_event(
+            tx,
+            "rqa-user-lifecycle",
+            "rqa_user_data_anonymized",
+            &json!({
+                "subject_sha256": &plan.subject_sha256,
+                "reason": reason,
+                "counts": lifecycle_counts(plan),
+                "delete_anonymize_strategy": "anonymize_in_place_to_preserve_rqa_traceability",
+                "secret_values_printed": false,
+            }),
+        )?;
+        Ok(())
+    })?;
+    Ok(lifecycle_report(
+        "anonymize",
+        "ok",
+        plan,
+        json!({"delete_anonymize_strategy": "anonymize_in_place_to_preserve_rqa_traceability"}),
+    ))
+}
+
+fn lifecycle_sensitive_values(user_ref: &str, plan: &RqaUserLifecyclePlan) -> Vec<String> {
+    let mut values = BTreeSet::new();
+    if !user_ref.is_empty() {
+        values.insert(user_ref.to_string());
+    }
+    for session in &plan.sessions {
+        values.insert(session.user_ref.clone());
+        values.insert(session.chat_ref.clone());
+    }
+    for message in &plan.messages {
+        values.insert(message.external_message_id.clone());
+        values.insert(message.question.clone());
+    }
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect()
+}
+
+fn redact_json_column_by_ids(
+    conn: &Connection,
+    table: &str,
+    id_column: &str,
+    json_column: &str,
+    ids: &BTreeSet<String>,
+    sensitive_values: &[String],
+) -> Result<()> {
+    let select_sql = format!("SELECT {json_column} FROM {table} WHERE {id_column} = ?1");
+    let update_sql = format!("UPDATE {table} SET {json_column} = ?1 WHERE {id_column} = ?2");
+    let mut select = conn.prepare(&select_sql)?;
+    for id in ids {
+        let value = select
+            .query_row(params![id], |row| row.get::<_, String>(0))
+            .optional()?;
+        if let Some(value) = value {
+            let redacted = redact_json_string(&value, sensitive_values)?;
+            conn.execute(&update_sql, params![redacted, id])?;
+        }
+    }
+    Ok(())
+}
+
+fn redact_json_string(value: &str, sensitive_values: &[String]) -> Result<String> {
+    match serde_json::from_str::<Value>(value) {
+        Ok(parsed) => Ok(serde_json::to_string(&redact_json_value(
+            parsed,
+            sensitive_values,
+        ))?),
+        Err(_) => Ok(redact_plain_text(value, sensitive_values)),
+    }
+}
+
+fn redact_json_value(value: Value, sensitive_values: &[String]) -> Value {
+    match value {
+        Value::String(text) => Value::String(redact_plain_text(&text, sensitive_values)),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| redact_json_value(item, sensitive_values))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_json_value(value, sensitive_values)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn redact_plain_text(value: &str, sensitive_values: &[String]) -> String {
+    sensitive_values
+        .iter()
+        .fold(value.to_string(), |redacted, sensitive| {
+            if sensitive.is_empty() {
+                redacted
+            } else {
+                redacted.replace(
+                    sensitive,
+                    &format!("[redacted:{}]", &hash_text(sensitive)[..12]),
+                )
+            }
+        })
+}
+
+fn lifecycle_counts(plan: &RqaUserLifecyclePlan) -> Value {
+    json!({
+        "session_count": plan.sessions.len(),
+        "message_count": plan.messages.len(),
+        "trace_count": plan.trace_ids.len(),
+        "package_count": plan.package_ids.len(),
+        "workflow_state_count": plan.workflow_state_ids.len(),
+        "audit_event_count": plan.audit_event_ids.len(),
+        "retrieval_failure_count": plan.retrieval_failure_ids.len(),
+        "governance_task_count": plan.governance_task_ids.len(),
+        "active_legal_hold_count": plan.active_legal_holds,
+    })
+}
+
+fn lifecycle_report(
+    action: &str,
+    status: &str,
+    plan: &RqaUserLifecyclePlan,
+    extra: Value,
+) -> Value {
+    json!({
+        "object": "tonglingyu.rqa_user_lifecycle_report",
+        "schema_version": 1,
+        "status": status,
+        "action": action,
+        "lifecycle_policy_version": RQA_LIFECYCLE_POLICY_VERSION,
+        "subject_sha256": &plan.subject_sha256,
+        "counts": lifecycle_counts(plan),
+        "extra": extra,
+        "refs": {
+            "trace_count": plan.trace_ids.len(),
+            "package_count": plan.package_ids.len(),
+            "retrieval_failure_count": plan.retrieval_failure_ids.len(),
+            "governance_task_count": plan.governance_task_ids.len(),
+        },
+        "source_text_included": false,
+        "response_body_included": false,
+        "secret_values_printed": false,
+    })
+}
+
+fn lifecycle_report_with_active_legal_hold_count(
+    action: &str,
+    status: &str,
+    plan: &RqaUserLifecyclePlan,
+    extra: Value,
+    active_legal_hold_count: i64,
+) -> Value {
+    let mut report = lifecycle_report(action, status, plan, extra);
+    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
+        counts.insert(
+            "active_legal_hold_count".to_string(),
+            json!(active_legal_hold_count),
+        );
+    }
+    report
+}
+
+#[derive(Debug)]
+struct GatewayPrunePlan {
+    message_prune_predicate: String,
+    workflow_prune_predicate: String,
+    session_prune_predicate: String,
+    message_candidates: i64,
+    prunable_messages: i64,
+    workflow_candidates: i64,
+    prunable_workflow_states: i64,
+    session_candidates: i64,
+    prunable_sessions: i64,
+}
+
+fn build_gateway_prune_plan(conn: &Connection, cutoff: &str) -> Result<GatewayPrunePlan> {
+    let message_prune_predicate = format!(
+        "created_at < ?1 AND NOT ({})",
+        gateway_rqa_protection_predicate("gateway_messages")
+    );
+    let workflow_prune_predicate = format!(
+        "created_at < ?1 AND NOT ({})",
+        gateway_rqa_protection_predicate("workflow_states")
+    );
+    let session_prune_predicate = gateway_session_prune_predicate();
+    let message_candidates = count_where(conn, "gateway_messages", "created_at < ?1", cutoff)?;
+    let prunable_messages =
+        count_where(conn, "gateway_messages", &message_prune_predicate, cutoff)?;
+    let workflow_candidates = count_where(conn, "workflow_states", "created_at < ?1", cutoff)?;
+    let prunable_workflow_states =
+        count_where(conn, "workflow_states", &workflow_prune_predicate, cutoff)?;
+    let session_candidates = count_where(conn, "gateway_sessions", "updated_at < ?1", cutoff)?;
+    let prunable_sessions =
+        count_where(conn, "gateway_sessions", &session_prune_predicate, cutoff)?;
+    Ok(GatewayPrunePlan {
+        message_prune_predicate,
+        workflow_prune_predicate,
+        session_prune_predicate,
+        message_candidates,
+        prunable_messages,
+        workflow_candidates,
+        prunable_workflow_states,
+        session_candidates,
+        prunable_sessions,
+    })
+}
+
+fn merge_gateway_prune_counts(
+    report: &mut Value,
+    plan: &GatewayPrunePlan,
+    gateway_tombstones: i64,
+) {
+    let gateway_counts = json!({
+        "gateway_message_candidates": plan.message_candidates,
+        "gateway_messages": plan.prunable_messages,
+        "protected_gateway_messages": plan.message_candidates - plan.prunable_messages,
+        "workflow_state_candidates": plan.workflow_candidates,
+        "workflow_states": plan.prunable_workflow_states,
+        "protected_workflow_states": plan.workflow_candidates - plan.prunable_workflow_states,
+        "gateway_session_candidates": plan.session_candidates,
+        "gateway_sessions": plan.prunable_sessions,
+        "protected_gateway_sessions": plan.session_candidates - plan.prunable_sessions,
+        "gateway_tombstone_candidates": i64::from(plan.prunable_messages > 0)
+            + i64::from(plan.prunable_workflow_states > 0)
+            + i64::from(plan.prunable_sessions > 0),
+        "gateway_tombstones": gateway_tombstones,
+    });
+    if let Some(counts) = report.get_mut("counts").and_then(Value::as_object_mut) {
+        for (key, value) in gateway_counts.as_object().expect("gateway counts object") {
+            counts.insert(key.to_string(), value.clone());
+        }
+        if let Some(existing) = counts.get("tombstones").and_then(Value::as_i64) {
+            counts.insert(
+                "tombstones".to_string(),
+                json!(existing + gateway_tombstones),
+            );
+        }
+    }
+}
+
+fn run_immediate_transaction<T>(
+    conn: &Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    match work(conn) {
+        Ok(value) => {
+            if let Err(error) = conn.execute_batch("COMMIT") {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error.into())
+            } else {
+                Ok(value)
+            }
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn gateway_rqa_protection_predicate(table_alias: &str) -> String {
+    format!(
+        r#"
+        EXISTS (
+            SELECT 1 FROM retrieval_failures AS rf
+            WHERE rf.human_review_status IN ('open', 'in_review')
+              AND (rf.trace_id = {table_alias}.trace_id OR rf.package_id = {table_alias}.package_id)
+        )
+        OR EXISTS (
+            SELECT 1 FROM knowledge_governance_tasks AS kgt
+            WHERE kgt.status IN ('open', 'in_review', 'accepted')
+              AND (kgt.trace_id = {table_alias}.trace_id OR kgt.package_id = {table_alias}.package_id)
+        )
+        "#
+    )
+}
+
+fn gateway_session_prune_predicate() -> String {
+    let message_protection = gateway_rqa_protection_predicate("gm");
+    let workflow_protection = gateway_rqa_protection_predicate("ws");
+    format!(
+        r#"
+        updated_at < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM gateway_messages AS gm
+            WHERE gm.session_id = gateway_sessions.session_id
+              AND NOT (gm.created_at < ?1 AND NOT ({message_protection}))
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM workflow_states AS ws
+            WHERE ws.session_id = gateway_sessions.session_id
+              AND NOT (ws.created_at < ?1 AND NOT ({workflow_protection}))
+        )
+        "#
+    )
 }
 
 fn count_where(conn: &Connection, table: &str, predicate: &str, value: &str) -> Result<i64> {
@@ -1049,16 +2625,31 @@ fn init_gateway_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS rqa_user_legal_holds (
+            hold_id TEXT PRIMARY KEY,
+            user_ref_sha256 TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            released_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_session ON gateway_messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_trace ON gateway_messages(trace_id);
         CREATE INDEX IF NOT EXISTS idx_gateway_messages_package ON gateway_messages(package_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_trace ON workflow_states(trace_id);
         CREATE INDEX IF NOT EXISTS idx_workflow_states_package ON workflow_states(package_id);
+        CREATE INDEX IF NOT EXISTS idx_rqa_user_legal_holds_subject
+            ON rqa_user_legal_holds(user_ref_sha256, active);
         "#,
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-gateway-schema-v1", now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params!["tonglingyu-rqa-user-lifecycle-v1", now_rfc3339()],
     )?;
     Ok(())
 }
@@ -1204,6 +2795,12 @@ fn hash_value(value: &Value) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn hash_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     if args.limit == 0 {
         return Err(anyhow!("--limit must be greater than 0"));
@@ -1292,6 +2889,42 @@ struct EvalCase {
     required_evidence_type: Option<&'static str>,
     required_text_any: &'static [&'static str],
     required_issue_any: &'static [&'static str],
+    expected_evidence_ids: &'static [&'static str],
+    expected_block_ids: &'static [&'static str],
+    expected_evidence_not_applicable_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Default)]
+struct EvalQualityAccumulator {
+    total_cases: usize,
+    quality_report_cases: usize,
+    quality_report_production_ready_required_cases: usize,
+    quality_report_production_ready_cases: usize,
+    classified_cases: usize,
+    expected_evidence_cases: usize,
+    expected_hit_at_1: usize,
+    expected_hit_at_3: usize,
+    expected_hit_at_8: usize,
+    required_type_cases: usize,
+    required_type_passed: usize,
+    exact_term_total: usize,
+    exact_term_passed: usize,
+    source_boundary_confirmation_cases: usize,
+    source_boundary_confirmation_avoided: usize,
+    forbidden_conclusion_cases: usize,
+    forbidden_conclusion_avoided: usize,
+    reviewer_status_matched: usize,
+    source_ids: BTreeSet<String>,
+    edition_labels: BTreeSet<String>,
+    eval_failure_records: usize,
+    blockers: BTreeSet<String>,
+}
+
+#[derive(Debug)]
+struct EvalExpectedRef {
+    kind: &'static str,
+    value: &'static str,
+    failure_id: String,
 }
 
 fn run_eval(args: &EvalArgs) -> Result<Value> {
@@ -1303,14 +2936,21 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     let total = cases.len();
     let mut passed = 0_usize;
     let mut case_results = Vec::new();
+    let mut quality = EvalQualityAccumulator {
+        total_cases: total,
+        ..EvalQualityAccumulator::default()
+    };
     for case in cases {
         let trace_id = format!("eval-{}", new_trace_id());
-        let (cards, _policy) = search_evidence_with_policy(
-            &runtime_store,
-            case.question,
-            case.limit.unwrap_or(args.limit),
-        )?;
-        let package = runtime_store.create_package(&trace_id, case.question, cards)?;
+        let policy = search_policy(case.question);
+        let workflow = runtime_store.execute_workflow(RuntimeWorkflowInput {
+            trace_id: trace_id.clone(),
+            question: case.question.to_string(),
+            limit: case.limit.unwrap_or(args.limit),
+            required_evidence_types: policy.required_evidence_types.clone(),
+            profiles: RuntimeWorkflowProfiles::default(),
+        })?;
+        let package = &workflow.package;
         let replay = runtime_store
             .replay_package(&package.package_id)?
             .and_then(|value| {
@@ -1382,22 +3022,251 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         if !package.cards.is_empty() && package.claim_evidence_map.is_empty() {
             failures.push("non-empty evidence package is missing claim_evidence_map".to_string());
         }
+        let quality_reports = quality_reports_from_workflow(&workflow)?;
+        let requires_production_ready_quality_report = case.expected_review_status == "passed";
+        if requires_production_ready_quality_report {
+            quality.quality_report_production_ready_required_cases += 1;
+        }
+        if !quality_reports.is_empty() {
+            quality.quality_report_cases += 1;
+        } else {
+            failures.push("missing retrieval quality report".to_string());
+        }
+        if requires_production_ready_quality_report
+            && !quality_reports.is_empty()
+            && quality_reports
+                .iter()
+                .all(|report| report.production_ready && report.quality_status == "passed")
+        {
+            quality.quality_report_production_ready_cases += 1;
+        }
+        let non_production_quality_issues = quality_reports
+            .iter()
+            .filter(|report| !report.production_ready || report.quality_status != "passed")
+            .flat_map(|report| {
+                if report.issues.is_empty() {
+                    vec![(
+                        format!("quality_status={}", report.quality_status),
+                        format!(
+                            "{}:quality_status={}",
+                            report.tool_name, report.quality_status
+                        ),
+                    )]
+                } else {
+                    report
+                        .issues
+                        .iter()
+                        .map(|issue| {
+                            (
+                                issue.clone(),
+                                format!("{}:{}", report.tool_name, trim_eval_text(issue, 160)),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                }
+            })
+            .collect::<Vec<_>>();
+        let unallowed_non_production_quality_issues = non_production_quality_issues
+            .iter()
+            .filter_map(|(raw_issue, formatted_issue)| {
+                if eval_allows_non_production_quality_issue(&case, raw_issue) {
+                    None
+                } else {
+                    Some(formatted_issue.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        if !unallowed_non_production_quality_issues.is_empty() {
+            failures.push(format!(
+                "retrieval quality report not production-ready: {}",
+                trim_eval_text(&unallowed_non_production_quality_issues.join("; "), 480)
+            ));
+        }
+        let selected_evidence_ids = package
+            .cards
+            .iter()
+            .map(|card| card.evidence_id.clone())
+            .collect::<Vec<_>>();
+        let selected_block_ids = package
+            .cards
+            .iter()
+            .map(|card| card.block_id.clone())
+            .collect::<Vec<_>>();
+        let expected_refs = expected_eval_refs(&case);
+        let exact_terms = eval_exact_terms(&case);
+        let forbidden_conclusion_terms = eval_forbidden_conclusion_terms(&case);
+        let source_boundary_confirmation_required =
+            eval_expected_evidence_not_applicable_reason(&case)
+                == Some(EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY);
+        let case_classification = if expected_refs.is_empty() {
+            match eval_expected_evidence_not_applicable_reason(&case) {
+                Some(reason) => {
+                    quality.classified_cases += 1;
+                    json!({
+                        "classification": "not_applicable",
+                        "reason": reason,
+                    })
+                }
+                None => {
+                    failures.push(
+                        "release eval case missing expected evidence classification".to_string(),
+                    );
+                    json!({"classification": "missing"})
+                }
+            }
+        } else {
+            quality.classified_cases += 1;
+            quality.expected_evidence_cases += 1;
+            json!({
+                "classification": "expected_evidence",
+                "expected_evidence_ids": eval_expected_evidence_ids(&case),
+                "expected_block_ids": eval_expected_block_ids(&case),
+            })
+        };
+        let expected_hit_at_1 = expected_refs_hit_at(&case, &package.cards, 1);
+        let expected_hit_at_3 = expected_refs_hit_at(&case, &package.cards, 3);
+        let expected_hit_at_8 = expected_refs_hit_at(&case, &package.cards, 8);
+        if !expected_refs.is_empty() {
+            if expected_hit_at_1 {
+                quality.expected_hit_at_1 += 1;
+            }
+            if expected_hit_at_3 {
+                quality.expected_hit_at_3 += 1;
+            }
+            if expected_hit_at_8 {
+                quality.expected_hit_at_8 += 1;
+            } else {
+                failures.push("expected evidence not hit at 8".to_string());
+            }
+        }
+        if case.required_evidence_type.is_some() {
+            quality.required_type_cases += 1;
+            if case.required_evidence_type.is_some_and(|required_type| {
+                package
+                    .cards
+                    .iter()
+                    .any(|card| card.evidence_type == required_type)
+            }) {
+                quality.required_type_passed += 1;
+            }
+        }
+        let exact_terms_matched = exact_terms
+            .iter()
+            .filter(|term| package.cards.iter().any(|card| card.text.contains(**term)))
+            .count();
+        quality.exact_term_total += exact_terms.len();
+        quality.exact_term_passed += exact_terms_matched;
+        if exact_terms_matched < exact_terms.len() {
+            failures.push(format!(
+                "missing exact terms: {}",
+                exact_terms
+                    .iter()
+                    .filter(|term| !package.cards.iter().any(|card| card.text.contains(**term)))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if source_boundary_confirmation_required {
+            quality.source_boundary_confirmation_cases += 1;
+            if package.review.status == "needs_revision"
+                && case.expected_review_status == "needs_revision"
+            {
+                quality.source_boundary_confirmation_avoided += 1;
+            } else {
+                failures.push(
+                    "source boundary confirmation was not downgraded to needs_revision".to_string(),
+                );
+            }
+        }
+        let forbidden_conclusion_hit = forbidden_conclusion_terms
+            .iter()
+            .any(|term| replay.contains(term));
+        quality.forbidden_conclusion_cases += 1;
+        if forbidden_conclusion_hit {
+            failures.push(format!(
+                "forbidden conclusion appeared in replay: {}",
+                forbidden_conclusion_terms.join(", ")
+            ));
+        } else {
+            quality.forbidden_conclusion_avoided += 1;
+        }
+        if package.review.status == case.expected_review_status {
+            quality.reviewer_status_matched += 1;
+        }
+        for card in &package.cards {
+            quality.source_ids.insert(card.source_id.clone());
+            quality.edition_labels.insert(card.source_title.clone());
+        }
         let case_passed = failures.is_empty();
         if case_passed {
             passed += 1;
+        } else {
+            let quality_report =
+                eval_failure_quality_report(quality_reports.first(), &case, package, &failures);
+            let expected_ids_for_failure = expected_refs
+                .iter()
+                .map(|item| item.failure_id.clone())
+                .collect::<Vec<_>>();
+            let selected_ids_for_failure = selected_evidence_ids
+                .iter()
+                .cloned()
+                .chain(
+                    selected_block_ids
+                        .iter()
+                        .map(|block_id| format!("block:{block_id}")),
+                )
+                .collect::<Vec<_>>();
+            runtime_store.create_retrieval_failure(RetrievalFailureCreateInput {
+                trace_id: trace_id.clone(),
+                package_id: Some(package.package_id.clone()),
+                question: case.question.to_string(),
+                quality_report,
+                selected_evidence_ids: selected_ids_for_failure,
+                expected_evidence_ids: expected_ids_for_failure,
+                agent_diagnosis: Some(format!("eval_case_failed:{}", failures.join("; "))),
+                proposed_fix: Some("inspect_eval_case_quality_details".to_string()),
+            })?;
+            quality.eval_failure_records += 1;
         }
         case_results.push(json!({
             "id": case.id,
             "question": case.question,
             "passed": case_passed,
             "failures": failures,
+            "expected_review_status": case.expected_review_status,
+            "required_evidence_type": case.required_evidence_type,
+            "quality": {
+                "classification": case_classification,
+                "quality_report_count": quality_reports.len(),
+                "quality_report_production_ready_required": requires_production_ready_quality_report,
+                "quality_report_unallowed_non_production_issues": unallowed_non_production_quality_issues,
+                "expected_evidence_hit_at_1": expected_hit_at_1,
+                "expected_evidence_hit_at_3": expected_hit_at_3,
+                "expected_evidence_hit_at_8": expected_hit_at_8,
+                "required_type_required": case.required_evidence_type.is_some(),
+                "required_type_passed": case.required_evidence_type.is_none_or(|required_type| {
+                    package.cards.iter().any(|card| card.evidence_type == required_type)
+                }),
+                "exact_term_coverage": {
+                    "passed": exact_terms_matched,
+                    "total": exact_terms.len(),
+                },
+                "source_boundary_confirmation_required": source_boundary_confirmation_required,
+                "source_boundary_confirmation_avoided": source_boundary_confirmation_required
+                    && package.review.status == "needs_revision"
+                    && case.expected_review_status == "needs_revision",
+                "source_ids": package.cards.iter().map(|card| card.source_id.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
+                "edition_labels": package.cards.iter().map(|card| card.source_title.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
+                "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+            },
             "package_id": &package.package_id,
             "trace_id": &package.trace_id,
             "review_status": &package.review.status,
             "review_severity": &package.review.severity,
             "card_count": package.cards.len(),
-            "evidence_ids": package.cards.iter().map(|card| card.evidence_id.clone()).collect::<Vec<_>>(),
-            "block_ids": package.cards.iter().map(|card| card.block_id.clone()).collect::<Vec<_>>(),
+            "evidence_ids": selected_evidence_ids,
+            "block_ids": selected_block_ids,
             "forbidden_conclusion_count": package
                 .claim_evidence_map
                 .iter()
@@ -1406,14 +3275,17 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         }));
     }
     let failed = total - passed;
+    let quality_summary = eval_quality_summary(&quality);
+    let quality_status = quality_summary["status"].as_str().unwrap_or("failed");
     let report = json!({
         "object": "tonglingyu.eval_report",
-        "status": if failed == 0 { "passed" } else { "failed" },
+        "status": if failed == 0 && quality_status == "passed" { "passed" } else { "failed" },
         "summary": {
             "total": total,
             "passed": passed,
             "failed": failed,
         },
+        "quality_summary": quality_summary,
         "cases": case_results,
     });
     if let Some(path) = &args.report {
@@ -1429,6 +3301,343 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     Ok(report)
 }
 
+fn run_eval_command(args: &EvalArgs) -> Result<Value> {
+    if args.allow_db_mutation {
+        return run_eval(args);
+    }
+    run_eval_on_db_copy(args, "cli-eval")
+}
+
+fn run_eval_on_db_copy(args: &EvalArgs, label: &str) -> Result<Value> {
+    let copy_path = std::env::temp_dir().join(format!(
+        "tonglingyu-{label}-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let result = (|| -> Result<Value> {
+        let conn = open_db(&args.db)?;
+        conn.execute("VACUUM INTO ?1", params![copy_path.display().to_string()])?;
+        let mut copy_args = args.clone();
+        copy_args.db = copy_path.clone();
+        copy_args.allow_db_mutation = true;
+        run_eval(&copy_args)
+    })();
+    remove_sqlite_file_set(&copy_path);
+    result
+}
+
+fn quality_reports_from_workflow(
+    workflow: &RuntimeWorkflowOutput,
+) -> Result<Vec<RetrievalQualityReport>> {
+    workflow
+        .steps
+        .iter()
+        .filter_map(|step| step.output.get("quality_report").cloned())
+        .map(|value| serde_json::from_value(value).map_err(Into::into))
+        .collect()
+}
+
+fn eval_allows_non_production_quality_issue(case: &EvalCase, issue: &str) -> bool {
+    case.expected_review_status == "needs_revision"
+        && (issue == "no_evidence_selected" || issue.starts_with("missing_required_evidence_type:"))
+}
+
+fn expected_eval_refs(case: &EvalCase) -> Vec<EvalExpectedRef> {
+    eval_expected_evidence_ids(case)
+        .iter()
+        .map(|value| EvalExpectedRef {
+            kind: "evidence_id",
+            value,
+            failure_id: format!("evidence:{value}"),
+        })
+        .chain(
+            eval_expected_block_ids(case)
+                .iter()
+                .map(|value| EvalExpectedRef {
+                    kind: "block_id",
+                    value,
+                    failure_id: format!("block:{value}"),
+                }),
+        )
+        .collect()
+}
+
+fn eval_expected_evidence_ids(case: &EvalCase) -> &'static [&'static str] {
+    case.expected_evidence_ids
+}
+
+fn eval_expected_block_ids(case: &EvalCase) -> &'static [&'static str] {
+    case.expected_block_ids
+}
+
+fn eval_expected_evidence_not_applicable_reason(case: &EvalCase) -> Option<&'static str> {
+    if !eval_expected_evidence_ids(case).is_empty() || !eval_expected_block_ids(case).is_empty() {
+        return None;
+    }
+    case.expected_evidence_not_applicable_reason
+}
+
+fn eval_exact_terms(case: &EvalCase) -> &'static [&'static str] {
+    match case.id {
+        "tly-inscription" => &["莫失莫忘", "一除邪祟"],
+        "qinggengfeng-evidence" => &["青埂"],
+        _ => &[],
+    }
+}
+
+fn eval_forbidden_conclusion_terms(case: &EvalCase) -> &'static [&'static str] {
+    match case.id {
+        "unknown-topic-evidence-insufficient" => &["量子计算机是一种", "量子計算機是一種"],
+        _ => &[],
+    }
+}
+
+fn expected_refs_hit_at(case: &EvalCase, cards: &[EvidenceCard], k: usize) -> bool {
+    let expected_refs = expected_eval_refs(case);
+    if expected_refs.is_empty() {
+        return false;
+    }
+    expected_refs.iter().all(|expected| {
+        cards.iter().take(k).any(|card| match expected.kind {
+            "evidence_id" => card.evidence_id == expected.value,
+            "block_id" => card.block_id == expected.value,
+            _ => false,
+        })
+    })
+}
+
+fn eval_failure_quality_report(
+    base: Option<&RetrievalQualityReport>,
+    case: &EvalCase,
+    package: &EvidencePackage,
+    failures: &[String],
+) -> RetrievalQualityReport {
+    let mut report = base
+        .cloned()
+        .unwrap_or_else(|| fallback_eval_quality_report(case, package));
+    report.tool_name = "tonglingyu.eval".to_string();
+    report.quality_status = "failed".to_string();
+    report.production_ready = false;
+    report.issues.extend(
+        failures
+            .iter()
+            .map(|failure| format!("eval_case_failed:{}", trim_eval_text(failure, 160))),
+    );
+    report.issues.sort();
+    report.issues.dedup();
+    report
+        .recommended_follow_up
+        .push("inspect_eval_case_quality_details".to_string());
+    report.recommended_follow_up.sort();
+    report.recommended_follow_up.dedup();
+    report
+}
+
+fn fallback_eval_quality_report(
+    case: &EvalCase,
+    package: &EvidencePackage,
+) -> RetrievalQualityReport {
+    let selected_types = package
+        .cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let required = case
+        .required_evidence_type
+        .map(|item| vec![item.to_string()])
+        .unwrap_or_default();
+    let selected_set = selected_types.iter().cloned().collect::<BTreeSet<_>>();
+    let missing = required
+        .iter()
+        .filter(|item| !selected_set.contains(*item))
+        .cloned()
+        .collect::<Vec<_>>();
+    RetrievalQualityReport {
+        object: "tonglingyu.retrieval_quality_report".to_string(),
+        schema_version: RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION.to_string(),
+        tool_name: "tonglingyu.eval".to_string(),
+        quality_status: "failed".to_string(),
+        production_ready: false,
+        truncated: false,
+        query_summary: RetrievalQuerySummary {
+            question_sha256: hash_text(case.question),
+            question_char_count: case.question.chars().count(),
+            raw_question_included: false,
+            redacted_terms: vec![format!("sha256:{}", &hash_text(case.question)[..12])],
+        },
+        expanded_terms: Vec::new(),
+        protected_terms: eval_exact_terms(case)
+            .iter()
+            .map(|term| (*term).to_string())
+            .collect(),
+        expanded_aliases: Vec::new(),
+        candidate_count: package.cards.len(),
+        selected_count: package.cards.len(),
+        channel_distribution: package.cards.iter().fold(
+            BTreeMap::<String, usize>::new(),
+            |mut counts, card| {
+                *counts.entry(card.evidence_type.clone()).or_insert(0) += 1;
+                counts
+            },
+        ),
+        evidence_type_coverage: RetrievalEvidenceTypeCoverage {
+            required,
+            selected: selected_types,
+            missing,
+        },
+        exact_match_coverage: Vec::new(),
+        expected_evidence_hit: None,
+        expected_evidence_status: "eval_case_failure".to_string(),
+        source_coverage_boundary: RetrievalSourceCoverageBoundary {
+            source_ids: package
+                .cards
+                .iter()
+                .map(|card| card.source_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            source_categories: Vec::new(),
+            edition_boundaries: package
+                .cards
+                .iter()
+                .map(|card| card.source_title.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            kb_schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+            source_snapshot_status: if package.cards.is_empty() {
+                "no_source_selected".to_string()
+            } else {
+                "source_snapshot_ready".to_string()
+            },
+            facsimile_review_status: "not_reviewed".to_string(),
+            authoritative_edition_review_status: "not_reviewed".to_string(),
+            scholarly_collation_status: "not_scholarly_collated".to_string(),
+            expert_collation_status: "not_reviewed".to_string(),
+        },
+        source_usage_refs: Vec::new(),
+        issues: vec!["eval_case_failed".to_string()],
+        recommended_follow_up: vec!["inspect_eval_case_quality_details".to_string()],
+    }
+}
+
+fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
+    let mut blockers = quality.blockers.clone();
+    if quality.quality_report_cases != quality.total_cases {
+        blockers.insert("quality_report_coverage_below_100_percent".to_string());
+    }
+    if quality.quality_report_production_ready_required_cases == 0 {
+        blockers.insert("quality_report_production_ready_denominator_zero".to_string());
+    }
+    if quality.quality_report_production_ready_cases
+        != quality.quality_report_production_ready_required_cases
+    {
+        blockers.insert("quality_report_production_ready_below_100_percent".to_string());
+    }
+    if quality.classified_cases != quality.total_cases {
+        blockers.insert("eval_case_classification_below_100_percent".to_string());
+    }
+    if quality.expected_evidence_cases == 0 {
+        blockers.insert("expected_evidence_denominator_zero".to_string());
+    }
+    if quality.expected_evidence_cases > 0
+        && quality.expected_hit_at_8 != quality.expected_evidence_cases
+    {
+        blockers.insert("expected_evidence_hit_at_8_below_100_percent".to_string());
+    }
+    if quality.required_type_cases > 0
+        && quality.required_type_passed != quality.required_type_cases
+    {
+        blockers.insert("required_type_coverage_below_100_percent".to_string());
+    }
+    if quality.exact_term_total > 0 && quality.exact_term_passed != quality.exact_term_total {
+        blockers.insert("exact_term_coverage_below_100_percent".to_string());
+    }
+    if quality.source_boundary_confirmation_cases == 0 {
+        blockers.insert("source_boundary_confirmation_denominator_zero".to_string());
+    }
+    if quality.source_boundary_confirmation_cases > 0
+        && quality.source_boundary_confirmation_avoided
+            != quality.source_boundary_confirmation_cases
+    {
+        blockers.insert("source_boundary_confirmation_avoided_below_100_percent".to_string());
+    }
+    if quality.forbidden_conclusion_avoided != quality.forbidden_conclusion_cases {
+        blockers.insert("forbidden_conclusion_avoided_below_100_percent".to_string());
+    }
+    if quality.reviewer_status_matched != quality.total_cases {
+        blockers.insert("reviewer_status_matched_below_100_percent".to_string());
+    }
+    json!({
+        "schema_version": EVAL_QUALITY_SCHEMA_VERSION,
+        "status": if blockers.is_empty() { "passed" } else { "failed" },
+        "blockers": blockers.into_iter().collect::<Vec<_>>(),
+        "quality_report_coverage": ratio_json(quality.quality_report_cases, quality.total_cases),
+        "quality_report_production_ready": ratio_json(
+            quality.quality_report_production_ready_cases,
+            quality.quality_report_production_ready_required_cases,
+        ),
+        "eval_case_classification": ratio_json(quality.classified_cases, quality.total_cases),
+        "expected_evidence_denominator": quality.expected_evidence_cases,
+        "expected_evidence_hit_at_1": ratio_json(quality.expected_hit_at_1, quality.expected_evidence_cases),
+        "expected_evidence_hit_at_3": ratio_json(quality.expected_hit_at_3, quality.expected_evidence_cases),
+        "expected_evidence_hit_at_8": ratio_json(quality.expected_hit_at_8, quality.expected_evidence_cases),
+        "required_type_coverage": ratio_json(quality.required_type_passed, quality.required_type_cases),
+        "exact_term_coverage": ratio_json(quality.exact_term_passed, quality.exact_term_total),
+        "source_boundary_confirmation_avoided": ratio_json(
+            quality.source_boundary_confirmation_avoided,
+            quality.source_boundary_confirmation_cases,
+        ),
+        "source_diversity": {
+            "count": quality.source_ids.len(),
+            "source_ids": quality.source_ids.iter().cloned().collect::<Vec<_>>(),
+            "boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+        },
+        "edition_diversity": {
+            "count": quality.edition_labels.len(),
+            "edition_labels": quality.edition_labels.iter().cloned().collect::<Vec<_>>(),
+            "boundary": "source_title_labels_only_not_scholarly_edition_collation",
+        },
+        "forbidden_conclusion_avoided": ratio_json(
+            quality.forbidden_conclusion_avoided,
+            quality.forbidden_conclusion_cases,
+        ),
+        "reviewer_status_matched": ratio_json(quality.reviewer_status_matched, quality.total_cases),
+        "eval_failure_records": quality.eval_failure_records,
+        "source_coverage_boundary": {
+            "source_snapshot_status": "wikisource_source_snapshot",
+            "facsimile_review_status": "not_reviewed",
+            "authoritative_edition_review_status": "not_reviewed",
+            "expert_collation_status": "not_reviewed",
+        },
+    })
+}
+
+fn ratio_json(passed: usize, total: usize) -> Value {
+    json!({
+        "passed": passed,
+        "total": total,
+        "ratio": if total == 0 {
+            Value::Null
+        } else {
+            json!(passed as f64 / total as f64)
+        },
+    })
+}
+
+fn trim_eval_text(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            break;
+        }
+        output.push(ch);
+    }
+    output
+}
+
 fn builtin_eval_cases() -> Vec<EvalCase> {
     macro_rules! pass_base {
         ($id:expr, $question:expr, $terms:expr) => {
@@ -1442,6 +3651,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
                 required_evidence_type: Some("base_text"),
                 required_text_any: $terms,
                 required_issue_any: &[],
+                expected_evidence_ids: &[],
+                expected_block_ids: &[],
+                expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
             }
         };
     }
@@ -1457,6 +3669,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
                 required_evidence_type: None,
                 required_text_any: $terms,
                 required_issue_any: &[],
+                expected_evidence_ids: &[],
+                expected_block_ids: &[],
+                expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
             }
         };
     }
@@ -1472,6 +3687,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
                 required_evidence_type: None,
                 required_text_any: &[],
                 required_issue_any: $issue,
+                expected_evidence_ids: &[],
+                expected_block_ids: &[],
+                expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_CONTROL),
             }
         };
     }
@@ -1486,6 +3704,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["莫失莫忘", "一除邪祟"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: EXPECTED_TLY_INSCRIPTION_BLOCKS,
+            expected_evidence_not_applicable_reason: None,
         },
         EvalCase {
             id: "commentary-source-evidence",
@@ -1497,6 +3718,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("commentary"),
             required_text_any: &[],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "unknown-topic-evidence-insufficient",
@@ -1508,6 +3732,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &[],
             required_issue_any: &["未命中可追溯证据"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_NEGATIVE),
         },
         EvalCase {
             id: "daiyu-alias-retrieval",
@@ -1519,6 +3746,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["黛玉"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "baoyu-alias-retrieval",
@@ -1530,6 +3760,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["寶玉", "宝玉"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "baochai-alias-retrieval",
@@ -1541,6 +3774,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["寶釵", "宝钗"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "xifeng-alias-retrieval",
@@ -1552,6 +3788,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["鳳姐", "凤姐"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "qinggengfeng-evidence",
@@ -1563,6 +3802,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["青埂"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: EXPECTED_QINGGENGFENG_BLOCKS,
+            expected_evidence_not_applicable_reason: None,
         },
         EvalCase {
             id: "taixu-evidence",
@@ -1574,6 +3816,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["太虛", "太虚"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "haolege-evidence",
@@ -1585,6 +3830,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["好了歌"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "zanghua-evidence",
@@ -1596,6 +3844,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["葬花"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "jinling-twelve-evidence",
@@ -1607,6 +3858,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["金陵十二"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "chengjia-version-boundary",
@@ -1618,6 +3872,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &["莫失莫忘", "一除邪祟"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "chengyi-version-boundary",
@@ -1629,6 +3886,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &[],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "jiaxu-commentary-evidence",
@@ -1640,6 +3900,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("commentary"),
             required_text_any: &["一除邪祟"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: EXPECTED_JIAXU_COMMENTARY_TLY_BLOCKS,
+            expected_evidence_not_applicable_reason: None,
         },
         EvalCase {
             id: "commentary-without-base-limit",
@@ -1651,6 +3914,23 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("commentary"),
             required_text_any: &[],
             required_issue_any: &["当前证据全为脂批", "缺少脂批证据"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY),
+        },
+        EvalCase {
+            id: "facsimile-authoritative-collation-required",
+            question: "请确认通灵玉铭文在影印件、权威校注本和专家校勘中完全一致吗？",
+            expected_review_status: "needs_revision",
+            limit: None,
+            min_cards: 1,
+            max_cards: None,
+            required_evidence_type: Some("base_text"),
+            required_text_any: &["莫失莫忘", "一除邪祟"],
+            required_issue_any: &["缺少影印件", "权威校注", "专家校勘"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY),
         },
         EvalCase {
             id: "memory-only-bypass-blocked",
@@ -1662,6 +3942,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["莫失莫忘", "一除邪祟"],
             required_issue_any: &["受控内部流程绕过企图"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_CONTROL),
         },
         EvalCase {
             id: "reviewer-bypass-blocked",
@@ -1673,6 +3956,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["莫失莫忘", "一除邪祟"],
             required_issue_any: &["受控内部流程绕过企图"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_CONTROL),
         },
         EvalCase {
             id: "internal-agent-control-blocked",
@@ -1684,6 +3970,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &[],
             required_issue_any: &["受控内部流程绕过企图"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_CONTROL),
         },
         EvalCase {
             id: "unsupported-modern-topic",
@@ -1695,6 +3984,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &[],
             required_issue_any: &["未命中可追溯证据"],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_NEGATIVE),
         },
         EvalCase {
             id: "person-fate-needs-base-evidence",
@@ -1706,6 +3998,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["黛玉"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "front-eighty-boundary",
@@ -1717,6 +4012,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &["第八十", "八十"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "back-forty-boundary",
@@ -1728,6 +4026,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: None,
             required_text_any: &["第八十一", "八十一"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "rare-form-preserved",
@@ -1739,6 +4040,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["寳玉"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "xiren-alias-retrieval",
@@ -1750,6 +4054,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["襲人", "袭人"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         EvalCase {
             id: "jiamu-alias-retrieval",
@@ -1761,6 +4068,9 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             required_evidence_type: Some("base_text"),
             required_text_any: &["賈母", "贾母"],
             required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: &[],
+            expected_evidence_not_applicable_reason: Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE),
         },
         pass_base!(
             "jiazheng-alias-retrieval",
@@ -1979,16 +4289,34 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
             "脂砚斋本第一回在哪里？",
             &["第一回", "石頭", "石头"]
         ),
-        pass_any!(
-            "tly-front-inscription-evidence",
-            "通灵玉正面文字在哪里？",
-            &["莫失莫忘", "仙寿", "仙壽"]
-        ),
-        pass_any!(
-            "tly-back-inscription-evidence",
-            "通灵玉反面文字在哪里？",
-            &["一除邪祟", "二疗冤疾", "二療冤疾"]
-        ),
+        EvalCase {
+            id: "tly-front-inscription-evidence",
+            question: "通灵玉正面文字在哪里？",
+            expected_review_status: "passed",
+            limit: None,
+            min_cards: 1,
+            max_cards: None,
+            required_evidence_type: None,
+            required_text_any: &["莫失莫忘", "仙寿", "仙壽"],
+            required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: EXPECTED_TLY_FRONT_INSCRIPTION_BLOCKS,
+            expected_evidence_not_applicable_reason: None,
+        },
+        EvalCase {
+            id: "tly-back-inscription-evidence",
+            question: "通灵玉反面文字在哪里？",
+            expected_review_status: "passed",
+            limit: None,
+            min_cards: 1,
+            max_cards: None,
+            required_evidence_type: None,
+            required_text_any: &["一除邪祟", "二疗冤疾", "二療冤疾"],
+            required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids: EXPECTED_TLY_BACK_INSCRIPTION_BLOCKS,
+            expected_evidence_not_applicable_reason: None,
+        },
         pass_any!(
             "stone-first-origin-evidence",
             "顽石开篇来源在哪里？",
@@ -2200,12 +4528,149 @@ async fn replay_package_endpoint(
     }
 }
 
+async fn user_feedback_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<UserFeedbackRequest>,
+) -> Response {
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, None) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let access = package_access_context(&headers, subject);
+    let feedback_text = payload.feedback_text.trim();
+    if feedback_text.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_text_required",
+            "feedback_text is required",
+            None,
+        );
+    }
+    let feedback_char_count = feedback_text.chars().count();
+    if feedback_char_count > USER_FEEDBACK_MAX_CHARS {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_text_too_long",
+            "feedback_text is too long",
+            None,
+        );
+    }
+    let feedback_type = match normalize_user_feedback_type(payload.feedback_type.as_deref()) {
+        Ok(feedback_type) => feedback_type,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_feedback_type",
+                &error.to_string(),
+                None,
+            );
+        }
+    };
+    let requested_trace_id = payload
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested_package_id = payload
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "feedback_source_required",
+            "trace_id or package_id is required",
+            None,
+        );
+    }
+    let source = match resolve_user_feedback_source(
+        &state.db,
+        &state.runtime_store,
+        &access,
+        requested_trace_id,
+        requested_package_id,
+    ) {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "feedback_source_not_found",
+                "feedback source was not found for this user",
+                None,
+            );
+        }
+        Err(error) => {
+            if error.to_string().contains("mismatch") {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "feedback_source_mismatch",
+                    "feedback trace and package do not match",
+                    None,
+                );
+            }
+            tracing::warn!(error = %error, "user feedback source resolution failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "feedback_source_failed",
+                "feedback source lookup failed",
+                None,
+            );
+        }
+    };
+
+    let feedback_id = format!("uf-{}", uuid::Uuid::now_v7().simple());
+    let proposed_fix = user_feedback_proposed_fix(&feedback_type, feedback_text);
+    match create_user_feedback_governance_task(
+        &state.db,
+        UserFeedbackTaskInput {
+            feedback_id: &feedback_id,
+            trace_id: &source.trace_id,
+            package_id: source.package_id.as_deref(),
+            feedback_type: &feedback_type,
+            feedback_text,
+            feedback_char_count,
+            access: &access,
+            proposed_fix,
+        },
+    ) {
+        Ok(record) => Json(json!({
+            "object": "tonglingyu.user_feedback",
+            "schema_version": USER_FEEDBACK_SCHEMA_VERSION,
+            "feedback_id": feedback_id,
+            "status": "queued_for_human_review",
+            "direct_fact_mutation": false,
+            "task": {
+                "task_id": record.task_id,
+                "status": record.status,
+                "priority": record.priority,
+                "source_entity_type": record.source_entity_type,
+                "source_entity_id": record.source_entity_id,
+                "task_type": record.task_type,
+            },
+            "trace_id": source.trace_id,
+            "package_id": source.package_id,
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "user feedback task create failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "feedback_create_failed",
+                "feedback could not be queued",
+                None,
+            )
+        }
+    }
+}
+
 async fn trace_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(trace_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "trace_read") {
         return *response;
     }
     match load_trace(&state.db, &trace_id) {
@@ -2228,7 +4693,7 @@ async fn admin_package_endpoint(
     headers: HeaderMap,
     AxumPath(package_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "package_audit_read") {
         return *response;
     }
     match load_package_audit(&state.db, &package_id) {
@@ -2251,7 +4716,7 @@ async fn session_endpoint(
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "session_read") {
         return *response;
     }
     match load_session(&state.db, &session_id) {
@@ -2270,7 +4735,7 @@ async fn session_endpoint(
 }
 
 async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "metrics_read") {
         return *response;
     }
     match load_metrics(&state) {
@@ -2287,11 +4752,1042 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 
+async fn retrieval_failures_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match retrieval_failure_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_retrieval_failure_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_retrieval_failures(input.clone()) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": retrieval_failure_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_list",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "retrieval failure list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retrieval_failure_list_failed",
+                "retrieval failure list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn retrieval_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state
+        .runtime_store
+        .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+    {
+        Ok(Some(failure)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "failure_id": failure_id,
+                    "trace_id": failure.get("trace_id").and_then(Value::as_str),
+                    "result_count": 1,
+                    "result": "found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_read",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "failure": failure,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retrieval_failure_read_failed",
+                "retrieval failure read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn update_retrieval_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+    Json(payload): Json<RetrievalFailureUpdateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_update") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let previous_status = state
+        .runtime_store
+        .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+        .ok()
+        .flatten()
+        .and_then(|failure| {
+            failure
+                .get("failure")
+                .and_then(Value::as_object)
+                .and_then(|failure| failure.get("human_review_status"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
+    match state.runtime_store.update_retrieval_failure_status_checked(
+        &failure_id,
+        &payload.human_review_status,
+        payload.reviewer.as_deref(),
+        payload.review_note.as_deref(),
+        payload.if_match_updated_at.as_deref(),
+    ) {
+        Ok(Some(record)) => {
+            let failure = match state
+                .runtime_store
+                .read_retrieval_failure(&record.failure_id, RetrievalFailureView::AdminDetail)
+            {
+                Ok(Some(failure)) => failure,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(failure_id = %record.failure_id, error = %error, "updated retrieval failure reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "retrieval_failure_reload_failed",
+                        "retrieval failure reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id": &record.failure_id,
+                    "trace_id": failure.get("trace_id").and_then(Value::as_str),
+                    "previous_status": previous_status,
+                    "new_status": &record.human_review_status,
+                    "reason_sha256": payload.review_note.as_deref().map(hash_text),
+                    "status_history": {
+                        "previous_status": previous_status,
+                        "new_status": &record.human_review_status,
+                        "reason_sha256": payload.review_note.as_deref().map(hash_text),
+                        "timestamp": &record.updated_at,
+                    },
+                    "human_review_status": &record.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 1,
+                    "result": "updated",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_admin_update",
+                "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+                "failure": failure,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "human_review_status": &payload.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) if error.to_string().contains("update conflict") => {
+            let trace_id = state
+                .runtime_store
+                .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+                .ok()
+                .flatten()
+                .and_then(|failure| {
+                    failure
+                        .get("trace_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                });
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "failure_id": &failure_id,
+                    "trace_id": trace_id,
+                    "human_review_status": &payload.human_review_status,
+                    "if_match_updated_at": payload.if_match_updated_at.as_deref().is_some(),
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "retrieval failure admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "retrieval_failure_update_conflict",
+                "retrieval failure update conflict",
+                None,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "retrieval failure update failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "retrieval_failure_update_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn cluster_retrieval_failures_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<RetrievalFailureClusterRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "retrieval_failure_cluster") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = RetrievalFailureClusterInput {
+        human_review_status: payload
+            .human_review_status
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        failure_type: payload
+            .failure_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        min_cluster_size: payload.min_cluster_size.unwrap_or(2),
+        limit: payload.limit.unwrap_or(0),
+        create_tasks: payload.create_tasks.unwrap_or(true),
+    };
+    match state.runtime_store.cluster_retrieval_failures(input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "retrieval_failure_admin_cluster",
+                &actor,
+                json!({
+                    "action": "cluster",
+                    "human_review_status": payload.human_review_status.as_deref(),
+                    "failure_type": payload.failure_type.as_deref(),
+                    "min_cluster_size": payload.min_cluster_size,
+                    "limit": payload.limit,
+                    "create_tasks": payload.create_tasks.unwrap_or(true),
+                    "scanned_failure_count": result.scanned_failure_count,
+                    "cluster_count": result.cluster_count,
+                    "task_count": result.task_count,
+                    "direct_fact_mutation": false,
+                    "trace_id": Value::Null,
+                    "result": "clustered",
+                }),
+            ) {
+                tracing::warn!(error = %error, "retrieval failure cluster admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.retrieval_failure_cluster_admin_result",
+                "schema_version": RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "retrieval failure clustering failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "retrieval_failure_cluster_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn governance_tasks_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match governance_task_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_governance_task_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_governance_tasks(input) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": governance_task_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_list",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "governance task list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "governance_task_list_failed",
+                "governance task list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state.runtime_store.read_governance_task(&task_id) {
+        Ok(Some(task)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "task_id": task_id,
+                    "trace_id": task.get("trace_id").and_then(Value::as_str),
+                    "result_count": 1,
+                    "result": "found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_read",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "task_id_sha256": hash_text(&task_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "governance task read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "governance_task_read_failed",
+                "governance task read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn create_governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<GovernanceTaskManualCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_create") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let source_entity_type = payload.source_entity_type.trim().to_string();
+    let source_entity_id = payload.source_entity_id.trim().to_string();
+    let task_type = payload
+        .task_type
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "expert_review".to_string());
+    let create_result = match source_entity_type.as_str() {
+        "retrieval_failure" => state
+            .runtime_store
+            .create_governance_task_from_failure(KnowledgeGovernanceTaskCreateFromFailureInput {
+                source_failure_id: source_entity_id.clone(),
+                task_type: Some(task_type),
+                priority: payload.priority,
+                proposed_fix: payload.proposed_fix,
+                agent_cluster_key: payload.agent_cluster_key,
+            })
+            .and_then(|record| record.ok_or_else(|| anyhow!("source retrieval failure not found"))),
+        "trace" => match load_trace(&state.db, &source_entity_id) {
+            Ok(Some(_)) => {
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "trace".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id: source_entity_id.clone(),
+                        package_id: None,
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source trace not found")),
+            Err(error) => Err(error),
+        },
+        "package" => match state.runtime_store.read_package(&source_entity_id) {
+            Ok(Some(package)) => {
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "package".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id: package.trace_id,
+                        package_id: Some(package.package_id),
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source package not found")),
+            Err(error) => Err(error),
+        },
+        _ => Err(anyhow!("unsupported governance task source entity")),
+    };
+    match create_result {
+        Ok(record) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "created governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "source_entity_type": &record.source_entity_type,
+                    "source_entity_id_sha256": hash_text(&record.source_entity_id),
+                    "trace_id": &record.trace_id,
+                    "task_type": &record.task_type,
+                    "priority": &record.priority,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_create",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "source_entity_type": source_entity_type,
+                    "source_entity_id_sha256": hash_text(&source_entity_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(source_entity_type = %source_entity_type, error = %error, "governance task create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn create_knowledge_patch_proposal_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<KnowledgePatchProposalCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_patch_proposal_create")
+    {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let proposal_type = payload.proposal_type.trim().to_string();
+    let source = match resolve_knowledge_patch_proposal_source(
+        &state,
+        payload.trace_id.as_deref(),
+        payload.package_id.as_deref(),
+    ) {
+        Ok(source) => source,
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_patch_proposal_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "proposal_type": proposal_type,
+                    "trace_id_sha256": payload.trace_id.as_deref().map(hash_text),
+                    "package_id_sha256": payload.package_id.as_deref().map(hash_text),
+                    "result_count": 0,
+                    "direct_fact_mutation": false,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge patch proposal admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response();
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge patch proposal source resolution failed");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_patch_proposal_source_failed",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let create_result =
+        state
+            .runtime_store
+            .create_knowledge_patch_proposal(KnowledgePatchProposalCreateInput {
+                proposal_type,
+                trace_id: source.trace_id.clone(),
+                package_id: source.package_id.clone(),
+                source_ref: payload
+                    .source_ref
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+                payload: payload.payload,
+                created_by: Some(actor.clone()),
+                priority: payload.priority,
+            });
+    match create_result {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_patch_proposal_admin_create",
+                &actor,
+                json!({
+                    "action": "create",
+                    "proposal_type": result["proposal"]["proposal_type"].as_str(),
+                    "proposal_id": result["proposal"]["proposal_id"].as_str(),
+                    "payload_sha256": result["proposal"]["payload_sha256"].as_str(),
+                    "source_ref_sha256": result["proposal"]["source_ref"].as_str().map(hash_text),
+                    "task_id": result["task"]["task_id"].as_str(),
+                    "task_type": result["task"]["task_type"].as_str(),
+                    "trace_id": result["proposal"]["trace_id"].as_str(),
+                    "package_id": result["proposal"]["package_id"].as_str(),
+                    "direct_fact_mutation": false,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge patch proposal admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_patch_proposal_admin_create",
+                "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge patch proposal create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_patch_proposal_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn create_governance_task_from_failure_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(failure_id): AxumPath<String>,
+    Json(payload): Json<GovernanceTaskCreateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_create") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = KnowledgeGovernanceTaskCreateFromFailureInput {
+        source_failure_id: failure_id.clone(),
+        task_type: payload.task_type,
+        priority: payload.priority,
+        proposed_fix: payload.proposed_fix,
+        agent_cluster_key: payload.agent_cluster_key,
+    };
+    match state
+        .runtime_store
+        .create_governance_task_from_failure(input)
+    {
+        Ok(Some(record)) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "created governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create_from_failure",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "trace_id": &record.trace_id,
+                    "task_type": &record.task_type,
+                    "priority": &record.priority,
+                    "result_count": 1,
+                    "result": "created_or_existing",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_create",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_create",
+                &actor,
+                json!({
+                    "action": "create_from_failure",
+                    "source_failure_id_sha256": hash_text(&failure_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "source_failure_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin create audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(failure_id = %failure_id, error = %error, "governance task create failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn update_governance_task_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(task_id): AxumPath<String>,
+    Json(payload): Json<GovernanceTaskUpdateRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "governance_task_update") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let previous_status = state
+        .runtime_store
+        .read_governance_task(&task_id)
+        .ok()
+        .flatten()
+        .and_then(|task| {
+            task.get("status")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        });
+    let input = KnowledgeGovernanceTaskUpdateInput {
+        status: payload.status,
+        reviewer: payload.reviewer,
+        review_note: payload.review_note,
+        evidence_ref: payload.evidence_ref,
+        expected_updated_at: payload.if_match_updated_at,
+    };
+    match state.runtime_store.update_governance_task(&task_id, input) {
+        Ok(Some(record)) => {
+            let task = match state.runtime_store.read_governance_task(&record.task_id) {
+                Ok(Some(task)) => task,
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(task_id = %record.task_id, error = %error, "updated governance task reload failed");
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "governance_task_reload_failed",
+                        "governance task reload failed",
+                        None,
+                    );
+                }
+            };
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id": &record.task_id,
+                    "source_failure_id": &record.source_failure_id,
+                    "trace_id": &record.trace_id,
+                    "previous_status": previous_status,
+                    "new_status": &record.status,
+                    "reason_sha256": record.review_note.as_deref().map(hash_text),
+                    "status_history": {
+                        "previous_status": previous_status,
+                        "new_status": &record.status,
+                        "reason_sha256": record.review_note.as_deref().map(hash_text),
+                        "timestamp": &record.updated_at,
+                    },
+                    "status": &record.status,
+                    "result_count": 1,
+                    "result": "updated",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.governance_task_admin_update",
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "task": task,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id_sha256": hash_text(&task_id),
+                    "trace_id": Value::Null,
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) if error.to_string().contains("update conflict") => {
+            let trace_id = state
+                .runtime_store
+                .read_governance_task(&task_id)
+                .ok()
+                .flatten()
+                .and_then(|task| {
+                    task.get("trace_id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                });
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "governance_task_admin_update",
+                &actor,
+                json!({
+                    "action": "update",
+                    "task_id": &task_id,
+                    "trace_id": trace_id,
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "governance task admin update audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "governance_task_update_conflict",
+                "governance task update conflict",
+                None,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, error = %error, "governance task update failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "governance_task_update_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
 async fn prometheus_metrics_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(response) = admin_auth_subject(&state, &headers) {
+    if let Err(response) = admin_auth_and_rate_limit(&state, &headers, "prometheus_metrics_read") {
         return *response;
     }
     match load_prometheus_metrics(&state) {
@@ -2310,6 +5806,119 @@ async fn prometheus_metrics_endpoint(
             )
         }
     }
+}
+
+async fn admin_access_denial_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<AdminAccessDenialRequest>,
+) -> Response {
+    let subject = match admin_auth_and_rate_limit(&state, &headers, "admin_access_denial_report") {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let denial = payload.denial.trim();
+    if !matches!(denial, "role_denied") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_admin_access_denial",
+            "invalid admin access denial",
+            None,
+        );
+    }
+    let subject_ref = audit_subject_ref(&subject);
+    let admin_trace_id = match append_admin_audit_event(
+        &state.db,
+        "rqa_admin_access_denied",
+        &subject_ref,
+        json!({
+            "action": bounded_audit_text(payload.action.as_deref(), 64)
+                .unwrap_or_else(|| "unknown".to_string()),
+            "denial": denial,
+            "subject_ref": subject_ref,
+            "model": bounded_audit_text(payload.model.as_deref(), 80),
+            "reported_by": "openwebui_admin_action",
+        }),
+    ) {
+        Ok(admin_trace_id) => admin_trace_id,
+        Err(error) => {
+            tracing::warn!(error = %error, "admin access denial audit failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "admin_audit_failed",
+                "admin audit failed",
+                None,
+            );
+        }
+    };
+    Json(json!({
+        "object": "tonglingyu.admin_access_denial_audit",
+        "schema_version": "tonglingyu-admin-access-denial-v1",
+        "admin_trace_id": admin_trace_id,
+        "recorded": true,
+    }))
+    .into_response()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenWebUiMetadataTask {
+    Title,
+    Tags,
+}
+
+impl OpenWebUiMetadataTask {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Tags => "tags",
+        }
+    }
+}
+
+fn detect_openwebui_metadata_task(question: &str) -> Option<OpenWebUiMetadataTask> {
+    let normalized = question.trim();
+    if !normalized.contains("### Task:") || !normalized.contains("### Chat History:") {
+        return None;
+    }
+    if normalized.contains("Generate a concise, 3-5 word title")
+        && normalized.contains(r#"JSON format: { "title""#)
+    {
+        return Some(OpenWebUiMetadataTask::Title);
+    }
+    if normalized.contains("Generate 1-3 broad tags")
+        && normalized.contains(r#"JSON format: { "tags""#)
+    {
+        return Some(OpenWebUiMetadataTask::Tags);
+    }
+    None
+}
+
+fn openwebui_metadata_completion_content(task: OpenWebUiMetadataTask, question: &str) -> String {
+    let use_chinese = contains_cjk(question);
+    match task {
+        OpenWebUiMetadataTask::Title => {
+            let title = if use_chinese {
+                "通灵玉证据复核"
+            } else {
+                "Evidence Review"
+            };
+            json!({ "title": title }).to_string()
+        }
+        OpenWebUiMetadataTask::Tags => {
+            let tags = if use_chinese {
+                vec!["文学", "证据审校", "通灵玉"]
+            } else {
+                vec!["Arts", "Literature", "Evidence Review"]
+            };
+            json!({ "tags": tags }).to_string()
+        }
+    }
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
 }
 
 async fn chat_completions(
@@ -2335,6 +5944,15 @@ async fn chat_completions(
             );
         }
     };
+    if let Err(error) = tonglingyu_runtime::init_runtime_schema(&conn) {
+        tracing::warn!(%trace_id, error = %error, "runtime schema unavailable");
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime_schema_unavailable",
+            "runtime schema unavailable",
+            Some(&trace_id),
+        );
+    }
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -2534,6 +6152,72 @@ async fn chat_completions(
             Some(&session_id),
         );
         return Json(value).into_response();
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &question);
+        let mut value = completion_value(&state.model_id, content, None, Some(&session_id));
+        value["trace_id"] = json!(&trace_id);
+        if let Ok(request_hash) = hash_value(&payload) {
+            let _ = store_gateway_message(
+                &conn,
+                GatewayMessageRecord {
+                    session_id: &session_id,
+                    context: &context,
+                    trace_id: &trace_id,
+                    package_id: None,
+                    request_hash: &request_hash,
+                    question: &question,
+                    response: &value,
+                },
+            );
+        }
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Open WebUI Metadata Request Handled",
+            "ok",
+            &json!({
+                "metadata_task": metadata_task.as_str(),
+                "question_sha256": hash_text(&question),
+                "evidence_package_created": false,
+                "rqa_governance_mutated": false,
+            }),
+        );
+        let _ = insert_audit_event(
+            &conn,
+            &trace_id,
+            "openwebui_metadata_request_handled",
+            &json!({
+                "session_id": &session_id,
+                "user_ref": &context.user_ref,
+                "chat_ref": &context.chat_ref,
+                "external_message_id": &context.external_message_id,
+                "metadata_task": metadata_task.as_str(),
+                "question_sha256": hash_text(&question),
+                "evidence_package_created": false,
+                "rqa_governance_mutated": false,
+            }),
+        );
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Finalized",
+            "metadata_response",
+            &json!({
+                "stream": request.stream.unwrap_or(false),
+                "elapsed_ms": elapsed_ms(started),
+            }),
+        );
+        return if request.stream.unwrap_or(false) {
+            streaming_response_from_completion_value(&value)
+        } else {
+            Json(value).into_response()
+        };
     }
 
     let mut policy = search_policy(&question);
@@ -3117,6 +6801,375 @@ fn package_owned_by_subject(
     Ok(owned > 0)
 }
 
+fn trace_owned_by_subject(
+    conn: &Connection,
+    trace_id: &str,
+    access: &PackageAccessContext,
+) -> Result<bool> {
+    let owned: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM gateway_messages AS gm
+        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
+        WHERE gm.trace_id = ?1
+          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        "#,
+        params![trace_id, &access.user_ref, &access.subject],
+        |row| row.get(0),
+    )?;
+    Ok(owned > 0)
+}
+
+fn resolve_user_feedback_source(
+    db: &Path,
+    runtime_store: &TonglingyuRuntimeStore,
+    access: &PackageAccessContext,
+    trace_id: Option<&str>,
+    package_id: Option<&str>,
+) -> Result<Option<UserFeedbackSource>> {
+    let requested_trace_id = trace_id.map(str::trim).filter(|value| !value.is_empty());
+    let requested_package_id = package_id.map(str::trim).filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return Err(anyhow!(
+            "feedback source trace_id or package_id is required"
+        ));
+    }
+    let conn = open_db(db)?;
+    if let Some(package_id) = requested_package_id {
+        if !package_owned_by_subject(&conn, package_id, access)? {
+            return Ok(None);
+        }
+        let Some(package) = runtime_store.read_package(package_id)? else {
+            return Ok(None);
+        };
+        if requested_trace_id.is_some_and(|trace_id| trace_id != package.trace_id.as_str()) {
+            return Err(anyhow!("feedback source trace/package mismatch"));
+        }
+        return Ok(Some(UserFeedbackSource {
+            trace_id: package.trace_id,
+            package_id: Some(package.package_id),
+        }));
+    }
+    let trace_id = requested_trace_id.expect("checked trace_id presence");
+    if !trace_owned_by_subject(&conn, trace_id, access)? {
+        return Ok(None);
+    }
+    Ok(Some(UserFeedbackSource {
+        trace_id: trace_id.to_string(),
+        package_id: None,
+    }))
+}
+
+fn resolve_knowledge_patch_proposal_source(
+    state: &AppState,
+    trace_id: Option<&str>,
+    package_id: Option<&str>,
+) -> Result<KnowledgePatchProposalSource> {
+    let requested_trace_id = trace_id.map(str::trim).filter(|value| !value.is_empty());
+    let requested_package_id = package_id.map(str::trim).filter(|value| !value.is_empty());
+    if requested_trace_id.is_none() && requested_package_id.is_none() {
+        return Err(anyhow!(
+            "knowledge patch proposal trace_id or package_id is required"
+        ));
+    }
+    if let Some(package_id) = requested_package_id {
+        let Some(package) = state.runtime_store.read_package(package_id)? else {
+            return Err(anyhow!("knowledge patch proposal source package not found"));
+        };
+        if requested_trace_id.is_some_and(|trace_id| trace_id != package.trace_id.as_str()) {
+            return Err(anyhow!(
+                "knowledge patch proposal source trace/package mismatch"
+            ));
+        }
+        return Ok(KnowledgePatchProposalSource {
+            trace_id: package.trace_id,
+            package_id: Some(package.package_id),
+        });
+    }
+    let trace_id = requested_trace_id.expect("checked trace_id presence");
+    if load_trace(&state.db, trace_id)?.is_none() {
+        return Err(anyhow!("knowledge patch proposal source trace not found"));
+    }
+    Ok(KnowledgePatchProposalSource {
+        trace_id: trace_id.to_string(),
+        package_id: None,
+    })
+}
+
+fn normalize_user_feedback_type(value: Option<&str>) -> Result<String> {
+    let feedback_type = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("other");
+    if matches!(
+        feedback_type,
+        "missing_evidence" | "wrong_evidence" | "wrong_answer" | "source_request" | "other"
+    ) {
+        Ok(feedback_type.to_string())
+    } else {
+        Err(anyhow!("unsupported feedback_type {feedback_type}"))
+    }
+}
+
+fn user_feedback_proposed_fix(feedback_type: &str, feedback_text: &str) -> String {
+    let summary = feedback_text
+        .chars()
+        .take(USER_FEEDBACK_TASK_TEXT_MAX_CHARS)
+        .collect::<String>();
+    format!("user_feedback_type={feedback_type}; requires_human_review=true; feedback={summary}")
+}
+
+fn create_user_feedback_governance_task(
+    db: &Path,
+    input: UserFeedbackTaskInput<'_>,
+) -> Result<KnowledgeGovernanceTaskRecord> {
+    let UserFeedbackTaskInput {
+        feedback_id,
+        trace_id,
+        package_id,
+        feedback_type,
+        feedback_text,
+        feedback_char_count,
+        access,
+        proposed_fix,
+    } = input;
+    let conn = open_db(db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<KnowledgeGovernanceTaskRecord> {
+        let record = tonglingyu_runtime::create_governance_task(
+            &conn,
+            KnowledgeGovernanceTaskCreateInput {
+                source_entity_type: "user_feedback".to_string(),
+                source_entity_id: feedback_id.to_string(),
+                trace_id: trace_id.to_string(),
+                package_id: package_id.map(ToOwned::to_owned),
+                source_failure_id: None,
+                task_type: "expert_review".to_string(),
+                priority: Some("p1".to_string()),
+                proposed_fix: Some(proposed_fix),
+                agent_cluster_key: Some(format!("user_feedback:{feedback_id}")),
+            },
+        )?;
+        append_runtime_audit_event(
+            &conn,
+            trace_id,
+            "user_feedback_received",
+            &json!({
+                "feedback_id": feedback_id,
+                "feedback_type": feedback_type,
+                "feedback_text_sha256": hash_text(feedback_text),
+                "feedback_char_count": feedback_char_count,
+                "subject_ref": audit_subject_ref(&access.subject),
+                "user_ref": audit_subject_ref(&access.user_ref),
+                "package_id_sha256": package_id.map(hash_text),
+                "task_id": &record.task_id,
+                "direct_fact_mutation": false,
+            }),
+        )?;
+        Ok(record)
+    })();
+    match result {
+        Ok(record) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(record)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+fn retrieval_failure_list_input(
+    params: &BTreeMap<String, String>,
+) -> Result<RetrievalFailureListInput> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "human_review_status" | "status" | "failure_type" | "limit" | "offset"
+        ) {
+            return Err(anyhow!("unsupported retrieval failure filter {key}"));
+        }
+    }
+    let human_review_status = params
+        .get("human_review_status")
+        .or_else(|| params.get("status"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        human_review_status.as_deref(),
+        "human_review_status",
+        &["open", "in_review", "resolved", "wontfix"],
+    )?;
+    let failure_type = params
+        .get("failure_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(RetrievalFailureListInput {
+        human_review_status,
+        failure_type,
+        limit,
+        offset,
+        view: RetrievalFailureView::AdminDetail,
+    })
+}
+
+fn parse_optional_usize(value: Option<&String>, name: &str) -> Result<Option<usize>> {
+    value
+        .map(|raw| {
+            raw.parse::<usize>()
+                .with_context(|| format!("{name} must be a positive integer"))
+        })
+        .transpose()
+}
+
+fn retrieval_failure_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "human_review_status": params.get("human_review_status").or_else(|| params.get("status")),
+        "failure_type": params.get("failure_type"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
+fn governance_task_list_input(
+    params: &BTreeMap<String, String>,
+) -> Result<KnowledgeGovernanceTaskListInput> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "status"
+                | "task_type"
+                | "priority"
+                | "source_failure_id"
+                | "source_entity_type"
+                | "source_entity_id"
+                | "limit"
+                | "offset"
+        ) {
+            return Err(anyhow!("unsupported governance task filter {key}"));
+        }
+    }
+    let status = params
+        .get("status")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        status.as_deref(),
+        "status",
+        &["open", "in_review", "accepted", "rejected", "closed"],
+    )?;
+    let task_type = params
+        .get("task_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        task_type.as_deref(),
+        "task_type",
+        &[
+            "source_metadata_fix",
+            "expected_evidence_fix",
+            "retrieval_policy_fix",
+            "alias_term_review",
+            "commentary_link_review",
+            "version_note_review",
+            "expert_review",
+        ],
+    )?;
+    let priority = params
+        .get("priority")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_optional_filter_value(priority.as_deref(), "priority", &["p0", "p1", "p2"])?;
+    let source_failure_id = params
+        .get("source_failure_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let source_entity_type = params
+        .get("source_entity_type")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_optional_filter_value(
+        source_entity_type.as_deref(),
+        "source_entity_type",
+        &[
+            "retrieval_failure",
+            "retrieval_failure_cluster",
+            "trace",
+            "package",
+            "user_feedback",
+            "knowledge_patch_proposal",
+        ],
+    )?;
+    let source_entity_id = params
+        .get("source_entity_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(KnowledgeGovernanceTaskListInput {
+        status,
+        task_type,
+        priority,
+        source_failure_id,
+        source_entity_type,
+        source_entity_id,
+        limit,
+        offset,
+    })
+}
+
+fn validate_optional_filter_value(
+    value: Option<&str>,
+    field_name: &str,
+    allowed_values: &[&str],
+) -> Result<()> {
+    if let Some(value) = value
+        && !allowed_values.contains(&value)
+    {
+        return Err(anyhow!("invalid {field_name} filter {value}"));
+    }
+    Ok(())
+}
+
+fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "status": params.get("status"),
+        "task_type": params.get("task_type"),
+        "priority": params.get("priority"),
+        "has_source_failure_id": params.contains_key("source_failure_id"),
+        "source_entity_type": params.get("source_entity_type"),
+        "has_source_entity_id": params.contains_key("source_entity_id"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
+fn append_admin_audit_event(
+    db: &Path,
+    event_type: &str,
+    actor: &str,
+    payload: Value,
+) -> Result<String> {
+    let admin_trace_id = format!("admin-{}", uuid::Uuid::now_v7().simple());
+    let conn = open_db(db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    append_runtime_audit_event(
+        &conn,
+        &admin_trace_id,
+        event_type,
+        &json!({
+            "actor": actor,
+            "admin_trace_id": &admin_trace_id,
+            "payload": payload,
+        }),
+    )?;
+    Ok(admin_trace_id)
+}
+
 fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
     let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
@@ -3128,6 +7181,13 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     )?;
     let audit_events = runtime_store.audit_events_for_trace(trace_id)?;
     let agent_runtime_summary = latest_agent_runtime_summary(&audit_events);
+    let retrieval_failures = runtime_store.list_retrieval_failures_for_trace(
+        trace_id,
+        RetrievalFailureView::AdminDetail,
+        100,
+    )?;
+    let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
+    let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let messages = load_rows_json(
         &conn,
         "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
@@ -3152,6 +7212,11 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "workflow_states": workflow_states,
         "audit_events": audit_events,
         "agent_runtime_summary": agent_runtime_summary,
+        "retrieval_quality_summary": retrieval_quality_summary,
+        "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
+        "retrieval_failures": retrieval_failures,
+        "governance_task_ids": governance_task_ids(&governance_tasks),
+        "governance_tasks": governance_tasks,
         "messages": messages,
         "packages": packages,
     })))
@@ -3170,18 +7235,92 @@ fn latest_agent_runtime_summary(audit_events: &[Value]) -> Value {
 }
 
 fn load_package_audit(db: &Path, package_id: &str) -> Result<Option<Value>> {
-    let Some(package) = TonglingyuRuntimeStore::new(db.to_path_buf()).read_package(package_id)?
-    else {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    let Some(package) = runtime_store.read_package(package_id)? else {
         return Ok(None);
     };
+    let retrieval_failures = runtime_store.list_retrieval_failures_for_package(
+        package_id,
+        RetrievalFailureView::AdminDetail,
+        100,
+    )?;
+    let governance_tasks = runtime_store.list_governance_tasks_for_package(package_id, 100)?;
+    let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let trace = load_trace(db, &package.trace_id)?;
     Ok(Some(json!({
         "object": "tonglingyu.package_audit",
         "package_id": &package.package_id,
         "trace_id": &package.trace_id,
         "package": package_json(&package),
+        "retrieval_quality_summary": retrieval_quality_summary,
+        "retrieval_failure_ids": retrieval_failure_ids(&retrieval_failures),
+        "retrieval_failures": retrieval_failures,
+        "governance_task_ids": governance_task_ids(&governance_tasks),
+        "governance_tasks": governance_tasks,
         "trace": trace,
     })))
+}
+
+fn retrieval_quality_summary(failures: &[Value]) -> Value {
+    let mut status_counts = BTreeMap::<String, usize>::new();
+    let mut type_counts = BTreeMap::<String, usize>::new();
+    let mut quality_issue_count = 0_usize;
+    for failure in failures {
+        if let Some(status) = failure
+            .get("human_review_status")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            *status_counts.entry(status).or_default() += 1;
+        }
+        if let Some(failure_type) = failure
+            .get("failure_type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        {
+            *type_counts.entry(failure_type).or_default() += 1;
+        }
+        quality_issue_count += failure
+            .get("quality_issues")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .or_else(|| {
+                failure
+                    .get("quality_issue_count")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+            })
+            .unwrap_or_default();
+    }
+    let open_failure_count = status_counts.get("open").copied().unwrap_or_default()
+        + status_counts.get("in_review").copied().unwrap_or_default();
+    json!({
+        "object": "tonglingyu.retrieval_quality_admin_summary",
+        "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+        "status": if open_failure_count == 0 { "passed" } else { "needs_attention" },
+        "failure_count": failures.len(),
+        "open_failure_count": open_failure_count,
+        "quality_issue_count": quality_issue_count,
+        "failure_ids": retrieval_failure_ids(failures),
+        "by_status": status_counts,
+        "by_type": type_counts,
+    })
+}
+
+fn retrieval_failure_ids(failures: &[Value]) -> Vec<String> {
+    failures
+        .iter()
+        .filter_map(|failure| failure.get("failure_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn governance_task_ids(tasks: &[Value]) -> Vec<String> {
+    tasks
+        .iter()
+        .filter_map(|task| task.get("task_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
@@ -3275,11 +7414,33 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "messages": table_count(&conn, "gateway_messages")?,
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
+            "retrieval_failures": runtime_stats.retrieval_failures,
+            "governance_tasks": runtime_stats.governance_tasks,
+            "knowledge_patch_proposals": runtime_stats.knowledge_patch_proposals,
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
         "review_status": runtime_stats.review_status,
         "evidence_types": runtime_stats.evidence_types,
+        "rqa": {
+            "schema_version": RETRIEVAL_FAILURE_SCHEMA_VERSION,
+            "retrieval_failures": {
+                "total": runtime_stats.retrieval_failures,
+                "by_status": runtime_stats.retrieval_failure_status,
+                "by_type": runtime_stats.retrieval_failure_type,
+            },
+            "governance_tasks": {
+                "schema_version": KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION,
+                "total": runtime_stats.governance_tasks,
+                "by_status": runtime_stats.governance_task_status,
+                "by_type": runtime_stats.governance_task_type,
+                "by_priority": runtime_stats.governance_task_priority,
+            },
+            "knowledge_patch_proposals": {
+                "schema_version": KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+                "total": runtime_stats.knowledge_patch_proposals,
+            },
+        },
         "workflow_status": workflow_status_counts,
     }))
 }
@@ -3292,13 +7453,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{model=\"{}\",main_profile=\"{}\",reviewer_profile=\"{}\",agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
-        escape_metric_label(&state.model_id),
-        escape_metric_label(&state.profiles.main),
-        escape_metric_label(&state.profiles.reviewer),
-        escape_metric_label(agent_runtime_mode.as_str()),
+        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
+        bounded_metric_enum_label(agent_runtime_mode.as_str(), &["minimal", "hermes"]),
         state.rate_limit_per_minute,
-        state.max_body_bytes
+        state.max_body_bytes,
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -3315,23 +7473,125 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "tonglingyu_evidence_packages_total",
             runtime_stats.evidence_packages,
         ),
+        (
+            "tonglingyu_retrieval_failures_total",
+            runtime_stats.retrieval_failures,
+        ),
+        (
+            "tonglingyu_governance_tasks_total",
+            runtime_stats.governance_tasks,
+        ),
+        (
+            "tonglingyu_knowledge_patch_proposals_total",
+            runtime_stats.knowledge_patch_proposals,
+        ),
         ("tonglingyu_audit_events_total", runtime_stats.audit_events),
     ] {
         lines.push(format!("# TYPE {metric} gauge"));
         lines.push(format!("{metric} {count}"));
     }
-    for (status, count) in runtime_stats.review_status {
+    for (status, count) in
+        bounded_metric_count_map(runtime_stats.review_status, &["passed", "needs_revision"])
+    {
         lines.push(format!(
             "tonglingyu_review_status_total{{status=\"{}\"}} {}",
-            escape_metric_label(&status),
-            count
+            status, count
         ));
     }
-    for (event_type, count) in runtime_stats.audit_event_types {
+    for (status, count) in bounded_metric_count_map(
+        runtime_stats.retrieval_failure_status,
+        &["open", "in_review", "resolved", "wontfix"],
+    ) {
+        lines.push(format!(
+            "tonglingyu_retrieval_failures_by_status_total{{status=\"{}\"}} {}",
+            status, count
+        ));
+    }
+    for (failure_type, count) in bounded_metric_count_map(
+        runtime_stats.retrieval_failure_type,
+        &[
+            "no_evidence_selected",
+            "expected_evidence_missing",
+            "missing_required_evidence_type",
+            "exact_term_missing",
+            "source_usage_metadata_incomplete",
+            "reviewer_evidence_insufficient",
+            "restore_drill_canary",
+            "quality_report_not_passed",
+        ],
+    ) {
+        lines.push(format!(
+            "tonglingyu_retrieval_failures_by_type_total{{failure_type=\"{}\"}} {}",
+            failure_type, count
+        ));
+    }
+    for (status, count) in bounded_metric_count_map(
+        runtime_stats.governance_task_status,
+        &["open", "in_review", "accepted", "rejected", "closed"],
+    ) {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_status_total{{status=\"{}\"}} {}",
+            status, count
+        ));
+    }
+    for (task_type, count) in bounded_metric_count_map(
+        runtime_stats.governance_task_type,
+        &[
+            "source_metadata_fix",
+            "expected_evidence_fix",
+            "retrieval_policy_fix",
+            "alias_term_review",
+            "commentary_link_review",
+            "version_note_review",
+            "expert_review",
+        ],
+    ) {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_type_total{{task_type=\"{}\"}} {}",
+            task_type, count
+        ));
+    }
+    for (priority, count) in
+        bounded_metric_count_map(runtime_stats.governance_task_priority, &["p0", "p1", "p2"])
+    {
+        lines.push(format!(
+            "tonglingyu_governance_tasks_by_priority_total{{priority=\"{}\"}} {}",
+            priority, count
+        ));
+    }
+    for (event_type, count) in bounded_metric_count_map(
+        runtime_stats.audit_event_types,
+        &[
+            "agent_runtime_profile_draft_consumed",
+            "agent_runtime_profile_step_executed",
+            "agent_runtime_profile_execution_summarized",
+            "evidence_package_created",
+            "evidence_package_replayed",
+            "retrieval_failure_recorded",
+            "retrieval_failure_status_updated",
+            "retrieval_failure_admin_list",
+            "retrieval_failure_admin_read",
+            "retrieval_failure_admin_update",
+            "retrieval_failure_admin_cluster",
+            "retrieval_failures_clustered",
+            "knowledge_patch_proposal_created",
+            "knowledge_patch_proposal_admin_create",
+            "rqa_retention_pruned",
+            "governance_task_created",
+            "governance_task_status_updated",
+            "governance_task_admin_list",
+            "governance_task_admin_read",
+            "governance_task_admin_create",
+            "governance_task_admin_update",
+            "user_feedback_received",
+            "rqa_admin_access_denied",
+            "reviewer_completed",
+            "runtime_profile_step_completed",
+        ],
+    ) {
         lines.push(format!(
             "tonglingyu_audit_events_by_type_total{{event_type=\"{}\"}} {}",
-            escape_metric_label(&event_type),
-            count
+            event_type, count
         ));
     }
     lines.push(String::new());
@@ -3340,6 +7600,26 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
 
 fn escape_metric_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn bounded_metric_count_map(
+    values: BTreeMap<String, i64>,
+    allowed: &[&str],
+) -> BTreeMap<String, i64> {
+    let mut bounded = BTreeMap::new();
+    for (value, count) in values {
+        let label = bounded_metric_enum_label(&value, allowed);
+        *bounded.entry(label).or_insert(0) += count;
+    }
+    bounded
+}
+
+fn bounded_metric_enum_label(value: &str, allowed: &[&str]) -> String {
+    if allowed.contains(&value) {
+        escape_metric_label(value)
+    } else {
+        "other".to_string()
+    }
 }
 
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
@@ -3428,6 +7708,7 @@ fn new_trace_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tonglingyu_runtime::{RetrievalFailureListInput, RetrievalFailureView, ReviewRecord};
 
     #[test]
     fn public_completion_strips_cached_runtime_stream_events() {
@@ -3490,6 +7771,1624 @@ mod tests {
         );
         assert_eq!(summary["tool_result_count"], json!(4));
         assert!(latest_agent_runtime_summary(&[]).is_null());
+    }
+
+    fn eval_case_fixture(id: &'static str) -> EvalCase {
+        let expected_block_ids = match id {
+            "tly-inscription" => EXPECTED_TLY_INSCRIPTION_BLOCKS,
+            _ => &[],
+        };
+        EvalCase {
+            id,
+            question: "通灵玉是什么？",
+            expected_review_status: "passed",
+            limit: None,
+            min_cards: 1,
+            max_cards: None,
+            required_evidence_type: Some("base_text"),
+            required_text_any: &[],
+            required_issue_any: &[],
+            expected_evidence_ids: &[],
+            expected_block_ids,
+            expected_evidence_not_applicable_reason: if expected_block_ids.is_empty() {
+                Some(EVAL_NOT_APPLICABLE_COVERAGE_SMOKE)
+            } else {
+                None
+            },
+        }
+    }
+
+    fn eval_test_card(block_id: &str) -> EvidenceCard {
+        EvidenceCard {
+            evidence_id: format!("ev-{block_id}"),
+            evidence_type: "base_text".to_string(),
+            source_id: "hongloumeng-wikisource-120".to_string(),
+            source_title: "紅樓夢/第008回".to_string(),
+            source_url: "https://example.test/source".to_string(),
+            revision_id: None,
+            block_id: block_id.to_string(),
+            text: "莫失莫忘，一除邪祟。".to_string(),
+            support_scope: "test".to_string(),
+            unsupported_scope: "test".to_string(),
+            evidence_level: "primary".to_string(),
+            confidence: "high".to_string(),
+            verification_status: "verified".to_string(),
+        }
+    }
+
+    #[test]
+    fn rqa_restore_canary_creates_closed_live_refs_without_open_p0() {
+        let db_path = temp_gateway_db_path("restore-canary");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let package = runtime_store
+            .create_package(
+                "trace-restore-canary-test",
+                "通灵玉正面文字在哪里？",
+                vec![eval_test_card("block-restore-canary")],
+            )
+            .expect("package creates");
+
+        let args = RqaRestoreCanaryArgs {
+            db: db_path.clone(),
+            package_id: Some(package.package_id.clone()),
+            reviewer: "restore-drill".to_string(),
+            review_note: "closed restore drill canary".to_string(),
+        };
+        let report = rqa_restore_canary_command(&args).expect("restore canary runs");
+
+        assert_eq!(report["status"], json!("ok"));
+        assert_eq!(report["refs"]["trace_id"], json!(package.trace_id));
+        assert_eq!(report["refs"]["package_id"], json!(package.package_id));
+        assert_eq!(
+            report["checks"]["failure_type"],
+            json!("restore_drill_canary")
+        );
+        assert_eq!(report["checks"]["failure_status"], json!("resolved"));
+        assert_eq!(report["checks"]["task_status"], json!("closed"));
+        assert_eq!(report["checks"]["task_priority"], json!("p1"));
+        assert_eq!(report["checks"]["open_p0_retrieval_failures"], json!(0));
+        assert_eq!(report["checks"]["open_p0_governance_tasks"], json!(0));
+
+        let rerun = rqa_restore_canary_command(&args).expect("restore canary reruns");
+        assert_eq!(rerun["refs"]["failure_id"], report["refs"]["failure_id"]);
+        assert_eq!(rerun["refs"]["task_id"], report["refs"]["task_id"]);
+
+        let conn = open_db(&db_path).expect("db opens");
+        let canary_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'rqa_restore_canary_recorded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert_eq!(canary_events, 2);
+        let failure_status: String = conn
+            .query_row(
+                "SELECT human_review_status FROM retrieval_failures WHERE failure_id = ?1",
+                params![report["refs"]["failure_id"].as_str().expect("failure id")],
+                |row| row.get(0),
+            )
+            .expect("failure status");
+        assert_eq!(failure_status, "resolved");
+        let task_status: String = conn
+            .query_row(
+                "SELECT status FROM knowledge_governance_tasks WHERE task_id = ?1",
+                params![report["refs"]["task_id"].as_str().expect("task id")],
+                |row| row.get(0),
+            )
+            .expect("task status");
+        assert_eq!(task_status, "closed");
+        remove_sqlite_file_set(&db_path);
+    }
+
+    fn temp_gateway_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{label}-{}.db", new_trace_id()))
+    }
+
+    fn test_app_state(db_path: PathBuf) -> AppState {
+        AppState {
+            db: db_path.clone(),
+            runtime_store: TonglingyuRuntimeStore::new(db_path),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            model_name: DEFAULT_MODEL_NAME.to_string(),
+            upstream_base_url: None,
+            upstream_api_key: None,
+            upstream_model: DEFAULT_MODEL_ID.to_string(),
+            upstream_timeout_secs: 30,
+            max_evidence: 8,
+            gateway_api_keys: vec!["gateway-key".to_string()],
+            admin_api_keys: vec!["admin-key".to_string()],
+            allow_admin_with_gateway_key: false,
+            max_messages: 20,
+            max_question_chars: 2000,
+            max_body_bytes: 1024 * 1024,
+            rate_limit_per_minute: 120,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
+            admin_rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
+            retention_days: 30,
+            profiles: InternalProfiles {
+                main: "honglou-main".to_string(),
+                text: "honglou-text".to_string(),
+                commentary: "honglou-commentary".to_string(),
+                reviewer: "honglou-reviewer".to_string(),
+            },
+            started_at: now_rfc3339(),
+        }
+    }
+
+    fn seed_eval_retrieval_failure(db_path: &Path, trace_id: &str) -> String {
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let case = eval_case_fixture("rqa-admin-failure");
+        let package = EvidencePackage {
+            package_id: "pkg-rqa-admin-failure".to_string(),
+            trace_id: trace_id.to_string(),
+            question: case.question.to_string(),
+            cards: Vec::new(),
+            claims: vec!["证据不足，不能给出确定结论。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "needs_revision".to_string(),
+                severity: "high".to_string(),
+                issues: vec!["当前没有可追溯证据。".to_string()],
+                summary: "reviewer requires evidence".to_string(),
+            },
+        };
+        let quality_report = eval_failure_quality_report(
+            None,
+            &case,
+            &package,
+            &["forced eval failure".to_string()],
+        );
+        runtime_store
+            .create_retrieval_failure(RetrievalFailureCreateInput {
+                trace_id: trace_id.to_string(),
+                package_id: Some(package.package_id),
+                question: case.question.to_string(),
+                quality_report,
+                selected_evidence_ids: Vec::new(),
+                expected_evidence_ids: Vec::new(),
+                agent_diagnosis: Some("eval_case_failed:forced eval failure".to_string()),
+                proposed_fix: Some("inspect_eval_case_quality_details".to_string()),
+            })
+            .expect("seed retrieval failure")
+            .failure_id
+    }
+
+    fn admin_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer admin-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "admin-1".parse().unwrap());
+        headers
+    }
+
+    fn gateway_headers(user_id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", user_id.parse().unwrap());
+        headers.insert("x-open-webui-user-id", user_id.parse().unwrap());
+        headers
+    }
+
+    fn seed_owned_gateway_package(db_path: &Path, user_id: &str) -> EvidencePackage {
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let package = runtime_store
+            .create_package(
+                "trace-user-feedback-test",
+                "通灵玉回答是否有证据？",
+                vec![eval_test_card("block-user-feedback-test")],
+            )
+            .expect("package creates");
+        let conn = open_db(db_path).expect("gateway db opens");
+        let context = GatewayRequestContext {
+            user_ref: user_id.to_string(),
+            chat_ref: "chat-user-feedback-test".to_string(),
+            external_message_id: "message-user-feedback-test".to_string(),
+            external_message_id_provided: true,
+            auth_subject: user_id.to_string(),
+        };
+        let session_id =
+            get_or_create_session(&conn, &context, DEFAULT_MODEL_ID).expect("session creates");
+        store_gateway_message(
+            &conn,
+            GatewayMessageRecord {
+                session_id: &session_id,
+                context: &context,
+                trace_id: &package.trace_id,
+                package_id: Some(&package.package_id),
+                request_hash: &hash_text("通灵玉回答是否有证据？"),
+                question: "通灵玉回答是否有证据？",
+                response: &json!({"object": "chat.completion", "id": "cmpl-user-feedback-test"}),
+            },
+        )
+        .expect("gateway message stores");
+        package
+    }
+
+    #[test]
+    fn prune_gateway_and_runtime_data_preserves_active_rqa_gateway_rows() {
+        let db_path = temp_gateway_db_path("gateway-prune-rqa-protect");
+        let old = "2020-01-01T00:00:00Z";
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let active_package = runtime_store
+            .create_package(
+                "trace-gateway-prune-active",
+                "active gateway retention question",
+                vec![eval_test_card("block-gateway-prune-active")],
+            )
+            .expect("active package creates");
+        let runtime_conn = runtime_store.open_connection().expect("runtime db opens");
+        for table in ["evidence_packages", "evidence_cards", "review_records"] {
+            runtime_conn
+                .execute(
+                    &format!("UPDATE {table} SET created_at = ?1 WHERE package_id = ?2"),
+                    params![old, &active_package.package_id],
+                )
+                .expect("runtime package rows old");
+        }
+        runtime_conn
+            .execute(
+                "UPDATE audit_events SET created_at = ?1 WHERE trace_id = ?2",
+                params![old, &active_package.trace_id],
+            )
+            .expect("runtime audit rows old");
+        runtime_conn
+            .execute(
+                r#"
+                INSERT INTO retrieval_failures (
+                    failure_id, trace_id, package_id, question_sha256,
+                    question_char_count, question_summary, kb_schema_version,
+                    kb_version_id, failure_type, redacted_query_terms_json,
+                    required_evidence_types_json, actual_evidence_types_json,
+                    expected_evidence_ids_json, selected_evidence_ids_json,
+                    missing_evidence_types_json, quality_issues_json,
+                    agent_diagnosis, proposed_fix, human_review_status, reviewer,
+                    review_note, created_at, updated_at, resolved_at
+                ) VALUES (
+                    'rf-gateway-prune-active', ?1, ?2, ?3, 33,
+                    'sha256:gateway-prune-active', ?4, NULL,
+                    'expected_evidence_missing', '[]', '["base_text"]', '[]',
+                    '["ev-missing"]', '[]', '["base_text"]',
+                    '["expected_evidence_missing"]', NULL,
+                    'protect gateway rows while RQA failure is open',
+                    'open', NULL, NULL, ?5, ?5, NULL
+                )
+                "#,
+                params![
+                    &active_package.trace_id,
+                    &active_package.package_id,
+                    hash_text("active gateway retention question"),
+                    KNOWLEDGE_BASE_SCHEMA_VERSION,
+                    old,
+                ],
+            )
+            .expect("active retrieval failure inserts");
+        drop(runtime_conn);
+
+        let conn = open_db(&db_path).expect("gateway db opens");
+        seed_gateway_retention_row(
+            &conn,
+            "active",
+            &active_package.trace_id,
+            Some(&active_package.package_id),
+            "active gateway retention question",
+            old,
+        );
+        seed_gateway_retention_row(
+            &conn,
+            "expired",
+            "trace-gateway-prune-expired",
+            Some("pkg-gateway-prune-expired"),
+            "expired gateway retention question",
+            old,
+        );
+        drop(conn);
+
+        let dry_run =
+            prune_gateway_and_runtime_data(&db_path, 1, true).expect("gateway dry run prune");
+        assert_eq!(dry_run["counts"]["gateway_message_candidates"], json!(2));
+        assert_eq!(dry_run["counts"]["gateway_messages"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_gateway_messages"], json!(1));
+        assert_eq!(dry_run["counts"]["workflow_state_candidates"], json!(2));
+        assert_eq!(dry_run["counts"]["workflow_states"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_workflow_states"], json!(1));
+        assert_eq!(dry_run["counts"]["gateway_sessions"], json!(1));
+        assert_eq!(dry_run["counts"]["protected_gateway_sessions"], json!(1));
+
+        let report = prune_gateway_and_runtime_data(&db_path, 1, false).expect("gateway prune");
+        assert_eq!(report["counts"]["gateway_messages"], json!(1));
+        assert_eq!(report["counts"]["workflow_states"], json!(1));
+        assert_eq!(report["counts"]["gateway_sessions"], json!(1));
+        assert_eq!(report["counts"]["gateway_tombstones"], json!(3));
+        let conn = open_db(&db_path).expect("gateway db reopens");
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_messages", "message_id", "msg-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_messages", "message_id", "msg-expired"),
+            0
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "workflow_states", "state_id", "state-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "workflow_states", "state_id", "state-expired"),
+            0
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_sessions", "session_id", "session-active"),
+            1
+        );
+        assert_eq!(
+            gateway_row_count(&conn, "gateway_sessions", "session_id", "session-expired"),
+            0
+        );
+        let gateway_tombstones: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rqa_lifecycle_tombstones WHERE object_type LIKE 'gateway_%' OR object_type = 'workflow_state_batch'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("gateway tombstone count");
+        assert_eq!(gateway_tombstones, 3);
+        let tombstone_payloads = load_gateway_tombstone_payloads(&conn);
+        assert!(tombstone_payloads.iter().all(|payload| {
+            !payload.contains("active gateway retention question")
+                && !payload.contains("expired gateway retention question")
+        }));
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    fn seed_gateway_retention_row(
+        conn: &Connection,
+        suffix: &str,
+        trace_id: &str,
+        package_id: Option<&str>,
+        question: &str,
+        created_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO gateway_sessions (session_id, user_ref, chat_ref, model_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![
+                format!("session-{suffix}"),
+                format!("user-{suffix}"),
+                format!("chat-{suffix}"),
+                DEFAULT_MODEL_ID,
+                created_at,
+            ],
+        )
+        .expect("gateway session inserts");
+        conn.execute(
+            "INSERT INTO gateway_messages (message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                format!("msg-{suffix}"),
+                format!("session-{suffix}"),
+                format!("external-{suffix}"),
+                trace_id,
+                package_id,
+                hash_text(question),
+                question,
+                json!({"object": "chat.completion", "id": format!("cmpl-{suffix}")}).to_string(),
+                created_at,
+            ],
+        )
+        .expect("gateway message inserts");
+        conn.execute(
+            "INSERT INTO workflow_states (state_id, trace_id, session_id, package_id, state, status, detail_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                format!("state-{suffix}"),
+                trace_id,
+                format!("session-{suffix}"),
+                package_id,
+                "rqa_retention_test",
+                "completed",
+                json!({"suffix": suffix}).to_string(),
+                created_at,
+            ],
+        )
+        .expect("workflow state inserts");
+    }
+
+    fn gateway_row_count(conn: &Connection, table: &str, id_column: &str, id: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {id_column} = ?1"),
+            params![id],
+            |row| row.get(0),
+        )
+        .expect("gateway row count")
+    }
+
+    fn load_gateway_tombstone_payloads(conn: &Connection) -> Vec<String> {
+        conn.prepare("SELECT payload_json FROM rqa_lifecycle_tombstones ORDER BY created_at")
+            .expect("prepare tombstone payloads")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query tombstone payloads")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect tombstone payloads")
+    }
+
+    fn audit_event_count(db_path: &Path, event_type: &str) -> i64 {
+        let conn = open_db(db_path).expect("db opens");
+        count_where(&conn, "audit_events", "event_type = ?1", event_type).expect("audit count")
+    }
+
+    fn latest_audit_event_payload(db_path: &Path, event_type: &str) -> Value {
+        let conn = open_db(db_path).expect("db opens");
+        let payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM audit_events WHERE event_type = ?1 ORDER BY created_at DESC, event_id DESC LIMIT 1",
+                params![event_type],
+                |row| row.get(0),
+            )
+            .expect("audit payload exists");
+        serde_json::from_str(&payload).expect("audit payload json")
+    }
+
+    async fn response_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body reads");
+        String::from_utf8(bytes.to_vec()).expect("response body is utf-8")
+    }
+
+    #[test]
+    fn eval_quality_summary_fails_closed_without_expected_denominator() {
+        let quality = EvalQualityAccumulator {
+            total_cases: 1,
+            quality_report_cases: 1,
+            classified_cases: 1,
+            expected_evidence_cases: 0,
+            forbidden_conclusion_cases: 1,
+            forbidden_conclusion_avoided: 1,
+            reviewer_status_matched: 1,
+            ..EvalQualityAccumulator::default()
+        };
+
+        let summary = eval_quality_summary(&quality);
+
+        assert_eq!(summary["status"], json!("failed"));
+        assert!(
+            summary["blockers"].as_array().is_some_and(|items| {
+                items.contains(&json!("expected_evidence_denominator_zero"))
+            })
+        );
+    }
+
+    #[test]
+    fn eval_quality_summary_passes_annotated_thresholds() {
+        let mut quality = EvalQualityAccumulator {
+            total_cases: 1,
+            quality_report_cases: 1,
+            quality_report_production_ready_required_cases: 1,
+            quality_report_production_ready_cases: 1,
+            classified_cases: 1,
+            expected_evidence_cases: 1,
+            expected_hit_at_1: 1,
+            expected_hit_at_3: 1,
+            expected_hit_at_8: 1,
+            required_type_cases: 1,
+            required_type_passed: 1,
+            exact_term_total: 1,
+            exact_term_passed: 1,
+            source_boundary_confirmation_cases: 1,
+            source_boundary_confirmation_avoided: 1,
+            forbidden_conclusion_cases: 1,
+            forbidden_conclusion_avoided: 1,
+            reviewer_status_matched: 1,
+            ..EvalQualityAccumulator::default()
+        };
+        quality
+            .source_ids
+            .insert("hongloumeng-wikisource-120".to_string());
+        quality.edition_labels.insert("紅樓夢/第008回".to_string());
+
+        let summary = eval_quality_summary(&quality);
+
+        assert_eq!(summary["status"], json!("passed"));
+        assert_eq!(summary["expected_evidence_hit_at_8"]["ratio"], json!(1.0));
+        assert_eq!(summary["source_diversity"]["count"], json!(1));
+    }
+
+    #[test]
+    fn eval_cli_defaults_to_snapshot_copy() {
+        let args = Args::try_parse_from(["tonglingyu-gateway", "eval"]).expect("parse eval args");
+        let Command::Eval(eval_args) = args.command else {
+            panic!("expected eval command");
+        };
+
+        assert!(!eval_args.allow_db_mutation);
+    }
+
+    #[test]
+    fn eval_cli_requires_explicit_db_mutation_opt_in() {
+        let args = Args::try_parse_from(["tonglingyu-gateway", "eval", "--allow-db-mutation"])
+            .expect("parse eval args");
+        let Command::Eval(eval_args) = args.command else {
+            panic!("expected eval command");
+        };
+
+        assert!(eval_args.allow_db_mutation);
+    }
+
+    #[test]
+    fn eval_allows_expected_downgrade_quality_issues_only_for_negative_cases() {
+        let mut negative = eval_case_fixture("unsupported-modern-topic");
+        negative.expected_review_status = "needs_revision";
+        negative.required_evidence_type = None;
+        negative.min_cards = 0;
+
+        assert!(eval_allows_non_production_quality_issue(
+            &negative,
+            "no_evidence_selected"
+        ));
+        assert!(eval_allows_non_production_quality_issue(
+            &negative,
+            "missing_required_evidence_type:base_text"
+        ));
+        assert!(!eval_allows_non_production_quality_issue(
+            &negative,
+            "source_usage_metadata_incomplete:source:missing_license_metadata"
+        ));
+
+        let positive = eval_case_fixture("baoyu-alias-retrieval");
+        assert!(!eval_allows_non_production_quality_issue(
+            &positive,
+            "no_evidence_selected"
+        ));
+    }
+
+    #[test]
+    fn eval_case_classification_marks_unannotated_cases_not_applicable() {
+        let annotated = eval_case_fixture("tly-inscription");
+        let unannotated = eval_case_fixture("baoyu-alias-retrieval");
+
+        assert!(!eval_expected_block_ids(&annotated).is_empty());
+        assert!(eval_expected_evidence_not_applicable_reason(&annotated).is_none());
+        assert_eq!(
+            eval_expected_evidence_not_applicable_reason(&unannotated),
+            Some("coverage_smoke_without_stable_expected_block")
+        );
+    }
+
+    #[test]
+    fn eval_expected_hit_requires_all_expected_refs() {
+        let case = eval_case_fixture("tly-inscription");
+        let partial_cards = vec![eval_test_card(EXPECTED_TLY_INSCRIPTION_BLOCKS[0])];
+        let full_cards = vec![
+            eval_test_card(EXPECTED_TLY_INSCRIPTION_BLOCKS[0]),
+            eval_test_card(EXPECTED_TLY_INSCRIPTION_BLOCKS[1]),
+        ];
+
+        assert!(!expected_refs_hit_at(&case, &partial_cards, 8));
+        assert!(expected_refs_hit_at(&case, &full_cards, 8));
+    }
+
+    #[test]
+    fn eval_failure_record_uses_retrieval_failures_api() {
+        let db_path = temp_gateway_db_path("tonglingyu-gateway-eval-failure");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let case = eval_case_fixture("eval-failure-test");
+        let package = EvidencePackage {
+            package_id: "pkg-eval-failure-test".to_string(),
+            trace_id: "trace-eval-failure-test".to_string(),
+            question: case.question.to_string(),
+            cards: Vec::new(),
+            claims: vec!["证据不足，不能给出确定结论。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "needs_revision".to_string(),
+                severity: "high".to_string(),
+                issues: vec!["当前没有可追溯证据。".to_string()],
+                summary: "reviewer requires evidence".to_string(),
+            },
+        };
+        let quality_report = eval_failure_quality_report(
+            None,
+            &case,
+            &package,
+            &["forced eval failure".to_string()],
+        );
+
+        runtime_store
+            .create_retrieval_failure(RetrievalFailureCreateInput {
+                trace_id: package.trace_id.clone(),
+                package_id: Some(package.package_id.clone()),
+                question: case.question.to_string(),
+                quality_report,
+                selected_evidence_ids: Vec::new(),
+                expected_evidence_ids: Vec::new(),
+                agent_diagnosis: Some("eval_case_failed:forced eval failure".to_string()),
+                proposed_fix: Some("inspect_eval_case_quality_details".to_string()),
+            })
+            .expect("eval failure writes retrieval failure");
+        let failures = runtime_store
+            .list_retrieval_failures(RetrievalFailureListInput {
+                human_review_status: Some("open".to_string()),
+                failure_type: Some("quality_report_not_passed".to_string()),
+                limit: 10,
+                offset: 0,
+                view: RetrievalFailureView::AdminDetail,
+            })
+            .expect("list retrieval failures");
+
+        assert_eq!(failures.items.len(), 1);
+        assert_eq!(
+            failures.items[0]["trace_id"],
+            json!("trace-eval-failure-test")
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn admin_trace_includes_retrieval_quality_summary_and_failure_ids() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-trace-rqa");
+        let trace_id = "trace-admin-rqa-test";
+        let failure_id = seed_eval_retrieval_failure(&db_path, trace_id);
+
+        let trace = load_trace(&db_path, trace_id)
+            .expect("trace loads")
+            .expect("trace exists");
+
+        assert_eq!(
+            trace["retrieval_quality_summary"]["schema_version"],
+            RETRIEVAL_FAILURE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            trace["retrieval_quality_summary"]["failure_count"],
+            json!(1)
+        );
+        assert_eq!(
+            trace["retrieval_quality_summary"]["open_failure_count"],
+            json!(1)
+        );
+        assert_eq!(trace["retrieval_failure_ids"], json!([failure_id]));
+        assert_eq!(trace["retrieval_failures"][0]["view"], "admin_detail");
+        assert_eq!(trace["governance_tasks"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            trace["governance_tasks"][0]["source_failure_id"],
+            json!(failure_id)
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn metrics_include_bounded_retrieval_failure_counts() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-metrics-rqa");
+        let trace_id = "trace-admin-metrics-test";
+        let case = eval_case_fixture("rqa-admin-failure");
+        let failure_id = seed_eval_retrieval_failure(&db_path, trace_id);
+        let conn = open_db(&db_path).expect("gateway db opens");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema exists");
+        let state = test_app_state(db_path.clone());
+
+        let metrics = load_metrics(&state).expect("metrics load");
+        let prometheus = load_prometheus_metrics(&state).expect("prometheus metrics load");
+        let metrics_text = serde_json::to_string(&metrics).expect("metrics serializes");
+
+        assert_eq!(metrics["counts"]["retrieval_failures"], json!(1));
+        assert_eq!(metrics["counts"]["governance_tasks"], json!(1));
+        assert_eq!(
+            metrics["rqa"]["schema_version"],
+            RETRIEVAL_FAILURE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            metrics["rqa"]["retrieval_failures"]["by_status"]["open"],
+            json!(1)
+        );
+        assert_eq!(
+            metrics["rqa"]["retrieval_failures"]["by_type"]["quality_report_not_passed"],
+            json!(1)
+        );
+        assert_eq!(
+            metrics["rqa"]["governance_tasks"]["by_status"]["open"],
+            json!(1)
+        );
+        assert_eq!(
+            metrics["rqa"]["governance_tasks"]["by_priority"]["p0"],
+            json!(1)
+        );
+        assert!(prometheus.contains("tonglingyu_retrieval_failures_total 1"));
+        assert!(prometheus.contains("tonglingyu_governance_tasks_total 1"));
+        assert!(
+            prometheus.contains("tonglingyu_retrieval_failures_by_status_total{status=\"open\"} 1")
+        );
+        assert!(prometheus.contains(
+            "tonglingyu_retrieval_failures_by_type_total{failure_type=\"quality_report_not_passed\"} 1"
+        ));
+        assert!(
+            prometheus.contains("tonglingyu_governance_tasks_by_status_total{status=\"open\"} 1")
+        );
+        assert!(prometheus.contains("tonglingyu_gateway_info{agent_runtime_mode="));
+        assert!(prometheus.contains("rate_limit_per_minute=\"120\""));
+        assert!(prometheus.contains("max_body_bytes=\"1048576\""));
+        assert!(!prometheus.contains("main_profile="));
+        assert!(!prometheus.contains("reviewer_profile="));
+        for leaked_value in [
+            trace_id,
+            "pkg-rqa-admin-failure",
+            failure_id.as_str(),
+            case.question,
+        ] {
+            assert!(!metrics_text.contains(leaked_value));
+            assert!(!prometheus.contains(leaked_value));
+        }
+        for forbidden_label in ["trace_id=", "package_id=", "question=", "query=", "user="] {
+            assert!(!prometheus.contains(forbidden_label));
+        }
+        assert!(!metrics_text.contains("\"trace_id\""));
+        assert!(!metrics_text.contains("\"package_id\""));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn retrieval_failure_list_filter_rejects_unknown_fields() {
+        let mut params = BTreeMap::new();
+        params.insert("trace_id".to_string(), "trace-leak-attempt".to_string());
+
+        let error =
+            retrieval_failure_list_input(&params).expect_err("unknown filter must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported retrieval failure filter")
+        );
+    }
+
+    #[test]
+    fn retrieval_failure_update_detects_stale_updated_at() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-cas");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cas");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let failure = runtime_store
+            .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+            .expect("failure reads")
+            .expect("failure exists");
+        let updated_at = failure["updated_at"]
+            .as_str()
+            .expect("updated_at is present")
+            .to_string();
+
+        runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "in_review",
+                Some("admin-1"),
+                Some("reviewing"),
+                Some(&updated_at),
+            )
+            .expect("first update succeeds")
+            .expect("failure updated");
+        let stale = runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "resolved",
+                Some("admin-1"),
+                Some("fixed"),
+                Some(&updated_at),
+            )
+            .expect_err("stale update must conflict");
+
+        assert!(stale.to_string().contains("update conflict"));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_denies_unauthorized_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-auth-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response =
+            retrieval_failures_endpoint(State(state), HeaderMap::new(), Query(BTreeMap::new()))
+                .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_denies_gateway_key_subject_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-user-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response =
+            retrieval_failures_endpoint(State(state), headers, Query(BTreeMap::new())).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_endpoint_rate_limit_denial_is_audited() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-rate-limit");
+        let mut state = test_app_state(db_path.clone());
+        state.admin_rate_limiter = Arc::new(GatewayRateLimiter::new(1, Duration::from_secs(60)));
+        let state = Arc::new(state);
+        let headers = admin_headers();
+
+        let first = retrieval_failures_endpoint(
+            State(state.clone()),
+            headers.clone(),
+            Query(BTreeMap::new()),
+        )
+        .await;
+        let second =
+            retrieval_failures_endpoint(State(state), headers, Query(BTreeMap::new())).await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn admin_access_denial_endpoint_records_role_denial_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-role-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = admin_headers();
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response = admin_access_denial_endpoint(
+            State(state),
+            headers,
+            Json(AdminAccessDenialRequest {
+                action: Some("metrics".to_string()),
+                denial: "role_denied".to_string(),
+                model: Some(DEFAULT_MODEL_ID.to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_read_not_found_is_redacted() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-not-found");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath("rf-does-not-exist".to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_read"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_read_success_writes_access_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-read-audit");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-read-audit");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response =
+            retrieval_failure_endpoint(State(state), admin_headers(), AxumPath(failure_id)).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_read"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_repeated_payload_is_idempotent() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-idempotent");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-idempotent");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let first = update_retrieval_failure_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(failure_id.clone()),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "in_review".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("reviewing".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+        let second = update_retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "in_review".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("reviewing".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_status_updated"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            2
+        );
+        let runtime_update_payload =
+            latest_audit_event_payload(&db_path, "retrieval_failure_status_updated");
+        assert_eq!(runtime_update_payload["previous_status"], "open");
+        assert_eq!(runtime_update_payload["new_status"], "in_review");
+        assert_eq!(
+            runtime_update_payload["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            runtime_update_payload["status_history"]["new_status"],
+            "in_review"
+        );
+        assert!(
+            runtime_update_payload["status_history"]["reason_sha256"]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            runtime_update_payload["status_history"]["timestamp"]
+                .as_str()
+                .is_some()
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_denies_gateway_key_subject_and_audits() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-user-denial");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-update-denial");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer gateway-key".parse().unwrap());
+        headers.insert("x-tonglingyu-subject", "user-1".parse().unwrap());
+
+        let response = update_retrieval_failure_endpoint(
+            State(state),
+            headers,
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "resolved".to_string(),
+                reviewer: Some("user-1".to_string()),
+                review_note: Some("should be denied".to_string()),
+                if_match_updated_at: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            0
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_update_conflict_writes_access_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-update-conflict");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-conflict");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let failure = runtime_store
+            .read_retrieval_failure(&failure_id, RetrievalFailureView::AdminDetail)
+            .expect("failure reads")
+            .expect("failure exists");
+        let stale_updated_at = failure["updated_at"]
+            .as_str()
+            .expect("updated_at is present")
+            .to_string();
+        runtime_store
+            .update_retrieval_failure_status_checked(
+                &failure_id,
+                "in_review",
+                Some("admin-1"),
+                Some("reviewing"),
+                Some(&stale_updated_at),
+            )
+            .expect("first update succeeds");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = update_retrieval_failure_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(failure_id),
+            Json(RetrievalFailureUpdateRequest {
+                human_review_status: "resolved".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("fixed".to_string()),
+                if_match_updated_at: Some(stale_updated_at),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_update"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn governance_task_endpoints_create_list_update_and_audit() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-governance-task");
+        let failure_id = seed_eval_retrieval_failure(&db_path, "trace-admin-governance-task");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let create = create_governance_task_from_failure_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(failure_id.clone()),
+            Json(GovernanceTaskCreateRequest {
+                task_type: None,
+                priority: None,
+                proposed_fix: None,
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(create.status(), StatusCode::OK);
+
+        let mut params = BTreeMap::new();
+        params.insert("status".to_string(), "open".to_string());
+        params.insert("source_failure_id".to_string(), failure_id.clone());
+        let list =
+            governance_tasks_endpoint(State(state.clone()), admin_headers(), Query(params)).await;
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let create_trace = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "trace".to_string(),
+                source_entity_id: "trace-admin-governance-task".to_string(),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("request expert review".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(create_trace.status(), StatusCode::OK);
+
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: None,
+                priority: Some("p0".to_string()),
+                source_failure_id: Some(failure_id),
+                source_entity_type: None,
+                source_entity_id: None,
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list governance tasks");
+        let task_id = tasks.items[0]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let updated_at = tasks.items[0]["updated_at"]
+            .as_str()
+            .expect("updated_at")
+            .to_string();
+        let update = update_governance_task_endpoint(
+            State(state),
+            admin_headers(),
+            AxumPath(task_id),
+            Json(GovernanceTaskUpdateRequest {
+                status: "accepted".to_string(),
+                reviewer: Some("admin-1".to_string()),
+                review_note: Some("accepted for source patch".to_string()),
+                evidence_ref: Some("source://review-note/001".to_string()),
+                if_match_updated_at: Some(updated_at),
+            }),
+        )
+        .await;
+
+        assert_eq!(update.status(), StatusCode::OK);
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_admin_create"),
+            2
+        );
+        assert_eq!(audit_event_count(&db_path, "governance_task_admin_list"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_admin_update"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "governance_task_status_updated"),
+            1
+        );
+        let runtime_update_payload =
+            latest_audit_event_payload(&db_path, "governance_task_status_updated");
+        assert_eq!(runtime_update_payload["previous_status"], "open");
+        assert_eq!(runtime_update_payload["new_status"], "accepted");
+        assert_eq!(
+            runtime_update_payload["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            runtime_update_payload["status_history"]["new_status"],
+            "accepted"
+        );
+        assert!(
+            runtime_update_payload["status_history"]["reason_sha256"]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            runtime_update_payload["status_history"]["timestamp"]
+                .as_str()
+                .is_some()
+        );
+        let admin_update_payload =
+            latest_audit_event_payload(&db_path, "governance_task_admin_update");
+        assert_eq!(admin_update_payload["actor"], "admin-1");
+        assert_eq!(
+            admin_update_payload["payload"]["status_history"]["previous_status"],
+            "open"
+        );
+        assert_eq!(
+            admin_update_payload["payload"]["status_history"]["new_status"],
+            "accepted"
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_patch_proposal_endpoint_creates_review_task_without_fact_mutation() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-patch-proposal");
+        let package = seed_owned_gateway_package(&db_path, "user-1");
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema");
+        let alias_count_before = table_count(&conn, "aliases").expect("alias count before");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = create_knowledge_patch_proposal_endpoint(
+            State(state),
+            admin_headers(),
+            Json(KnowledgePatchProposalCreateRequest {
+                proposal_type: "alias".to_string(),
+                trace_id: Some(package.trace_id.clone()),
+                package_id: Some(package.package_id.clone()),
+                source_ref: Some(format!("package:{}", package.package_id)),
+                payload: json!({
+                    "alias": "灵玉",
+                    "target_ref": "person:baoyu",
+                    "rationale": "admin proposed alias must be human reviewed",
+                }),
+                priority: Some("p1".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("proposal response json");
+        assert_eq!(
+            body["object"],
+            json!("tonglingyu.knowledge_patch_proposal_admin_create")
+        );
+        assert_eq!(
+            body["schema_version"],
+            json!(KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION)
+        );
+        assert_eq!(body["result"]["direct_fact_mutation"], json!(false));
+        assert_eq!(body["result"]["proposal"]["proposal_type"], json!("alias"));
+        assert_eq!(
+            body["result"]["task"]["source_entity_type"],
+            json!("knowledge_patch_proposal")
+        );
+        assert_eq!(
+            body["result"]["task"]["task_type"],
+            json!("alias_term_review")
+        );
+        assert_eq!(
+            table_count(&conn, "aliases").expect("alias count after"),
+            alias_count_before
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_patch_proposal_admin_create"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_patch_proposal_created"),
+            1
+        );
+        assert_eq!(audit_event_count(&db_path, "governance_task_created"), 1);
+        let runtime_audit_payload: String = conn
+            .query_row(
+                "SELECT payload_json FROM audit_events WHERE event_type = 'knowledge_patch_proposal_created' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("runtime proposal audit payload");
+        assert!(!runtime_audit_payload.contains("灵玉"));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn retrieval_failure_cluster_endpoint_creates_proposed_fix_task() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-rqa-cluster");
+        seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cluster-1");
+        seed_eval_retrieval_failure(&db_path, "trace-admin-rqa-cluster-2");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = cluster_retrieval_failures_endpoint(
+            State(state),
+            admin_headers(),
+            Json(RetrievalFailureClusterRequest {
+                human_review_status: Some("open".to_string()),
+                failure_type: Some("quality_report_not_passed".to_string()),
+                min_cluster_size: Some(2),
+                limit: Some(20),
+                create_tasks: Some(true),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("cluster response json");
+        assert_eq!(
+            body["schema_version"],
+            json!(RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION)
+        );
+        assert_eq!(body["result"]["cluster_count"], json!(1));
+        assert_eq!(body["result"]["task_count"], json!(1));
+        assert_eq!(
+            body["result"]["clusters"][0]["direct_fact_mutation"],
+            json!(false)
+        );
+        assert_eq!(
+            body["result"]["clusters"][0]["task"]["source_entity_type"],
+            json!("retrieval_failure_cluster")
+        );
+        assert!(
+            body["result"]["clusters"][0]["task"]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("agent_cluster_proposed_fix"))
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failure_admin_cluster"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "retrieval_failures_clustered"),
+            1
+        );
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn user_feedback_endpoint_queues_governance_task_without_fact_mutation() {
+        let db_path = temp_gateway_db_path("tonglingyu-user-feedback");
+        let package = seed_owned_gateway_package(&db_path, "user-1");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = user_feedback_endpoint(
+            State(state.clone()),
+            gateway_headers("user-1"),
+            Json(UserFeedbackRequest {
+                trace_id: None,
+                package_id: Some(package.package_id.clone()),
+                feedback_type: Some("missing_evidence".to_string()),
+                feedback_text: "这条回答缺少直接证据，请专家复核。".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("feedback response json");
+        assert_eq!(body["object"], json!("tonglingyu.user_feedback"));
+        assert_eq!(body["direct_fact_mutation"], json!(false));
+        assert_eq!(body["task"]["source_entity_type"], json!("user_feedback"));
+        assert_eq!(body["task"]["task_type"], json!("expert_review"));
+        assert_eq!(body["task"]["priority"], json!("p1"));
+
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: Some("open".to_string()),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p1".to_string()),
+                source_failure_id: None,
+                source_entity_type: Some("user_feedback".to_string()),
+                source_entity_id: Some(
+                    body["task"]["source_entity_id"]
+                        .as_str()
+                        .expect("feedback source id")
+                        .to_string(),
+                ),
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list user feedback governance tasks");
+        assert_eq!(tasks.items.len(), 1);
+        assert_eq!(tasks.items[0]["package_id"], json!(package.package_id));
+        assert_eq!(tasks.items[0]["source_failure_id"], Value::Null);
+        assert!(
+            tasks.items[0]["proposed_fix"]
+                .as_str()
+                .is_some_and(|value| value.contains("user_feedback_type=missing_evidence"))
+        );
+        assert_eq!(audit_event_count(&db_path, "user_feedback_received"), 1);
+        assert_eq!(audit_event_count(&db_path, "governance_task_created"), 1);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn user_feedback_endpoint_rejects_unowned_package() {
+        let db_path = temp_gateway_db_path("tonglingyu-user-feedback-unowned");
+        let package = seed_owned_gateway_package(&db_path, "owner-1");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = user_feedback_endpoint(
+            State(state),
+            gateway_headers("user-2"),
+            Json(UserFeedbackRequest {
+                trace_id: None,
+                package_id: Some(package.package_id),
+                feedback_type: Some("wrong_answer".to_string()),
+                feedback_text: "这条回答可能有问题。".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(audit_event_count(&db_path, "user_feedback_received"), 0);
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let tasks = runtime_store
+            .list_governance_tasks(KnowledgeGovernanceTaskListInput {
+                status: None,
+                task_type: None,
+                priority: None,
+                source_failure_id: None,
+                source_entity_type: Some("user_feedback".to_string()),
+                source_entity_id: None,
+                limit: 10,
+                offset: 0,
+            })
+            .expect("list user feedback governance tasks");
+        assert!(tasks.items.is_empty());
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn openwebui_metadata_task_detection_is_narrow() {
+        let title_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+
+### Output:
+JSON format: { "title": "your concise title here" }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
+        let tags_prompt = r#"### Task:
+Generate 1-3 broad tags categorizing the main themes of the chat history.
+
+### Output:
+JSON format: { "tags": ["tag1", "tag2", "tag3"] }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
+
+        assert_eq!(
+            detect_openwebui_metadata_task(title_prompt),
+            Some(OpenWebUiMetadataTask::Title)
+        );
+        assert_eq!(
+            detect_openwebui_metadata_task(tags_prompt),
+            Some(OpenWebUiMetadataTask::Tags)
+        );
+        assert_eq!(detect_openwebui_metadata_task("通灵玉是什么？"), None);
+    }
+
+    #[tokio::test]
+    async fn openwebui_metadata_request_does_not_mutate_rqa_governance() {
+        let db_path = temp_gateway_db_path("tonglingyu-openwebui-metadata");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Guidelines:
+- The output must be a single, raw JSON object, without any markdown code fences.
+### Output:
+JSON format: { "title": "your concise title here" }
+### Chat History:
+<chat_history>
+USER: Please answer briefly: what evidence appears when Lin Daiyu first arrives in chapter 3?
+ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回证据不足。
+</chat_history>"#;
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": metadata_prompt}],
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-title-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("metadata content");
+        let metadata_json: Value = serde_json::from_str(content).expect("metadata content is json");
+        assert_eq!(metadata_json["title"], json!("通灵玉证据复核"));
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(
+            body["trace_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("tly-"))
+        );
+        assert_eq!(body["evidence_package_id"], Value::Null);
+
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        assert_eq!(
+            table_count(&conn, "retrieval_failures").expect("failure count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "knowledge_governance_tasks").expect("task count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata message count"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "openwebui_metadata_request_handled"),
+            1
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn public_completion_does_not_expose_rqa_internal_fields() {
+        let package = EvidencePackage {
+            package_id: "pkg-public-rqa-test".to_string(),
+            trace_id: "trace-public-rqa-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards: vec![eval_test_card("block-public-rqa-test")],
+            claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer passed".to_string(),
+            },
+        };
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some("session-public-rqa-test"),
+        );
+
+        let rendered = serde_json::to_string(&value).expect("completion serializes");
+
+        assert!(!rendered.contains("retrieval_failures"));
+        assert!(!rendered.contains("retrieval_quality_summary"));
+        assert!(!rendered.contains("quality_report"));
+    }
+
+    #[tokio::test]
+    async fn streaming_completion_does_not_expose_rqa_internal_fields() {
+        let package = EvidencePackage {
+            package_id: "pkg-public-rqa-stream-test".to_string(),
+            trace_id: "trace-public-rqa-stream-test".to_string(),
+            question: "通灵玉是什么？".to_string(),
+            cards: vec![eval_test_card("block-public-rqa-stream-test")],
+            claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer passed".to_string(),
+            },
+        };
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some("session-public-rqa-stream-test"),
+        );
+
+        let rendered = response_text(streaming_response_from_completion_value(&value)).await;
+
+        assert!(!rendered.contains("retrieval_failures"));
+        assert!(!rendered.contains("retrieval_quality_summary"));
+        assert!(!rendered.contains("quality_report"));
     }
 
     #[test]

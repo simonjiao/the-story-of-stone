@@ -49,6 +49,10 @@ def require(condition: bool, message: str) -> None:
         raise ValidationError(message)
 
 
+def non_empty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def resolve_repo_path(repo_root: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else repo_root / path
@@ -87,6 +91,7 @@ def validate_source(
         == raw_html_contract["saved"],
         f"{source_id}: raw_html_saved mismatch",
     )
+    validate_source_usage_metadata(source_id, source, spec)
     require(report.get("missing") == spec["expected_missing"], f"{source_id}: missing != 0")
     require(
         report.get("raw_html_files") == raw_html_contract["expected_files"],
@@ -106,6 +111,49 @@ def validate_source(
         seen.add(block_id)
 
     print(f"OK source {source_id}: documents={len(documents)} blocks={len(blocks)}")
+
+
+def validate_source_usage_metadata(
+    source_id: str,
+    source: dict[str, Any],
+    spec: dict[str, Any],
+) -> None:
+    required_fields = (
+        "source_url",
+        "license",
+        "license_url",
+        "license_source_url",
+        "attribution",
+        "usage_boundary",
+    )
+    for field in required_fields:
+        require(non_empty_text(source.get(field)), f"{source_id}: missing {field}")
+
+    expected_license = spec.get("license")
+    if expected_license:
+        require(
+            source.get("license") == expected_license,
+            f"{source_id}: license mismatch",
+        )
+    expected_license_url = spec.get("license_url")
+    if expected_license_url:
+        require(
+            source.get("license_url") == expected_license_url,
+            f"{source_id}: license_url mismatch",
+        )
+
+    require(
+        source["source_url"].startswith(("https://", "http://")),
+        f"{source_id}: source_url must be absolute URL",
+    )
+    require(
+        source["license_url"].startswith(("https://", "http://")),
+        f"{source_id}: license_url must be absolute URL",
+    )
+    require(
+        source["license_source_url"].startswith(("https://", "http://")),
+        f"{source_id}: license_source_url must be absolute URL",
+    )
 
 
 def find_block(root: Path, source_id: str, block_id: str) -> dict[str, Any] | None:

@@ -2,13 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
-load_optional_deploy_env_file
+load_deploy_env_file_or_local
 
 HEALTH_JSON="${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-${WORK_DIR}/health.json}"
 MODELS_JSON="${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-${WORK_DIR}/models.json}"
@@ -18,13 +20,14 @@ CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
 STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
 STREAM_TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-${WORK_DIR}/stream-trace.json}"
+RUNNING_IMAGES_JSON="${TONGLINGYU_GATEWAY_VERIFY_RUNNING_IMAGES_JSON:-${WORK_DIR}/running-images.json}"
 VERIFY_RUN_ID="${TONGLINGYU_GATEWAY_VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 cd "${DEPLOY_DIR}"
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway \
-    curl -fsS http://127.0.0.1:8090/healthz >"${HEALTH_JSON}"
+  docker compose exec -T open-webui \
+    curl -fsS http://tonglingyu-gateway:8090/healthz >"${HEALTH_JSON}"
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-}" ]]; then
@@ -36,16 +39,16 @@ curl -fsS -H "Authorization: Bearer ${key}" http://tonglingyu-gateway:8090/v1/mo
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_METRICS_JSON:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" http://127.0.0.1:8090/v1/admin/metrics
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:8090/v1/admin/metrics
 ' >"${METRICS_JSON}"
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_PROMETHEUS_TXT:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" http://127.0.0.1:8090/v1/admin/metrics/prometheus
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:8090/v1/admin/metrics/prometheus
 ' >"${PROMETHEUS_TXT}"
 fi
 
@@ -91,9 +94,9 @@ if not trace_id:
 print(trace_id)
 PY
 )"
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0.1:8090/v1/admin/traces/'"${TRACE_ID}"'"
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/traces/'"${TRACE_ID}"'"
 ' >"${TRACE_JSON}"
 fi
 
@@ -117,16 +120,98 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 raise SystemExit("stream response missing trace_id")
 PY
 )"
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0.1:8090/v1/admin/traces/'"${STREAM_TRACE_ID}"'"
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/traces/'"${STREAM_TRACE_ID}"'"
 ' >"${STREAM_TRACE_JSON}"
 fi
 
-python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
-  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" <<'PY'
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_RUNNING_IMAGES_JSON:-}" ]]; then
+  python3 - "${DEPLOY_DIR}" "${RUNNING_IMAGES_JSON}" <<'PY'
+import hashlib
 import json
+import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+deploy_dir = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+
+
+def run_json(args):
+    completed = subprocess.run(
+        args,
+        cwd=deploy_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def sha256_text(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+container_ids_raw = subprocess.run(
+    ["docker", "compose", "ps", "-q"],
+    cwd=deploy_dir,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+container_ids = [
+    line.strip()
+    for line in container_ids_raw.splitlines()
+    if line.strip()
+]
+containers = run_json(["docker", "inspect", *container_ids]) if container_ids else []
+images = []
+for container in containers:
+    labels = (container.get("Config") or {}).get("Labels") or {}
+    service = str(labels.get("com.docker.compose.service") or "")
+    configured_image = str((container.get("Config") or {}).get("Image") or "")
+    image_id = str(container.get("Image") or "")
+    image_info = run_json(["docker", "image", "inspect", image_id])[0] if image_id else {}
+    repo_digests = sorted(
+        str(item)
+        for item in (image_info.get("RepoDigests") or [])
+        if str(item).strip()
+    )
+    images.append({
+        "service": service,
+        "configured_image": configured_image,
+        "image_id": image_id,
+        "image_id_sha256": sha256_text(image_id),
+        "repo_digests": repo_digests,
+        "repo_digests_sha256": sha256_text("\n".join(repo_digests) + "\n"),
+        "container_id_sha256": sha256_text(str(container.get("Id") or "")),
+    })
+
+payload = {
+    "object": "tonglingyu.running_image_inventory",
+    "schema_version": 1,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "image_count": len(images),
+    "images": sorted(images, key=lambda item: item["service"]),
+    "secret_values_printed": False,
+}
+target_path.write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+fi
+
+python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
+  "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" \
+  "${RUNNING_IMAGES_JSON}" "${REPO_DIR}" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
 
 (
     health_path,
@@ -137,7 +222,10 @@ import sys
     stream_path,
     trace_path,
     stream_trace_path,
-) = sys.argv[1:9]
+    running_images_path,
+    repo_dir_raw,
+) = sys.argv[1:11]
+repo_dir = Path(repo_dir_raw)
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
 with open(models_path, "r", encoding="utf-8") as handle:
@@ -154,6 +242,8 @@ with open(trace_path, "r", encoding="utf-8") as handle:
     trace = json.load(handle)
 with open(stream_trace_path, "r", encoding="utf-8") as handle:
     stream_trace = json.load(handle)
+with open(running_images_path, "r", encoding="utf-8") as handle:
+    running_images = json.load(handle)
 
 errors = []
 forbidden_public_chat_keys = {
@@ -229,6 +319,72 @@ def stream_event_has_content_delta(event):
         if isinstance(delta, dict) and delta.get("content"):
             return True
     return False
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def optional_file_sha256(path):
+    try:
+        return file_sha256(path)
+    except OSError:
+        errors.append(f"policy file missing: {path.name}")
+        return ""
+
+
+def canonical_digest(value):
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(encoded.encode("utf-8"))
+
+
+def is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value.lower())
+    )
+
+
+if running_images.get("object") != "tonglingyu.running_image_inventory":
+    errors.append("running image inventory object invalid")
+if running_images.get("secret_values_printed") is not False:
+    errors.append("running image inventory must not print secret values")
+running_image_items = running_images.get("images")
+if not isinstance(running_image_items, list) or not running_image_items:
+    errors.append("running image inventory must include running containers")
+else:
+    running_services = {
+        item.get("service")
+        for item in running_image_items
+        if isinstance(item, dict) and item.get("service")
+    }
+    for required_service in ("tonglingyu-gateway", "open-webui"):
+        if required_service not in running_services:
+            errors.append(f"running image inventory missing {required_service}")
+    for index, item in enumerate(running_image_items):
+        if not isinstance(item, dict):
+            errors.append(f"running image inventory item {index} must be object")
+            continue
+        image_id = str(item.get("image_id") or "")
+        if not image_id.startswith("sha256:") or not is_sha256(image_id.removeprefix("sha256:")):
+            errors.append(f"running image inventory item {index} image_id must be sha256")
+        if not item.get("configured_image"):
+            errors.append(f"running image inventory item {index} configured_image missing")
+        if not isinstance(item.get("repo_digests"), list):
+            errors.append(f"running image inventory item {index} repo_digests must be array")
+        if not is_sha256(item.get("image_id_sha256")):
+            errors.append(f"running image inventory item {index} image_id_sha256 invalid")
+        if not is_sha256(item.get("repo_digests_sha256")):
+            errors.append(f"running image inventory item {index} repo_digests_sha256 invalid")
 
 
 def validate_trace_summary_surface(trace_value, expected_trace_id, expected_package_id, label):
@@ -383,11 +539,136 @@ if security.get("rate_limit_disabled") is True:
     errors.append("metrics.security.rate_limit_disabled must be false")
 if int(limits.get("max_body_bytes") or 0) <= 0:
     errors.append("metrics.limits.max_body_bytes must be positive")
+rqa_metrics = metrics.get("rqa") or {}
+retrieval_failure_metrics = rqa_metrics.get("retrieval_failures") or {}
+if rqa_metrics.get("schema_version") != "tonglingyu-retrieval-failures-v1":
+    errors.append("metrics.rqa.schema_version must be tonglingyu-retrieval-failures-v1")
+if not isinstance(retrieval_failure_metrics.get("by_status"), dict):
+    errors.append("metrics.rqa.retrieval_failures.by_status must be an object")
+if not isinstance(retrieval_failure_metrics.get("by_type"), dict):
+    errors.append("metrics.rqa.retrieval_failures.by_type must be an object")
+
+
+def sensitive_metric_paths(value, prefix="$"):
+    hits = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower()
+            child_prefix = f"{prefix}.{key}"
+            if normalized in {
+                "query",
+                "question",
+                "raw_query",
+                "raw_question",
+                "prompt",
+                "trace_id",
+                "trace_ids",
+                "package_id",
+                "package_ids",
+                "session_id",
+                "session_ids",
+                "user_id",
+                "user_ids",
+            }:
+                hits.append(child_prefix)
+            hits.extend(sensitive_metric_paths(child, child_prefix))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            hits.extend(sensitive_metric_paths(child, f"{prefix}[{index}]"))
+    return hits
+
+
+metrics_sensitive_paths = sensitive_metric_paths(metrics)
+prometheus_forbidden_needles = [
+    "query",
+    "question",
+    "raw_query",
+    "raw_question",
+    "trace_id",
+    "package_id",
+    "session_id",
+    "user_id",
+    "x-api-key",
+    "authorization",
+    "bearer ",
+]
+prometheus_sensitive_tokens = [
+    needle
+    for needle in prometheus_forbidden_needles
+    if needle in prometheus.lower()
+]
+known_secret_values = [
+    value.strip()
+    for value in (
+        os.environ.get("TONGLINGYU_ADMIN_API_KEY", ""),
+        os.environ.get("TONGLINGYU_GATEWAY_API_KEY", ""),
+        os.environ.get("OPENAI_API_KEY", ""),
+        os.environ.get("AGENT_BRIDGE_SECRET", ""),
+    )
+    if value and len(value.strip()) >= 8
+]
+metrics_encoded = json.dumps(metrics, ensure_ascii=True, sort_keys=True)
+secret_values_in_metrics = any(secret in metrics_encoded for secret in known_secret_values)
+secret_values_in_prometheus = any(secret in prometheus for secret in known_secret_values)
+metrics_privacy = {
+    "object": "tonglingyu.strict_gateway_metrics_privacy",
+    "schema_version": 1,
+    "json_metrics_sensitive_paths": metrics_sensitive_paths,
+    "json_metrics_sensitive_paths_sha256": canonical_digest(metrics_sensitive_paths),
+    "prometheus_sensitive_tokens": prometheus_sensitive_tokens,
+    "prometheus_sensitive_tokens_sha256": canonical_digest(prometheus_sensitive_tokens),
+    "json_metrics_secret_values_present": secret_values_in_metrics,
+    "prometheus_secret_values_present": secret_values_in_prometheus,
+    "secret_values_printed": False,
+}
+if metrics_sensitive_paths:
+    errors.append("metrics JSON must not expose query, trace, package, session, or user identifiers")
+if prometheus_sensitive_tokens:
+    errors.append("prometheus metrics must not expose query, trace, package, session, user, or auth labels")
+if secret_values_in_metrics:
+    errors.append("metrics JSON must not expose secret values")
+if secret_values_in_prometheus:
+    errors.append("prometheus metrics must not expose secret values")
+
+runtime_policy_digest = optional_file_sha256(
+    repo_dir / "agent-platform" / "crates" / "tonglingyu-runtime" / "src" / "lib.rs"
+)
+gateway_policy_digest = optional_file_sha256(
+    repo_dir / "agent-platform" / "crates" / "tonglingyu-gateway" / "src" / "main.rs"
+)
+model_upstream_id = (
+    os.environ.get("TONGLINGYU_UPSTREAM_MODEL")
+    or os.environ.get("AGENT_RUNTIME_HERMES_MODEL")
+    or ""
+).strip()
+if not model_upstream_id:
+    errors.append("strict gateway model upstream id missing")
+behavior_config = {
+    "agent_runtime_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+    "decoding_parameters_summary": {
+        "source": "gateway_runtime_config",
+        "upstream_timeout_secs_env": "TONGLINGYU_UPSTREAM_TIMEOUT_SECS",
+    },
+    "profile_contract": "tonglingyu-runtime-profile-contract-v1",
+    "runtime_profile_digest": runtime_policy_digest,
+    "prompt_digest": runtime_policy_digest,
+    "tool_policy": "read_only_runtime_tools",
+    "tool_policy_digest": runtime_policy_digest,
+    "reviewer_policy": "local_reviewer_enforced",
+    "reviewer_policy_digest": runtime_policy_digest,
+    "gateway_policy_digest": gateway_policy_digest,
+    "model_upstream_id": model_upstream_id,
+    "model_upstream_bound_by_gate": "model_upstream_network",
+    "decoding_parameters_source": "gateway_runtime_config",
+}
+behavior_config["behavior_config_digest"] = canonical_digest(behavior_config)
 
 if 'agent_runtime_mode="hermes"' not in prometheus:
     errors.append("prometheus tonglingyu_gateway_info must include agent_runtime_mode=hermes")
 if 'agent_runtime_mode="minimal"' in prometheus:
     errors.append("prometheus tonglingyu_gateway_info must not report minimal runtime mode")
+if "tonglingyu_retrieval_failures_total" not in prometheus:
+    errors.append("prometheus must expose bounded retrieval failure totals")
 
 chat_trace_id = chat.get("trace_id")
 chat_package_id = chat.get("evidence_package_id")
@@ -450,6 +731,11 @@ if stream_trace_id and stream_package_id:
     )
 if trace.get("trace_id") != chat_trace_id:
     errors.append("admin trace must match chat trace_id")
+trace_quality_summary = trace.get("retrieval_quality_summary") or {}
+if trace_quality_summary.get("schema_version") != "tonglingyu-retrieval-failures-v1":
+    errors.append("admin trace must expose RQA retrieval quality summary")
+if not isinstance(trace.get("retrieval_failure_ids"), list):
+    errors.append("admin trace retrieval_failure_ids must be a list")
 event_types = {
     item.get("event_type")
     for item in trace.get("audit_events") or []
@@ -607,6 +893,85 @@ for item in runtime_step_events:
         if review_observation.get("local_reviewer_enforced") is not True:
             errors.append(f"runtime step {operation} must enforce local reviewer")
 
+trace_runtime_summary_for_binding = (
+    trace.get("agent_runtime_summary")
+    if isinstance(trace.get("agent_runtime_summary"), dict)
+    else {}
+)
+stream_runtime_summary_for_binding = (
+    stream_trace.get("agent_runtime_summary")
+    if isinstance(stream_trace.get("agent_runtime_summary"), dict)
+    else {}
+)
+behavior_config_binding = {
+    "object": "tonglingyu.strict_gateway_behavior_config_binding",
+    "schema_version": 1,
+    "policy_version": "tonglingyu-behavior-config-binding-v1",
+    "behavior_config_digest": behavior_config.get("behavior_config_digest"),
+    "behavior_config_sha256": canonical_digest(behavior_config),
+    "admin_trace_id": chat_trace_id,
+    "stream_trace_id": stream_trace_id,
+    "admin_trace_runtime_summary": trace_runtime_summary_for_binding,
+    "admin_trace_runtime_summary_sha256": (
+        canonical_digest(trace_runtime_summary_for_binding)
+        if trace_runtime_summary_for_binding
+        else ""
+    ),
+    "stream_trace_runtime_summary": stream_runtime_summary_for_binding,
+    "stream_trace_runtime_summary_sha256": (
+        canonical_digest(stream_runtime_summary_for_binding)
+        if stream_runtime_summary_for_binding
+        else ""
+    ),
+    "agent_runtime_mode": trace_runtime_summary_for_binding.get("mode"),
+    "profile_execution_status": trace_runtime_summary_for_binding.get(
+        "profile_execution_status"
+    ),
+    "hermes_content_execution_complete": trace_runtime_summary_for_binding.get(
+        "hermes_content_execution_complete"
+    ),
+    "local_governance_enforced": trace_runtime_summary_for_binding.get(
+        "local_governance_enforced"
+    ),
+    "profile_step_count": trace_runtime_summary_for_binding.get("profile_step_count"),
+    "executed_profile_step_count": trace_runtime_summary_for_binding.get(
+        "executed_profile_step_count"
+    ),
+    "tool_result_count": trace_runtime_summary_for_binding.get("tool_result_count"),
+    "tool_audit_event_count": trace_runtime_summary_for_binding.get(
+        "tool_audit_event_count"
+    ),
+    "secret_values_printed": False,
+}
+if behavior_config_binding["behavior_config_sha256"] != canonical_digest(behavior_config):
+    errors.append("behavior config binding digest must match behavior_config")
+for label, summary in (
+    ("admin trace", trace_runtime_summary_for_binding),
+    ("stream admin trace", stream_runtime_summary_for_binding),
+):
+    if not summary:
+        errors.append(f"{label} runtime summary missing for behavior config binding")
+        continue
+    if summary.get("mode") != "hermes":
+        errors.append(f"{label} behavior binding runtime mode must be hermes")
+    if (
+        summary.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(
+            f"{label} behavior binding profile execution status must be hermes complete"
+        )
+    if summary.get("hermes_content_execution_complete") is not True:
+        errors.append(f"{label} behavior binding content execution must be complete")
+    if summary.get("local_governance_enforced") is not True:
+        errors.append(f"{label} behavior binding local governance must be enforced")
+    if int(summary.get("tool_result_count") or 0) <= 0:
+        errors.append(f"{label} behavior binding tool result count must be positive")
+    if int(summary.get("tool_audit_event_count") or 0) < int(
+        summary.get("tool_result_count") or 0
+    ):
+        errors.append(f"{label} behavior binding tool audit count must cover results")
+
 if errors:
     for error in errors:
         print(f"strict_gateway_error={error}", file=sys.stderr)
@@ -632,6 +997,10 @@ print(json.dumps(
         "evidence_package_id": chat_package_id,
         "stream_trace_id": stream_trace_id,
         "stream_evidence_package_id": stream_package_id,
+        "behavior_config": behavior_config,
+        "behavior_config_binding": behavior_config_binding,
+        "metrics_privacy": metrics_privacy,
+        "running_images": running_images,
     },
     ensure_ascii=True,
     sort_keys=True,

@@ -10,9 +10,14 @@ use agent_core::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row, postgres::PgPoolOptions, postgres::PgRow};
-use std::{str::FromStr, time::Duration};
+use sqlx_core::{query::query, query_scalar::query_scalar, row::Row};
+use sqlx_postgres::{PgPool, PgPoolOptions, PgRow};
+use std::{env, path::PathBuf, str::FromStr, time::Duration};
 use time::OffsetDateTime;
+
+const MIGRATIONS_DIR_ENV: &str = "AGENT_STORE_MIGRATIONS_DIR";
+const CONTAINER_MIGRATIONS_DIR: &str = "/usr/local/share/agent-platform/migrations";
+const LOCAL_MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
 
 #[derive(Debug, Clone)]
 pub struct PgAgentStore {
@@ -38,11 +43,40 @@ impl PgAgentStore {
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {
-        sqlx::migrate!("./migrations")
-            .run(&self.pool)
+        let migrations_dir = resolve_migrations_dir()?;
+        let migrator = sqlx_core::migrate::Migrator::new(migrations_dir.as_path())
             .await
-            .map_err(store_error)
+            .map_err(store_error)?;
+        migrator.run(&self.pool).await.map_err(store_error)
     }
+}
+
+fn resolve_migrations_dir() -> CoreResult<PathBuf> {
+    if let Ok(value) = env::var(MIGRATIONS_DIR_ENV) {
+        let path = PathBuf::from(value);
+        if path.is_dir() {
+            return Ok(path);
+        }
+        return Err(store_error(format!(
+            "{MIGRATIONS_DIR_ENV} does not point to a migration directory: {}",
+            path.display()
+        )));
+    }
+
+    for candidate in [
+        PathBuf::from(CONTAINER_MIGRATIONS_DIR),
+        PathBuf::from(LOCAL_MIGRATIONS_DIR),
+        PathBuf::from("crates/agent-store/migrations"),
+        PathBuf::from("migrations"),
+    ] {
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(store_error(format!(
+        "agent-store migrations directory not found; set {MIGRATIONS_DIR_ENV}"
+    )))
 }
 
 fn parse<T>(value: String) -> CoreResult<T>
@@ -367,7 +401,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn upsert_template(&self, template: AgentTemplate) -> CoreResult<AgentTemplate> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_templates (
                 agent_type, display_name, allowed_triggers, allowed_actions,
@@ -397,7 +431,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_template(&self, agent_type: &str) -> CoreResult<Option<AgentTemplate>> {
-        let row = sqlx::query("SELECT * FROM agent_templates WHERE agent_type = $1")
+        let row = query("SELECT * FROM agent_templates WHERE agent_type = $1")
             .bind(agent_type)
             .fetch_optional(&self.pool)
             .await
@@ -406,7 +440,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_agent_request(&self, request: AgentRequest) -> CoreResult<AgentRequest> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_requests (
                 id, idempotency_key, requested_by_user, requested_by_service, request_type,
@@ -443,7 +477,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_agent_request(&self, request_id: &str) -> CoreResult<Option<AgentRequest>> {
-        let row = sqlx::query("SELECT * FROM agent_requests WHERE id = $1")
+        let row = query("SELECT * FROM agent_requests WHERE id = $1")
             .bind(request_id)
             .fetch_optional(&self.pool)
             .await
@@ -457,7 +491,7 @@ impl AgentStore for PgAgentStore {
         service_id: &str,
         idempotency_key: &str,
     ) -> CoreResult<Option<AgentRequest>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT * FROM agent_requests
             WHERE requested_by_user = $1
@@ -480,7 +514,7 @@ impl AgentStore for PgAgentStore {
         statuses: &[AgentRequestStatus],
         limit: i64,
     ) -> CoreResult<Vec<AgentRequest>> {
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT * FROM agent_requests
             WHERE ($1::text IS NULL OR requested_by_user = $1)
@@ -504,7 +538,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn update_agent_request(&self, request: AgentRequest) -> CoreResult<AgentRequest> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_requests SET
                 idempotency_key = $2,
@@ -550,7 +584,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_approval(&self, approval: ApprovalRequest) -> CoreResult<ApprovalRequest> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO approval_requests (
                 id, request_id, requested_by_user, approver_user, status, risk_level,
@@ -577,7 +611,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_approval(&self, approval_id: &str) -> CoreResult<Option<ApprovalRequest>> {
-        let row = sqlx::query("SELECT * FROM approval_requests WHERE id = $1")
+        let row = query("SELECT * FROM approval_requests WHERE id = $1")
             .bind(approval_id)
             .fetch_optional(&self.pool)
             .await
@@ -589,7 +623,7 @@ impl AgentStore for PgAgentStore {
         &self,
         request_id: &str,
     ) -> CoreResult<Option<ApprovalRequest>> {
-        let row = sqlx::query("SELECT * FROM approval_requests WHERE request_id = $1 ORDER BY created_at DESC LIMIT 1")
+        let row = query("SELECT * FROM approval_requests WHERE request_id = $1 ORDER BY created_at DESC LIMIT 1")
             .bind(request_id)
             .fetch_optional(&self.pool)
             .await
@@ -604,7 +638,7 @@ impl AgentStore for PgAgentStore {
         status: ApprovalStatus,
         reason: Option<String>,
     ) -> CoreResult<ApprovalRequest> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE approval_requests SET
                 approver_user = $2,
@@ -627,7 +661,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_agent_instance(&self, agent: AgentInstance) -> CoreResult<AgentInstance> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_instances (
                 id, agent_type, hermes_profile, owner_user, target_resource,
@@ -664,7 +698,7 @@ impl AgentStore for PgAgentStore {
         target_resource: &str,
         core_constraints_hash: &str,
     ) -> CoreResult<Option<AgentInstance>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT * FROM agent_instances
             WHERE owner_user = $1
@@ -687,7 +721,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_agent(&self, agent_id: &str) -> CoreResult<Option<AgentInstance>> {
-        let row = sqlx::query("SELECT * FROM agent_instances WHERE id = $1")
+        let row = query("SELECT * FROM agent_instances WHERE id = $1")
             .bind(agent_id)
             .fetch_optional(&self.pool)
             .await
@@ -700,7 +734,7 @@ impl AgentStore for PgAgentStore {
         user_id: Option<&str>,
         limit: i64,
     ) -> CoreResult<Vec<AgentSummary>> {
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT * FROM agent_instances
             WHERE ($1::text IS NULL OR owner_user = $1)
@@ -716,14 +750,14 @@ impl AgentStore for PgAgentStore {
         let mut summaries = Vec::new();
         for row in rows {
             let agent = map_agent(&row)?;
-            let active_session_count: i64 = sqlx::query_scalar(
+            let active_session_count: i64 = query_scalar(
                 "SELECT COUNT(*) FROM agent_sessions WHERE agent_id = $1 AND status = 'active'",
             )
             .bind(&agent.id)
             .fetch_one(&self.pool)
             .await
             .map_err(store_error)?;
-            let last_run_row = sqlx::query(
+            let last_run_row = query(
                 "SELECT * FROM agent_runs WHERE agent_id = $1 ORDER BY created_at DESC LIMIT 1",
             )
             .bind(&agent.id)
@@ -753,7 +787,7 @@ impl AgentStore for PgAgentStore {
         status: AgentInstanceStatus,
         trace_id: &str,
     ) -> CoreResult<AgentInstance> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_instances
             SET status = $2, trace_id = $3, version = version + 1, updated_at = $4
@@ -772,7 +806,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_session(&self, session: AgentSession) -> CoreResult<AgentSession> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_sessions (
                 id, idempotency_key, agent_id, owner_user, source_conversation_id, parent_session_id,
@@ -806,7 +840,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_session(&self, session_id: &str) -> CoreResult<Option<AgentSession>> {
-        let row = sqlx::query("SELECT * FROM agent_sessions WHERE id = $1")
+        let row = query("SELECT * FROM agent_sessions WHERE id = $1")
             .bind(session_id)
             .fetch_optional(&self.pool)
             .await
@@ -820,7 +854,7 @@ impl AgentStore for PgAgentStore {
         agent_id: &str,
         idempotency_key: &str,
     ) -> CoreResult<Option<AgentSession>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT * FROM agent_sessions
             WHERE owner_user = $1
@@ -845,7 +879,7 @@ impl AgentStore for PgAgentStore {
         agent_id: Option<&str>,
         limit: i64,
     ) -> CoreResult<Vec<SessionSummary>> {
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT * FROM agent_sessions
             WHERE ($1::text IS NULL OR owner_user = $1)
@@ -870,7 +904,7 @@ impl AgentStore for PgAgentStore {
         &self,
         parent_session_id: &str,
     ) -> CoreResult<Vec<SessionSummary>> {
-        let rows = sqlx::query(
+        let rows = query(
             "SELECT * FROM agent_sessions WHERE parent_session_id = $1 ORDER BY created_at ASC",
         )
         .bind(parent_session_id)
@@ -889,7 +923,7 @@ impl AgentStore for PgAgentStore {
             .await?
             .ok_or_else(|| store_error("session not found"))?;
         validate_session_transition(current.status, agent_core::AgentSessionStatus::Closed)?;
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_sessions
             SET status = 'closed', trace_id = $2, version = version + 1, updated_at = $3
@@ -907,7 +941,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn next_message_sequence(&self, session_id: &str) -> CoreResult<i64> {
-        let sequence: i64 = sqlx::query_scalar(
+        let sequence: i64 = query_scalar(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_session_messages WHERE session_id = $1",
         )
         .bind(session_id)
@@ -923,7 +957,7 @@ impl AgentStore for PgAgentStore {
         open_webui_chat_id: &str,
         model: &str,
     ) -> CoreResult<Option<AgentBridgeBinding>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT * FROM open_webui_bridge_bindings
             WHERE open_webui_subject = $1
@@ -947,7 +981,7 @@ impl AgentStore for PgAgentStore {
         &self,
         binding: AgentBridgeBinding,
     ) -> CoreResult<AgentBridgeBinding> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO open_webui_bridge_bindings (
                 id, open_webui_subject, open_webui_chat_id, open_webui_session_id,
@@ -996,7 +1030,7 @@ impl AgentStore for PgAgentStore {
         model: &str,
         trace_id: &str,
     ) -> CoreResult<EmptyResponse> {
-        sqlx::query(
+        query(
             r#"
             UPDATE open_webui_bridge_bindings
             SET status = 'closed',
@@ -1032,7 +1066,7 @@ impl AgentStore for PgAgentStore {
         run_id: &str,
         trace_id: &str,
     ) -> CoreResult<AgentBridgeBinding> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE open_webui_bridge_bindings
             SET last_message_id = $2,
@@ -1076,7 +1110,7 @@ impl AgentStore for PgAgentStore {
             ));
         }
         let issued_at = OffsetDateTime::from_unix_timestamp(issued_at).map_err(store_error)?;
-        let inserted = sqlx::query_scalar::<_, String>(
+        let inserted = query_scalar::<_, String>(
             r#"
             INSERT INTO open_webui_bridge_nonces (
                 id, open_webui_subject, open_webui_chat_id, model, nonce,
@@ -1112,7 +1146,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_run(&self, run: AgentRun) -> CoreResult<AgentRun> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_runs (
                 id, idempotency_key, agent_id, session_id, trigger_type, target_resource,
@@ -1151,7 +1185,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_run(&self, run_id: &str) -> CoreResult<Option<AgentRun>> {
-        let row = sqlx::query("SELECT * FROM agent_runs WHERE id = $1")
+        let row = query("SELECT * FROM agent_runs WHERE id = $1")
             .bind(run_id)
             .fetch_optional(&self.pool)
             .await
@@ -1164,7 +1198,7 @@ impl AgentStore for PgAgentStore {
         agent_id: &str,
         idempotency_key: &str,
     ) -> CoreResult<Option<AgentRun>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT * FROM agent_runs
             WHERE agent_id = $1 AND idempotency_key = $2
@@ -1186,7 +1220,7 @@ impl AgentStore for PgAgentStore {
         agent_id: Option<&str>,
         limit: i64,
     ) -> CoreResult<Vec<RunSummary>> {
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT r.* FROM agent_runs r
             JOIN agent_instances a ON a.id = r.agent_id
@@ -1231,7 +1265,7 @@ impl AgentStore for PgAgentStore {
         } else {
             current.finished_at
         };
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs
             SET run_status = $2,
@@ -1259,7 +1293,7 @@ impl AgentStore for PgAgentStore {
             .await?
             .ok_or_else(|| store_error("run not found"))?;
         validate_run_transition(current.run_status, AgentRunStatus::Queued)?;
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs SET
                 run_status = 'queued',
@@ -1301,7 +1335,7 @@ impl AgentStore for PgAgentStore {
             .await?
             .ok_or_else(|| store_error("run not found"))?;
         validate_run_transition(current.run_status, AgentRunStatus::Cancelled)?;
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs SET
                 run_status = 'cancelled',
@@ -1333,7 +1367,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn append_audit(&self, audit: AuditLog) -> CoreResult<AuditLog> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO audit_logs (
                 id, actor_user, actor_service, action, resource_type, resource_id,
@@ -1366,7 +1400,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn list_audit(&self, limit: i64) -> CoreResult<Vec<AuditLog>> {
-        let rows = sqlx::query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1")
+        let rows = query("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1")
             .bind(limit.max(1))
             .fetch_all(&self.pool)
             .await
@@ -1375,7 +1409,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_observer_report(&self, report: ObserverReport) -> CoreResult<ObserverReport> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO observer_reports (
                 id, observer_run_id, health_status, risk_level, summary, findings,
@@ -1402,7 +1436,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn list_observer_reports(&self, limit: i64) -> CoreResult<Vec<ObserverReportSummary>> {
-        let rows = sqlx::query("SELECT * FROM observer_reports ORDER BY created_at DESC LIMIT $1")
+        let rows = query("SELECT * FROM observer_reports ORDER BY created_at DESC LIMIT $1")
             .bind(limit.max(1))
             .fetch_all(&self.pool)
             .await
@@ -1424,7 +1458,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn get_observer_report(&self, report_id: &str) -> CoreResult<Option<ObserverReport>> {
-        let row = sqlx::query("SELECT * FROM observer_reports WHERE id = $1")
+        let row = query("SELECT * FROM observer_reports WHERE id = $1")
             .bind(report_id)
             .fetch_optional(&self.pool)
             .await
@@ -1436,7 +1470,7 @@ impl AgentStore for PgAgentStore {
         &self,
         plan: ExternalActionPlan,
     ) -> CoreResult<ExternalActionPlan> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO external_action_plans (
                 id, run_id, connector, action, resource_ref, risk_level,
@@ -1478,7 +1512,7 @@ impl AgentStore for PgAgentStore {
         &self,
         plan_id: &str,
     ) -> CoreResult<Option<ExternalActionPlan>> {
-        let row = sqlx::query("SELECT * FROM external_action_plans WHERE id = $1")
+        let row = query("SELECT * FROM external_action_plans WHERE id = $1")
             .bind(plan_id)
             .fetch_optional(&self.pool)
             .await
@@ -1490,13 +1524,12 @@ impl AgentStore for PgAgentStore {
         &self,
         run_id: &str,
     ) -> CoreResult<Vec<ExternalActionPlan>> {
-        let rows = sqlx::query(
-            "SELECT * FROM external_action_plans WHERE run_id = $1 ORDER BY created_at DESC",
-        )
-        .bind(run_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(store_error)?;
+        let rows =
+            query("SELECT * FROM external_action_plans WHERE run_id = $1 ORDER BY created_at DESC")
+                .bind(run_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(store_error)?;
         rows.iter().map(map_external_action_plan).collect()
     }
 
@@ -1509,7 +1542,7 @@ impl AgentStore for PgAgentStore {
         error_code: Option<&str>,
         trace_id: &str,
     ) -> CoreResult<ExternalActionPlan> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE external_action_plans
             SET status = $2,
@@ -1544,7 +1577,7 @@ impl AgentStore for PgAgentStore {
         compensation_result_ref: &str,
         trace_id: &str,
     ) -> CoreResult<ExternalActionPlan> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE external_action_plans
             SET status = 'compensated',
@@ -1570,7 +1603,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_credential_lease(&self, lease: CredentialLease) -> CoreResult<CredentialLease> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO credential_leases (
                 id, external_action_plan_id, credential_scope, provider_ref, status,
@@ -1599,7 +1632,7 @@ impl AgentStore for PgAgentStore {
         &self,
         plan_id: &str,
     ) -> CoreResult<Vec<CredentialLease>> {
-        let rows = sqlx::query(
+        let rows = query(
             "SELECT * FROM credential_leases WHERE external_action_plan_id = $1 ORDER BY created_at DESC",
         )
         .bind(plan_id)
@@ -1610,7 +1643,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn create_grant(&self, grant: AgentGrant) -> CoreResult<AgentGrant> {
-        sqlx::query(
+        query(
             r#"
             INSERT INTO agent_grants (
                 id, subject_type, subject_id, action, resource_type, resource_id,
@@ -1642,7 +1675,7 @@ impl AgentStore for PgAgentStore {
     ) -> CoreResult<ResourceLock> {
         lock.lease_until = lease_until(lease);
         let mut tx = self.pool.begin().await.map_err(store_error)?;
-        sqlx::query(
+        query(
             r#"
             DELETE FROM resource_locks
             WHERE resource_type = $1 AND resource_id = $2 AND lock_scope = $3
@@ -1657,7 +1690,7 @@ impl AgentStore for PgAgentStore {
         .execute(&mut *tx)
         .await
         .map_err(store_error)?;
-        let inserted = sqlx::query(
+        let inserted = query(
             r#"
             INSERT INTO resource_locks (
                 id, resource_type, resource_id, lock_scope, holder_run_id, lease_until, created_at
@@ -1693,7 +1726,7 @@ impl AgentStore for PgAgentStore {
         resource_id: &str,
         lock_scope: &str,
     ) -> CoreResult<Option<ResourceLock>> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             SELECT *
             FROM resource_locks
@@ -1727,7 +1760,7 @@ impl AgentStore for PgAgentStore {
     }
 
     async fn release_resource_lock(&self, run_id: &str) -> CoreResult<EmptyResponse> {
-        sqlx::query("DELETE FROM resource_locks WHERE holder_run_id = $1")
+        query("DELETE FROM resource_locks WHERE holder_run_id = $1")
             .bind(run_id)
             .execute(&self.pool)
             .await
@@ -1745,7 +1778,7 @@ impl AgentStore for PgAgentStore {
         status: &str,
         trace_id: &str,
     ) -> CoreResult<EmptyResponse> {
-        sqlx::query(
+        query(
             r#"
             INSERT INTO worker_heartbeats (worker_id, current_run_id, status, trace_id, last_seen_at)
             VALUES ($1,$2,$3,$4,$5)
@@ -1777,7 +1810,7 @@ impl MemoryStore for PgAgentStore {
         &self,
         message: AgentSessionMessage,
     ) -> CoreResult<AgentSessionMessage> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             INSERT INTO agent_session_messages (
                 id, session_id, sequence, role, content_ref, content_summary,
@@ -1804,7 +1837,7 @@ impl MemoryStore for PgAgentStore {
         .fetch_one(&self.pool)
         .await
         .map_err(store_error)?;
-        sqlx::query(
+        query(
             "UPDATE agent_sessions SET updated_at = $2, trace_id = $3, version = version + 1 WHERE id = $1",
         )
         .bind(&message.session_id)
@@ -1825,7 +1858,7 @@ impl MemoryStore for PgAgentStore {
             .get_session(session_id)
             .await?
             .ok_or_else(|| store_error("session not found"))?;
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT * FROM agent_session_messages
             WHERE session_id = $1
@@ -1867,7 +1900,7 @@ impl MemoryStore for PgAgentStore {
         summary: &str,
         trace_id: &str,
     ) -> CoreResult<()> {
-        sqlx::query(
+        query(
             r#"
             UPDATE agent_sessions
             SET context_summary = $2, trace_id = $3, version = version + 1, updated_at = $4
@@ -1891,7 +1924,7 @@ impl MemoryStore for PgAgentStore {
         result_ref: Option<&str>,
         trace_id: &str,
     ) -> CoreResult<()> {
-        sqlx::query(
+        query(
             r#"
             UPDATE agent_runs
             SET result_summary = $2, result_ref = $3, trace_id = $4, version = version + 1
@@ -1922,7 +1955,7 @@ impl RunQueue for PgAgentStore {
     ) -> CoreResult<Option<RunClaim>> {
         let lease_until = lease_until(lease);
         let now = OffsetDateTime::now_utc();
-        let row = sqlx::query(
+        let row = query(
             r#"
             WITH candidate AS (
                 SELECT id FROM agent_runs
@@ -1964,7 +1997,7 @@ impl RunQueue for PgAgentStore {
         worker_id: &str,
         lease: Duration,
     ) -> CoreResult<()> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs
             SET lease_until = $3, version = version + 1
@@ -1988,7 +2021,7 @@ impl RunQueue for PgAgentStore {
     }
 
     async fn finish_run(&self, run_id: &str, output: RuntimeOutput) -> CoreResult<AgentRun> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs SET
                 run_status = 'completed',
@@ -2043,7 +2076,7 @@ impl RunQueue for PgAgentStore {
         } else {
             None
         };
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs SET
                 run_status = $2,
@@ -2071,7 +2104,7 @@ impl RunQueue for PgAgentStore {
     }
 
     async fn dead_letter_run(&self, run_id: &str, reason: &str) -> CoreResult<AgentRun> {
-        let row = sqlx::query(
+        let row = query(
             r#"
             UPDATE agent_runs SET
                 run_status = 'dead_letter',
@@ -2095,7 +2128,7 @@ impl RunQueue for PgAgentStore {
     }
 
     async fn sweep_expired_leases(&self, max_retries: i32) -> CoreResult<Vec<RunSummary>> {
-        let rows = sqlx::query(
+        let rows = query(
             r#"
             SELECT * FROM agent_runs
             WHERE run_status IN ('claimed','context_built','policy_checked','executing','validating','applying_external_actions')
@@ -2125,10 +2158,7 @@ impl RunQueue for PgAgentStore {
 impl ObserverSnapshotStore for PgAgentStore {
     async fn collect_observer_snapshot(&self, _trace_id: &str) -> CoreResult<ObserverSnapshot> {
         async fn counts(pool: &PgPool, sql: &str) -> CoreResult<Value> {
-            let rows = sqlx::query(sql)
-                .fetch_all(pool)
-                .await
-                .map_err(store_error)?;
+            let rows = query(sql).fetch_all(pool).await.map_err(store_error)?;
             let mut map = serde_json::Map::new();
             for row in rows {
                 let status: String = row.try_get("status").map_err(store_error)?;
@@ -2153,7 +2183,7 @@ impl ObserverSnapshotStore for PgAgentStore {
             "SELECT run_status AS status, COUNT(*) AS count FROM agent_runs GROUP BY run_status",
         )
         .await?;
-        let runtime_row = sqlx::query(
+        let runtime_row = query(
             r#"
             SELECT
                 COUNT(*) FILTER (WHERE retry_count > 0) AS retrying_runs,
@@ -2166,7 +2196,7 @@ impl ObserverSnapshotStore for PgAgentStore {
         .fetch_one(&self.pool)
         .await
         .map_err(store_error)?;
-        let context_row = sqlx::query(
+        let context_row = query(
             r#"
             SELECT COALESCE(MAX(message_count), 0)::BIGINT AS max_context_messages
             FROM (
@@ -2189,7 +2219,7 @@ impl ObserverSnapshotStore for PgAgentStore {
             "SELECT error_code AS status, COUNT(*) AS count FROM external_action_plans WHERE error_code IS NOT NULL GROUP BY error_code",
         )
         .await?;
-        let lock_rows = sqlx::query(
+        let lock_rows = query(
             r#"
             SELECT resource_type, resource_id, lock_scope, holder_run_id, lease_until
             FROM resource_locks
@@ -2212,7 +2242,7 @@ impl ObserverSnapshotStore for PgAgentStore {
                 }))
             })
             .collect::<CoreResult<Vec<_>>>()?;
-        let audit_rows = sqlx::query(
+        let audit_rows = query(
             r#"
             SELECT action, decision, trace_id, created_at
             FROM audit_logs
@@ -2234,7 +2264,7 @@ impl ObserverSnapshotStore for PgAgentStore {
                 }))
             })
             .collect::<CoreResult<Vec<_>>>()?;
-        let worker_rows = sqlx::query(
+        let worker_rows = query(
             r#"
             SELECT worker_id, current_run_id, status, trace_id, last_seen_at
             FROM worker_heartbeats

@@ -43,25 +43,37 @@ impl RuntimeStepPlan {
 
 pub(crate) fn search_policy(question: &str) -> SearchPolicy {
     let normalized = normalize_text(question);
+    let blocked_controls = blocked_prompt_controls(question);
     let mut required = BTreeSet::new();
-    required.insert("base_text".to_string());
     let asks_commentary = question.contains("脂批")
         || question.contains("脂評")
         || question.contains("甲戌")
         || normalized.contains("脂批");
-    let asks_version = question.contains("程甲")
-        || question.contains("程乙")
-        || question.contains("版本")
+    let asks_named_edition = question.contains("程甲") || question.contains("程乙");
+    let asks_version_boundary = question.contains("版本")
         || question.contains("前八十")
         || question.contains("后四十")
         || question.contains("後四十");
+    let asks_version = asks_named_edition || asks_version_boundary;
+    let lowered = question.to_lowercase();
+    let clearly_out_of_scope = normalized.contains("量子计算机")
+        || normalized.contains("现代人工智能")
+        || normalized.contains("清朝以后的")
+        || lowered.contains("system prompt");
+    let control_only = !blocked_controls.is_empty()
+        && !normalized.contains("通灵")
+        && !normalized.contains("宝玉")
+        && !normalized.contains("红楼")
+        && !normalized.contains("黛玉");
     if asks_commentary {
         required.insert("commentary".to_string());
     }
-    if asks_version {
+    if asks_version_boundary {
         required.insert("version_note".to_string());
     }
-    let blocked_controls = blocked_prompt_controls(question);
+    if !asks_commentary && !asks_version_boundary && !clearly_out_of_scope && !control_only {
+        required.insert("base_text".to_string());
+    }
     let question_type = if !blocked_controls.is_empty() {
         "control_injection"
     } else if asks_commentary {
@@ -211,5 +223,39 @@ mod tests {
             step.allowed_tools
                 .contains(&"tonglingyu.commentary.search".to_string())
         }));
+    }
+
+    #[test]
+    fn version_boundary_policy_requires_version_note_without_base_text() {
+        let policy = search_policy("前八十回边界在哪里？");
+
+        assert_eq!(policy.question_type, "version");
+        assert!(
+            policy
+                .required_evidence_types
+                .contains(&"version_note".to_string())
+        );
+        assert!(
+            !policy
+                .required_evidence_types
+                .contains(&"base_text".to_string())
+        );
+    }
+
+    #[test]
+    fn named_edition_policy_keeps_base_text_without_forcing_version_note() {
+        let policy = search_policy("程乙本第一回顽石文字在哪里？");
+
+        assert_eq!(policy.question_type, "version");
+        assert!(
+            policy
+                .required_evidence_types
+                .contains(&"base_text".to_string())
+        );
+        assert!(
+            !policy
+                .required_evidence_types
+                .contains(&"version_note".to_string())
+        );
     }
 }

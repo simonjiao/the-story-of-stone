@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import pathlib
 import sys
 import unittest
@@ -33,9 +34,12 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
         action.valves.GATEWAY_ADMIN_API_KEY = "admin-key"
         return action
 
-    def test_non_admin_is_denied_without_gateway_call(self) -> None:
+    def test_non_admin_is_denied_and_reports_gateway_audit(self) -> None:
         action = self.action_with_key()
-        with patch("tonglingyu_gateway_admin_action.urllib.request.urlopen") as urlopen:
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"recorded":true}'),
+        ) as urlopen:
             result = asyncio.run(
                 action.action(
                     {"model": "tonglingyu"},
@@ -45,7 +49,17 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             )
 
         self.assertIn("requires Open WebUI admin role", result["content"])
-        urlopen.assert_not_called()
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/access-denials",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer admin-key")
+        self.assertEqual(request.get_header("X-tonglingyu-subject"), "user-1")
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["action"], "metrics")
+        self.assertEqual(payload["denial"], "role_denied")
 
     def test_missing_admin_key_is_denied_without_gateway_call(self) -> None:
         action = Action()
@@ -81,6 +95,7 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             "http://tonglingyu-gateway:8090/v1/admin/metrics",
         )
         self.assertEqual(request.get_header("Authorization"), "Bearer admin-key")
+        self.assertEqual(request.get_header("X-tonglingyu-subject"), "admin-1")
         self.assertIn("tonglingyu.gateway_metrics", result["content"])
 
     def test_trace_action_prompts_for_trace_id(self) -> None:
@@ -132,6 +147,316 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             urlopen.call_args.args[0].full_url,
             "http://tonglingyu-gateway:8090/v1/admin/packages/pkg-1",
         )
+
+    def test_retrieval_failures_list_supports_bounded_filters(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                json.dumps(
+                    {
+                        "object": "tonglingyu.retrieval_failure_admin_list",
+                        "list": {
+                            "object": "tonglingyu.retrieval_failure_list",
+                            "schema_version": "tonglingyu-retrieval-failures-v1",
+                            "limit": 20,
+                            "offset": 0,
+                            "next_offset": 20,
+                            "items": [],
+                        },
+                    }
+                )
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "failure_type": "quality_report_not_passed",
+                        "limit": 20,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failures",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures?status=open&failure_type=quality_report_not_passed&limit=20",
+        )
+        self.assertIn("tonglingyu.retrieval_failure_admin_list", result["content"])
+        self.assertIn("tonglingyu-retrieval-failures-v1", result["content"])
+        self.assertIn('"next_offset": 20', result["content"])
+
+    def test_retrieval_failure_id_can_be_extracted_from_message_content(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_read"}'),
+        ) as urlopen:
+            asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "messages": [{"content": "failure_id: rf-1"}],
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1",
+        )
+
+    def test_retrieval_failure_update_uses_patch_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_admin_update"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "failure_id": "rf-1",
+                        "human_review_status": "resolved",
+                        "reviewer": "admin-1",
+                        "review_note": "fixed",
+                        "if_match_updated_at": "2026-05-15T00:00:00Z",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure_update",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1",
+        )
+        self.assertEqual(payload["human_review_status"], "resolved")
+        self.assertEqual(payload["if_match_updated_at"], "2026-05-15T00:00:00Z")
+        self.assertEqual(request.get_header("X-tonglingyu-subject"), "admin-1")
+        self.assertIn("tonglingyu.retrieval_failure_admin_update", result["content"])
+
+    def test_governance_tasks_list_supports_bounded_filters(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                json.dumps(
+                    {
+                        "object": "tonglingyu.governance_task_admin_list",
+                        "list": {
+                            "object": "tonglingyu.knowledge_governance_task_list",
+                            "schema_version": "tonglingyu-knowledge-governance-tasks-v2",
+                            "limit": 20,
+                            "offset": 0,
+                            "next_offset": 20,
+                            "items": [],
+                        },
+                    }
+                )
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "task_type": "expected_evidence_fix",
+                        "priority": "p0",
+                        "source_failure_id": "rf-1",
+                        "source_entity_type": "retrieval_failure",
+                        "source_entity_id": "rf-1",
+                        "limit": 20,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_tasks",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks?status=open&task_type=expected_evidence_fix&priority=p0&source_failure_id=rf-1&source_entity_type=retrieval_failure&source_entity_id=rf-1&limit=20",
+        )
+        self.assertIn("tonglingyu.governance_task_admin_list", result["content"])
+        self.assertIn("tonglingyu-knowledge-governance-tasks-v2", result["content"])
+        self.assertIn('"next_offset": 20', result["content"])
+
+    def test_retrieval_failure_cluster_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.retrieval_failure_cluster_admin_result"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "status": "open",
+                        "failure_type": "quality_report_not_passed",
+                        "min_cluster_size": 2,
+                        "limit": 20,
+                        "create_tasks": True,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="retrieval_failure_cluster",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/cluster",
+        )
+        self.assertEqual(payload["human_review_status"], "open")
+        self.assertEqual(payload["failure_type"], "quality_report_not_passed")
+        self.assertEqual(payload["min_cluster_size"], 2)
+        self.assertEqual(payload["limit"], 20)
+        self.assertTrue(payload["create_tasks"])
+        self.assertIn("tonglingyu.retrieval_failure_cluster_admin_result", result["content"])
+
+    def test_governance_task_manual_create_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_create"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "source_entity_type": "trace",
+                        "source_entity_id": "trace-1",
+                        "task_type": "expert_review",
+                        "priority": "p0",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_create",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks",
+        )
+        self.assertEqual(payload["source_entity_type"], "trace")
+        self.assertEqual(payload["source_entity_id"], "trace-1")
+        self.assertIn("tonglingyu.governance_task_admin_create", result["content"])
+
+    def test_governance_task_create_from_failure_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_create"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "failure_id": "rf-1",
+                        "task_type": "expected_evidence_fix",
+                        "priority": "p0",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_from_failure",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/retrieval-failures/rf-1/governance-task",
+        )
+        self.assertEqual(payload["task_type"], "expected_evidence_fix")
+        self.assertEqual(payload["priority"], "p0")
+        self.assertIn("tonglingyu.governance_task_admin_create", result["content"])
+
+    def test_knowledge_patch_proposal_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                '{"object":"tonglingyu.knowledge_patch_proposal_admin_create"}'
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "proposal_type": "alias",
+                        "trace_id": "trace-1",
+                        "package_id": "pkg-1",
+                        "source_ref": "package:pkg-1",
+                        "payload": {
+                            "alias": "灵玉",
+                            "target_ref": "person:baoyu",
+                        },
+                        "priority": "p1",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="knowledge_patch_proposal",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/proposals",
+        )
+        self.assertEqual(payload["proposal_type"], "alias")
+        self.assertEqual(payload["payload"]["target_ref"], "person:baoyu")
+        self.assertIn(
+            "tonglingyu.knowledge_patch_proposal_admin_create", result["content"]
+        )
+
+    def test_governance_task_update_uses_patch_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.governance_task_admin_update"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "task_id": "kgt-1",
+                        "status": "accepted",
+                        "reviewer": "admin-1",
+                        "review_note": "accepted",
+                        "evidence_ref": "source://review-note/001",
+                        "if_match_updated_at": "2026-05-15T00:00:00Z",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="governance_task_update",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "PATCH")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/governance/tasks/kgt-1",
+        )
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["evidence_ref"], "source://review-note/001")
+        self.assertIn("tonglingyu.governance_task_admin_update", result["content"])
 
     def test_target_model_guard_skips_non_tonglingyu_model(self) -> None:
         action = self.action_with_key()

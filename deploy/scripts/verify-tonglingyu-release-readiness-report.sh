@@ -31,6 +31,16 @@ live_gate_names = [
 ]
 required_gate_names = [
     "runtime_config",
+    "rqa_migration_preflight",
+    "retrieval_quality",
+    "rqa_backup_restore_drill",
+    "rqa_performance_budget",
+    "rqa_api_contract",
+    "rqa_user_lifecycle",
+    "security_scan",
+    "release_ops_readiness",
+    "rqa_incident_capacity",
+    "openwebui_admin_action_contract",
     *live_gate_names,
     "openwebui_browser_review",
 ]
@@ -80,12 +90,226 @@ secret_value_needles = [
     "x-api-key:",
     "xoxb-",
 ]
+privacy_sensitive_keys = {
+    "messages",
+    "prompt",
+    "query",
+    "queries",
+    "query_text",
+    "query_terms",
+    "question",
+    "questions",
+    "raw_query",
+    "raw_question",
+    "raw_question_included",
+    "user_query",
+    "user_question",
+}
+high_cardinality_list_keys = {
+    "block_ids",
+    "case_ids",
+    "cases",
+    "edition_labels",
+    "evidence_ids",
+    "message_ids",
+    "package_ids",
+    "request_ids",
+    "session_ids",
+    "trace_ids",
+    "user_ids",
+}
+json_privacy_needles = [
+    '"messages"',
+    '"prompt"',
+    '"query"',
+    '"query_text"',
+    '"query_terms"',
+    '"question"',
+    '"raw_query"',
+    '"raw_question"',
+    '"user_query"',
+    '"user_question"',
+]
+json_high_cardinality_needles = [
+    '"block_ids"',
+    '"case_ids"',
+    '"cases"',
+    '"edition_labels"',
+    '"evidence_ids"',
+    '"message_ids"',
+    '"package_ids"',
+    '"request_ids"',
+    '"session_ids"',
+    '"trace_ids"',
+    '"user_ids"',
+]
 gate_stdout_requirements = {
     "runtime_config": {
         "required_fields": [
             "checked_policy_fields",
             "checked_secret_fields",
             "checked_services",
+        ],
+    },
+    "rqa_migration_preflight": {
+        "object": "tonglingyu.rqa_migration_preflight_gate",
+        "required_fields": [
+            "backup",
+            "checks",
+            "db",
+            "finished_at",
+            "generated_at",
+            "migration_counts",
+            "migration_preflight",
+            "migration_preflight_passed",
+            "migration_preflight_sha256",
+            "mode",
+            "policy_version",
+            "require_live",
+            "source_mode",
+            "started_at",
+        ],
+    },
+    "retrieval_quality": {
+        "object": "tonglingyu.rqa_quality_gate",
+        "required_fields": [
+            "behavior_config",
+            "effective_thresholds",
+            "eval_report_sha256",
+            "eval_report_path",
+            "eval_run_id",
+            "eval_suite_version",
+            "kb_build_hash",
+            "kb_version",
+            "open_p0_governance_tasks",
+            "open_p0_retrieval_failures",
+            "quality_gate_passed",
+            "quality_summary",
+            "production_default_thresholds",
+            "rqa_schema_version",
+            "source_license_summary",
+            "source_snapshot_digest",
+            "threshold_config",
+        ],
+    },
+    "rqa_backup_restore_drill": {
+        "object": "tonglingyu.rqa_backup_restore_drill",
+        "required_fields": [
+            "artifact_dir",
+            "artifact_dir_sha256",
+            "artifacts",
+            "backup",
+            "checks",
+            "drill_result",
+            "duration_ms",
+            "environment",
+            "finished_at",
+            "operator",
+            "policy_version",
+            "refs",
+            "restore",
+            "rpo",
+            "rto",
+            "source_mode",
+            "started_at",
+        ],
+    },
+    "rqa_performance_budget": {
+        "object": "tonglingyu.rqa_performance_budget_gate",
+        "required_fields": [
+            "budget_policy_version",
+            "budget_results",
+            "budgets",
+            "checks",
+            "generated_at",
+            "measurements",
+            "performance_budget_passed",
+            "refs",
+            "timeouts_seconds",
+        ],
+    },
+    "rqa_api_contract": {
+        "object": "tonglingyu.rqa_api_contract_gate",
+        "required_fields": [
+            "api_contract_passed",
+            "checks",
+            "compatibility_policy",
+            "contract_version",
+            "generated_at",
+            "negative_statuses",
+            "pagination",
+            "refs",
+        ],
+    },
+    "rqa_user_lifecycle": {
+        "object": "tonglingyu.rqa_user_lifecycle_gate",
+        "required_fields": [
+            "action_reports",
+            "checks",
+            "contract_version",
+            "generated_at",
+            "lifecycle_policy_version",
+            "refs",
+            "user_lifecycle_passed",
+        ],
+    },
+    "security_scan": {
+        "object": "tonglingyu.release_security_gate",
+        "required_fields": [
+            "accepted_error_count",
+            "dependency_scan",
+            "generated_at",
+            "image_scan",
+            "release_script_scan",
+            "risk_acceptance",
+            "risk_conclusion",
+            "scan_coverage",
+            "security_scan_passed",
+            "unaccepted_error_count",
+        ],
+    },
+    "release_ops_readiness": {
+        "object": "tonglingyu.release_ops_readiness_gate",
+        "required_fields": [
+            "alert_policy",
+            "checks",
+            "evidence",
+            "generated_at",
+            "mode",
+            "ops_policy_version",
+            "post_release_monitor",
+            "release_ops_ready",
+            "reproduction",
+            "rollback",
+            "rto_rpo",
+            "runbook",
+        ],
+    },
+    "rqa_incident_capacity": {
+        "object": "tonglingyu.rqa_incident_capacity_gate",
+        "required_fields": [
+            "audit_history",
+            "capacity_policy",
+            "checks",
+            "emergency_state",
+            "evidence",
+            "generated_at",
+            "incident_capacity_ready",
+            "incident_runbook",
+            "mode",
+            "policy_version",
+            "public_degraded_response",
+        ],
+    },
+    "openwebui_admin_action_contract": {
+        "object": "tonglingyu.openwebui_admin_action_contract_gate",
+        "required_fields": [
+            "action",
+            "checks",
+            "contract_version",
+            "feedback_action",
+            "fixture_validation",
+            "generated_at",
         ],
     },
     "model_upstream_network": {
@@ -100,8 +324,12 @@ gate_stdout_requirements = {
             "agent_runtime_mode": "hermes",
         },
         "required_fields": [
+            "behavior_config",
+            "behavior_config_binding",
             "checked_surfaces",
+            "metrics_privacy",
             "model_ids",
+            "running_images",
             "stream_trace_id",
             "trace_id",
         ],
@@ -113,10 +341,18 @@ gate_stdout_requirements = {
         },
     },
     "openwebui_admin_action": {
+        "object": "tonglingyu.openwebui_admin_action_live_gate",
         "exact": {
             "function_id": "tonglingyu_gateway_admin",
             "type": "action",
         },
+        "required_fields": [
+            "checks",
+            "permission_boundary",
+            "secret_values_printed",
+            "source",
+            "valve_keys",
+        ],
     },
 }
 hex_digits = set("0123456789abcdef")
@@ -154,11 +390,35 @@ def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
 
 
+def release_ops_ref_valid(value):
+    if not nonempty(value):
+        return False
+    lowered = value.lower()
+    if any(needle in lowered for needle in secret_value_needles):
+        return False
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return True
+    return (
+        value.startswith("runbook:")
+        or value.startswith("artifact:")
+        or value.startswith("file:")
+        or value.startswith("/")
+    )
+
+
 def is_sha256(value):
     return (
         isinstance(value, str)
         and len(value) == 64
         and all(char in hex_digits for char in value.lower())
+    )
+
+
+def image_ref_is_digest_pinned(value):
+    return isinstance(value, str) and (
+        "@sha256:" in value
+        or (value.startswith("sha256:") and is_sha256(value.removeprefix("sha256:")))
     )
 
 
@@ -198,6 +458,15 @@ def file_sha256(file_path):
     return digest.hexdigest()
 
 
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical_digest(value):
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return sha256_bytes(encoded.encode("utf-8"))
+
+
 def secret_value_paths(value, prefix="$"):
     paths = []
     if isinstance(value, dict):
@@ -211,6 +480,40 @@ def secret_value_paths(value, prefix="$"):
         if any(needle in lowered for needle in secret_value_needles):
             paths.append(prefix)
     return paths
+
+
+def release_report_privacy_paths(value, prefix="$"):
+    sensitive_paths = []
+    high_cardinality_paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}"
+            normalized_key = str(key).lower()
+            if normalized_key in privacy_sensitive_keys:
+                sensitive_paths.append(child_prefix)
+            if normalized_key in high_cardinality_list_keys and isinstance(child, list):
+                high_cardinality_paths.append(child_prefix)
+            child_sensitive, child_high_cardinality = release_report_privacy_paths(
+                child,
+                child_prefix,
+            )
+            sensitive_paths.extend(child_sensitive)
+            high_cardinality_paths.extend(child_high_cardinality)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_sensitive, child_high_cardinality = release_report_privacy_paths(
+                child,
+                f"{prefix}[{index}]",
+            )
+            sensitive_paths.extend(child_sensitive)
+            high_cardinality_paths.extend(child_high_cardinality)
+    elif isinstance(value, str):
+        lowered = value.lower()
+        if any(needle in lowered for needle in json_privacy_needles):
+            sensitive_paths.append(prefix)
+        if any(needle in lowered for needle in json_high_cardinality_needles):
+            high_cardinality_paths.append(prefix)
+    return sensitive_paths, high_cardinality_paths
 
 
 def validate_gate_tail(name, gate, field):
@@ -273,6 +576,867 @@ def browser_validation_from_gate(gate):
     )
 
 
+def ratio_is_one(value):
+    return isinstance(value, dict) and value.get("ratio") == 1.0
+
+
+def nonempty_dict(value):
+    return isinstance(value, dict) and bool(value)
+
+
+def threshold_below_production_default(key, actual, default):
+    if not isinstance(actual, (int, float)) or not isinstance(default, (int, float)):
+        return True
+    if key in ("open_p0_retrieval_failures", "open_p0_governance_tasks"):
+        return actual > default
+    return actual < default
+
+
+def threshold_invalid(key, actual):
+    if not isinstance(actual, (int, float)):
+        return True
+    if key in ("open_p0_retrieval_failures", "open_p0_governance_tasks"):
+        return int(actual) != actual or actual < 0
+    if key == "expected_evidence_denominator_min":
+        return int(actual) != actual or actual < 0
+    return actual < 0.0 or actual > 1.0
+
+
+def ratio_at_least(value, threshold):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("ratio"), (int, float))
+        and isinstance(threshold, (int, float))
+        and float(value.get("ratio")) >= float(threshold)
+    )
+
+
+def validate_behavior_config(prefix, behavior_config):
+    if not isinstance(behavior_config, dict):
+        errors.append(f"{prefix}_behavior_config_missing")
+        return
+    for field in (
+        "agent_runtime_mode_env",
+        "runtime_profile_digest",
+        "prompt_digest",
+        "profile_contract",
+        "tool_policy",
+        "tool_policy_digest",
+        "reviewer_policy",
+        "reviewer_policy_digest",
+        "gateway_policy_digest",
+        "model_upstream_id",
+        "model_upstream_bound_by_gate",
+        "decoding_parameters_source",
+        "behavior_config_digest",
+    ):
+        if not nonempty(behavior_config.get(field)):
+            errors.append(f"{prefix}_behavior_config_{field}_missing")
+    for field in (
+        "runtime_profile_digest",
+        "prompt_digest",
+        "tool_policy_digest",
+        "reviewer_policy_digest",
+        "gateway_policy_digest",
+        "behavior_config_digest",
+    ):
+        if not is_sha256(behavior_config.get(field)):
+            errors.append(f"{prefix}_behavior_config_{field}_invalid")
+    if not isinstance(behavior_config.get("decoding_parameters_summary"), dict):
+        errors.append(f"{prefix}_behavior_config_decoding_parameters_summary_missing")
+    digest_payload = {
+        key: value
+        for key, value in behavior_config.items()
+        if key != "behavior_config_digest"
+    }
+    if (
+        is_sha256(behavior_config.get("behavior_config_digest"))
+        and behavior_config.get("behavior_config_digest") != canonical_digest(digest_payload)
+    ):
+        errors.append(f"{prefix}_behavior_config_digest_mismatch")
+
+
+def validate_behavior_config_binding(prefix, binding, behavior_config):
+    if not isinstance(binding, dict):
+        errors.append(f"{prefix}_behavior_config_binding_missing")
+        return
+    if binding.get("object") != "tonglingyu.strict_gateway_behavior_config_binding":
+        errors.append(f"{prefix}_behavior_config_binding_object_invalid")
+    if binding.get("schema_version") != 1:
+        errors.append(f"{prefix}_behavior_config_binding_schema_version_invalid")
+    if binding.get("policy_version") != "tonglingyu-behavior-config-binding-v1":
+        errors.append(f"{prefix}_behavior_config_binding_policy_version_invalid")
+    if binding.get("secret_values_printed") is not False:
+        errors.append(f"{prefix}_behavior_config_binding_secret_values_printed_must_be_false")
+    if not isinstance(behavior_config, dict):
+        errors.append(f"{prefix}_behavior_config_binding_behavior_config_missing")
+    else:
+        expected_digest = behavior_config.get("behavior_config_digest")
+        if binding.get("behavior_config_digest") != expected_digest:
+            errors.append(f"{prefix}_behavior_config_binding_behavior_config_digest_mismatch")
+        if binding.get("behavior_config_sha256") != canonical_digest(behavior_config):
+            errors.append(f"{prefix}_behavior_config_binding_behavior_config_sha256_mismatch")
+    for field in (
+        "behavior_config_digest",
+        "behavior_config_sha256",
+        "admin_trace_runtime_summary_sha256",
+        "stream_trace_runtime_summary_sha256",
+    ):
+        if not is_sha256(binding.get(field)):
+            errors.append(f"{prefix}_behavior_config_binding_{field}_invalid")
+    if not nonempty(binding.get("admin_trace_id")):
+        errors.append(f"{prefix}_behavior_config_binding_admin_trace_id_missing")
+    if not nonempty(binding.get("stream_trace_id")):
+        errors.append(f"{prefix}_behavior_config_binding_stream_trace_id_missing")
+
+    for label, field in (
+        ("admin_trace", "admin_trace_runtime_summary"),
+        ("stream_trace", "stream_trace_runtime_summary"),
+    ):
+        summary = binding.get(field)
+        if not isinstance(summary, dict):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_summary_missing")
+            continue
+        if binding.get(f"{field}_sha256") != canonical_digest(summary):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_summary_digest_mismatch")
+        if summary.get("mode") != "hermes":
+            errors.append(f"{prefix}_behavior_config_binding_{label}_mode_invalid")
+        if (
+            summary.get("profile_execution_status")
+            != "hermes_profile_observed_with_local_governance"
+        ):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_profile_status_invalid")
+        if summary.get("hermes_content_execution_complete") is not True:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_content_incomplete")
+        if summary.get("local_governance_enforced") is not True:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_governance_missing")
+        tool_result_count = summary.get("tool_result_count")
+        tool_audit_event_count = summary.get("tool_audit_event_count")
+        if not isinstance(tool_result_count, int) or tool_result_count <= 0:
+            errors.append(f"{prefix}_behavior_config_binding_{label}_tool_results_invalid")
+        if (
+            not isinstance(tool_audit_event_count, int)
+            or not isinstance(tool_result_count, int)
+            or tool_audit_event_count < tool_result_count
+        ):
+            errors.append(f"{prefix}_behavior_config_binding_{label}_tool_audit_invalid")
+    if binding.get("agent_runtime_mode") != "hermes":
+        errors.append(f"{prefix}_behavior_config_binding_agent_runtime_mode_invalid")
+    if (
+        binding.get("profile_execution_status")
+        != "hermes_profile_observed_with_local_governance"
+    ):
+        errors.append(f"{prefix}_behavior_config_binding_profile_status_invalid")
+    if binding.get("hermes_content_execution_complete") is not True:
+        errors.append(f"{prefix}_behavior_config_binding_content_incomplete")
+    if binding.get("local_governance_enforced") is not True:
+        errors.append(f"{prefix}_behavior_config_binding_governance_missing")
+    if not isinstance(binding.get("tool_result_count"), int) or binding.get("tool_result_count") <= 0:
+        errors.append(f"{prefix}_behavior_config_binding_tool_result_count_invalid")
+    if (
+        not isinstance(binding.get("tool_audit_event_count"), int)
+        or not isinstance(binding.get("tool_result_count"), int)
+        or binding.get("tool_audit_event_count") < binding.get("tool_result_count")
+    ):
+        errors.append(f"{prefix}_behavior_config_binding_tool_audit_count_invalid")
+
+
+def validate_strict_gateway_metrics_privacy(gate_json):
+    metrics_privacy = gate_json.get("metrics_privacy")
+    if not isinstance(metrics_privacy, dict):
+        errors.append("strict_gateway_metrics_privacy_missing")
+        return
+    if metrics_privacy.get("object") != "tonglingyu.strict_gateway_metrics_privacy":
+        errors.append("strict_gateway_metrics_privacy_object_invalid")
+    if metrics_privacy.get("schema_version") != 1:
+        errors.append("strict_gateway_metrics_privacy_schema_version_invalid")
+    if metrics_privacy.get("secret_values_printed") is not False:
+        errors.append("strict_gateway_metrics_privacy_secret_values_printed_must_be_false")
+    json_paths = metrics_privacy.get("json_metrics_sensitive_paths")
+    if not isinstance(json_paths, list):
+        errors.append("strict_gateway_metrics_privacy_json_paths_invalid")
+        json_paths = []
+    elif json_paths:
+        errors.append("strict_gateway_metrics_privacy_json_sensitive_paths_present")
+    if metrics_privacy.get("json_metrics_sensitive_paths_sha256") != canonical_digest(json_paths):
+        errors.append("strict_gateway_metrics_privacy_json_paths_digest_mismatch")
+    prom_tokens = metrics_privacy.get("prometheus_sensitive_tokens")
+    if not isinstance(prom_tokens, list):
+        errors.append("strict_gateway_metrics_privacy_prometheus_tokens_invalid")
+        prom_tokens = []
+    elif prom_tokens:
+        errors.append("strict_gateway_metrics_privacy_prometheus_sensitive_tokens_present")
+    if metrics_privacy.get("prometheus_sensitive_tokens_sha256") != canonical_digest(prom_tokens):
+        errors.append("strict_gateway_metrics_privacy_prometheus_tokens_digest_mismatch")
+    if metrics_privacy.get("json_metrics_secret_values_present") is not False:
+        errors.append("strict_gateway_metrics_privacy_json_secret_values_present")
+    if metrics_privacy.get("prometheus_secret_values_present") is not False:
+        errors.append("strict_gateway_metrics_privacy_prometheus_secret_values_present")
+
+
+def is_git_commit(value):
+    return (
+        isinstance(value, str)
+        and 7 <= len(value) <= 64
+        and all(char in hex_digits for char in value.lower())
+    )
+
+
+def validate_release_manifest():
+    manifest = report.get("release_manifest")
+    manifest_digest = report.get("release_manifest_digest")
+    if not isinstance(manifest, dict):
+        if production_ready:
+            errors.append("production_ready_requires_release_manifest")
+        return
+    if manifest.get("object") != "tonglingyu.release_manifest":
+        errors.append("release_manifest_object_invalid")
+    if manifest.get("schema_version") != 1:
+        errors.append("release_manifest_schema_version_invalid")
+    if not is_sha256(manifest_digest):
+        errors.append("release_manifest_digest_invalid")
+    elif manifest_digest != canonical_digest(manifest):
+        errors.append("release_manifest_digest_mismatch")
+
+    git = manifest.get("git")
+    if not isinstance(git, dict):
+        errors.append("release_manifest_git_missing")
+    else:
+        if not is_git_commit(git.get("commit")):
+            errors.append("release_manifest_git_commit_invalid")
+        if not isinstance(git.get("tracked_dirty"), bool):
+            errors.append("release_manifest_git_tracked_dirty_must_be_bool")
+        if production_ready and git.get("tracked_dirty") is not False:
+            errors.append("production_ready_requires_clean_tracked_worktree")
+
+    runtime_config_json = success_json_from_gate_stdout(gates_by_name.get("runtime_config"))
+    runtime_config = manifest.get("runtime_config")
+    if not isinstance(runtime_config, dict):
+        errors.append("release_manifest_runtime_config_missing")
+    elif runtime_config_json is not None:
+        if runtime_config.get("config_digest") != canonical_digest(runtime_config_json):
+            errors.append("release_manifest_runtime_config_digest_mismatch")
+        for field in ("config_mode", "checked_policy_fields", "checked_services"):
+            if runtime_config.get(field) != runtime_config_json.get(field):
+                errors.append(f"release_manifest_runtime_config_{field}_mismatch")
+
+    rqa_gate = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    )
+    rqa = manifest.get("rqa")
+    if not isinstance(rqa, dict):
+        errors.append("release_manifest_rqa_missing")
+    elif rqa_gate is not None:
+        for field in (
+            "rqa_schema_version",
+            "eval_suite_version",
+            "eval_run_id",
+            "eval_report_sha256",
+            "source_snapshot_digest",
+            "kb_build_hash",
+        ):
+            if rqa.get(field) != rqa_gate.get(field):
+                errors.append(f"release_manifest_rqa_{field}_mismatch")
+        for field in (
+            "eval_report_sha256",
+            "source_snapshot_digest",
+            "kb_build_hash",
+        ):
+            if not is_sha256(rqa.get(field)):
+                errors.append(f"release_manifest_rqa_{field}_invalid")
+        kb_version = rqa_gate.get("kb_version") or {}
+        expected_kb_version = {
+            "version_id": kb_version.get("version_id"),
+            "schema_version": kb_version.get("schema_version"),
+            "source_count": kb_version.get("source_count"),
+            "block_count": kb_version.get("block_count"),
+            "built_at": kb_version.get("built_at"),
+        }
+        if rqa.get("kb_version") != expected_kb_version:
+            errors.append("release_manifest_rqa_kb_version_mismatch")
+        source_license = rqa_gate.get("source_license_summary") or {}
+        expected_source_license_digest = (
+            canonical_digest(source_license) if source_license else ""
+        )
+        if rqa.get("source_license_summary_digest") != expected_source_license_digest:
+            errors.append("release_manifest_rqa_source_license_summary_digest_mismatch")
+        if production_ready and not is_sha256(rqa.get("source_license_summary_digest")):
+            errors.append("production_ready_requires_source_license_summary_digest")
+
+    migration_gate = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_migration_preflight"),
+        "tonglingyu.rqa_migration_preflight_gate",
+    )
+    migration = manifest.get("migration")
+    if not isinstance(migration, dict):
+        errors.append("release_manifest_migration_missing")
+    elif migration_gate is not None:
+        migration_backup = migration_gate.get("backup") or {}
+        migration_db = migration_gate.get("db") or {}
+        migration_preflight = migration_gate.get("migration_preflight") or {}
+        migration_counts = migration_gate.get("migration_counts") or {}
+        expected_preflight_digest = (
+            canonical_digest(migration_preflight) if migration_preflight else ""
+        )
+        expected_fields = {
+            "policy_version": migration_gate.get("policy_version"),
+            "mode": migration_gate.get("mode"),
+            "require_live": migration_gate.get("require_live"),
+            "source_mode": migration_gate.get("source_mode"),
+            "source_db_sha256": migration_db.get("source_db_sha256"),
+            "backup_artifact_path": migration_backup.get("artifact_path"),
+            "backup_artifact_path_sha256": migration_backup.get("artifact_path_sha256"),
+            "backup_artifact_sha256": migration_backup.get("artifact_sha256"),
+            "migration_preflight_sha256": expected_preflight_digest,
+            "required_migration_count": migration_counts.get("required"),
+            "applied_migration_count": migration_counts.get("applied"),
+            "pending_migration_count": migration_counts.get("pending"),
+        }
+        for field, expected in expected_fields.items():
+            if migration.get(field) != expected:
+                errors.append(f"release_manifest_migration_{field}_mismatch")
+        for field in (
+            "source_db_sha256",
+            "backup_artifact_path_sha256",
+            "backup_artifact_sha256",
+            "migration_preflight_sha256",
+        ):
+            if not is_sha256(migration.get(field)):
+                errors.append(f"release_manifest_migration_{field}_invalid")
+        for field in (
+            "required_migration_count",
+            "applied_migration_count",
+            "pending_migration_count",
+        ):
+            value = migration.get(field)
+            if not isinstance(value, int) or value < 0:
+                errors.append(f"release_manifest_migration_{field}_invalid")
+        if production_ready and migration.get("mode") != "live":
+            errors.append("production_ready_release_manifest_migration_mode_not_live")
+        if production_ready and migration.get("require_live") is not True:
+            errors.append("production_ready_release_manifest_migration_require_live_missing")
+        if production_ready and migration.get("source_mode") != "existing_db":
+            errors.append("production_ready_release_manifest_migration_source_not_existing_db")
+        if production_ready and not nonempty(migration.get("backup_artifact_path")):
+            errors.append("production_ready_release_manifest_migration_backup_path_missing")
+
+    behavior = manifest.get("behavior_config")
+    behavior_config = rqa_gate.get("behavior_config") if isinstance(rqa_gate, dict) else None
+    if not isinstance(behavior, dict):
+        errors.append("release_manifest_behavior_config_missing")
+    elif isinstance(behavior_config, dict):
+        for field in (
+            "behavior_config_digest",
+            "runtime_profile_digest",
+            "prompt_digest",
+            "tool_policy_digest",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+            "model_upstream_id",
+            "model_upstream_bound_by_gate",
+            "decoding_parameters_source",
+            "decoding_parameters_summary",
+        ):
+            if behavior.get(field) != behavior_config.get(field):
+                errors.append(f"release_manifest_behavior_config_{field}_mismatch")
+        for field in (
+            "behavior_config_digest",
+            "runtime_profile_digest",
+            "prompt_digest",
+            "tool_policy_digest",
+            "reviewer_policy_digest",
+            "gateway_policy_digest",
+        ):
+            if not is_sha256(behavior.get(field)):
+                errors.append(f"release_manifest_behavior_config_{field}_invalid")
+
+    security_gate = success_json_from_gate_stdout(
+        gates_by_name.get("security_scan"),
+        "tonglingyu.release_security_gate",
+    )
+    security = manifest.get("security")
+    if not isinstance(security, dict):
+        errors.append("release_manifest_security_missing")
+    elif security_gate is not None:
+        dependency_scan = security_gate.get("dependency_scan") or {}
+        image_scan = security_gate.get("image_scan") or {}
+        if security.get("dependency_scan_sha256") != dependency_scan.get("report_sha256"):
+            errors.append("release_manifest_security_dependency_scan_sha256_mismatch")
+        for field in (
+            "image_count",
+            "image_refs",
+            "image_refs_sha256",
+            "digest_missing_count",
+            "mutable_tag_count",
+            "scanned_image_count",
+            "scanned_image_refs_sha256",
+            "scanned_report_count",
+            "scanned_reports_sha256",
+            "raw_reports_persistent",
+            "raw_report_artifact_dir",
+            "raw_report_paths_sha256",
+        ):
+            if security.get(field) != image_scan.get(field):
+                errors.append(f"release_manifest_security_{field}_mismatch")
+        for field in (
+            "dependency_scan_sha256",
+            "image_refs_sha256",
+            "scanned_image_refs_sha256",
+            "scanned_reports_sha256",
+            "raw_report_paths_sha256",
+        ):
+            if not is_sha256(security.get(field)):
+                errors.append(f"release_manifest_security_{field}_invalid")
+        if production_ready and security.get("raw_reports_persistent") is not True:
+            errors.append("production_ready_release_manifest_image_raw_reports_not_persistent")
+        if production_ready and not nonempty(security.get("raw_report_artifact_dir")):
+            errors.append("production_ready_release_manifest_image_raw_report_artifact_dir_missing")
+        if production_ready and security.get("digest_missing_count") != 0:
+            errors.append("production_ready_release_manifest_image_digest_missing")
+        if production_ready and security.get("mutable_tag_count") != 0:
+            errors.append("production_ready_release_manifest_mutable_image_tag")
+        if production_ready:
+            image_refs = security.get("image_refs")
+            if not isinstance(image_refs, list) or not image_refs:
+                errors.append("production_ready_release_manifest_image_refs_missing")
+            elif any(not image_ref_is_digest_pinned(image_ref) for image_ref in image_refs):
+                errors.append("production_ready_release_manifest_image_refs_not_digest_pinned")
+        if production_ready and security.get("image_count") != security.get("scanned_image_count"):
+            errors.append("production_ready_release_manifest_image_scan_count_mismatch")
+        if production_ready and security.get("image_count") != security.get("scanned_report_count"):
+            errors.append("production_ready_release_manifest_image_report_count_mismatch")
+
+
+def validate_release_artifact_registry():
+    registry = report.get("release_artifact_registry")
+    registry_digest = report.get("release_artifact_registry_digest")
+    if not isinstance(registry, dict):
+        if production_ready:
+            errors.append("production_ready_requires_release_artifact_registry")
+        return
+    if registry.get("object") != "tonglingyu.release_artifact_registry":
+        errors.append("release_artifact_registry_object_invalid")
+    if registry.get("schema_version") != 1:
+        errors.append("release_artifact_registry_schema_version_invalid")
+    if registry.get("policy_version") != "tonglingyu-release-artifact-registry-v1":
+        errors.append("release_artifact_registry_policy_version_invalid")
+    if registry.get("secret_values_printed") is not False:
+        errors.append("release_artifact_registry_secret_values_printed_must_be_false")
+    if not is_sha256(registry_digest):
+        errors.append("release_artifact_registry_digest_invalid")
+    elif registry_digest != canonical_digest(registry):
+        errors.append("release_artifact_registry_digest_mismatch")
+    retention_days = registry.get("retention_days")
+    if not isinstance(retention_days, int) or retention_days < 365:
+        errors.append("release_artifact_registry_retention_days_invalid")
+    if registry.get("legal_hold_supported") is not True:
+        errors.append("release_artifact_registry_legal_hold_missing")
+    if parse_timestamp(registry.get("generated_at")) is None:
+        errors.append("release_artifact_registry_generated_at_invalid")
+
+    entries = registry.get("entries")
+    if not isinstance(entries, list) or not entries:
+        errors.append("release_artifact_registry_entries_missing")
+        entries = []
+    entries_by_name = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"release_artifact_registry_entry_{index}_must_be_object")
+            continue
+        name = entry.get("name")
+        if not nonempty(name):
+            errors.append(f"release_artifact_registry_entry_{index}_name_missing")
+            continue
+        if name in entries_by_name:
+            errors.append(f"release_artifact_registry_duplicate_entry={name}")
+        entries_by_name[name] = entry
+        for field in ("artifact_type", "source_gate", "retention_class"):
+            if not nonempty(entry.get(field)):
+                errors.append(f"release_artifact_registry_{name}_{field}_missing")
+        if not isinstance(entry.get("required_for_production"), bool):
+            errors.append(f"release_artifact_registry_{name}_required_flag_invalid")
+        if not is_sha256(entry.get("digest_sha256")) and (
+            production_ready or nonempty(entry.get("digest_sha256"))
+        ):
+            errors.append(f"release_artifact_registry_{name}_digest_invalid")
+        for field in ("ref", "path"):
+            value = entry.get(field)
+            if value not in ("", None) and not isinstance(value, str):
+                errors.append(f"release_artifact_registry_{name}_{field}_invalid")
+
+    manifest = report.get("release_manifest") if isinstance(report.get("release_manifest"), dict) else {}
+    manifest_rqa = manifest.get("rqa") if isinstance(manifest.get("rqa"), dict) else {}
+    manifest_runtime = (
+        manifest.get("runtime_config")
+        if isinstance(manifest.get("runtime_config"), dict)
+        else {}
+    )
+    manifest_migration = (
+        manifest.get("migration")
+        if isinstance(manifest.get("migration"), dict)
+        else {}
+    )
+    manifest_behavior = (
+        manifest.get("behavior_config")
+        if isinstance(manifest.get("behavior_config"), dict)
+        else {}
+    )
+    manifest_security = (
+        manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
+    )
+    rqa_gate = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    ) or {}
+    expected_entries = {
+        "release_manifest": {
+            "digest": report.get("release_manifest_digest"),
+            "source_gate": "release_readiness",
+        },
+        "release_context": {
+            "digest": report.get("release_context_digest"),
+            "source_gate": "release_readiness",
+            "ref": (
+                report.get("release_context", {}).get("environment")
+                if isinstance(report.get("release_context"), dict)
+                else ""
+            ),
+        },
+        "release_runtime_identity": {
+            "digest": report.get("release_runtime_identity_digest"),
+            "source_gate": "release_readiness",
+            "ref": (
+                report.get("release_runtime_identity", {}).get("git", {}).get("commit")
+                if isinstance(report.get("release_runtime_identity"), dict)
+                and isinstance(report.get("release_runtime_identity", {}).get("git"), dict)
+                else ""
+            ),
+        },
+        "runtime_config": {
+            "digest": manifest_runtime.get("config_digest"),
+            "source_gate": "runtime_config",
+        },
+        "rqa_eval_report": {
+            "digest": manifest_rqa.get("eval_report_sha256"),
+            "source_gate": "retrieval_quality",
+            "path": rqa_gate.get("eval_report_path") or "",
+            "ref": manifest_rqa.get("eval_run_id") or "",
+        },
+        "source_license_summary": {
+            "digest": manifest_rqa.get("source_license_summary_digest"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_rqa.get("source_snapshot_digest") or "",
+        },
+        "migration_preflight": {
+            "digest": manifest_migration.get("migration_preflight_sha256"),
+            "source_gate": "rqa_migration_preflight",
+            "ref": manifest_migration.get("policy_version") or "",
+        },
+        "migration_backup": {
+            "digest": manifest_migration.get("backup_artifact_sha256"),
+            "source_gate": "rqa_migration_preflight",
+            "path": manifest_migration.get("backup_artifact_path") or "",
+            "ref": manifest_migration.get("source_db_sha256") or "",
+        },
+        "behavior_config": {
+            "digest": manifest_behavior.get("behavior_config_digest"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_behavior.get("model_upstream_id") or "",
+        },
+        "dependency_scan": {
+            "digest": manifest_security.get("dependency_scan_sha256"),
+            "source_gate": "security_scan",
+        },
+        "image_inventory": {
+            "digest": manifest_security.get("image_refs_sha256"),
+            "source_gate": "security_scan",
+        },
+        "image_scan_reports": {
+            "digest": manifest_security.get("scanned_reports_sha256"),
+            "source_gate": "security_scan",
+            "path": manifest_security.get("raw_report_artifact_dir") or "",
+            "ref": manifest_security.get("raw_report_paths_sha256")
+            or f"reports:{manifest_security.get('scanned_report_count') or 0}",
+        },
+    }
+    if isinstance(browser_review_validation, dict):
+        expected_entries["browser_review_evidence"] = {
+            "digest": browser_review_validation.get("evidence_sha256"),
+            "source_gate": "openwebui_browser_review",
+            "path": browser_review_evidence or "",
+            "ref": browser_review_ref or "",
+        }
+
+    required_names = set(expected_entries)
+    if not production_ready:
+        required_names.discard("browser_review_evidence")
+    for name in sorted(required_names):
+        entry = entries_by_name.get(name)
+        if entry is None:
+            if production_ready:
+                errors.append(f"production_ready_missing_artifact_registry_entry={name}")
+            continue
+        expected = expected_entries[name]
+        expected_digest = expected.get("digest") or ""
+        if (production_ready or expected_digest) and entry.get("digest_sha256") != expected_digest:
+            errors.append(f"release_artifact_registry_{name}_digest_mismatch")
+        if entry.get("source_gate") != expected.get("source_gate"):
+            errors.append(f"release_artifact_registry_{name}_source_gate_mismatch")
+        if expected.get("path") is not None and entry.get("path") != expected.get("path", ""):
+            errors.append(f"release_artifact_registry_{name}_path_mismatch")
+        if expected.get("ref") is not None and entry.get("ref") != expected.get("ref", ""):
+            errors.append(f"release_artifact_registry_{name}_ref_mismatch")
+        if production_ready and entry.get("required_for_production") is not True:
+            errors.append(f"production_ready_artifact_registry_entry_not_required={name}")
+
+
+def ratio_json(passed, total):
+    return {
+        "passed": passed,
+        "total": total,
+        "ratio": None if total == 0 else passed / total,
+    }
+
+
+def recompute_eval_quality_from_cases(cases):
+    if not isinstance(cases, list) or not cases:
+        return None
+    total_cases = len(cases)
+    quality_report_cases = 0
+    quality_report_production_ready_required_cases = 0
+    quality_report_production_ready_cases = 0
+    classified_cases = 0
+    expected_evidence_cases = 0
+    expected_hit_at_1 = 0
+    expected_hit_at_3 = 0
+    expected_hit_at_8 = 0
+    required_type_cases = 0
+    required_type_passed = 0
+    exact_term_total = 0
+    exact_term_passed = 0
+    source_boundary_confirmation_cases = 0
+    source_boundary_confirmation_avoided = 0
+    forbidden_conclusion_avoided = 0
+    reviewer_status_matched = 0
+    eval_failure_records = 0
+    source_ids = set()
+
+    for case in cases:
+        if not isinstance(case, dict):
+            return None
+        quality = case.get("quality")
+        if not isinstance(quality, dict):
+            return None
+        quality_report_count = quality.get("quality_report_count")
+        if isinstance(quality_report_count, int) and quality_report_count > 0:
+            quality_report_cases += 1
+        requires_production_ready = (
+            quality.get("quality_report_production_ready_required") is True
+        )
+        if requires_production_ready:
+            quality_report_production_ready_required_cases += 1
+            unallowed_issues = quality.get(
+                "quality_report_unallowed_non_production_issues",
+            )
+            if (
+                isinstance(quality_report_count, int)
+                and quality_report_count > 0
+                and unallowed_issues == []
+            ):
+                quality_report_production_ready_cases += 1
+        classification = quality.get("classification")
+        classification_name = (
+            classification.get("classification")
+            if isinstance(classification, dict)
+            else None
+        )
+        if classification_name in {"expected_evidence", "not_applicable"}:
+            classified_cases += 1
+        if classification_name == "expected_evidence":
+            expected_evidence_cases += 1
+            if quality.get("expected_evidence_hit_at_1") is True:
+                expected_hit_at_1 += 1
+            if quality.get("expected_evidence_hit_at_3") is True:
+                expected_hit_at_3 += 1
+            if quality.get("expected_evidence_hit_at_8") is True:
+                expected_hit_at_8 += 1
+        required_type_required = quality.get("required_type_required")
+        if required_type_required not in (True, False):
+            return None
+        if required_type_required:
+            required_type_cases += 1
+            if quality.get("required_type_passed") is True:
+                required_type_passed += 1
+        exact_term_coverage = quality.get("exact_term_coverage")
+        if isinstance(exact_term_coverage, dict):
+            exact_passed = exact_term_coverage.get("passed")
+            exact_total = exact_term_coverage.get("total")
+            if isinstance(exact_passed, int) and isinstance(exact_total, int):
+                exact_term_passed += exact_passed
+                exact_term_total += exact_total
+        source_boundary_required = quality.get("source_boundary_confirmation_required")
+        if source_boundary_required not in (True, False):
+            return None
+        if source_boundary_required:
+            source_boundary_confirmation_cases += 1
+            if (
+                quality.get("source_boundary_confirmation_avoided") is True
+                and case.get("expected_review_status") == "needs_revision"
+                and case.get("review_status") == "needs_revision"
+            ):
+                source_boundary_confirmation_avoided += 1
+        failures = case.get("failures")
+        if not isinstance(failures, list):
+            return None
+        if not any(
+            isinstance(failure, str)
+            and failure.startswith("forbidden conclusion appeared in replay:")
+            for failure in failures
+        ):
+            forbidden_conclusion_avoided += 1
+        if case.get("passed") is not True:
+            eval_failure_records += 1
+        if not nonempty(case.get("expected_review_status")):
+            return None
+        if case.get("review_status") == case.get("expected_review_status"):
+            reviewer_status_matched += 1
+        for source_id in quality.get("source_ids") or []:
+            if isinstance(source_id, str):
+                source_ids.add(source_id)
+
+    return {
+        "quality_report_coverage": ratio_json(quality_report_cases, total_cases),
+        "quality_report_production_ready": ratio_json(
+            quality_report_production_ready_cases,
+            quality_report_production_ready_required_cases,
+        ),
+        "eval_case_classification": ratio_json(classified_cases, total_cases),
+        "expected_evidence_denominator": expected_evidence_cases,
+        "expected_evidence_hit_at_1": ratio_json(expected_hit_at_1, expected_evidence_cases),
+        "expected_evidence_hit_at_3": ratio_json(expected_hit_at_3, expected_evidence_cases),
+        "expected_evidence_hit_at_8": ratio_json(expected_hit_at_8, expected_evidence_cases),
+        "required_type_coverage": ratio_json(required_type_passed, required_type_cases),
+        "exact_term_coverage": ratio_json(exact_term_passed, exact_term_total),
+        "source_boundary_confirmation_avoided": ratio_json(
+            source_boundary_confirmation_avoided,
+            source_boundary_confirmation_cases,
+        ),
+        "forbidden_conclusion_avoided": ratio_json(
+            forbidden_conclusion_avoided,
+            total_cases,
+        ),
+        "reviewer_status_matched": ratio_json(reviewer_status_matched, total_cases),
+        "eval_failure_records": eval_failure_records,
+        "source_diversity": {
+            "count": len(source_ids),
+            "source_ids": sorted(source_ids),
+        },
+    }
+
+
+def add_eval_summary_mismatch(field, expected, actual):
+    if expected != actual:
+        errors.append(f"retrieval_quality_eval_report_{field}_mismatch")
+
+
+def validate_retrieval_quality_eval_report_artifact(gate_json):
+    eval_report_path = gate_json.get("eval_report_path")
+    if not nonempty(eval_report_path):
+        errors.append("retrieval_quality_eval_report_path_missing")
+        return
+    artifact_path = Path(eval_report_path)
+    if not artifact_path.is_absolute():
+        errors.append("retrieval_quality_eval_report_path_must_be_absolute")
+        return
+    if not artifact_path.is_file():
+        errors.append("retrieval_quality_eval_report_file_not_found")
+        return
+    actual_sha256 = file_sha256(artifact_path)
+    if actual_sha256 != gate_json.get("eval_report_sha256"):
+        errors.append("retrieval_quality_eval_report_sha256_mismatch")
+    try:
+        eval_report = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        errors.append("retrieval_quality_eval_report_json_invalid")
+        return
+    if not isinstance(eval_report, dict):
+        errors.append("retrieval_quality_eval_report_must_be_object")
+        return
+    if eval_report.get("object") != "tonglingyu.eval_report":
+        errors.append("retrieval_quality_eval_report_object_invalid")
+    if eval_report.get("status") != "passed":
+        errors.append("retrieval_quality_eval_report_status_not_passed")
+    eval_summary = eval_report.get("quality_summary")
+    gate_summary = gate_json.get("quality_summary")
+    if not isinstance(eval_summary, dict):
+        errors.append("retrieval_quality_eval_report_quality_summary_missing")
+        return
+    if not isinstance(gate_summary, dict):
+        errors.append("retrieval_quality_summary_missing")
+        return
+    if gate_json.get("eval_suite_version") != eval_summary.get("schema_version"):
+        errors.append("retrieval_quality_eval_suite_version_mismatch")
+    if gate_json.get("eval_run_id") != f"rqa-eval-{actual_sha256[:16]}":
+        errors.append("retrieval_quality_eval_run_id_mismatch")
+    for field in (
+        "status",
+        "blockers",
+        "quality_report_coverage",
+        "quality_report_production_ready",
+        "eval_case_classification",
+        "expected_evidence_denominator",
+        "expected_evidence_hit_at_8",
+        "required_type_coverage",
+        "exact_term_coverage",
+        "source_boundary_confirmation_avoided",
+        "forbidden_conclusion_avoided",
+        "reviewer_status_matched",
+        "eval_failure_records",
+        "source_coverage_boundary",
+    ):
+        add_eval_summary_mismatch(field, eval_summary.get(field), gate_summary.get(field))
+    eval_source_diversity = eval_summary.get("source_diversity")
+    gate_source_diversity = gate_summary.get("source_diversity")
+    if not isinstance(eval_source_diversity, dict) or not isinstance(gate_source_diversity, dict):
+        errors.append("retrieval_quality_eval_report_source_diversity_missing")
+    else:
+        for field in ("count", "source_ids"):
+            if eval_source_diversity.get(field) != gate_source_diversity.get(field):
+                errors.append(f"retrieval_quality_eval_report_source_diversity_{field}_mismatch")
+
+    recomputed = recompute_eval_quality_from_cases(eval_report.get("cases"))
+    if recomputed is None:
+        errors.append("retrieval_quality_eval_report_cases_unusable")
+        return
+    for field in (
+        "quality_report_coverage",
+        "quality_report_production_ready",
+        "eval_case_classification",
+        "expected_evidence_denominator",
+        "expected_evidence_hit_at_1",
+        "expected_evidence_hit_at_3",
+        "expected_evidence_hit_at_8",
+        "required_type_coverage",
+        "exact_term_coverage",
+        "source_boundary_confirmation_avoided",
+        "forbidden_conclusion_avoided",
+        "reviewer_status_matched",
+        "eval_failure_records",
+    ):
+        if eval_summary.get(field) != recomputed.get(field):
+            errors.append(f"retrieval_quality_eval_report_{field}_recompute_mismatch")
+    eval_source_diversity = eval_summary.get("source_diversity")
+    if not isinstance(eval_source_diversity, dict):
+        errors.append("retrieval_quality_eval_report_source_diversity_missing")
+    else:
+        recomputed_sources = recomputed["source_diversity"]
+        if eval_source_diversity.get("count") != recomputed_sources["count"]:
+            errors.append("retrieval_quality_eval_report_source_diversity_count_recompute_mismatch")
+        if eval_source_diversity.get("source_ids") != recomputed_sources["source_ids"]:
+            errors.append("retrieval_quality_eval_report_source_ids_recompute_mismatch")
+
+
 def validate_gate_stdout(name, gate, requirement):
     if not isinstance(gate, dict) or gate.get("status") != "passed":
         return
@@ -306,6 +1470,1725 @@ def validate_production_gate_stdout():
             validate_gate_stdout(name, gate, requirement)
         else:
             errors.append(f"production_ready_requires_{name}_stdout_success_json")
+
+
+def validate_migration_preflight_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_migration_preflight"),
+        "tonglingyu.rqa_migration_preflight_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("migration_preflight_passed") is not True:
+        errors.append("rqa_migration_preflight_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_migration_preflight_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-migration-preflight-v1":
+        errors.append("rqa_migration_preflight_policy_version_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("rqa_migration_preflight_mode_invalid")
+    if not isinstance(gate_json.get("require_live"), bool):
+        errors.append("rqa_migration_preflight_require_live_invalid")
+    if gate_json.get("source_mode") not in {"existing_db", "fixture_built"}:
+        errors.append("rqa_migration_preflight_source_mode_invalid")
+    if production_ready and gate_json.get("mode") != "live":
+        errors.append("production_ready_requires_live_migration_preflight")
+    if production_ready and gate_json.get("require_live") is not True:
+        errors.append("production_ready_requires_migration_preflight_live_flag")
+    if production_ready and gate_json.get("source_mode") != "existing_db":
+        errors.append("production_ready_requires_existing_db_migration_preflight")
+    for field in ("started_at", "finished_at", "generated_at"):
+        if parse_timestamp(gate_json.get(field)) is None:
+            errors.append(f"rqa_migration_preflight_{field}_invalid")
+    if not isinstance(gate_json.get("duration_ms"), int) or gate_json.get("duration_ms") < 0:
+        errors.append("rqa_migration_preflight_duration_ms_invalid")
+
+    db = gate_json.get("db")
+    if not isinstance(db, dict):
+        errors.append("rqa_migration_preflight_db_missing")
+    else:
+        if not nonempty(db.get("path")):
+            errors.append("rqa_migration_preflight_db_path_missing")
+        if not is_sha256(db.get("path_sha256")):
+            errors.append("rqa_migration_preflight_db_path_sha256_invalid")
+        if not is_sha256(db.get("source_db_sha256")):
+            errors.append("rqa_migration_preflight_db_source_db_sha256_invalid")
+        if not isinstance(db.get("size_bytes"), int) or db.get("size_bytes") <= 0:
+            errors.append("rqa_migration_preflight_db_size_bytes_invalid")
+
+    backup = gate_json.get("backup")
+    if not isinstance(backup, dict):
+        errors.append("rqa_migration_preflight_backup_missing")
+    else:
+        if not nonempty(backup.get("artifact_path")):
+            errors.append("rqa_migration_preflight_backup_path_missing")
+        elif production_ready and not Path(backup.get("artifact_path")).is_absolute():
+            errors.append("production_ready_migration_preflight_backup_path_must_be_absolute")
+        if not is_sha256(backup.get("artifact_path_sha256")):
+            errors.append("rqa_migration_preflight_backup_path_sha256_invalid")
+        if not is_sha256(backup.get("artifact_sha256")):
+            errors.append("rqa_migration_preflight_backup_artifact_sha256_invalid")
+        if not is_sha256(backup.get("source_db_sha256")):
+            errors.append("rqa_migration_preflight_backup_source_db_sha256_invalid")
+        if not isinstance(backup.get("size_bytes"), int) or backup.get("size_bytes") <= 0:
+            errors.append("rqa_migration_preflight_backup_size_bytes_invalid")
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(backup.get(field)) is None:
+                errors.append(f"rqa_migration_preflight_backup_{field}_invalid")
+        if backup.get("before_preflight") is not True:
+            errors.append("rqa_migration_preflight_backup_not_before_preflight")
+
+    migration_preflight = gate_json.get("migration_preflight")
+    if not isinstance(migration_preflight, dict):
+        errors.append("rqa_migration_preflight_payload_missing")
+        migration_preflight = {}
+    else:
+        if (
+            migration_preflight.get("object")
+            != "tonglingyu.runtime_schema_migration_preflight"
+        ):
+            errors.append("rqa_migration_preflight_payload_object_invalid")
+        for field in ("required_migrations", "applied_migrations", "pending_migrations"):
+            if not isinstance(migration_preflight.get(field), list):
+                errors.append(f"rqa_migration_preflight_payload_{field}_invalid")
+        if migration_preflight.get("will_rebuild_knowledge_base") is not False:
+            errors.append("rqa_migration_preflight_would_rebuild_kb")
+        if migration_preflight.get("will_delete_runtime_data") is not False:
+            errors.append("rqa_migration_preflight_would_delete_runtime_data")
+        if migration_preflight.get("contains_secret_values") is not False:
+            errors.append("rqa_migration_preflight_contains_secret_values")
+    expected_preflight_digest = canonical_digest(migration_preflight)
+    if gate_json.get("migration_preflight_sha256") != expected_preflight_digest:
+        errors.append("rqa_migration_preflight_digest_mismatch")
+
+    counts = gate_json.get("migration_counts")
+    if not isinstance(counts, dict):
+        errors.append("rqa_migration_preflight_counts_missing")
+        counts = {}
+    expected_counts = {
+        "required": len(migration_preflight.get("required_migrations") or []),
+        "applied": len(migration_preflight.get("applied_migrations") or []),
+        "pending": len(migration_preflight.get("pending_migrations") or []),
+    }
+    for field, expected in expected_counts.items():
+        if counts.get(field) != expected:
+            errors.append(f"rqa_migration_preflight_{field}_count_mismatch")
+    if production_ready and counts.get("pending") != 0:
+        errors.append("production_ready_requires_migration_pending_count_zero")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "backup_created",
+        "backup_before_preflight",
+        "backup_path_recorded",
+        "schema_preflight_ran",
+        "no_runtime_data_rebuild",
+        "no_runtime_data_delete",
+        "no_secret_values",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_migration_preflight_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_migration_preflight_check_failed={check}")
+
+
+def validate_retrieval_quality_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("retrieval_quality"),
+        "tonglingyu.rqa_quality_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("quality_gate_passed") is not True:
+        errors.append("retrieval_quality_gate_not_passed")
+    if gate_json.get("errors") not in ([], None):
+        errors.append("retrieval_quality_gate_errors_present")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("retrieval_quality_secret_values_printed_must_be_false")
+    if gate_json.get("rqa_schema_version") != "tonglingyu-retrieval-failures-v1":
+        errors.append("retrieval_quality_rqa_schema_version_invalid")
+    if not nonempty(gate_json.get("eval_suite_version")):
+        errors.append("retrieval_quality_eval_suite_version_missing")
+    if not nonempty(gate_json.get("eval_run_id")):
+        errors.append("retrieval_quality_eval_run_id_missing")
+    for field in ("source_snapshot_digest", "kb_build_hash", "eval_report_sha256"):
+        if not is_sha256(gate_json.get(field)):
+            errors.append(f"retrieval_quality_{field}_invalid")
+    production_thresholds = {
+        "quality_report_coverage": 1.0,
+        "quality_report_production_ready": 1.0,
+        "eval_case_classification": 1.0,
+        "expected_evidence_denominator_min": 1,
+        "expected_evidence_hit_at_8": 1.0,
+        "required_type_coverage": 1.0,
+        "exact_term_coverage": 1.0,
+        "source_boundary_confirmation_avoided": 1.0,
+        "forbidden_conclusion_avoided": 1.0,
+        "reviewer_status_matched": 1.0,
+        "open_p0_retrieval_failures": 0,
+        "open_p0_governance_tasks": 0,
+    }
+    if gate_json.get("production_default_thresholds") != production_thresholds:
+        errors.append("retrieval_quality_production_default_thresholds_mismatch")
+    threshold_config = gate_json.get("threshold_config")
+    if not isinstance(threshold_config, dict):
+        errors.append("retrieval_quality_threshold_config_missing")
+    else:
+        if threshold_config.get("less_strict_overrides") not in ([], None):
+            errors.append("retrieval_quality_threshold_config_less_strict_overrides_present")
+        if threshold_config.get("invalid_overrides") not in ([], None):
+            errors.append("retrieval_quality_threshold_config_invalid_overrides_present")
+        if threshold_config.get("production_ready_thresholds_enforced") is not True:
+            errors.append("retrieval_quality_threshold_config_not_production_ready")
+    thresholds = gate_json.get("effective_thresholds")
+    if not isinstance(thresholds, dict):
+        errors.append("retrieval_quality_effective_thresholds_missing")
+        thresholds = production_thresholds
+    else:
+        for key, default in production_thresholds.items():
+            actual = thresholds.get(key)
+            if threshold_invalid(key, actual):
+                errors.append(f"retrieval_quality_threshold_{key}_invalid")
+            elif threshold_below_production_default(key, actual, default):
+                errors.append(f"retrieval_quality_threshold_{key}_below_production_default")
+    quality = gate_json.get("quality_summary")
+    if not isinstance(quality, dict):
+        errors.append("retrieval_quality_summary_missing")
+    else:
+        if quality.get("status") != "passed":
+            errors.append("retrieval_quality_summary_status_not_passed")
+        if quality.get("blockers") not in ([], None):
+            errors.append("retrieval_quality_summary_blockers_present")
+        for field, threshold_key in (
+            ("quality_report_coverage", "quality_report_coverage"),
+            ("quality_report_production_ready", "quality_report_production_ready"),
+            ("eval_case_classification", "eval_case_classification"),
+            ("expected_evidence_hit_at_8", "expected_evidence_hit_at_8"),
+            ("required_type_coverage", "required_type_coverage"),
+            ("exact_term_coverage", "exact_term_coverage"),
+            ("source_boundary_confirmation_avoided", "source_boundary_confirmation_avoided"),
+            ("forbidden_conclusion_avoided", "forbidden_conclusion_avoided"),
+            ("reviewer_status_matched", "reviewer_status_matched"),
+        ):
+            if not ratio_at_least(quality.get(field), thresholds.get(threshold_key)):
+                errors.append(f"retrieval_quality_{field}_below_threshold")
+        if quality.get("eval_failure_records") != 0:
+            errors.append("retrieval_quality_eval_failure_records_not_zero")
+        denominator = quality.get("expected_evidence_denominator")
+        denominator_threshold = thresholds.get("expected_evidence_denominator_min")
+        if (
+            not isinstance(denominator, int)
+            or not isinstance(denominator_threshold, int)
+            or denominator < denominator_threshold
+        ):
+            errors.append("retrieval_quality_expected_evidence_denominator_invalid")
+        source_boundary = quality.get("source_coverage_boundary")
+        if not isinstance(source_boundary, dict):
+            errors.append("retrieval_quality_source_coverage_boundary_missing")
+        else:
+            if source_boundary.get("source_snapshot_status") != "wikisource_source_snapshot":
+                errors.append("retrieval_quality_source_snapshot_status_invalid")
+            for field in (
+                "facsimile_review_status",
+                "authoritative_edition_review_status",
+                "expert_collation_status",
+            ):
+                if source_boundary.get(field) != "not_reviewed":
+                    errors.append(f"retrieval_quality_{field}_unexpected")
+    kb_version = gate_json.get("kb_version")
+    if not nonempty_dict(kb_version):
+        errors.append("retrieval_quality_kb_version_missing")
+    else:
+        for field in ("version_id", "source_count", "block_count", "schema_version", "built_at"):
+            if field not in kb_version:
+                errors.append(f"retrieval_quality_kb_version_{field}_missing")
+    source_license = gate_json.get("source_license_summary")
+    if not isinstance(source_license, dict):
+        errors.append("retrieval_quality_source_license_summary_missing")
+    else:
+        if not isinstance(source_license.get("source_count"), int) or source_license.get("source_count") < 1:
+            errors.append("retrieval_quality_source_license_source_count_invalid")
+        if source_license.get("missing_metadata") not in ([], None):
+            errors.append("retrieval_quality_source_license_missing_metadata")
+        sources = source_license.get("sources")
+        if not isinstance(sources, list) or not sources:
+            errors.append("retrieval_quality_source_license_sources_missing")
+    if gate_json.get("open_p0_retrieval_failures") != 0:
+        errors.append("retrieval_quality_open_p0_retrieval_failures_not_zero")
+    if gate_json.get("open_p0_governance_tasks") != 0:
+        errors.append("retrieval_quality_open_p0_governance_tasks_not_zero")
+    if production_ready and gate_json.get("eval_report_generated_by_gate") is not True:
+        errors.append("retrieval_quality_eval_report_must_be_generated_by_gate")
+    behavior_config = gate_json.get("behavior_config")
+    validate_behavior_config("retrieval_quality", behavior_config)
+    strict_gate_json = success_json_from_gate_stdout(gates_by_name.get("strict_gateway"))
+    if strict_gate_json is not None:
+        strict_behavior_config = strict_gate_json.get("behavior_config")
+        validate_behavior_config("strict_gateway", strict_behavior_config)
+        validate_behavior_config_binding(
+            "strict_gateway",
+            strict_gate_json.get("behavior_config_binding"),
+            strict_behavior_config,
+        )
+        validate_strict_gateway_metrics_privacy(strict_gate_json)
+        if isinstance(behavior_config, dict) and isinstance(strict_behavior_config, dict):
+            if behavior_config != strict_behavior_config:
+                errors.append("retrieval_quality_behavior_config_strict_gateway_mismatch")
+    validate_retrieval_quality_eval_report_artifact(gate_json)
+
+
+def validate_restore_drill_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_backup_restore_drill"),
+        "tonglingyu.rqa_backup_restore_drill",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("drill_result") != "passed":
+        errors.append("rqa_backup_restore_drill_result_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_backup_restore_drill_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-backup-restore-drill-v1":
+        errors.append("rqa_backup_restore_drill_policy_version_invalid")
+    if gate_json.get("source_mode") not in {"existing_refs", "fixture"}:
+        errors.append("rqa_backup_restore_drill_source_mode_invalid")
+    if production_ready and gate_json.get("source_mode") != "existing_refs":
+        errors.append("production_ready_requires_live_rqa_restore_drill_refs")
+    artifact_dir = gate_json.get("artifact_dir")
+    if not nonempty(artifact_dir):
+        errors.append("rqa_backup_restore_drill_artifact_dir_missing")
+    else:
+        if hashlib.sha256(artifact_dir.encode("utf-8")).hexdigest() != gate_json.get(
+            "artifact_dir_sha256"
+        ):
+            errors.append("rqa_backup_restore_drill_artifact_dir_sha256_mismatch")
+        artifact_dir_path = Path(artifact_dir)
+        if production_ready and not artifact_dir_path.is_absolute():
+            errors.append("production_ready_rqa_restore_artifact_dir_not_absolute")
+        elif production_ready and not artifact_dir_path.is_dir():
+            errors.append("production_ready_rqa_restore_artifact_dir_missing")
+    if not is_sha256(gate_json.get("artifact_dir_sha256")):
+        errors.append("rqa_backup_restore_drill_artifact_dir_sha256_invalid")
+    if parse_timestamp(gate_json.get("started_at")) is None:
+        errors.append("rqa_backup_restore_drill_started_at_invalid")
+    if parse_timestamp(gate_json.get("finished_at")) is None:
+        errors.append("rqa_backup_restore_drill_finished_at_invalid")
+    if not isinstance(gate_json.get("duration_ms"), int) or gate_json.get("duration_ms") < 0:
+        errors.append("rqa_backup_restore_drill_duration_ms_invalid")
+    if not nonempty(gate_json.get("environment")):
+        errors.append("rqa_backup_restore_drill_environment_missing")
+    if not nonempty(gate_json.get("operator")):
+        errors.append("rqa_backup_restore_drill_operator_missing")
+
+    for field in ("rto", "rpo"):
+        value = gate_json.get(field)
+        if not isinstance(value, dict):
+            errors.append(f"rqa_backup_restore_drill_{field}_missing")
+            continue
+        if not isinstance(value.get("target_seconds"), int) or value.get("target_seconds") <= 0:
+            errors.append(f"rqa_backup_restore_drill_{field}_target_seconds_invalid")
+        if not isinstance(value.get("actual_seconds"), (int, float)) or value.get("actual_seconds") < 0:
+            errors.append(f"rqa_backup_restore_drill_{field}_actual_seconds_invalid")
+        if value.get("met") is not True:
+            errors.append(f"rqa_backup_restore_drill_{field}_not_met")
+
+    backup = gate_json.get("backup")
+    if not isinstance(backup, dict):
+        errors.append("rqa_backup_restore_drill_backup_missing")
+    else:
+        artifact_path = backup.get("artifact_path")
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(backup.get(field)) is None:
+                errors.append(f"rqa_backup_restore_drill_backup_{field}_invalid")
+        if not nonempty(artifact_path):
+            errors.append("rqa_backup_restore_drill_backup_artifact_path_missing")
+        else:
+            if hashlib.sha256(artifact_path.encode("utf-8")).hexdigest() != backup.get(
+                "artifact_path_sha256"
+            ):
+                errors.append(
+                    "rqa_backup_restore_drill_backup_artifact_path_sha256_mismatch"
+                )
+            artifact_path_obj = Path(artifact_path)
+            if production_ready and not artifact_path_obj.is_absolute():
+                errors.append("production_ready_rqa_restore_backup_artifact_path_not_absolute")
+            elif production_ready and not artifact_path_obj.is_file():
+                errors.append("production_ready_rqa_restore_backup_artifact_missing")
+            elif production_ready and file_sha256(artifact_path_obj) != backup.get(
+                "artifact_sha256"
+            ):
+                errors.append("production_ready_rqa_restore_backup_artifact_sha256_mismatch")
+        if not is_sha256(backup.get("artifact_path_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_artifact_path_sha256_invalid")
+        if not is_sha256(backup.get("artifact_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_artifact_sha256_invalid")
+        if not is_sha256(backup.get("source_db_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_source_db_sha256_invalid")
+        if not isinstance(backup.get("size_bytes"), int) or backup.get("size_bytes") <= 0:
+            errors.append("rqa_backup_restore_drill_backup_size_bytes_invalid")
+
+    restore = gate_json.get("restore")
+    if not isinstance(restore, dict):
+        errors.append("rqa_backup_restore_drill_restore_missing")
+    else:
+        for field in ("started_at", "finished_at"):
+            if parse_timestamp(restore.get(field)) is None:
+                errors.append(f"rqa_backup_restore_drill_restore_{field}_invalid")
+        if restore.get("db_integrity_check") != "ok":
+            errors.append("rqa_backup_restore_drill_restore_integrity_check_invalid")
+        if not is_sha256(restore.get("restored_db_sha256")):
+            errors.append("rqa_backup_restore_drill_restore_db_sha256_invalid")
+        if restore.get("schema_migrations_verified") is not True:
+            errors.append("rqa_backup_restore_drill_schema_migrations_not_verified")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "admin_trace_readable",
+        "retrieval_failure_readable",
+        "governance_task_readable",
+        "admin_package_readable",
+        "package_replay_readable",
+        "rqa_quality_gate_reran",
+        "saved_report_validator_reran",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_backup_restore_drill_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_backup_restore_drill_check_failed={check}")
+
+    refs = gate_json.get("refs")
+    required_ref_hashes = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_backup_restore_drill_refs_missing")
+    else:
+        for field in required_ref_hashes:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_backup_restore_drill_{field}_invalid")
+
+    artifacts = gate_json.get("artifacts")
+    required_artifact_hashes = (
+        "rqa_quality_gate_sha256",
+        "saved_release_report_sha256",
+        "saved_report_validator_sha256",
+    )
+    if not isinstance(artifacts, dict):
+        errors.append("rqa_backup_restore_drill_artifacts_missing")
+    else:
+        for field in required_artifact_hashes:
+            if not is_sha256(artifacts.get(field)):
+                errors.append(f"rqa_backup_restore_drill_{field}_invalid")
+
+
+def validate_security_scan_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("security_scan"),
+        "tonglingyu.release_security_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("security_scan_passed") is not True:
+        errors.append("security_scan_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("security_scan_secret_values_printed_must_be_false")
+    if gate_json.get("risk_conclusion") != "no_unaccepted_findings":
+        errors.append("security_scan_risk_conclusion_invalid")
+    if gate_json.get("unaccepted_error_count") != 0:
+        errors.append("security_scan_unaccepted_errors_present")
+    if not isinstance(gate_json.get("accepted_error_count"), int) or gate_json.get("accepted_error_count") < 0:
+        errors.append("security_scan_accepted_error_count_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("security_scan_generated_at_invalid")
+
+    scan_coverage = gate_json.get("scan_coverage")
+    if not isinstance(scan_coverage, dict):
+        errors.append("security_scan_coverage_missing")
+        scan_coverage = {}
+    for field in ("dependency_scan", "image_scan", "release_script_scan"):
+        if not isinstance(scan_coverage.get(field), bool):
+            errors.append(f"security_scan_coverage_{field}_invalid")
+
+    for field in ("dependency_scan", "image_scan"):
+        scan = gate_json.get(field)
+        if not isinstance(scan, dict):
+            errors.append(f"security_scan_{field}_missing")
+            continue
+        status = scan.get("status")
+        if status not in {"passed", "missing", "failed"}:
+            errors.append(f"security_scan_{field}_status_invalid")
+        if not isinstance(scan.get("scanner"), str):
+            errors.append(f"security_scan_{field}_scanner_invalid")
+        for count_field in ("critical_count", "high_count"):
+            count_value = scan.get(count_field)
+            if count_value is not None and (
+                not isinstance(count_value, int) or count_value < 0
+            ):
+                errors.append(f"security_scan_{field}_{count_field}_invalid")
+        report_sha256 = scan.get("report_sha256")
+        if report_sha256 not in ("", None) and not is_sha256(report_sha256):
+            errors.append(f"security_scan_{field}_report_sha256_invalid")
+    image_scan = gate_json.get("image_scan")
+    if isinstance(image_scan, dict):
+        image_refs = image_scan.get("image_refs")
+        if not isinstance(image_refs, list) or not all(
+            isinstance(item, str) and item for item in image_refs
+        ):
+            errors.append("security_scan_image_refs_invalid")
+        for count_field in (
+            "image_count",
+            "mutable_tag_count",
+            "digest_missing_count",
+            "failed_image_count",
+            "scanned_image_count",
+            "scanned_report_count",
+        ):
+            count_value = image_scan.get(count_field)
+            if not isinstance(count_value, int) or count_value < 0:
+                errors.append(f"security_scan_image_{count_field}_invalid")
+        for digest_field in (
+            "image_refs_sha256",
+            "scanned_image_refs_sha256",
+            "scanned_reports_sha256",
+        ):
+            if not is_sha256(image_scan.get(digest_field)):
+                errors.append(f"security_scan_image_{digest_field}_invalid")
+        if (
+            isinstance(image_refs, list)
+            and isinstance(image_scan.get("image_count"), int)
+            and len(image_refs) != image_scan["image_count"]
+        ):
+            errors.append("security_scan_image_refs_count_mismatch")
+        if isinstance(image_refs, list) and all(isinstance(item, str) for item in image_refs):
+            image_refs_raw = "\n".join(image_refs) + "\n"
+            if (
+                is_sha256(image_scan.get("image_refs_sha256"))
+                and hashlib.sha256(image_refs_raw.encode("utf-8")).hexdigest()
+                != image_scan["image_refs_sha256"]
+            ):
+                errors.append("security_scan_image_refs_digest_mismatch")
+        if (
+            is_sha256(image_scan.get("image_refs_sha256"))
+            and is_sha256(image_scan.get("scanned_image_refs_sha256"))
+            and image_scan["image_refs_sha256"]
+            != image_scan["scanned_image_refs_sha256"]
+        ):
+            errors.append("security_scan_image_inventory_mismatch")
+        if (
+            isinstance(image_scan.get("image_count"), int)
+            and isinstance(image_scan.get("scanned_image_count"), int)
+            and image_scan["image_count"] != image_scan["scanned_image_count"]
+        ):
+            errors.append("security_scan_image_count_mismatch")
+        if isinstance(image_scan.get("failed_image_count"), int) and image_scan[
+            "failed_image_count"
+        ] > 0:
+            errors.append("security_scan_image_failed_images_present")
+        if (
+            isinstance(image_scan.get("image_count"), int)
+            and isinstance(image_scan.get("scanned_report_count"), int)
+            and image_scan["image_count"] != image_scan["scanned_report_count"]
+        ):
+            errors.append("security_scan_image_report_count_mismatch")
+        raw_report_artifact_dir = image_scan.get("raw_report_artifact_dir")
+        if image_scan.get("raw_reports_persistent") is not True:
+            errors.append("security_scan_image_raw_reports_not_persistent")
+        if not nonempty(raw_report_artifact_dir):
+            errors.append("security_scan_image_raw_report_artifact_dir_missing")
+            raw_report_artifact_path = None
+        else:
+            raw_report_artifact_path = Path(raw_report_artifact_dir)
+            if not raw_report_artifact_path.is_absolute():
+                errors.append("security_scan_image_raw_report_artifact_dir_not_absolute")
+            elif not raw_report_artifact_path.is_dir():
+                errors.append("security_scan_image_raw_report_artifact_dir_missing")
+        raw_report_paths = image_scan.get("raw_report_paths")
+        if not isinstance(raw_report_paths, list) or not all(
+            isinstance(item, str) and item for item in raw_report_paths
+        ):
+            errors.append("security_scan_image_raw_report_paths_invalid")
+            raw_report_paths = []
+        elif (
+            isinstance(image_scan.get("scanned_report_count"), int)
+            and len(raw_report_paths) != image_scan["scanned_report_count"]
+        ):
+            errors.append("security_scan_image_raw_report_paths_count_mismatch")
+        raw_report_paths_sha256 = image_scan.get("raw_report_paths_sha256")
+        if not is_sha256(raw_report_paths_sha256):
+            errors.append("security_scan_image_raw_report_paths_sha256_invalid")
+        elif hashlib.sha256(
+            ("\n".join(raw_report_paths) + "\n").encode("utf-8")
+        ).hexdigest() != raw_report_paths_sha256:
+            errors.append("security_scan_image_raw_report_paths_sha256_mismatch")
+        raw_report_digests = []
+        for raw_report_path in raw_report_paths:
+            candidate = Path(raw_report_path)
+            if not candidate.is_absolute():
+                errors.append("security_scan_image_raw_report_path_not_absolute")
+                continue
+            if not candidate.is_file():
+                errors.append("security_scan_image_raw_report_path_missing")
+                continue
+            raw_report_digests.append(file_sha256(candidate))
+        if (
+            raw_report_paths
+            and len(raw_report_digests) == len(raw_report_paths)
+            and is_sha256(image_scan.get("scanned_reports_sha256"))
+            and hashlib.sha256(
+                ("\n".join(sorted(raw_report_digests)) + "\n").encode("utf-8")
+            ).hexdigest()
+            != image_scan["scanned_reports_sha256"]
+        ):
+            errors.append("security_scan_image_raw_reports_digest_mismatch")
+        if production_ready:
+            if image_scan.get("image_policy_version") != "tonglingyu-image-ownership-v1":
+                errors.append("production_ready_security_scan_image_policy_version_invalid")
+            ownership = image_scan.get("image_ownership")
+            if not isinstance(ownership, list):
+                errors.append("production_ready_security_scan_image_ownership_missing")
+            elif isinstance(image_scan.get("image_count"), int) and len(ownership) != image_scan["image_count"]:
+                errors.append("production_ready_security_scan_image_ownership_count_mismatch")
+            for count_field in (
+                "owned_image_count",
+                "third_party_image_count",
+                "owned_critical_count",
+                "owned_high_count",
+                "third_party_critical_count",
+                "third_party_high_count",
+                "blocking_critical_count",
+                "blocking_high_count",
+            ):
+                count_value = image_scan.get(count_field)
+                if not isinstance(count_value, int) or count_value < 0:
+                    errors.append(f"production_ready_security_scan_image_{count_field}_invalid")
+            if (
+                isinstance(image_scan.get("owned_image_count"), int)
+                and isinstance(image_scan.get("third_party_image_count"), int)
+                and isinstance(image_scan.get("image_count"), int)
+                and image_scan["owned_image_count"] + image_scan["third_party_image_count"]
+                != image_scan["image_count"]
+            ):
+                errors.append("production_ready_security_scan_image_owner_count_mismatch")
+            if image_scan.get("blocking_critical_count") != image_scan.get("owned_critical_count"):
+                errors.append("production_ready_security_scan_image_blocking_critical_mismatch")
+            if image_scan.get("blocking_high_count") != image_scan.get("owned_high_count"):
+                errors.append("production_ready_security_scan_image_blocking_high_mismatch")
+            if image_scan.get("owned_critical_count") != 0:
+                errors.append("production_ready_security_scan_owned_image_critical_findings_present")
+            if image_scan.get("owned_high_count") != 0:
+                errors.append("production_ready_security_scan_owned_image_high_findings_present")
+            if (
+                (image_scan.get("third_party_critical_count") or 0) > 0
+                or (image_scan.get("third_party_high_count") or 0) > 0
+            ) and image_scan.get("third_party_findings_non_blocking") is not True:
+                errors.append("production_ready_security_scan_third_party_findings_policy_missing")
+
+    script_scan = gate_json.get("release_script_scan")
+    if not isinstance(script_scan, dict):
+        errors.append("security_scan_release_script_scan_missing")
+    else:
+        if script_scan.get("status") != "passed":
+            errors.append("security_scan_release_scripts_not_passed")
+        if script_scan.get("scanner") != "tonglingyu-release-script-static-policy-v1":
+            errors.append("security_scan_release_script_scanner_invalid")
+        if not isinstance(script_scan.get("scanned_file_count"), int) or script_scan.get("scanned_file_count") <= 0:
+            errors.append("security_scan_release_script_scanned_file_count_invalid")
+        if script_scan.get("finding_count") != 0:
+            errors.append("security_scan_release_script_findings_present")
+        if script_scan.get("finding_types") not in ([], None):
+            errors.append("security_scan_release_script_finding_types_present")
+
+    risk_acceptance = gate_json.get("risk_acceptance")
+    if not isinstance(risk_acceptance, dict):
+        errors.append("security_scan_risk_acceptance_missing")
+        return
+    risk_present = risk_acceptance.get("present") is True
+    if risk_present:
+        if not nonempty(risk_acceptance.get("accepted_risk_id")):
+            errors.append("security_scan_risk_acceptance_id_missing")
+        if not nonempty(risk_acceptance.get("risk_owner")):
+            errors.append("security_scan_risk_acceptance_owner_missing")
+        if parse_timestamp(risk_acceptance.get("approved_at")) is None:
+            errors.append("security_scan_risk_acceptance_approved_at_invalid")
+        expires_at = parse_timestamp(risk_acceptance.get("expires_at"))
+        if expires_at is None:
+            errors.append("security_scan_risk_acceptance_expires_at_invalid")
+        elif expires_at <= datetime.now(timezone.utc):
+            errors.append("security_scan_risk_acceptance_expired")
+        accepted_findings = risk_acceptance.get("accepted_findings")
+        if not isinstance(accepted_findings, list) or not accepted_findings:
+            errors.append("security_scan_risk_acceptance_findings_missing")
+        elif not all(isinstance(item, str) and item for item in accepted_findings):
+            errors.append("security_scan_risk_acceptance_findings_invalid")
+        if not is_sha256(risk_acceptance.get("report_sha256")):
+            errors.append("security_scan_risk_acceptance_report_sha256_invalid")
+    else:
+        for field in ("dependency_scan", "image_scan", "release_script_scan"):
+            if scan_coverage.get(field) is not True:
+                errors.append(f"security_scan_without_risk_acceptance_requires_{field}")
+
+
+def validate_release_ops_ref(prefix, value):
+    if not isinstance(value, dict):
+        errors.append(f"{prefix}_ref_missing")
+        return None
+    ref = value.get("ref")
+    if nonempty(ref) and not release_ops_ref_valid(ref):
+        errors.append(f"{prefix}_ref_invalid")
+    if nonempty(ref) and value.get("valid") is not True:
+        errors.append(f"{prefix}_ref_valid_flag_invalid")
+    if nonempty(ref) and not nonempty(value.get("kind")):
+        errors.append(f"{prefix}_ref_kind_missing")
+    return ref
+
+
+def validate_release_ops_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("release_ops_readiness"),
+        "tonglingyu.release_ops_readiness_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("release_ops_ready") is not True:
+        errors.append("release_ops_not_ready")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("release_ops_secret_values_printed_must_be_false")
+    if gate_json.get("ops_policy_version") != "tonglingyu-rqa-release-ops-v1":
+        errors.append("release_ops_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("release_ops_generated_at_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("release_ops_mode_invalid")
+
+    runbook = gate_json.get("runbook")
+    if not isinstance(runbook, dict):
+        errors.append("release_ops_runbook_missing")
+    else:
+        runbook_path = runbook.get("path")
+        if not nonempty(runbook_path):
+            errors.append("release_ops_runbook_path_missing")
+        else:
+            candidate = Path(runbook_path)
+            if not candidate.is_absolute():
+                errors.append("release_ops_runbook_path_must_be_absolute")
+            elif production_ready:
+                if not candidate.is_file():
+                    errors.append("release_ops_runbook_file_not_found")
+                elif is_sha256(runbook.get("sha256")) and file_sha256(candidate) != runbook.get("sha256"):
+                    errors.append("release_ops_runbook_sha256_mismatch")
+        if not is_sha256(runbook.get("sha256")):
+            errors.append("release_ops_runbook_sha256_invalid")
+        if not isinstance(runbook.get("required_sections"), list) or not runbook.get("required_sections"):
+            errors.append("release_ops_runbook_required_sections_missing")
+        if runbook.get("missing_sections") not in ([], None):
+            errors.append("release_ops_runbook_missing_sections_present")
+        if not nonempty(runbook.get("ref")):
+            errors.append("release_ops_runbook_ref_missing")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "runbook_exists",
+        "runbook_sections_complete",
+        "rollback_steps_defined",
+        "db_restore_or_additive_downgrade_defined",
+        "post_rollback_release_readiness_required",
+        "non_production_marker_required",
+        "alerts_defined",
+        "alert_labels_low_cardinality",
+        "post_release_monitor_defined",
+        "release_report_reproduction_defined",
+    }
+    if not isinstance(checks, dict):
+        errors.append("release_ops_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"release_ops_check_failed={check}")
+
+    rollback = gate_json.get("rollback")
+    if not isinstance(rollback, dict):
+        errors.append("release_ops_rollback_missing")
+    else:
+        rollback_ref = validate_release_ops_ref(
+            "release_ops_rollback_evidence",
+            rollback.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(rollback_ref):
+            errors.append("release_ops_rollback_evidence_ref_missing")
+        if rollback.get("post_rollback_release_readiness_required") is not True:
+            errors.append("release_ops_post_rollback_readiness_not_required")
+        if rollback.get("non_production_marker_required") is not True:
+            errors.append("release_ops_non_production_marker_not_required")
+        if rollback.get("db_restore_or_additive_downgrade_defined") is not True:
+            errors.append("release_ops_db_restore_or_additive_downgrade_missing")
+
+    rto_rpo = gate_json.get("rto_rpo")
+    if not isinstance(rto_rpo, dict):
+        errors.append("release_ops_rto_rpo_missing")
+    else:
+        for field in ("rto_target_seconds", "rpo_target_seconds"):
+            if not isinstance(rto_rpo.get(field), int) or rto_rpo.get(field) <= 0:
+                errors.append(f"release_ops_{field}_invalid")
+        rto_rpo_ref = validate_release_ops_ref(
+            "release_ops_rto_rpo_evidence",
+            rto_rpo.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(rto_rpo_ref):
+            errors.append("release_ops_rto_rpo_evidence_ref_missing")
+
+    alert_policy = gate_json.get("alert_policy")
+    required_alerts = {
+        "rqa_write_failure_rate",
+        "admin_api_5xx_rate",
+        "admin_api_latency_p95",
+        "open_p0_retrieval_failure",
+        "open_p0_governance_task",
+        "rqa_quality_gate_failure",
+        "release_gate_failure",
+        "openwebui_admin_action_failure",
+    }
+    allowed_labels = {
+        "status",
+        "failure_type",
+        "task_type",
+        "priority",
+        "event_type",
+        "agent_runtime_mode",
+        "rate_limit_per_minute",
+        "max_body_bytes",
+    }
+    forbidden_labels = {
+        "query",
+        "question",
+        "trace",
+        "trace_id",
+        "package",
+        "package_id",
+        "user",
+        "user_id",
+        "session",
+        "session_id",
+        "message",
+        "message_id",
+    }
+    if not isinstance(alert_policy, dict):
+        errors.append("release_ops_alert_policy_missing")
+    else:
+        if alert_policy.get("policy_version") != "tonglingyu-rqa-release-alerts-v1":
+            errors.append("release_ops_alert_policy_version_invalid")
+        if alert_policy.get("low_cardinality_labels_only") is not True:
+            errors.append("release_ops_alert_labels_not_low_cardinality")
+        if alert_policy.get("missing_conditions") not in ([], None):
+            errors.append("release_ops_alert_missing_conditions_present")
+        conditions = alert_policy.get("conditions")
+        if not isinstance(conditions, dict):
+            errors.append("release_ops_alert_conditions_missing")
+            conditions = {}
+        missing_alerts = sorted(required_alerts - set(conditions))
+        for alert in missing_alerts:
+            errors.append(f"release_ops_alert_missing={alert}")
+        for alert_name, condition in conditions.items():
+            if alert_name not in required_alerts:
+                errors.append(f"release_ops_alert_unexpected={alert_name}")
+            if not isinstance(condition, dict):
+                errors.append(f"release_ops_alert_{alert_name}_invalid")
+                continue
+            for field in ("severity", "owner", "metric", "threshold"):
+                if not nonempty(condition.get(field)):
+                    errors.append(f"release_ops_alert_{alert_name}_{field}_missing")
+            labels = condition.get("labels")
+            if not isinstance(labels, list) or not labels:
+                errors.append(f"release_ops_alert_{alert_name}_labels_missing")
+                labels = []
+            for label in labels:
+                if label in forbidden_labels:
+                    errors.append(f"release_ops_alert_{alert_name}_forbidden_label={label}")
+                if label not in allowed_labels:
+                    errors.append(f"release_ops_alert_{alert_name}_label_not_allowed={label}")
+        alert_ref = validate_release_ops_ref(
+            "release_ops_alert_evidence",
+            alert_policy.get("evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(alert_ref):
+            errors.append("release_ops_alert_evidence_ref_missing")
+
+    monitor = gate_json.get("post_release_monitor")
+    if not isinstance(monitor, dict):
+        errors.append("release_ops_post_release_monitor_missing")
+    else:
+        if monitor.get("required") is not True:
+            errors.append("release_ops_post_release_monitor_not_required")
+        if not isinstance(monitor.get("window_minutes"), int) or monitor.get("window_minutes") < 60:
+            errors.append("release_ops_post_release_window_too_short")
+        if monitor.get("requires_live_gate_evidence") is not True:
+            errors.append("release_ops_post_release_live_gate_not_required")
+        if monitor.get("requires_admin_action_or_api_evidence") is not True:
+            errors.append("release_ops_post_release_admin_action_not_required")
+        monitor_ref = validate_release_ops_ref(
+            "release_ops_post_release_monitor",
+            monitor.get("monitor_ref"),
+        )
+        live_gate_ref = validate_release_ops_ref(
+            "release_ops_post_release_live_gate",
+            monitor.get("live_gate_evidence_ref"),
+        )
+        admin_action_ref = validate_release_ops_ref(
+            "release_ops_post_release_admin_action",
+            monitor.get("admin_action_or_api_evidence_ref"),
+        )
+        evidence_path = monitor.get("evidence_path")
+        evidence_sha256 = monitor.get("evidence_sha256")
+        evidence_errors = monitor.get("evidence_errors")
+        if not isinstance(monitor.get("evidence_validated"), bool):
+            errors.append("release_ops_post_release_evidence_validated_must_be_bool")
+        if not isinstance(evidence_errors, list):
+            errors.append("release_ops_post_release_evidence_errors_must_be_array")
+        elif evidence_errors:
+            errors.append("release_ops_post_release_evidence_errors_present")
+        if nonempty(evidence_path):
+            evidence_file = Path(evidence_path)
+            if not evidence_file.is_absolute():
+                errors.append("release_ops_post_release_evidence_path_must_be_absolute")
+            elif production_ready:
+                if not evidence_file.is_file():
+                    errors.append("release_ops_post_release_evidence_file_not_found")
+                elif is_sha256(evidence_sha256) and file_sha256(evidence_file) != evidence_sha256:
+                    errors.append("release_ops_post_release_evidence_sha256_mismatch")
+        if nonempty(evidence_sha256) and not is_sha256(evidence_sha256):
+            errors.append("release_ops_post_release_evidence_sha256_invalid")
+        if production_ready:
+            if gate_json.get("mode") != "live":
+                errors.append("production_ready_requires_release_ops_live_mode")
+            if gate_json.get("require_live") is not True:
+                errors.append("production_ready_requires_release_ops_require_live")
+            for field in ("operator", "environment", "release_report_path"):
+                if not nonempty(monitor.get(field)):
+                    errors.append(f"release_ops_post_release_{field}_missing")
+            if monitor.get("conclusion") != "passed":
+                errors.append("release_ops_post_release_conclusion_not_passed")
+            if not release_ops_ref_valid(monitor_ref):
+                errors.append("release_ops_post_release_monitor_ref_missing")
+            if not release_ops_ref_valid(live_gate_ref):
+                errors.append("release_ops_post_release_live_gate_ref_missing")
+            if not release_ops_ref_valid(admin_action_ref):
+                errors.append("release_ops_post_release_admin_action_ref_missing")
+            if monitor.get("evidence_validated") is not True:
+                errors.append("release_ops_post_release_evidence_not_validated")
+            if not nonempty(evidence_path):
+                errors.append("release_ops_post_release_evidence_path_missing")
+            if not is_sha256(evidence_sha256):
+                errors.append("release_ops_post_release_evidence_sha256_missing")
+
+    reproduction = gate_json.get("reproduction")
+    required_reproduction_inputs = {
+        "git_commit",
+        "image_digest",
+        "config_digest",
+        "source_snapshot_digest",
+        "kb_build_hash",
+        "security_scan_summary",
+        "runtime_profile_digest",
+        "prompt_digest",
+        "tool_policy_digest",
+    }
+    if not isinstance(reproduction, dict):
+        errors.append("release_ops_reproduction_missing")
+    else:
+        if not nonempty(reproduction.get("runbook_ref")):
+            errors.append("release_ops_reproduction_runbook_ref_missing")
+        inputs = reproduction.get("required_inputs")
+        if not isinstance(inputs, list):
+            errors.append("release_ops_reproduction_inputs_missing")
+        else:
+            missing_inputs = sorted(required_reproduction_inputs - set(inputs))
+            for item in missing_inputs:
+                errors.append(f"release_ops_reproduction_input_missing={item}")
+
+    evidence = gate_json.get("evidence")
+    if not isinstance(evidence, dict):
+        errors.append("release_ops_evidence_missing")
+    elif production_ready:
+        if evidence.get("production_evidence_complete") is not True:
+            errors.append("release_ops_production_evidence_incomplete")
+        for field in (
+            "rollback_evidence_ref",
+            "rto_rpo_evidence_ref",
+            "alert_evidence_ref",
+            "post_release_monitor_ref",
+        ):
+            if not release_ops_ref_valid(evidence.get(field)):
+                errors.append(f"release_ops_{field}_missing")
+        if not is_sha256(evidence.get("post_release_monitor_evidence_sha256")):
+            errors.append("release_ops_post_release_monitor_evidence_sha256_missing")
+
+
+def validate_incident_capacity_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_incident_capacity"),
+        "tonglingyu.rqa_incident_capacity_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("incident_capacity_ready") is not True:
+        errors.append("rqa_incident_capacity_not_ready")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_incident_capacity_secret_values_printed_must_be_false")
+    if gate_json.get("policy_version") != "tonglingyu-rqa-incident-capacity-v1":
+        errors.append("rqa_incident_capacity_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_incident_capacity_generated_at_invalid")
+    if gate_json.get("mode") not in {"preflight", "live"}:
+        errors.append("rqa_incident_capacity_mode_invalid")
+
+    emergency = gate_json.get("emergency_state")
+    if not isinstance(emergency, dict):
+        errors.append("rqa_incident_capacity_emergency_state_missing")
+    else:
+        if emergency.get("emergency_disabled") is True:
+            errors.append("rqa_incident_capacity_emergency_disabled")
+        if emergency.get("degraded_mode") is True:
+            errors.append("rqa_incident_capacity_degraded_mode")
+        if emergency.get("persistence_degraded") is True:
+            errors.append("rqa_incident_capacity_persistence_degraded")
+        if emergency.get("production_allowed") is not True:
+            errors.append("rqa_incident_capacity_production_not_allowed")
+        if emergency.get("non_production_required") is True:
+            errors.append("rqa_incident_capacity_non_production_required")
+
+    degraded_response = gate_json.get("public_degraded_response")
+    if not isinstance(degraded_response, dict):
+        errors.append("rqa_incident_capacity_degraded_response_missing")
+    else:
+        for field in (
+            "stable_status_required",
+            "trace_id_required",
+            "full_success_forbidden",
+        ):
+            if degraded_response.get(field) is not True:
+                errors.append(f"rqa_incident_capacity_degraded_response_{field}_missing")
+
+    checks = gate_json.get("checks")
+    required_checks = {
+        "emergency_flags_fail_closed",
+        "public_degraded_response_defined",
+        "no_unbounded_queue",
+        "retry_idempotency_defined",
+        "status_history_audit_defined",
+        "hard_delete_open_records_forbidden",
+        "incident_runbook_defined",
+        "capacity_live_evidence_required",
+        "load_live_evidence_required",
+        "audit_history_live_evidence_required",
+        "capacity_load_evidence_validated",
+        "incident_audit_evidence_validated",
+    }
+    if not isinstance(checks, dict):
+        errors.append("rqa_incident_capacity_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_incident_capacity_check_failed={check}")
+
+    capacity = gate_json.get("capacity_policy")
+    if not isinstance(capacity, dict):
+        errors.append("rqa_incident_capacity_policy_missing")
+    else:
+        if capacity.get("write_queue_policy") != "synchronous_write_no_unbounded_queue":
+            errors.append("rqa_incident_capacity_write_queue_policy_invalid")
+        if capacity.get("max_in_memory_queue_items") != 0:
+            errors.append("rqa_incident_capacity_queue_bound_invalid")
+        if capacity.get("retry_idempotency_required") is not True:
+            errors.append("rqa_incident_capacity_retry_idempotency_not_required")
+        if capacity.get("retry_duplicate_record_forbidden") is not True:
+            errors.append("rqa_incident_capacity_retry_duplicate_not_forbidden")
+        for field in ("capacity_evidence_ref", "load_evidence_ref"):
+            ref = validate_release_ops_ref(f"rqa_incident_capacity_{field}", capacity.get(field))
+            if production_ready and not release_ops_ref_valid(ref):
+                errors.append(f"rqa_incident_capacity_{field}_missing")
+        counts = capacity.get("representative_counts")
+        if not isinstance(counts, dict):
+            errors.append("rqa_incident_capacity_representative_counts_missing")
+        else:
+            if production_ready:
+                minimums = {
+                    "eval_report_count": 1,
+                    "failure_count": 1,
+                    "admin_list_page_count": 2,
+                }
+                for field, minimum in minimums.items():
+                    if not isinstance(counts.get(field), int) or counts.get(field) < minimum:
+                        errors.append(f"rqa_incident_capacity_{field}_below_minimum")
+        measurements = capacity.get("load_measurements")
+        if not isinstance(measurements, dict):
+            errors.append("rqa_incident_capacity_load_measurements_missing")
+        elif production_ready:
+            for field in (
+                "rqa_write_p95_ms",
+                "admin_read_p95_ms",
+                "metrics_read_p95_ms",
+                "release_gate_ms",
+            ):
+                if not isinstance(measurements.get(field), (int, float)) or measurements.get(field) <= 0:
+                    errors.append(f"rqa_incident_capacity_{field}_invalid")
+
+    capacity_load_evidence = gate_json.get("capacity_load_evidence")
+    if not isinstance(capacity_load_evidence, dict):
+        errors.append("rqa_incident_capacity_capacity_load_evidence_missing")
+    else:
+        evidence_path = capacity_load_evidence.get("path")
+        evidence_sha256 = capacity_load_evidence.get("sha256")
+        evidence_errors = capacity_load_evidence.get("errors")
+        if not isinstance(capacity_load_evidence.get("validated"), bool):
+            errors.append("rqa_incident_capacity_capacity_load_evidence_validated_bool")
+        if not isinstance(evidence_errors, list):
+            errors.append("rqa_incident_capacity_capacity_load_evidence_errors_array")
+        elif evidence_errors:
+            errors.append("rqa_incident_capacity_capacity_load_evidence_errors_present")
+        if nonempty(evidence_path):
+            evidence_file = Path(evidence_path)
+            if not evidence_file.is_absolute():
+                errors.append("rqa_incident_capacity_capacity_load_evidence_path_not_absolute")
+            elif production_ready:
+                if not evidence_file.is_file():
+                    errors.append("rqa_incident_capacity_capacity_load_evidence_file_not_found")
+                elif is_sha256(evidence_sha256) and file_sha256(evidence_file) != evidence_sha256:
+                    errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_mismatch")
+        if nonempty(evidence_sha256) and not is_sha256(evidence_sha256):
+            errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_invalid")
+        if production_ready:
+            if capacity_load_evidence.get("validated") is not True:
+                errors.append("rqa_incident_capacity_capacity_load_evidence_not_validated")
+            if not nonempty(evidence_path):
+                errors.append("rqa_incident_capacity_capacity_load_evidence_path_missing")
+            if not is_sha256(evidence_sha256):
+                errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_missing")
+
+    incident_audit_evidence = gate_json.get("incident_audit_evidence")
+    if not isinstance(incident_audit_evidence, dict):
+        errors.append("rqa_incident_capacity_incident_audit_evidence_missing")
+    else:
+        evidence_path = incident_audit_evidence.get("path")
+        evidence_sha256 = incident_audit_evidence.get("sha256")
+        evidence_errors = incident_audit_evidence.get("errors")
+        if not isinstance(incident_audit_evidence.get("validated"), bool):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_validated_bool")
+        if not isinstance(evidence_errors, list):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_errors_array")
+        elif evidence_errors:
+            errors.append("rqa_incident_capacity_incident_audit_evidence_errors_present")
+        if nonempty(evidence_path):
+            evidence_file = Path(evidence_path)
+            if not evidence_file.is_absolute():
+                errors.append("rqa_incident_capacity_incident_audit_evidence_path_not_absolute")
+            elif production_ready:
+                if not evidence_file.is_file():
+                    errors.append("rqa_incident_capacity_incident_audit_evidence_file_not_found")
+                elif is_sha256(evidence_sha256) and file_sha256(evidence_file) != evidence_sha256:
+                    errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_mismatch")
+        if nonempty(evidence_sha256) and not is_sha256(evidence_sha256):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_invalid")
+        if production_ready:
+            if incident_audit_evidence.get("validated") is not True:
+                errors.append("rqa_incident_capacity_incident_audit_evidence_not_validated")
+            if not nonempty(evidence_path):
+                errors.append("rqa_incident_capacity_incident_audit_evidence_path_missing")
+            if not is_sha256(evidence_sha256):
+                errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_missing")
+
+    audit_history = gate_json.get("audit_history")
+    if not isinstance(audit_history, dict):
+        errors.append("rqa_incident_capacity_audit_history_missing")
+    else:
+        if audit_history.get("status_history_required") is not True:
+            errors.append("rqa_incident_capacity_status_history_not_required")
+        if audit_history.get("hard_delete_open_records_forbidden") is not True:
+            errors.append("rqa_incident_capacity_hard_delete_not_forbidden")
+        required_fields = {
+            "actor",
+            "reason_sha256",
+            "previous_status",
+            "new_status",
+            "timestamp",
+        }
+        fields = audit_history.get("required_fields")
+        if not isinstance(fields, list):
+            errors.append("rqa_incident_capacity_audit_required_fields_missing")
+        else:
+            for field in sorted(required_fields - set(fields)):
+                errors.append(f"rqa_incident_capacity_audit_field_missing={field}")
+        audit_ref = validate_release_ops_ref(
+            "rqa_incident_capacity_audit_history_evidence",
+            audit_history.get("audit_history_evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(audit_ref):
+            errors.append("rqa_incident_capacity_audit_history_evidence_ref_missing")
+
+    incident_runbook = gate_json.get("incident_runbook")
+    if not isinstance(incident_runbook, dict):
+        errors.append("rqa_incident_capacity_incident_runbook_missing")
+    else:
+        if not nonempty(incident_runbook.get("ref")):
+            errors.append("rqa_incident_capacity_incident_runbook_ref_missing")
+        if not is_sha256(incident_runbook.get("sha256")):
+            errors.append("rqa_incident_capacity_incident_runbook_sha256_invalid")
+        if incident_runbook.get("severity_owner_first_response_defined") is not True:
+            errors.append("rqa_incident_capacity_incident_response_missing")
+        if incident_runbook.get("rto_rpo_breach_escalation_defined") is not True:
+            errors.append("rqa_incident_capacity_rto_rpo_escalation_missing")
+        incident_ref = validate_release_ops_ref(
+            "rqa_incident_capacity_incident_evidence",
+            incident_runbook.get("incident_evidence_ref"),
+        )
+        if production_ready and not release_ops_ref_valid(incident_ref):
+            errors.append("rqa_incident_capacity_incident_evidence_ref_missing")
+
+    evidence = gate_json.get("evidence")
+    if not isinstance(evidence, dict):
+        errors.append("rqa_incident_capacity_evidence_missing")
+    elif production_ready:
+        if evidence.get("capacity_evidence_complete") is not True:
+            errors.append("rqa_incident_capacity_evidence_incomplete")
+        for field in (
+            "capacity_evidence_ref",
+            "load_evidence_ref",
+            "audit_history_evidence_ref",
+            "incident_evidence_ref",
+        ):
+            if not release_ops_ref_valid(evidence.get(field)):
+                errors.append(f"rqa_incident_capacity_{field}_missing")
+        if not is_sha256(evidence.get("capacity_load_evidence_sha256")):
+            errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_missing")
+        if not is_sha256(evidence.get("incident_audit_evidence_sha256")):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_missing")
+        if gate_json.get("mode") != "live":
+            errors.append("production_ready_requires_rqa_incident_capacity_live_mode")
+        if gate_json.get("require_live") is not True:
+            errors.append("production_ready_requires_rqa_incident_capacity_require_live")
+
+
+def validate_performance_budget_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_performance_budget"),
+        "tonglingyu.rqa_performance_budget_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("performance_budget_passed") is not True:
+        errors.append("rqa_performance_budget_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_performance_budget_secret_values_printed_must_be_false")
+    if gate_json.get("budget_policy_version") != "tonglingyu-rqa-performance-budget-v1":
+        errors.append("rqa_performance_budget_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_performance_budget_generated_at_invalid")
+    budgets = gate_json.get("budgets")
+    measurements = gate_json.get("measurements")
+    budget_results = gate_json.get("budget_results")
+    timeouts = gate_json.get("timeouts_seconds")
+    required_budget_fields = (
+        "rqa_write_ms",
+        "admin_trace_read_ms",
+        "admin_failure_list_ms",
+        "admin_governance_task_list_ms",
+        "admin_status_update_ms",
+        "rqa_quality_gate_ms",
+    )
+    if not isinstance(budgets, dict):
+        errors.append("rqa_performance_budget_budgets_missing")
+        budgets = {}
+    if not isinstance(measurements, dict):
+        errors.append("rqa_performance_budget_measurements_missing")
+        measurements = {}
+    if not isinstance(budget_results, dict):
+        errors.append("rqa_performance_budget_results_missing")
+        budget_results = {}
+    if not isinstance(timeouts, dict):
+        errors.append("rqa_performance_budget_timeouts_missing")
+        timeouts = {}
+    for field in required_budget_fields:
+        budget_value = budgets.get(field)
+        actual_value = measurements.get(field)
+        result = budget_results.get(field)
+        if not isinstance(budget_value, int) or budget_value <= 0:
+            errors.append(f"rqa_performance_budget_{field}_budget_invalid")
+        if not isinstance(actual_value, int) or actual_value < 0:
+            errors.append(f"rqa_performance_budget_{field}_measurement_invalid")
+        if not isinstance(result, dict):
+            errors.append(f"rqa_performance_budget_{field}_result_missing")
+            continue
+        if result.get("met") is not True:
+            errors.append(f"rqa_performance_budget_{field}_not_met")
+        if result.get("actual_ms") != actual_value:
+            errors.append(f"rqa_performance_budget_{field}_actual_mismatch")
+        if result.get("budget_ms") != budget_value:
+            errors.append(f"rqa_performance_budget_{field}_budget_mismatch")
+        if (
+            isinstance(budget_value, int)
+            and isinstance(actual_value, int)
+            and actual_value > budget_value
+        ):
+            errors.append(f"rqa_performance_budget_{field}_exceeded")
+
+    for field in (
+        "curl_connect",
+        "curl_max_time",
+        "eval",
+        "gateway_build",
+        "kb_build",
+        "rqa_quality_gate",
+    ):
+        value = timeouts.get(field)
+        if not isinstance(value, (int, float)) or value <= 0:
+            errors.append(f"rqa_performance_budget_timeout_{field}_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "rqa_write_created_failure",
+        "rqa_write_created_governance_task",
+        "admin_trace_readable",
+        "admin_lists_readable",
+        "admin_status_updates_closed_open_p0",
+        "rqa_quality_gate_reran",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_performance_budget_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_performance_budget_check_failed={check}")
+    refs = gate_json.get("refs")
+    required_refs = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_performance_budget_refs_missing")
+    else:
+        for field in required_refs:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_performance_budget_{field}_invalid")
+
+
+def validate_api_contract_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_api_contract"),
+        "tonglingyu.rqa_api_contract_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("api_contract_passed") is not True:
+        errors.append("rqa_api_contract_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_api_contract_secret_values_printed_must_be_false")
+    if gate_json.get("contract_version") != "tonglingyu-rqa-api-contract-v1":
+        errors.append("rqa_api_contract_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_api_contract_generated_at_invalid")
+    checks = gate_json.get("checks")
+    required_checks = (
+        "retrieval_failure_list_schema",
+        "retrieval_failure_list_pagination",
+        "retrieval_failure_max_page_clamped",
+        "retrieval_failure_stable_sort",
+        "retrieval_failure_unknown_filter_rejected",
+        "retrieval_failure_invalid_status_rejected",
+        "retrieval_failure_read_schema",
+        "retrieval_failure_storage_minimized",
+        "governance_task_list_schema",
+        "governance_task_list_pagination",
+        "governance_task_max_page_clamped",
+        "governance_task_stable_sort",
+        "governance_task_unknown_filter_rejected",
+        "governance_task_invalid_status_rejected",
+        "governance_task_invalid_priority_rejected",
+        "governance_task_read_schema",
+        "old_client_retrieval_failure_list_compatible",
+        "old_client_retrieval_failure_read_compatible",
+        "old_client_governance_task_list_compatible",
+        "old_client_governance_task_read_compatible",
+        "additive_response_fields_tolerated",
+        "unknown_mutation_fields_rejected",
+        "schema_versions_stable",
+        "json_metrics_schema",
+        "json_metrics_excludes_raw_identifiers",
+        "prometheus_metrics_excludes_raw_identifiers",
+        "prometheus_label_set_bounded",
+        "admin_payload_excludes_raw_prompts",
+        "admin_detail_excludes_sensitive_patterns",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_api_contract_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_api_contract_check_failed={check}")
+
+    pagination = gate_json.get("pagination")
+    if not isinstance(pagination, dict):
+        errors.append("rqa_api_contract_pagination_missing")
+    else:
+        for name in ("retrieval_failures", "governance_tasks"):
+            page = pagination.get(name)
+            if not isinstance(page, dict):
+                errors.append(f"rqa_api_contract_{name}_pagination_missing")
+                continue
+            if page.get("effective_limit") != 1:
+                errors.append(f"rqa_api_contract_{name}_effective_limit_invalid")
+            if page.get("max_limit") != 100:
+                errors.append(f"rqa_api_contract_{name}_max_limit_invalid")
+            if page.get("offset") != 0:
+                errors.append(f"rqa_api_contract_{name}_offset_invalid")
+            if page.get("next_offset") != 1:
+                errors.append(f"rqa_api_contract_{name}_next_offset_invalid")
+
+    negative_statuses = gate_json.get("negative_statuses")
+    expected_negative_statuses = (
+        "governance_task_invalid_priority",
+        "governance_task_invalid_status",
+        "governance_task_unknown_filter",
+        "retrieval_failure_invalid_status",
+        "retrieval_failure_unknown_filter",
+    )
+    if not isinstance(negative_statuses, dict):
+        errors.append("rqa_api_contract_negative_statuses_missing")
+    else:
+        for field in expected_negative_statuses:
+            if negative_statuses.get(field) != 400:
+                errors.append(f"rqa_api_contract_{field}_status_invalid")
+
+    compatibility_policy = gate_json.get("compatibility_policy")
+    if not isinstance(compatibility_policy, dict):
+        errors.append("rqa_api_contract_compatibility_policy_missing")
+    else:
+        if (
+            compatibility_policy.get("policy_version")
+            != "tonglingyu-rqa-api-compatibility-v1"
+        ):
+            errors.append("rqa_api_contract_compatibility_policy_version_invalid")
+        if compatibility_policy.get("query_unknown_fields") != "reject":
+            errors.append("rqa_api_contract_query_unknown_fields_policy_invalid")
+        if compatibility_policy.get("request_unknown_fields") != "reject":
+            errors.append("rqa_api_contract_request_unknown_fields_policy_invalid")
+        if (
+            compatibility_policy.get("response_unknown_fields")
+            != "ignore_additive_fields"
+        ):
+            errors.append("rqa_api_contract_response_unknown_fields_policy_invalid")
+        schema_versions = compatibility_policy.get("schema_versions")
+        expected_schema_versions = {
+            "retrieval_failure_list": "tonglingyu-retrieval-failures-v1",
+            "retrieval_failure_read": "tonglingyu-retrieval-failures-v1",
+            "governance_task_list": "tonglingyu-knowledge-governance-tasks-v2",
+            "governance_task_read": "tonglingyu-knowledge-governance-tasks-v2",
+        }
+        if schema_versions != expected_schema_versions:
+            errors.append("rqa_api_contract_schema_versions_invalid")
+        unknown_request_statuses = compatibility_policy.get("unknown_request_statuses")
+        expected_unknown_request_fields = (
+            "retrieval_failure_update",
+            "retrieval_failure_cluster",
+            "governance_task_create_from_failure",
+            "governance_task_manual_create",
+            "knowledge_patch_proposal_create",
+            "governance_task_update",
+        )
+        if not isinstance(unknown_request_statuses, dict):
+            errors.append("rqa_api_contract_unknown_request_statuses_missing")
+        else:
+            for field in expected_unknown_request_fields:
+                if unknown_request_statuses.get(field) not in (400, 422):
+                    errors.append(
+                        f"rqa_api_contract_{field}_unknown_request_status_invalid"
+                    )
+
+    refs = gate_json.get("refs")
+    required_refs = (
+        "trace_sha256",
+        "package_sha256",
+        "failure_sha256",
+        "governance_task_sha256",
+    )
+    if not isinstance(refs, dict):
+        errors.append("rqa_api_contract_refs_missing")
+    else:
+        for field in required_refs:
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_api_contract_{field}_invalid")
+
+
+def validate_user_lifecycle_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("rqa_user_lifecycle"),
+        "tonglingyu.rqa_user_lifecycle_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("user_lifecycle_passed") is not True:
+        errors.append("rqa_user_lifecycle_not_passed")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("rqa_user_lifecycle_secret_values_printed_must_be_false")
+    if gate_json.get("contract_version") != "tonglingyu-rqa-user-lifecycle-contract-v1":
+        errors.append("rqa_user_lifecycle_contract_version_invalid")
+    if gate_json.get("lifecycle_policy_version") != "tonglingyu-rqa-lifecycle-v1":
+        errors.append("rqa_user_lifecycle_policy_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("rqa_user_lifecycle_generated_at_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "export_audited_and_redacted",
+        "export_manifest_redacted",
+        "legal_hold_blocks_anonymize",
+        "legal_hold_can_be_released",
+        "anonymize_completed",
+        "raw_user_values_removed",
+        "tombstones_recorded",
+        "lifecycle_audit_events_recorded",
+        "rqa_traceability_preserved",
+    )
+    if not isinstance(checks, dict):
+        errors.append("rqa_user_lifecycle_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"rqa_user_lifecycle_check_failed={check}")
+
+    action_reports = gate_json.get("action_reports")
+    expected_actions = {
+        "export": "ok",
+        "legal_hold": "ok",
+        "blocked_anonymize": "blocked",
+        "release_hold": "ok",
+        "anonymize": "ok",
+    }
+    if not isinstance(action_reports, dict):
+        errors.append("rqa_user_lifecycle_action_reports_missing")
+    else:
+        for name, expected_status in expected_actions.items():
+            report = action_reports.get(name)
+            if not isinstance(report, dict):
+                errors.append(f"rqa_user_lifecycle_action_report_missing={name}")
+                continue
+            if report.get("status") != expected_status:
+                errors.append(f"rqa_user_lifecycle_{name}_status_invalid")
+            if report.get("source_text_included") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_source_text_included")
+            if report.get("response_body_included") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_response_body_included")
+            if report.get("secret_values_printed") is not False:
+                errors.append(f"rqa_user_lifecycle_{name}_secret_values_printed")
+            if not isinstance(report.get("counts"), dict):
+                errors.append(f"rqa_user_lifecycle_{name}_counts_missing")
+
+    refs = gate_json.get("refs")
+    if not isinstance(refs, dict):
+        errors.append("rqa_user_lifecycle_refs_missing")
+    else:
+        for field in ("subject_sha256", "trace_sha256", "package_sha256"):
+            if not is_sha256(refs.get(field)):
+                errors.append(f"rqa_user_lifecycle_{field}_invalid")
+
+
+def validate_openwebui_admin_action_contract_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("openwebui_admin_action_contract"),
+        "tonglingyu.openwebui_admin_action_contract_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("status") != "ok":
+        errors.append("openwebui_admin_action_contract_status_invalid")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("openwebui_admin_action_contract_secret_values_printed_must_be_false")
+    if (
+        gate_json.get("contract_version")
+        != "tonglingyu-openwebui-admin-action-contract-v1"
+    ):
+        errors.append("openwebui_admin_action_contract_version_invalid")
+    if parse_timestamp(gate_json.get("generated_at")) is None:
+        errors.append("openwebui_admin_action_contract_generated_at_invalid")
+
+    checks = gate_json.get("checks")
+    required_checks = (
+        "py_compile_passed",
+        "unit_tests_passed",
+        "valid_fixture_passed",
+        "admin_key_not_printed",
+        "empty_admin_key_rejected",
+        "admin_role_guard_required",
+        "admin_actions_required",
+        "required_valves_present",
+        "rqa_list_response_contract_tested",
+    )
+    if not isinstance(checks, dict):
+        errors.append("openwebui_admin_action_contract_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"openwebui_admin_action_contract_check_failed={check}")
+
+    action = gate_json.get("action")
+    required_actions = {
+        "metrics",
+        "trace",
+        "package",
+        "session",
+        "retrieval_failures",
+        "retrieval_failure",
+        "retrieval_failure_update",
+        "retrieval_failure_cluster",
+        "governance_tasks",
+        "governance_task",
+        "governance_task_create",
+        "governance_task_from_failure",
+        "governance_task_update",
+        "knowledge_patch_proposal",
+    }
+    if not isinstance(action, dict):
+        errors.append("openwebui_admin_action_contract_action_missing")
+    else:
+        if action.get("function_id") != "tonglingyu_gateway_admin":
+            errors.append("openwebui_admin_action_contract_function_id_invalid")
+        if action.get("type") != "action":
+            errors.append("openwebui_admin_action_contract_type_invalid")
+        for field in ("source_sha256", "test_sha256"):
+            if not is_sha256(action.get(field)):
+                errors.append(f"openwebui_admin_action_contract_{field}_invalid")
+        action_names = action.get("required_actions")
+        if not isinstance(action_names, list):
+            errors.append("openwebui_admin_action_contract_required_actions_missing")
+        elif set(action_names) != required_actions:
+            errors.append("openwebui_admin_action_contract_required_actions_mismatch")
+
+    feedback_action = gate_json.get("feedback_action")
+    if not isinstance(feedback_action, dict):
+        errors.append("openwebui_admin_action_contract_feedback_action_missing")
+    else:
+        if feedback_action.get("function_id") != "tonglingyu_gateway_feedback":
+            errors.append("openwebui_admin_action_contract_feedback_function_id_invalid")
+        if feedback_action.get("type") != "action":
+            errors.append("openwebui_admin_action_contract_feedback_type_invalid")
+        for field in ("source_sha256", "test_sha256"):
+            if not is_sha256(feedback_action.get(field)):
+                errors.append(f"openwebui_admin_action_contract_feedback_{field}_invalid")
+
+    fixture_validation = gate_json.get("fixture_validation")
+    if not isinstance(fixture_validation, dict):
+        errors.append("openwebui_admin_action_contract_fixture_validation_missing")
+    else:
+        if fixture_validation.get("source") != "fixture-json":
+            errors.append("openwebui_admin_action_contract_fixture_source_invalid")
+        if fixture_validation.get("negative_fixture_count") != 2:
+            errors.append("openwebui_admin_action_contract_negative_fixture_count_invalid")
+        valve_keys = fixture_validation.get("valve_keys")
+        if not isinstance(valve_keys, list) or not set(valve_keys) >= {
+            "GATEWAY_BASE_URL",
+            "GATEWAY_ADMIN_API_KEY",
+            "TARGET_MODEL",
+            "TARGET_MODELS",
+        }:
+            errors.append("openwebui_admin_action_contract_valve_keys_invalid")
+
+
+def validate_openwebui_admin_action_live_gate_stdout():
+    gate_json = success_json_from_gate_stdout(
+        gates_by_name.get("openwebui_admin_action"),
+        "tonglingyu.openwebui_admin_action_live_gate",
+    )
+    if gate_json is None:
+        return
+    if gate_json.get("status") != "ok":
+        errors.append("openwebui_admin_action_status_invalid")
+    if gate_json.get("secret_values_printed") is not False:
+        errors.append("openwebui_admin_action_secret_values_printed_must_be_false")
+    if gate_json.get("schema_version") != 1:
+        errors.append("openwebui_admin_action_schema_version_invalid")
+    if gate_json.get("function_id") != "tonglingyu_gateway_admin":
+        errors.append("openwebui_admin_action_function_id_invalid")
+    if gate_json.get("type") != "action":
+        errors.append("openwebui_admin_action_type_invalid")
+    if gate_json.get("is_active") is not True:
+        errors.append("openwebui_admin_action_inactive")
+    if gate_json.get("is_global") is not True:
+        errors.append("openwebui_admin_action_not_global")
+
+    required_actions = {
+        "metrics",
+        "trace",
+        "package",
+        "session",
+        "retrieval_failures",
+        "retrieval_failure",
+        "retrieval_failure_update",
+        "retrieval_failure_cluster",
+        "governance_tasks",
+        "governance_task",
+        "governance_task_create",
+        "governance_task_from_failure",
+        "governance_task_update",
+        "knowledge_patch_proposal",
+    }
+    required_api_paths = {
+        "/v1/admin/metrics",
+        "/v1/admin/traces/",
+        "/v1/admin/packages/",
+        "/v1/admin/sessions/",
+        "/v1/admin/retrieval-failures",
+        "/v1/admin/governance/tasks",
+        "/v1/admin/governance/proposals",
+    }
+    required_checks = (
+        "active_global_action",
+        "admin_role_guard_required",
+        "admin_role_denial_defined",
+        "required_valves_present",
+        "admin_key_not_printed",
+        "rqa_admin_actions_present",
+        "rqa_admin_api_paths_present",
+        "target_models_bound",
+    )
+    checks = gate_json.get("checks")
+    if not isinstance(checks, dict):
+        errors.append("openwebui_admin_action_checks_missing")
+    else:
+        for check in required_checks:
+            if checks.get(check) is not True:
+                errors.append(f"openwebui_admin_action_check_failed={check}")
+    permission = gate_json.get("permission_boundary")
+    if not isinstance(permission, dict):
+        errors.append("openwebui_admin_action_permission_boundary_missing")
+    else:
+        if permission.get("admin_role_guard_required") is not True:
+            errors.append("openwebui_admin_action_admin_role_guard_missing")
+        if permission.get("admin_role_denial_defined") is not True:
+            errors.append("openwebui_admin_action_admin_role_denial_missing")
+        if permission.get("admin_key_valve_bound") is not True:
+            errors.append("openwebui_admin_action_admin_key_valve_unbound")
+        if permission.get("target_models_bound") is not True:
+            errors.append("openwebui_admin_action_target_models_unbound")
+        actions = permission.get("required_actions")
+        if not isinstance(actions, list) or set(actions) != required_actions:
+            errors.append("openwebui_admin_action_required_actions_mismatch")
+        api_paths = permission.get("required_api_paths")
+        if not isinstance(api_paths, list) or set(api_paths) != required_api_paths:
+            errors.append("openwebui_admin_action_required_api_paths_mismatch")
+    valve_keys = gate_json.get("valve_keys")
+    if not isinstance(valve_keys, list) or not set(valve_keys) >= {
+        "GATEWAY_BASE_URL",
+        "GATEWAY_ADMIN_API_KEY",
+        "TARGET_MODEL",
+        "TARGET_MODELS",
+    }:
+        errors.append("openwebui_admin_action_valve_keys_invalid")
 
 
 if not report_path:
@@ -358,6 +3241,11 @@ add_if(
 secret_value_hits = secret_value_paths(report)
 if secret_value_hits:
     errors.append("secret_like_values_present=" + ",".join(secret_value_hits[:8]))
+privacy_sensitive_hits, high_cardinality_hits = release_report_privacy_paths(report)
+if privacy_sensitive_hits:
+    errors.append("privacy_sensitive_fields_present=" + ",".join(privacy_sensitive_hits[:8]))
+if high_cardinality_hits:
+    errors.append("high_cardinality_fields_present=" + ",".join(high_cardinality_hits[:8]))
 
 required_lists = [
     "gates",
@@ -418,6 +3306,10 @@ browser_review_ref = report.get("browser_review_ref")
 browser_review_evidence = report.get("browser_review_evidence")
 browser_review_validation = report.get("browser_review_validation")
 generated_at = report.get("generated_at")
+release_context = report.get("release_context")
+release_context_digest = report.get("release_context_digest")
+release_runtime_identity = report.get("release_runtime_identity")
+release_runtime_identity_digest = report.get("release_runtime_identity_digest")
 
 generated_at_dt = None
 if not nonempty(generated_at):
@@ -431,6 +3323,247 @@ else:
         future_skew_seconds = (generated_at_dt - now).total_seconds()
         if future_skew_seconds > 300:
             errors.append("generated_at_must_not_be_in_future")
+
+computed_release_context_errors = []
+release_context_ready = False
+release_context_valid_until_dt = None
+if not isinstance(release_context, dict):
+    errors.append("release_context_missing")
+    computed_release_context_errors.append("release context missing")
+else:
+    if release_context.get("object") != "tonglingyu.release_context":
+        errors.append("release_context_object_invalid")
+    if release_context.get("schema_version") != 1:
+        errors.append("release_context_schema_version_invalid")
+    if release_context.get("policy_version") != "tonglingyu-release-context-v1":
+        errors.append("release_context_policy_version_invalid")
+    if release_context.get("secret_values_printed") is not False:
+        errors.append("release_context_secret_values_printed_must_be_false")
+    if not is_sha256(release_context_digest):
+        errors.append("release_context_digest_invalid")
+    elif release_context_digest != canonical_digest(release_context):
+        errors.append("release_context_digest_mismatch")
+    context_generated_at = release_context.get("generated_at")
+    context_generated_at_dt = parse_timestamp(context_generated_at)
+    if context_generated_at_dt is None:
+        errors.append("release_context_generated_at_invalid")
+    elif generated_at_dt is not None and context_generated_at != generated_at:
+        errors.append("release_context_generated_at_mismatch")
+    release_context_valid_until_dt = parse_timestamp(release_context.get("valid_until"))
+    if release_context_valid_until_dt is None:
+        errors.append("release_context_valid_until_invalid")
+    elif context_generated_at_dt is not None:
+        if release_context_valid_until_dt <= context_generated_at_dt:
+            errors.append("release_context_valid_until_not_after_generated_at")
+    validity_hours = release_context.get("validity_hours")
+    if not isinstance(validity_hours, (int, float)) or validity_hours <= 0:
+        errors.append("release_context_validity_hours_invalid")
+        computed_release_context_errors.append("release report validity hours must be positive")
+    elif context_generated_at_dt is not None and release_context_valid_until_dt is not None:
+        expected_seconds = float(validity_hours) * 3600
+        actual_seconds = (
+            release_context_valid_until_dt - context_generated_at_dt
+        ).total_seconds()
+        if abs(actual_seconds - expected_seconds) > 1:
+            errors.append("release_context_valid_until_mismatch")
+    environment = release_context.get("environment")
+    if not nonempty(environment):
+        errors.append("release_context_environment_missing")
+    if not isinstance(release_context.get("environment_explicit"), bool):
+        errors.append("release_context_environment_explicit_must_be_bool")
+    if release_context.get("require_live") is not require_live:
+        errors.append("release_context_require_live_mismatch")
+    if release_context.get("context_source") != "env":
+        errors.append("release_context_source_invalid")
+    if not isinstance(release_context.get("errors"), list):
+        errors.append("release_context_errors_must_be_array")
+    if require_live and release_context.get("environment_explicit") is not True:
+        computed_release_context_errors.append("live release environment was not provided")
+    if (
+        require_live
+        and isinstance(environment, str)
+        and environment.lower() in {"local", "preflight", "test", "fixture"}
+    ):
+        computed_release_context_errors.append(
+            "live release environment must identify target environment"
+        )
+    if release_context.get("errors") != computed_release_context_errors:
+        errors.append("release_context_errors_mismatch")
+    if release_context.get("valid") != (not computed_release_context_errors):
+        errors.append("release_context_valid_mismatch")
+    release_context_ready = (
+        release_context.get("valid") is True
+        and not computed_release_context_errors
+        and context_generated_at_dt is not None
+        and release_context_valid_until_dt is not None
+    )
+
+computed_runtime_identity_errors = []
+runtime_identity_ready = False
+if not isinstance(release_runtime_identity, dict):
+    errors.append("release_runtime_identity_missing")
+    computed_runtime_identity_errors.append("release runtime identity missing")
+else:
+    if release_runtime_identity.get("object") != "tonglingyu.release_runtime_identity":
+        errors.append("release_runtime_identity_object_invalid")
+    if release_runtime_identity.get("schema_version") != 1:
+        errors.append("release_runtime_identity_schema_version_invalid")
+    if (
+        release_runtime_identity.get("policy_version")
+        != "tonglingyu-release-runtime-identity-v1"
+    ):
+        errors.append("release_runtime_identity_policy_version_invalid")
+    if release_runtime_identity.get("secret_values_printed") is not False:
+        errors.append("release_runtime_identity_secret_values_printed_must_be_false")
+    if not is_sha256(release_runtime_identity_digest):
+        errors.append("release_runtime_identity_digest_invalid")
+    elif release_runtime_identity_digest != canonical_digest(release_runtime_identity):
+        errors.append("release_runtime_identity_digest_mismatch")
+    if release_runtime_identity.get("require_live") is not require_live:
+        errors.append("release_runtime_identity_require_live_mismatch")
+
+    manifest = report.get("release_manifest") if isinstance(report.get("release_manifest"), dict) else {}
+    manifest_git = manifest.get("git") if isinstance(manifest.get("git"), dict) else {}
+    identity_git = (
+        release_runtime_identity.get("git")
+        if isinstance(release_runtime_identity.get("git"), dict)
+        else {}
+    )
+    if identity_git.get("commit") != manifest_git.get("commit"):
+        errors.append("release_runtime_identity_git_commit_mismatch")
+    if identity_git.get("tracked_dirty") != manifest_git.get("tracked_dirty"):
+        errors.append("release_runtime_identity_git_tracked_dirty_mismatch")
+    if not is_git_commit(identity_git.get("commit")):
+        errors.append("release_runtime_identity_git_commit_invalid")
+    if not isinstance(identity_git.get("tracked_dirty"), bool):
+        errors.append("release_runtime_identity_git_tracked_dirty_invalid")
+    if require_live and identity_git.get("tracked_dirty") is not False:
+        computed_runtime_identity_errors.append("tracked worktree must be clean for live release")
+
+    manifest_security = (
+        manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
+    )
+    image_inventory = (
+        release_runtime_identity.get("image_inventory")
+        if isinstance(release_runtime_identity.get("image_inventory"), dict)
+        else {}
+    )
+    for field in (
+        "image_count",
+        "image_refs",
+        "image_refs_sha256",
+        "digest_missing_count",
+        "mutable_tag_count",
+        "scanned_image_count",
+        "scanned_report_count",
+        "scanned_reports_sha256",
+        "raw_reports_persistent",
+        "raw_report_artifact_dir",
+        "raw_report_paths_sha256",
+    ):
+        if image_inventory.get(field) != manifest_security.get(field):
+            errors.append(f"release_runtime_identity_image_{field}_mismatch")
+    if image_inventory.get("source_gate") != "security_scan":
+        errors.append("release_runtime_identity_image_source_gate_invalid")
+
+    manifest_migration = (
+        manifest.get("migration") if isinstance(manifest.get("migration"), dict) else {}
+    )
+    migration = (
+        release_runtime_identity.get("migration")
+        if isinstance(release_runtime_identity.get("migration"), dict)
+        else {}
+    )
+    expected_migration = {
+        "policy_version": manifest_migration.get("policy_version"),
+        "mode": manifest_migration.get("mode"),
+        "source_mode": manifest_migration.get("source_mode"),
+        "source_db_sha256": manifest_migration.get("source_db_sha256"),
+        "preflight_sha256": manifest_migration.get("migration_preflight_sha256"),
+        "backup_artifact_sha256": manifest_migration.get("backup_artifact_sha256"),
+        "required_migration_count": manifest_migration.get("required_migration_count"),
+        "applied_migration_count": manifest_migration.get("applied_migration_count"),
+        "pending_migration_count": manifest_migration.get("pending_migration_count"),
+    }
+    for field, expected in expected_migration.items():
+        if migration.get(field) != expected:
+            errors.append(f"release_runtime_identity_migration_{field}_mismatch")
+    if migration.get("source_gate") != "rqa_migration_preflight":
+        errors.append("release_runtime_identity_migration_source_gate_invalid")
+    if require_live and migration.get("mode") != "live":
+        computed_runtime_identity_errors.append("live migration preflight was not captured")
+    if require_live and migration.get("pending_migration_count") != 0:
+        computed_runtime_identity_errors.append("pending migrations must be zero for live release")
+
+    running = (
+        release_runtime_identity.get("running_images")
+        if isinstance(release_runtime_identity.get("running_images"), dict)
+        else {}
+    )
+    running_inventory = (
+        running.get("inventory") if isinstance(running.get("inventory"), dict) else {}
+    )
+    running_items = (
+        running_inventory.get("images")
+        if isinstance(running_inventory.get("images"), list)
+        else []
+    )
+    if running.get("source_gate") != "strict_gateway":
+        errors.append("release_runtime_identity_running_images_source_gate_invalid")
+    expected_inventory_digest = canonical_digest(running_inventory) if running_inventory else ""
+    if running.get("inventory_sha256") != expected_inventory_digest:
+        errors.append("release_runtime_identity_running_images_digest_mismatch")
+    if running.get("image_count") != len(running_items):
+        errors.append("release_runtime_identity_running_images_count_mismatch")
+    if require_live and not running_items:
+        computed_runtime_identity_errors.append("live running image inventory was not captured")
+    if running_items:
+        running_services = {
+            item.get("service")
+            for item in running_items
+            if isinstance(item, dict) and item.get("service")
+        }
+        if require_live:
+            for required_service in ("tonglingyu-gateway", "open-webui"):
+                if required_service not in running_services:
+                    computed_runtime_identity_errors.append(
+                        f"running image inventory missing {required_service}"
+                    )
+        for index, item in enumerate(running_items):
+            if not isinstance(item, dict):
+                errors.append(f"release_runtime_identity_running_image_{index}_must_be_object")
+                continue
+            image_id = item.get("image_id")
+            if not (
+                isinstance(image_id, str)
+                and image_id.startswith("sha256:")
+                and is_sha256(image_id.removeprefix("sha256:"))
+            ):
+                errors.append(f"release_runtime_identity_running_image_{index}_image_id_invalid")
+            if not nonempty(item.get("configured_image")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_configured_image_missing"
+                )
+            if not is_sha256(item.get("image_id_sha256")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_image_id_sha256_invalid"
+                )
+            if not isinstance(item.get("repo_digests"), list):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_repo_digests_invalid"
+                )
+            if not is_sha256(item.get("repo_digests_sha256")):
+                errors.append(
+                    f"release_runtime_identity_running_image_{index}_repo_digests_sha256_invalid"
+                )
+    if release_runtime_identity.get("errors") != computed_runtime_identity_errors:
+        errors.append("release_runtime_identity_errors_mismatch")
+    if release_runtime_identity.get("valid") != (not computed_runtime_identity_errors):
+        errors.append("release_runtime_identity_valid_mismatch")
+    runtime_identity_ready = (
+        release_runtime_identity.get("valid") is True
+        and not computed_runtime_identity_errors
+    )
 
 computed_required_failures = [
     gate["name"]
@@ -506,11 +3639,18 @@ if not computed_browser_review_acknowledged:
     computed_release_blockers.append("Open WebUI browser-side review was not acknowledged")
 if summary_only:
     computed_release_blockers.append("summary-only mode was used")
+for error in computed_release_context_errors:
+    computed_release_blockers.append(error)
+for error in computed_runtime_identity_errors:
+    if require_live:
+        computed_release_blockers.append(error)
 computed_release_conditions_met = (
     require_live
     and not computed_required_failures
     and not computed_skipped_live_gates
     and computed_browser_review_acknowledged
+    and release_context_ready
+    and runtime_identity_ready
 )
 if gate_overrides_used:
     computed_release_blockers.append("gate command overrides were used")
@@ -538,8 +3678,21 @@ add_mismatch(
 )
 add_mismatch("production_release_ready", computed_production_ready, production_ready)
 add_mismatch("exit_policy", computed_exit_policy, exit_policy)
+validate_release_manifest()
+validate_release_artifact_registry()
 validate_non_override_gate_stdout()
 validate_production_gate_stdout()
+validate_migration_preflight_gate_stdout()
+validate_retrieval_quality_gate_stdout()
+validate_restore_drill_gate_stdout()
+validate_security_scan_gate_stdout()
+validate_release_ops_gate_stdout()
+validate_incident_capacity_gate_stdout()
+validate_performance_budget_gate_stdout()
+validate_api_contract_gate_stdout()
+validate_user_lifecycle_gate_stdout()
+validate_openwebui_admin_action_contract_gate_stdout()
+validate_openwebui_admin_action_live_gate_stdout()
 
 add_if(
     production_ready and not release_conditions_met,
@@ -558,6 +3711,14 @@ if production_ready:
         age_seconds = (datetime.now(timezone.utc) - generated_at_dt).total_seconds()
         if age_seconds > report_max_age_hours * 3600:
             errors.append("production_ready_report_too_old")
+    if release_context_valid_until_dt is None:
+        errors.append("production_ready_requires_release_context_valid_until")
+    elif release_context_valid_until_dt <= datetime.now(timezone.utc):
+        errors.append("production_ready_report_expired")
+    if not release_context_ready:
+        errors.append("production_ready_requires_valid_release_context")
+    if not runtime_identity_ready:
+        errors.append("production_ready_requires_valid_runtime_identity")
 add_if(
     production_ready and report.get("status") != "passed",
     "production_ready_requires_passed_status",
@@ -583,6 +3744,26 @@ add_if(
 )
 
 for name in live_gate_names:
+    gate = gates_by_name.get(name)
+    add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
+    if isinstance(gate, dict):
+        add_if(
+            production_ready and gate.get("status") != "passed",
+            f"production_ready_requires_{name}_passed",
+        )
+        add_if(
+            production_ready and gate.get("required") is not True,
+            f"production_ready_requires_{name}_required",
+        )
+
+for name in (
+    "runtime_config",
+    "retrieval_quality",
+    "rqa_backup_restore_drill",
+    "security_scan",
+    "release_ops_readiness",
+    "rqa_incident_capacity",
+):
     gate = gates_by_name.get(name)
     add_if(production_ready and not isinstance(gate, dict), f"production_ready_missing_{name}")
     if isinstance(gate, dict):

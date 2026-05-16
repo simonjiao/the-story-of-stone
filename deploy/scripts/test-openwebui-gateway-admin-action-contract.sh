@@ -9,7 +9,10 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 ACTION_FILE="${FUNCTION_DIR}/tonglingyu_gateway_admin_action.py"
 ACTION_TEST="${FUNCTION_DIR}/test_tonglingyu_gateway_admin_action.py"
+FEEDBACK_ACTION_FILE="${FUNCTION_DIR}/tonglingyu_gateway_feedback_action.py"
+FEEDBACK_ACTION_TEST="${FUNCTION_DIR}/test_tonglingyu_gateway_feedback_action.py"
 VERIFY_SCRIPT="${SCRIPT_DIR}/verify-openwebui-gateway-admin-action.sh"
+CONTRACT_VERSION="tonglingyu-openwebui-admin-action-contract-v1"
 OK_FIXTURE="${WORK_DIR}/gateway-admin-action-ok.json"
 EMPTY_KEY_FIXTURE="${WORK_DIR}/gateway-admin-action-empty-key.json"
 MISSING_GUARD_FIXTURE="${WORK_DIR}/gateway-admin-action-missing-guard.json"
@@ -17,8 +20,12 @@ OK_OUT="${WORK_DIR}/ok.out"
 EMPTY_OUT="${WORK_DIR}/empty.out"
 MISSING_GUARD_OUT="${WORK_DIR}/missing-guard.out"
 
-python3 -m py_compile "${ACTION_FILE}" "${ACTION_TEST}"
-python3 -m unittest "${ACTION_TEST}"
+python3 -m py_compile \
+  "${ACTION_FILE}" \
+  "${ACTION_TEST}" \
+  "${FEEDBACK_ACTION_FILE}" \
+  "${FEEDBACK_ACTION_TEST}"
+python3 -m unittest "${ACTION_TEST}" "${FEEDBACK_ACTION_TEST}"
 
 python3 - "${ACTION_FILE}" "${OK_FIXTURE}" "${EMPTY_KEY_FIXTURE}" "${MISSING_GUARD_FIXTURE}" <<'PY'
 import json
@@ -98,4 +105,109 @@ assert "content_missing_admin_role_guard" in report["errors"], report
 assert "content_missing_admin_actions" in report["errors"], report
 PY
 
-echo "openwebui gateway admin action contract passed"
+python3 - \
+  "${ACTION_FILE}" \
+  "${ACTION_TEST}" \
+  "${FEEDBACK_ACTION_FILE}" \
+  "${FEEDBACK_ACTION_TEST}" \
+  "${OK_OUT}" \
+  "${EMPTY_OUT}" \
+  "${MISSING_GUARD_OUT}" \
+  "${CONTRACT_VERSION}" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    action_file,
+    action_test,
+    feedback_action_file,
+    feedback_action_test,
+    ok_out,
+    empty_out,
+    missing_guard_out,
+    contract_version,
+) = sys.argv[1:9]
+
+
+def sha256_file(path: str) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+ok_report = json.loads(Path(ok_out).read_text(encoding="utf-8"))
+empty_report = json.loads(Path(empty_out).read_text(encoding="utf-8"))
+missing_guard_report = json.loads(Path(missing_guard_out).read_text(encoding="utf-8"))
+action_test_content = Path(action_test).read_text(encoding="utf-8")
+required_actions = [
+    "metrics",
+    "trace",
+    "package",
+    "session",
+    "retrieval_failures",
+    "retrieval_failure",
+    "retrieval_failure_update",
+    "retrieval_failure_cluster",
+    "governance_tasks",
+    "governance_task",
+    "governance_task_create",
+    "governance_task_from_failure",
+    "governance_task_update",
+    "knowledge_patch_proposal",
+]
+checks = {
+    "py_compile_passed": True,
+    "unit_tests_passed": True,
+    "valid_fixture_passed": ok_report.get("status") == "ok",
+    "admin_key_not_printed": True,
+    "empty_admin_key_rejected": "empty_valves=GATEWAY_ADMIN_API_KEY"
+    in empty_report.get("errors", []),
+    "admin_role_guard_required": "content_missing_admin_role_guard"
+    in missing_guard_report.get("errors", []),
+    "admin_actions_required": "content_missing_admin_actions"
+    in missing_guard_report.get("errors", []),
+    "required_valves_present": set(ok_report.get("valve_keys", []))
+    >= {"GATEWAY_BASE_URL", "GATEWAY_ADMIN_API_KEY", "TARGET_MODEL", "TARGET_MODELS"},
+    "rqa_list_response_contract_tested": all(
+        token in action_test_content
+        for token in (
+            "tonglingyu-retrieval-failures-v1",
+            "tonglingyu-knowledge-governance-tasks-v2",
+            '"next_offset": 20',
+        )
+    ),
+}
+errors = [f"check_failed={name}" for name, passed in checks.items() if passed is not True]
+payload = {
+    "object": "tonglingyu.openwebui_admin_action_contract_gate",
+    "schema_version": 1,
+    "status": "ok" if not errors else "failed",
+    "contract_version": contract_version,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "checks": checks,
+    "action": {
+        "function_id": "tonglingyu_gateway_admin",
+        "type": "action",
+        "source_sha256": sha256_file(action_file),
+        "test_sha256": sha256_file(action_test),
+        "required_actions": required_actions,
+    },
+    "feedback_action": {
+        "function_id": "tonglingyu_gateway_feedback",
+        "type": "action",
+        "source_sha256": sha256_file(feedback_action_file),
+        "test_sha256": sha256_file(feedback_action_test),
+    },
+    "fixture_validation": {
+        "source": ok_report.get("source"),
+        "valve_keys": ok_report.get("valve_keys", []),
+        "negative_fixture_count": 2,
+    },
+    "errors": errors,
+    "secret_values_printed": False,
+}
+print(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+if errors:
+    raise SystemExit(1)
+PY

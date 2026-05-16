@@ -559,6 +559,12 @@ def build_snapshot(args: argparse.Namespace) -> int:
         "input_path": str(epub_path),
         "input_sha256": input_hash,
         "extracted_at": extracted_at,
+        "source_url": args.source_url,
+        "license": args.license,
+        "license_url": args.license_url,
+        "license_source_url": args.license_source_url,
+        "attribution": args.attribution,
+        "usage_boundary": args.usage_boundary,
         "notes": args.notes,
     }
     report = {
@@ -632,6 +638,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--work", help="Override work name.")
     parser.add_argument("--edition", default="", help="Edition or version label.")
     parser.add_argument("--language", help="Override language.")
+    parser.add_argument("--source-url", default="", help="Canonical source landing page URL.")
+    parser.add_argument("--license", default="", help="Machine-readable source license id.")
+    parser.add_argument("--license-url", default="", help="Canonical license URL.")
+    parser.add_argument(
+        "--license-source-url",
+        default="",
+        help="URL proving or explaining the source license.",
+    )
+    parser.add_argument("--attribution", default="", help="Required attribution text.")
+    parser.add_argument("--usage-boundary", default="", help="Production usage boundary.")
     parser.add_argument("--notes", default="", help="Human-readable source notes.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output directory.")
     parser.add_argument(

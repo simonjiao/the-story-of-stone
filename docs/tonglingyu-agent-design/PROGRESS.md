@@ -24,12 +24,17 @@
 - 已下载第一批 source snapshot：`hongloumeng-wikisource-120`、`hongloumeng-wikisource-chengjia`、`hongloumeng-wikisource-chengyi`、`shitouji-wikisource-zhiyanzhai`、`shitouji-wikisource-jiaxu`。
 - `hongloumeng-wikisource-chengjia` 已通过 ProofreadPage Page namespace 展开补齐正文。
 - 第一批 Wikisource snapshot 已补 source snapshot ready 口径和 19 个跨版本
-  抽样点；这只代表工程上可进入 loader，不代表完成学术校勘。
+  抽样点；当前可支持通俗分析场景下的跨版本对照和证据链检索，但仍不代表
+  完成学术校勘、影印复核或权威校注本复核。后续 RQA production-ready
+  必须把这个 source coverage boundary 写入公共回答边界、RQA report 和
+  release report。
 - M1 完成闸门已明确：进入 M2 前必须完成并通过 source snapshot registry
   校验；本计划不设置独立“M1.5”。若影印件、权威校注本或评测题库要阻塞
   M2，必须先提升为 M1 P0。
 - 当前 `python3 scripts/validate_source_snapshots.py` 已通过：5 个来源和
-  19 个抽样点满足 M1 source snapshot 闸门。
+  19 个抽样点满足 M1 source snapshot 闸门；validator 同时要求每个来源
+  具备机器可读 `source_url`、`license`、`license_url`、
+  `license_source_url`、`attribution` 和 `usage_boundary`。
 - Rust `tonglingyu-gateway` + `tonglingyu-runtime` 已实现 M2-M6 最小工程闭环：
   source snapshot loader、SQLite/FTS、别名种子、证据卡片、证据包、
   reviewer、OpenAI-compatible `/v1/models` 和 `/v1/chat/completions`。
@@ -84,7 +89,7 @@
   便于后续按 trace ID 回放与审计。
 - 已补内置评测入口 `eval`，当前覆盖正文、脂批、版本边界、人物别名、
   诗词判词、字形读音、证据不足、prompt injection、预期证据 ID 和禁止
-  结论等 102 个发布回归 case；评测报告可落盘到
+  结论等 103 个发布回归 case；评测报告可落盘到
   `data/tonglingyu/reports/`。
 - 已新增 `agent-platform/scripts/tonglingyu-gateway-smoke.sh`，可临时建库并
   验证 Gateway 鉴权、单可见模型、会话映射、消息去重、内部字段拒绝、
@@ -393,13 +398,16 @@
   状态的负向路径。
 - Open WebUI 已补 `tonglingyu_gateway_admin` Action Function：只读查询 Gateway
   metrics、trace、evidence package audit 和 session，Function 内强制
-  `__user__.role == "admin"` 后才调用 `/v1/admin/*`；普通用户不会触发 Gateway
-  admin 请求。已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入
-  release readiness live gate。
-- `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已补 Gateway
-  Admin Action contract smoke，覆盖 Action 编译和单测、verify fixture 正向、
-  admin key 为空、缺少 admin role guard、缺少 admin action endpoint，以及
-  verify 输出不泄露 fixture-secret 值。
+  `__user__.role == "admin"` 后才调用 Gateway admin read/update API；普通用户只会
+  触发 `/v1/admin/access-denials` 写脱敏拒绝审计，不会读取或修改 admin 资源。
+  已补 API/DB 两条安装路径、fixture/API/DB verify gate，并纳入 release
+  readiness live gate。
+- `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh` 已升级为结构化
+  release gate `openwebui_admin_action_contract`：编译 Open WebUI Admin/Feedback
+  Action，运行 21 个 Action 单测，验证 fixture 正向、admin key 为空、缺少
+  admin role guard、缺少 admin action endpoint、required Action 列表和 verify
+  输出不泄露 fixture-secret 值；saved report validator 会拒绝缺 gate stdout、
+  guard check 失败或 required Action 覆盖被篡改的 production-ready report。
 - release/readiness、runtime config、strict Gateway、Open WebUI Bridge Function
   和 Gateway Admin Action 的 install/verify 脚本已支持
   `TONGLINGYU_DEPLOY_ENV_FILE` / `DEPLOY_ENV_FILE`，实现分支可以复用目标部署
@@ -443,9 +451,10 @@
   installer 更新并重启 `hermes-open-webui`；复测
   `verify-openwebui-function.sh` 与
   `verify-openwebui-gateway-admin-action.sh` 均通过。
-- 最新远端 production readiness 显示 runtime config、model upstream network、
+- 此前 R5D 生产入口 readiness 显示 runtime config、model upstream network、
   strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
-  `openwebui_browser_review` 均已通过；`production_release_ready=true`。
+  `openwebui_browser_review` 通过；该记录只证明 R5D 入口基线，不能替代本轮
+  RQA release automation / security / ops / capacity 生产门禁。
 - 已新增 `deploy/scripts/verify-model-upstream-network.sh`，release readiness
   live mode 会在 strict Gateway 之前运行该 gate；它从 `sub2api`/Hermes 容器内
   检查模型上游 DNS、198.18.0.0/15 fake-IP 和 TLS 握手状态，只输出 host、
@@ -466,7 +475,8 @@
   等负向路径。
 - Open WebUI Function API/DB 安装脚本已支持 `AGENT_BRIDGE_TARGET_MODELS`，
   避免 Filter 和 verify gate 已支持多 target model，但安装脚本仍覆盖成单值。
-- 当前可以按本文 R5D 口径宣布 Gateway + Runtime Agent 接入 production-ready：
+- 当前 R5D 生产入口基线已通过，但不能据此宣布本轮 RQA 或完整通灵玉
+  production-ready：
   Hermes profile content/tool execution 已通过 `agent-runtime`/Hermes 接入并由
   summary/audit gate fail-closed；目标 `hhost` runtime config、model upstream
   network、strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
@@ -475,9 +485,644 @@
   browser review evidence 为
   `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
   事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
+- RQA Milestone A 已完成代码切片：
+  `tonglingyu-runtime` 的 text/commentary search 输出已携带
+  `RetrievalQualityReport`，覆盖 redacted query summary、candidate/selected
+  count、channel distribution、protected terms、expanded aliases、
+  required/missing evidence types、exact-match coverage、source coverage boundary、
+  source license/usage/attribution refs、`expected_evidence_status` 和
+  `truncated`；`cargo test -p tonglingyu-runtime` 已通过 32 个测试。该结果只证明
+  runtime search 质量报告闭环，不证明后续
+  RQA release gate、saved report validator 或 live KB 已 production-ready。
+- RQA Milestone B 已完成代码切片：
+  runtime schema 新增 `tonglingyu-retrieval-failures-v1` 和
+  `retrieval_failures` 表；create/list/read/update API、默认分页与最大 page size、
+  admin detail / safe summary、migration preflight、失败 rollback 测试和 workflow
+  quality failure 自动登记均已接入。`cargo test -p tonglingyu-runtime` 已通过 35
+  个测试。该结果仍不等于完整 production-ready，因为 Milestone C 的完整触发矩阵、
+  去重、eval expected evidence、release gate 和 saved report validator 尚未完成。
+- RQA Milestone C 的 runtime/API 层已完成代码切片：
+  workflow 会为非 production-ready quality report、reviewer downgrade 和 package
+  无法支持关键 claim 登记 failure；expected evidence miss 可由 eval/gate 调用方
+  通过 expected/selected evidence ids 写入；相同 trace/package/failure type 会
+  去重；failure insert 与 audit append 在同一事务中完成，audit append 失败会
+  rollback。当前 runtime 回归套件已扩展到 42 个测试并通过。该结果仍不等于
+  完整 production-ready，因为 eval quality metrics、release quality gate 和 saved
+  report validator 尚未完成。
+- RQA Milestone D 已完成代码切片并关闭当前 eval quality blocker：
+  `tonglingyu-gateway eval` 已输出 `tonglingyu-eval-quality-v1` quality summary
+  和 case-level quality details，覆盖 expected evidence classification、hit@1/@3/@8、
+  required type、exact term、source/edition diversity、source coverage boundary、
+  forbidden conclusion、reviewer status 和 eval failure 写入
+  `retrieval_failures`。expected evidence 分母当前为 5，hit@8 为 5/5；新增
+  影印件、权威校注本、专家校勘边界 case，并由 Runtime reviewer 降级为资料不足。
+  `cargo test -p tonglingyu-runtime` 已通过 42 个测试，
+  `cargo test -p tonglingyu-gateway` 已通过 21 个测试。
+- 当前 RQA eval 按 production 口径通过：
+  本地 live eval 生成 103/103 个 case report，103/103 case 通过，
+  expected-passed / evidence-bearing report 的
+  `quality_report_production_ready=86/86`，`quality_summary.status=passed`，
+  blocker 为空，`eval_failure_records=0`。本轮修复包含 source license /
+  usage / attribution metadata 入库与校验、version boundary 与程乙正文检索
+  策略校准、脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
+  2026-05-16 进一步修正通灵玉铭文与青埂峰核心 eval target：通灵玉“字”
+  问题会强制 exact term 保护 `莫失莫忘` 和 `一除邪祟`，青埂问题会强制
+  exact term 保护 `青埂`；exact-text fallback 优先返回
+  `hongloumeng-wikisource-120` source snapshot，避免被更短的程甲/程乙文本抢占。
+  `tonglingyu-gateway eval` 也已改为默认在 SQLite 临时副本上运行；只有显式设置
+  `--allow-db-mutation` / `TONGLINGYU_EVAL_ALLOW_DB_MUTATION=true` 才允许把 eval
+  workflow 写回目标 DB。
+- RQA Milestone E 已完成代码切片：
+  Gateway admin trace 和 package audit 现在暴露 `retrieval_quality_summary`、
+  `retrieval_failure_ids` 与 admin detail failure 列表；JSON metrics 新增
+  `rqa.retrieval_failures.total/by_status/by_type`，Prometheus 只保留 bounded
+  labels，覆盖 Gateway info、review status、retrieval failure status/type 和
+  audit event type，不输出 trace/user/question/package id；新增 admin retrieval failure
+  list/read/update API，并在 Open WebUI admin Action 中提供 list/read/update 入口。
+  admin list/read/update 成功、not-found 和 conflict 路径都会写访问审计；
+  admin auth failure、Open WebUI role denial 和 rate-limit denial 都写脱敏
+  `rqa_admin_access_denied`。`admin update` 支持 `if_match_updated_at` 冲突检测，
+  重复同 payload 且未带 CAS 时 runtime update no-op，不重复写状态更新 audit。
+  普通 completion 和 streaming completion 均有 RQA 内部字段不可见测试。
+  `cargo test -p tonglingyu-gateway` 已通过 36 个测试，Open WebUI admin Action
+  单测已通过 10 个测试。
+- RQA Milestone F/G 已完成 release artifact 主干实现：
+  新增 `deploy/scripts/verify-tonglingyu-rqa-quality-gate.sh`，并把
+  `retrieval_quality` 加入 `verify-tonglingyu-release-readiness.sh` 的 required
+  gate；saved report validator 的 canonical gate set 也加入
+  `retrieval_quality`。gate 会验证 eval quality summary、Production 默认阈值、
+  open retrieval failures、source coverage boundary、source license/attribution
+  metadata、source snapshot digest、KB build hash、kb_version、eval run id、
+  runtime profile/prompt/tool/reviewer policy digest、model upstream id 和 decoding
+  参数摘要，并输出可复核的 `eval_report_path`。当 release report path 已设置且
+  未显式指定 eval report path 时，release readiness 会为真实 RQA gate 生成同目录
+  `.rqa-eval.json` artifact，避免 production-ready report 绑定临时文件。
+- RQA quality gate 已支持 `TONGLINGYU_RQA_THRESHOLD_*` 阈值配置；默认值仍是
+  Production 默认阈值。更严格阈值会进入 `effective_thresholds` 和
+  `threshold_config`，低于默认值或不可解析的覆盖会 fail-closed，不能生成
+  production-ready artifact。新增 eval 指标
+  `source_boundary_confirmation_avoided`，用于证明需要影印件、权威校注或专家
+  校勘的问题没有被公共回答声明为已确认。
+- RQA Milestone G 已完成 saved report validator 的 artifact 复核：
+  validator 会读取 `eval_report_path`，校验 `eval_report_sha256`、`eval_run_id`
+  和 `eval_suite_version`，并从原始 eval cases 重算 quality report coverage、
+  production-ready quality report coverage、eval classification、expected
+  evidence hit@1/@3/@8、required type coverage、exact term coverage、forbidden
+  conclusion avoided、reviewer status matched、eval failure records 和 source
+  boundary confirmation avoided、source diversity。为支持完整重算，
+  `tonglingyu-gateway eval` 的 case result 已新增 `expected_review_status`、
+  `required_evidence_type`、`quality.required_type_required`、
+  `quality.source_boundary_confirmation_required` 和
+  `quality.source_boundary_confirmation_avoided`。
+- Saved report validator 还会扫描 release report 中的 raw question/query/prompt
+  字段、stdout JSON 字符串泄露，以及 trace/package/evidence/block/case/user 等
+  高基数 id 列表。contract smoke 已覆盖 RQA gate stdout 缺失、阈值被降低、
+  open P0 tamper、eval artifact 缺失、summary tamper、privacy leak 和
+  high-cardinality list leak。
+- `deploy/scripts/verify-tonglingyu-strict-gateway.sh` 已输出与 RQA quality gate 同
+  结构的 `behavior_config` 和 `behavior_config_digest`；saved report validator
+  会逐字段比较 RQA eval gate 与 strict live gate 的 Runtime profile、prompt、
+  tool policy、reviewer policy、model upstream 和 decoding 参数摘要。
+- 2026-05-15 本地 RQA quality gate 曾因旧 eval artifact 正确 fail-closed：
+  `quality_summary.status=passed`，但默认 DB 存在 open P0 retrieval failures；
+  schema migration backfill 后同时出现 open P0 governance tasks。2026-05-16
+  执行 eval artifact remediation 并复跑 preflight 后，`retrieval_quality`
+  输出 open P0 failure/task 为 0 并通过。该节点的当前 blocker 已关闭，但目标 live
+  DB 仍必须单独证明没有 open P0 RQA blocker。
+- RQA Milestone H 已完成第一批治理任务代码切片：
+  runtime 新增 `knowledge_governance_tasks` schema、通用
+  `source_entity_type/source_entity_id`、open/in_review retrieval failure backfill、
+  新 failure 自动生成 open P0 governance task，以及 governance task
+  create/list/read/update API；accepted task 必须带 reviewer、review note 和
+  evidence ref，closed/rejected 必须带 reviewer 和 review note。Gateway 和 Open
+  WebUI admin Action 新增 governance task list/read/create/update 与
+  create-from-failure；管理员可把 trace、package 或 retrieval failure 标记为
+  expert-review 任务。trace/package audit 会返回 governance task ids/tasks，admin
+  成功、not-found、conflict 和 update 路径写访问审计。RQA quality gate、saved
+  report validator 和 release contract smoke 新增 `open_p0_governance_tasks=0`
+  blocker。
+- 普通用户反馈入口已完成第一批代码切片：Gateway 新增 `/v1/feedback`，Open
+  WebUI 新增 feedback Action；反馈必须绑定用户可访问的 trace/package，只生成
+  `source_entity_type=user_feedback` 的 `expert_review` governance task，并写
+  `user_feedback_received` audit，不接受事实层 mutation 字段。
+- retrieval failure 聚类已完成第一批代码切片：Runtime 新增
+  `tonglingyu-retrieval-failure-clusters-v1` 聚类结果，按 failure type、KB、
+  missing/required evidence types 和 issue family 聚合 open/in_review failures；
+  Gateway admin API 和 Open WebUI admin Action 可触发聚类，只生成
+  `source_entity_type=retrieval_failure_cluster` 的 governance task proposed fix，
+  并写 `retrieval_failures_clustered` / `retrieval_failure_admin_cluster` audit；
+  不改 retrieval failure 状态或 source/alias/term/commentary/fact 表。
+- proposed alias / term / commentary link / version note 的人工状态流转已完成第一批
+  代码切片：Runtime 新增 `tonglingyu-knowledge-patch-proposals-v1` 和
+  `knowledge_patch_proposals`，proposal 必须有类型化 payload、payload hash、
+  source ref、trace/package 绑定，并创建
+  `source_entity_type=knowledge_patch_proposal` 的 governance task；Gateway admin
+  API 和 Open WebUI admin Action 可创建 proposal，并写
+  `knowledge_patch_proposal_created` / `knowledge_patch_proposal_admin_create` audit。
+  accepted/rejected 仍只更新人工状态，不直接写 source、alias、term、commentary
+  link、version note 或事实层。
+- KB rebuild diff report 与 eval 前后对比已完成第一批代码切片：Runtime 新增
+  `tonglingyu-kb-version-diff-v1` 和 `kb_version_diff_reports`，rebuild 会记录
+  before/after KB summary、source hash 变化、count delta、source snapshot digest
+  和 KB build hash；Gateway `build-kb` 默认在临时 SQLite 副本上运行 rebuild 前后
+  eval，只把 `quality_summary` 写回 diff report，post-rebuild eval 不通过时
+  fail-closed，且不把 eval package/failure 污染 live DB。
+- accepted knowledge patch proposal 已接入 KB rebuild 输入：rebuild 只应用
+  `accepted` 且带 evidence ref 的 proposal，按类型写入 aliases、terms、
+  commentary_links 或 version_notes，并记录 `knowledge_patch_applications` 与
+  `knowledge_patch_proposals_applied` audit；不满足目标表约束或引用不存在时
+  rebuild fail-closed。
+- RQA Milestone H 已完成，但不等于整体 production-ready：Milestone I-J-K 的端到端
+  自动化、live release 证据、真实安全扫描 artifact、live/load 容量和值守仍未完成；
+  用户数据 lifecycle 已有本地 gate，但还不能替代 live/Open WebUI admin Action
+  证据。accepted 状态本身仍不能直接等同为事实层已更新，必须经过 rebuild
+  application、diff report 和 eval gate。
+- RQA retention/prune 已完成第一批 production 保护切片：Runtime 新增
+  `tonglingyu-rqa-lifecycle-v1` 和 `rqa_lifecycle_tombstones`，prune 会保护仍被
+  open retrieval failure、open/in_review/accepted governance task 引用的
+  trace/package 数据；Gateway prune 同步保护对应 `gateway_messages`、
+  `workflow_states` 和 session。实际删除前写 tombstone，完成后写
+  `rqa_retention_pruned` audit；actual prune 会在写事务内重新判定候选集合再删除，
+  避免判定后新增活动 RQA 引用造成误删。单测覆盖 dry-run、实际 prune、active
+  RQA 引用保护和 tombstone payload 不含原始 question/secret。
+- Gateway Prometheus `tonglingyu_gateway_info` 已恢复低基数运行边界标签：
+  `agent_runtime_mode`、`rate_limit_per_minute` 和 `max_body_bytes`，使 gateway
+  smoke 能复核限流与请求体边界没有从指标中丢失。
+- RQA backup/restore drill 已接入 release readiness 必跑 gate：
+  `deploy/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh` 会执行 DB backup、
+  restored DB integrity check、restored Gateway admin trace/failure/governance
+  task/package 读取、package replay、恢复后 RQA quality gate 和 saved report
+  validator 复跑。默认 RTO/RPO 为 900s / 3600s，gate stdout 写入
+  started_at、finished_at、operator、environment、RTO/RPO、artifact hash 和
+  post-restore checks。live mode 现在默认把 restore-drill 备份证据持久化到
+  `data/tonglingyu/restore-drills/<run_id>/`，也可通过
+  `TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR` 显式绑定 artifact 目录。
+- saved report validator 已要求 `rqa_backup_restore_drill` gate 存在并校验
+  RTO/RPO、backup/restore hash、恢复后 checks；production-ready report 若使用
+  fixture-only restore drill、缺失持久备份 artifact，或备份 artifact 内容 hash
+  与 gate stdout 不一致会失败，live release 必须提供真实 trace/package/failure/
+  governance task restore refs。
+- Release security gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-release-security.sh` 会记录 dependency scan、
+  image scan、release script static scan 和 risk acceptance。缺依赖扫描、镜像扫描、
+  镜像 digest、存在 `latest/main` 等可变 tag 或未审批风险时 fail-closed；已审批
+  risk exception 必须包含 risk owner、accepted risk id、approved/expires 时间和
+  accepted findings。saved report validator 会拒绝缺 `security_scan` gate stdout、
+  缺 scan 且无 risk acceptance、release script finding 等篡改。
+- RQA performance budget gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-performance-budget.sh` 会启动本地 Gateway，
+  真实执行 chat 写入 RQA failure/governance task、admin trace/list、admin 状态
+  关闭和 RQA quality gate 复跑；默认预算覆盖 RQA 写入、admin 查询、状态更新和
+  quality gate，curl、KB build、eval 和 quality gate 都有可配置 timeout。saved
+  report validator 会拒绝缺 `rqa_performance_budget` gate stdout、缺 timeout
+  边界、预算超限、budget/measurement 不一致和关键 checks 未通过的
+  production-ready report。
+- RQA API contract gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-api-contract.sh` 会启动本地 Gateway，验证
+  retrieval failure 与 governance task 的 admin list/read schema version、pagination
+  metadata、max page size clamp、稳定排序、未知 filter 和非法 enum filter 的 400
+  边界，以及旧客户端解析、响应新增字段容忍、RQA admin mutation 未知 request body
+  字段 422 拒绝、admin metrics/Prometheus 不输出原始 prompt、trace/package id 或
+  secret、Prometheus label set 只使用低基数字段、admin payload 不返回完整原始
+  prompt。
+  兼容策略版本为
+  `tonglingyu-rqa-api-compatibility-v1`；saved report validator 会拒绝缺 gate
+  stdout、contract check 失败、兼容策略漂移、metrics 边界漂移、未知 request body
+  未拒绝和负向状态码不是 400 的 production-ready report。
+- RQA failure 隐私 schema 已接入 runtime migration：
+  `tonglingyu-retrieval-failure-privacy-v1` 新增 `redacted_question_excerpt`，
+  `retrieval_failures` 默认只存 `question_sha256`、`question_summary`、
+  `redacted_question_excerpt` 和 `redacted_query_terms_json`，不接受 raw `question`
+  列。redaction 覆盖 password/key、token、URL secret、邮箱、手机号和长随机串；
+  RQA API contract gate 会验证 admin detail 不回显原始 prompt 或敏感片段。
+- RQA 用户数据生命周期 gate 已接入 release readiness 必跑路径：
+  `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh` 会启动本地 Gateway，验证
+  export 脱敏 manifest、legal hold 阻断 anonymize、release legal hold、
+  delete/anonymize、audit event、tombstone、原始用户值移除和
+  trace/package/failure/task 可追责性；gate stdout 只输出计数和 hash ref，不输出
+  原始 question、response、user_ref、chat_ref 或 secret。saved report validator
+  会拒绝缺 `rqa_user_lifecycle` gate stdout、关键 check 失败和 action status drift
+  的 production-ready report。
+- Open WebUI admin Action source/fixture contract 现在要求 Action 单测覆盖
+  retrieval failure / governance task list 响应保留 `schema_version`、`limit`、
+  `offset` 和 `next_offset`；saved report validator 会拒绝缺少该 Action 响应契约
+  check 的 production-ready report。
+- RQA Milestone K 的本地 contract / release gate 切片已闭合：隐私 schema、
+  API 兼容策略、稳定分页、metrics 低基数、Open WebUI admin Action source/fixture
+  contract 和性能预算 fail-closed gate 均已纳入本地验证。但这仍不是整体
+  production-ready，因为 live Action、目标环境 live/load 性能和 operator handoff
+  证据尚未闭合。
+- RQA Milestone L 已新增发布值守 gate：
+  `deploy/runbooks/tonglingyu-rqa-release-runbook.md` 记录 release flow、
+  migration preflight、backup、deploy、live gate、saved report validation、
+  rollback、DB restore/additive downgrade、RTO/RPO、alert policy、incident
+  response、post-release monitor 和 release report reproduction；
+  `deploy/scripts/verify-tonglingyu-release-ops-readiness.sh` 接入
+  `verify-tonglingyu-release-readiness.sh` 的 required gate
+  `release_ops_readiness`。preflight 模式可验证 runbook/alert/rollback 结构；
+  live 模式缺 rollback/RTO-RPO/alert/post-release/operator/environment/report
+  evidence 会 fail-closed。saved report validator 会拒绝缺
+  `release_ops_readiness` stdout、缺 post-release live gate ref 或高基数告警标签
+  的 production-ready report。
+- RQA Milestone M 的本地 incident/capacity gate 已开始落地：
+  Runtime/Gateway 管理员状态更新现在把 previous status、new status、reason
+  hash 和 timestamp 写入 status-history audit；新增
+  `deploy/scripts/verify-tonglingyu-rqa-incident-capacity.sh` 并接入 release
+  readiness required gate `rqa_incident_capacity`。该 gate 在 preflight 模式只
+  证明 emergency/degraded fail-closed 规则、无无界队列静态检查、幂等标记、
+  status-history audit 标记和 incident runbook 结构；live 模式缺 capacity、
+  load、audit-history 或 incident evidence 会 fail-closed。saved report
+  validator 会拒绝缺 gate stdout、emergency/degraded/persistence-degraded
+  状态、非 live 模式、缺代表性数量、缺 load measurement 或缺 incident/audit
+  evidence 的 production-ready report。
+- RQA backup/restore drill 的嵌套 release report 已同步新增 gate 边界：
+  恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
+  incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
+  反向打断恢复演练；contract 已覆盖该边界。2026-05-16 持久 artifact 加固后
+  曾因恢复后 RQA eval 失败 fail-closed；本轮修正 exact-term / source-priority
+  检索后，本地 eval 重新达到 103/103，expected_evidence_hit@8 为 5/5，
+  exact_term_coverage 为 3/3。随后用真实 `existing_refs` 重新运行恢复演练，
+  恢复后 admin trace、retrieval failure、governance task、package replay、
+  RQA quality gate 和 saved report validator 均通过，RTO/RPO 约为
+  45s / 45s，低于 900s / 3600s 目标。
+- 2026-05-16 带 digest image refs 和 fixture image scan 的 preflight release
+  readiness 可消除 required gate failure：runtime config 静态 compose/env 解析通过，
+  默认 RQA DB 的旧 eval artifact 已审计关闭，`retrieval_quality` open P0
+  failure/task 为 0，`security_scan` 在该 fixture 配置下通过。仍不能声明
+  production-ready：live mode 未开启，model upstream、strict Gateway、
+  Open WebUI Function、Open WebUI admin Action 仍 skipped，browser review 尚未确认。
+- 2026-05-16 默认本地配置复跑 release readiness：新增
+  `rqa_migration_preflight` 通过并写入 release manifest / artifact registry；
+  saved report validator 对失败报告校验通过；但 `security_scan` 因本地 image refs
+  未 digest-pinned 且缺 image scan 证据失败，live gates 仍 skipped。因此默认本地
+  状态仍是 fail-closed，不是 production-ready。
+- 2026-05-16 全量 `docs/tonglingyu-agent-design/*.md` markdownlint 已通过：
+  历史表格分隔行已规范化，重复标题规则改为同一父级内不重复，未改变通灵玉
+  设计文档的正文语义。
+- RQA quality gate 生成 eval report 时已改为先创建 SQLite snapshot，并在 snapshot
+  上运行 eval；gate 仍从 live DB 检查发布前真实 open P0 failure/task。这样 release
+  eval 的负向/降级用例不会写入生产 RQA 队列。2026-05-16 已用干净 KB 验证：
+  quality gate 通过后原 DB 的 retrieval_failures 和 governance tasks 仍为 0。
+- 已新增 `deploy/scripts/verify-tonglingyu-rqa-release-automation.sh` 作为 RQA
+  release automation wrapper：强制串联 release readiness contract smoke、release
+  readiness report 和 saved report validator，并记录 run id、git commit、gate
+  summary 和 artifact hash。当前执行结果按预期 fail-closed，因为 release readiness
+  阻塞仍未关闭。
+- Release automation wrapper 现在默认把 automation report、release readiness
+  report 和 saved report validator JSON 写入
+  `data/tonglingyu/release-artifacts/<run_id>/`；production-ready 结论会要求这些
+  证据不在脚本临时工作目录内，避免真实发布通过后核心 artifact 被 cleanup 删除。
+- Release readiness report 已新增 `tonglingyu.release_manifest` 和
+  `release_manifest_digest`：manifest 绑定 git commit / tracked dirty 状态、
+  runtime config digest、RQA schema、eval suite、eval run id、source snapshot
+  digest、KB build hash、kb_version、source license summary digest、behavior
+  config digest、model upstream、decoding 参数摘要、dependency scan hash、
+  digest-pinned image refs、image inventory hash 和 per-image scan report hash。
+  saved report validator 会重算 manifest digest，并反查 manifest 与
+  `runtime_config`、`retrieval_quality` 和 `security_scan` gate stdout 一致；
+  contract smoke 已覆盖 manifest source snapshot 篡改和 manifest digest 篡改。
+- Release readiness report 已新增 `tonglingyu.release_artifact_registry` 和
+  `release_artifact_registry_digest`：registry 按
+  `tonglingyu-release-artifact-registry-v1` 记录 release manifest、runtime
+  config、RQA eval report、source license summary、behavior config、dependency
+  scan、image inventory、image scan reports 和 browser review evidence 的
+  digest/source gate/ref/path、365 天保留策略与 legal hold 支持。saved report
+  validator 会重算 registry digest，并拒绝 production-ready report 缺关键 registry
+  entry；release automation artifact 已记录 registry digest 和 entry count。
+- Release readiness 已新增 `rqa_migration_preflight` 必跑 gate：
+  `tonglingyu-gateway runtime-schema-preflight` 暴露 runtime schema preflight；
+  `verify-tonglingyu-rqa-migration-preflight.sh` 先执行 SQLite 只读 backup，再输出
+  backup path/hash、source DB hash、schema preflight digest、migration count 和
+  no-secret/no-rebuild/no-delete 检查。release manifest / artifact registry 已绑定
+  migration backup 与 preflight digest；saved report validator 会拒绝缺 gate
+  stdout、缺备份路径、preflight digest 不匹配、production-ready 使用非 live
+  preflight 或 pending migration 未清零的报告。2026-05-16 contract smoke、
+  fixture preflight gate、非 live readiness saved report validation 和
+  `cargo check -p tonglingyu-gateway` 已通过。
+- Release readiness report 已新增 `tonglingyu.release_context` 和
+  `release_context_digest`：报告会绑定 environment、target、generated_at、
+  valid_until、validity_hours、require_live 和 context source；artifact registry
+  记录 release context digest。saved report validator 会拒绝缺 context、context
+  digest 漂移、generated_at 不一致、无效有效期、production-ready 过期、live
+  模式未显式绑定目标环境或使用 local/preflight/test/fixture 环境名的报告；
+  contract smoke 已覆盖缺 context 和无效 validity window；默认非 live readiness
+  失败报告已通过 saved report validator 结构校验。该机制已闭合，但目标
+  production-ready 仍必须由真实 live release run 生成并保存仍有效的报告 artifact。
+- Release readiness report 已新增 `tonglingyu.release_runtime_identity` 和
+  `release_runtime_identity_digest`：strict Gateway live gate 会采集当前 Docker
+  Compose 运行镜像 inventory；release report 将该 inventory 与 git commit、
+  tracked dirty 状态、security image inventory、migration preflight mode/count/hash
+  共同写入 runtime identity，并在 artifact registry 记录 digest。saved report
+  validator 会拒绝缺 runtime identity、identity digest 漂移、live migration 不是
+  live、pending migration 未清零、tracked tree 不干净或缺
+  `tonglingyu-gateway` / `open-webui` 运行镜像的 production-ready report。2026-05-16
+  contract smoke 已覆盖缺 runtime identity 和缺运行镜像 inventory；机制已闭合，
+  但目标 production-ready 仍必须由真实 live release run 生成并保存 runtime
+  identity artifact。
+- Strict Gateway live gate 已新增 `behavior_config_binding`：把
+  `behavior_config_digest` 与普通 chat admin trace、streaming admin trace 的
+  `agent_runtime_summary` digest 绑定，并要求 summary 证明 Hermes content
+  execution complete、local governance enforced、tool result / tool audit 计数
+  一致。saved report validator 会拒绝缺 binding 或 binding 与 strict Gateway
+  行为配置不一致的 production-ready report；contract smoke 已覆盖 binding digest
+  篡改。目标 production-ready 仍必须由真实 live strict Gateway gate 产出该证据。
+- Live Open WebUI admin Action gate 已升级为结构化
+  `tonglingyu.openwebui_admin_action_live_gate`：输出 active/global、valve keys、
+  admin role guard、role denied、RQA admin Action 覆盖、Gateway admin API path
+  覆盖、target model 绑定和 secret 输出边界。saved report validator 会拒绝
+  role guard 缺失、RQA Action/API 覆盖不完整或 valves 未绑定的 production-ready
+  report；contract smoke 已覆盖 live Action 权限边界篡改。目标 production-ready
+  仍必须由真实 live Open WebUI admin Action gate 产出该证据。
+- Strict Gateway live gate 已新增 `metrics_privacy`：递归检查 JSON metrics 是否
+  出现 query/question/trace/package/session/user 等高基数字段，检查 Prometheus
+  是否出现 query、trace、package、session、user 或鉴权 label，并确认已知 secret
+  值没有进入 metrics 输出。saved report validator 会拒绝 metrics privacy 摘要
+  缺失或含敏感 token 的 production-ready report；contract smoke 已覆盖
+  Prometheus sensitive token 篡改。
+- 已新增 `deploy/scripts/remediate-tonglingyu-rqa-eval-artifacts.sh` 处理旧版
+  live DB eval 污染：脚本只选择 `eval-tly-*` trace 的 open/in_review RQA
+  failure 和关联 governance task，apply 前备份 DB，事务内关闭状态并写
+  status-history audit。2026-05-16 已对本地默认 RQA DB 执行一次 remediation，
+  审计关闭 182 个旧 eval failure 和 182 个 governance tasks；备份路径为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260515T205220Z.db`。
+  本轮 eval 修正后又审计关闭 25 个 `eval-tly-*` failure 和 25 个 governance
+  tasks，备份路径为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260516T005451Z.db`，
+  备份 SHA-256 为
+  `00426cf0fe5c17e8946e0704de4f82bfd9ab41c4d16fcaff5172957affdd8d22`。在修正 eval
+  CLI 默认 snapshot-copy 前，手动复测又产生一批 25/25 eval artifact，已同样按
+  remediation 策略审计关闭；备份为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260516T010554Z.db`，
+  备份 SHA-256 为
+  `3d668a2549d1125f36d6b979a6dcf99fc2bd0600082cb2d0e99370dee33ca45a`。
+- 2026-05-16 以 digest image refs 和 fixture image scan 复跑 preflight release
+  readiness 后，`runtime_config`、`retrieval_quality`、
+  `rqa_backup_restore_drill` 和 `security_scan` 均已通过；`required_failures=[]`。
+  browser review 仍未执行，因此仍不能声明 production-ready。
+- 2026-05-16 已新增 `deploy/scripts/sync-tonglingyu-remote-release-tools.sh`：
+  它通过 SSH/rsync 同步当前 `scripts/`、runbook、Open WebUI Function、
+  `agent-platform` 源码和 `resources` 到 `hhost`，不覆盖远端 `.env`；同时从正在
+  运行的 `tonglingyu-gateway` 容器复制 Gateway 二进制到
+  `agent-platform/target/debug/tonglingyu-gateway`，并写入不含 secret 的
+  `.tonglingyu-release-tool-env`，让远端无 Rust toolchain 时也能运行当前 RQA
+  gates。最新同步 artifact 为
+  `data/tonglingyu/remote-release-tools/remote-tools-20260516T020637Z-81768/remote-release-tools-sync.json`。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-remote-live-gates.sh`
+  作为本机缺 Docker CLI 时的 SSH 远端 live gate evidence collector。同步当前
+  release 工具、升级远端 `tonglingyu_gateway_admin` Action、重建并重启
+  `tonglingyu-gateway:formal` 后，远端运行镜像 digest 为
+  `sha256:a117351dd4436659b7f3d9abd3be43a95b6f06dbaa5b9b6325693b92c8f774b8`，
+  最新 live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260516T020657Z-81956/remote-live-gates.json`；
+  `model_upstream_network`、`openwebui_function`、`openwebui_admin_action` 和
+  `strict_gateway` 均通过。该 artifact 仍只证明基础 live gates 通过，不能替代
+  完整 live release automation / release report 绑定。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-remote-release-automation.sh`：
+  本机缺 Docker CLI 时可通过 SSH 在 `hhost` 执行完整 live release automation，
+  注入本地源 commit/dirty 状态，绑定目标 live DB、pre-migration backup、远端
+  artifact 目录，并把 release automation / release readiness / saved validator
+  artifact 回收到本地。同步当前工具后，最新 artifact：
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-release-automation.json`。
+  该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，
+  `restore_ref_available=true`，contract smoke 和 saved report validator 通过，且
+  `runtime_config`、`rqa_migration_preflight`、
+  `retrieval_quality`、`rqa_backup_restore_drill`、`rqa_performance_budget`、
+  `rqa_api_contract`、`rqa_user_lifecycle`、`openwebui_admin_action_contract`、
+  `model_upstream_network`、`strict_gateway`、`openwebui_function` 和
+  `openwebui_admin_action` 已在 live automation 中通过。restore drill stdout
+  记录 `source_mode=existing_refs`、`backup.execution_mode=docker`，并重新跑过
+  RQA quality gate 与 saved report validator。当前仍 fail-closed：
+  `security_scan` 已有真实依赖/镜像扫描，但 6 镜像 aggregate Trivy report 存在
+  未审批 high/critical findings；`release_ops_readiness` 缺 post-release monitor
+  evidence，`rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
+  `openwebui_browser_review` 未确认。提交后复跑已确认
+  `tracked worktree must be clean for live release` blocker 消失。
+- 2026-05-16 为 live restore drill 新增闭环 canary 路径：
+  `tonglingyu-gateway rqa-restore-canary` 使用 Runtime API 写入
+  `restore_drill_canary` retrieval failure 和关联 governance task，并在同一事务中
+  置为 `resolved` / `closed`、priority=`p1`，不留下 open P0；
+  `deploy/scripts/prepare-tonglingyu-rqa-restore-canary.sh` 会先备份 live DB，host
+  权限不足时通过 `docker compose exec tonglingyu-gateway` 在容器内执行。`hhost`
+  canary artifact 为
+  `/home/simon/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
+  restore drill 本身也已支持容器内备份并 `docker compose cp` 回 gate artifact，
+  避免 root-owned live DB 使 host tool 误判失败。
+- 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
+  `source_url`、`license`、`license_url`、`license_source_url`、
+  `attribution` 和 `usage_boundary`，导致 live RQA eval fail-closed。已新增
+  `tonglingyu-gateway kb-source-metadata-backfill` 和
+  `deploy/scripts/remediate-tonglingyu-kb-source-metadata.sh`，并在 `hhost` 容器内
+  执行 additive backfill；备份保存在
+  `hhost:/home/simon/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
+  backfill 报告显示 6 个 metadata 列补齐、5 个 source 更新、缺失值为 0。随后
+  目标 live RQA quality gate 通过，`expected_evidence_hit@8=5/5`、
+  `quality_report_coverage=103/103`、open P0 failure/task 为 0。远端 gateway
+  已重建并重启到包含该 CLI 的 `tonglingyu-gateway:formal`
+  (`sha256:f1e27233696cd2282f269d3d1a68085fefa5e972588a042960ffd89139c70b55`)。
+- Security gate 已支持生产 digest-pinned image refs：compose 可通过
+  `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
+  `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
+  `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
+  deploy env 后解析 image refs 并检查 mutable tag / digest missing。2026-05-16
+  已将 Agent Platform JWT provider 从 RustCrypto RSA 链路切到 `aws_lc_rs`，并把
+  `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
+  lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
+  扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
+  fixture image scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
+  JSON 持久化到 `data/tonglingyu/security-image-scans/<run_id>/` 或显式
+  `TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR`，并解析每个 image
+  report 的 HIGH/CRITICAL vulnerability。image scan artifact 已绑定当前
+  compose image inventory hash、per-image report content hash、raw report
+  path hash 和 raw report artifact dir；saved report validator 会重算 raw
+  report path/content digest，并拒绝 scan refs 与 release refs 不一致、raw
+  report 缺失或 raw report 不可读取的 production-ready 报告。
+- 2026-05-16 已把 `agent-platform` 与 `tonglingyu-gateway` runtime image 切到
+  Chainguard `glibc-dynamic` 基线，并在 first-party 容器内改用内置
+  `healthcheck` 子命令，移除对 runtime `curl`/apt 包的依赖。远端当前 first-party
+  image refs 已更新为
+  `AGENT_PLATFORM_IMAGE_REF=sha256:c559d34b96a430bb53650906ce8a23f64948904c4f2af7028c6e588a8f537a77`
+  和
+  `TONGLINGYU_GATEWAY_IMAGE_REF=sha256:084aa51d528359e6f86b3b574ebb59f4f7ddd72e4dda1adae0323190e6546bcb`；
+  这两个 first-party image 的 Trivy raw report 为 0 critical / 0 high。
+- 2026-05-16 已新增
+  `deploy/scripts/prepare-tonglingyu-remote-security-evidence.sh`，完整远端 release
+  automation 会先生成并同步真实 `cargo audit` dependency scan、当前 compose
+  image inventory 和 6 个 per-image Trivy raw reports。最新 security evidence
+  artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-security-evidence.json`：
+  dependency scan 0 critical / 0 high，image refs 均 immutable 且 raw reports
+  可读取，但 aggregate image scan 仍 fail-closed：`critical_count=63`、
+  `high_count=714`，来源为第三方 `hermes-agent`、`open-webui`、`cloudflared`
+  和 `postgres` 镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
+  production-ready artifact。
+- `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
+  release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
+  digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
+  所有 required preflight gates 已通过；随后 `hhost` 已同步当前 release 工具并由
+  独立 remote live-gate collector 证明 model upstream、strict Gateway、Open
+  WebUI Function 和 Open WebUI admin Action 通过，但这些结果尚未进入当前
+  release report。
+- 目标环境 live `existing_refs` 恢复演练已在 release automation 中执行并保留
+  持久备份 artifact；后续 RQA production-ready 仍必须保证自有镜像
+  (`AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical
+  findings，并在干净 release commit 上复跑 dependency/image scan 且绑定报告 hash。
+  第三方镜像 high/critical findings 不作为 production-ready blocker，但必须保留
+  Trivy raw reports、ownership 分类和 nonblocking 风险摘要。
+- 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
+  budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
+  与值守验证。
+- RQA quality gate、saved report validator 和 contract smoke 已进入
+  `verify-tonglingyu-rqa-release-automation.sh` 强制路径；后续 production-ready
+  仍必须在目标 release run 中真实执行该 wrapper，并保存 automation artifact /
+  release report / validator 输出，不能只引用本地人工命令。
+- RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；
+  `hhost` 已有独立 live Open WebUI admin Action gate artifact，但后续
+  production-ready 仍必须把当前版本的 live Action、目标环境 live/load 性能和
+  值守证据绑定进 live release report；Open WebUI admin Action source/fixture
+  contract 与单独 live gate 不能替代完整 release automation 证据。
+- Post-release monitor 已有可复核 evidence 机制：
+  `deploy/scripts/verify-tonglingyu-post-release-monitor.sh` 会生成
+  `tonglingyu.post_release_monitor` JSON，校验 60 分钟窗口、operator/environment、
+  live release report、live gates passed、admin Action/API evidence ref 和 `passed`
+  结论；live `release_ops_readiness` 必须绑定该 evidence path/hash，saved report
+  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。2026-05-16
+  目标环境 run `remote-release-20260516T074522Z-71051` 已执行 60 分钟
+  post-release monitor，生成 13 条样本，artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
+  `post-release-monitor-evidence.json` 为 `status=ok`，live gates、admin
+  Action/API evidence、operator/environment 和 report path 校验均通过。该 evidence
+  已绑定进同一 artifact 目录的 `release_ops_readiness` 复核；Milestone L 的值守证据
+  blocker 已关闭。
+- Capacity/load smoke 已有可复核 evidence 机制：
+  `deploy/scripts/verify-tonglingyu-rqa-capacity-load-evidence.sh` 会生成
+  `tonglingyu.rqa_capacity_load_evidence` JSON，校验代表性 eval report、failure、
+  admin list 翻页、RQA 写入、admin 查询、metrics 查询和 release gate 预算；
+  live `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report
+  validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。早期本地
+  smoke 不能替代目标环境真实 capacity/load、incident drill 和 audit-history evidence；
+  当前目标环境执行状态见后续 live runner/result 记录。
+- Capacity/load smoke 现在已有真实执行 runner：
+  `deploy/scripts/verify-tonglingyu-rqa-capacity-load-smoke.sh` 会实际运行本地
+  performance budget gate，提取代表性 counts、admin pagination、metrics read、
+  status-history audit 和 p95 耗时，生成 capacity/load evidence 与
+  incident/audit evidence，再以 live 模式运行 `rqa_incident_capacity` gate 绑定
+  evidence path/hash。该输出 scope 是 `local_gateway_smoke`，明确不是目标环境
+  live/load 证据。
+- 2026-05-16 已新增目标环境 live runner
+  `deploy/scripts/verify-tonglingyu-rqa-live-capacity-load-smoke.sh`，并接入
+  `verify-tonglingyu-rqa-release-automation.sh` 的 live release 路径和远端工具同步
+  校验。该 runner 通过 Open WebUI 容器访问正在运行的 `tonglingyu-gateway`，
+  创建 RQA failure / governance task，再通过 live admin API 查询、翻页、metrics、
+  状态关闭和 live DB quality gate 生成 capacity/load、incident/audit 和
+  `rqa_incident_capacity` evidence。短窗口远端 smoke 已证明脚本可生成完整失败报告：
+  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
+  的 `tonglingyu.rqa_live_capacity_load_smoke` 显示 live gateway 请求、admin 查询、
+  incident audit 和 quality gate 均可执行，但 `rqa_write_p95_ms=11567`，超过当前
+  10s production 预算，因此 capacity/load evidence 和 `rqa_incident_capacity`
+  仍 fail-closed。不能通过调松预算或缩短窗口来宣布 production-ready。
+- 已定位 live `rqa_write_p95_ms` 超预算的主要代码风险：RQA 写请求会先完成本地
+  deterministic workflow，再逐个串行执行四个 Agent Runtime profile step；这些
+  profile step 只绑定和审计对应 step output，不参与本地证据/包/reviewer 的因果
+  生成链。`tonglingyu-runtime` 已把 profile step execution 改为并发执行，并按
+  原 workflow step index 写回 `agent_runtime` metadata，同时保留 required tool
+  enforcement、output_ref 校验、Hermes draft/reviewer 本地治理和后续按序 audit
+  append。本地验证已通过：`cargo test -p tonglingyu-runtime`（55 tests）、
+  `cargo test -p tonglingyu-gateway`（45 tests）、两包 `cargo clippy -D warnings`、
+  `cargo fmt --check` 和 `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
+  2026-05-16 已将提交 `4f514d0` 同步到 `hhost`，重建并重启
+  `tonglingyu-gateway`；远端 `.env` 先备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  并 pin 回新 image id
+  `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
+  完整远端 release automation
+  `remote-release-20260516T055004Z-50395` 已在默认 10 分钟 live capacity
+  窗口下通过 `rqa_incident_capacity`：`rqa_write_p95_ms=7816`、
+  `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
+  artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+  因此 RQA incident/capacity 性能 blocker 已关闭；该 run 当时仍失败，剩余
+  required failures 为 `security_scan`、`release_ops_readiness` 和
+  `openwebui_browser_review`，后续记录已继续收敛这些 blocker。
+- 2026-05-16 已修复 Open WebUI 普通用户模型可见性：新增
+  `deploy/scripts/ensure-openwebui-tonglingyu-model-access.sh`，在 live Open WebUI
+  DB 中确保 `model:tonglingyu` active 且存在 `access_grant user:* read`。远端执行
+  结果为 `public_read_grant_count=1`，普通用户内部 `/api/models` 验证
+  `has_tonglingyu=true`。
+- 同日已完成 Open WebUI browser-side review evidence，并绑定进远端 `.env`
+  （更新前已备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
+  evidence ref 为 `browser-review-20260516T063114Z`，远端 evidence JSON 为
+  `/home/simon/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
+  `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
+  visibility、streaming chat UX、admin audit visibility 和 persisted provider
+  settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
+- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签后台任务也会
+  走 `tonglingyu`，旧 gateway 会把这些非 RQA metadata prompt 当成文学问答处理，
+  从而写入 open P0 retrieval failure / governance task。`tonglingyu-gateway`
+  已新增 Open WebUI metadata prompt 隔离：识别 title/tags 任务后返回确定性 JSON，
+  记录 `openwebui_metadata_request_handled` audit event，但不创建 evidence package、
+  retrieval failure 或治理任务。本地验证：
+  `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+  47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
+  tonglingyu-gateway -- -D warnings` 通过。
+- 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
+  `tonglingyu-gateway` 已重建并 pin 到 image id
+  `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
+  远端 metadata smoke 证明 title prompt 返回 JSON、没有
+  `evidence_package_id`，trace 为 `tly-019e2f90fc947651abccbdb2b91f6f00`；随后 live
+  DB 复核 `open_failures=0`、`open_p0_tasks=0`、metadata audit events `>=1`。
+- 最新 release evidence baseline 为
+  `remote-release-20260516T074522Z-71051`。该完整远端 automation 已生成 live
+  capacity/load evidence 和 60 分钟 post-release ops evidence；初次收尾暴露出第二次
+  readiness 复核复用 migration backup path 的脚本问题，已在提交
+  `ab9ce22d503c97daa2678529762f6da523b4eb8c` 修复为独立 backup/restore artifact
+  path 并重同步远端。使用同一 artifact 目录、原 `release-readiness.json` report path、
+  live capacity env 和 post-release ops env 复核后，`rqa_migration_preflight`、
+  `rqa_incident_capacity`、`release_ops_readiness`、`openwebui_browser_review` 均
+  `passed`，open P0 retrieval failures / governance tasks 均为 0；当时
+  `required_failures=["security_scan"]`，`production_release_ready=false`。
+- 2026-05-16 已在提交 `8aea6545aa9917b850701c3239c2f018eb01bd35` 中调整
+  release security policy：镜像扫描按所有权分类，`AGENT_PLATFORM_IMAGE_REF` 和
+  `TONGLINGYU_GATEWAY_IMAGE_REF` 的 high/critical findings 仍 fail-closed，第三方
+  镜像 findings 进入 `nonblocking_errors` 和 ownership summary，不再阻塞
+  production-ready。contract smoke 已覆盖“自有镜像 high 仍失败”和“仅第三方镜像
+  high 通过但记录 nonblocking risk”；使用最新远端 Trivy raw reports 本地复核时，
+  自有镜像为 0 critical / 0 high，第三方镜像为 63 critical / 714 high，security
+  gate 在新策略下通过。
+- 最终 live release readiness 已在提交
+  `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上复核通过：远端报告
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
+  显示 `status=passed`、`production_release_ready=true`、
+  `release_conditions_met=true`、`required_failures=[]`、`release_blockers=[]`，
+  并绑定 `git.tracked_dirty=false`。saved report validator 输出
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
+  为 `status=ok`、`errors=[]`。因此通灵玉 RQA production-ready release gate
+  已闭合。
+- Incident drill / audit-history 已有可复核 evidence 机制：
+  `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
+  `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
+  audit tombstone、incident severity/owner、first response、mitigation、rollback、
+  recovery validation 和 RTO/RPO breach escalation evidence ref；live
+  `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report validator
+  会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境真实
+  incident drill、capacity/load 和 audit-history evidence 已在
+  `remote-release-20260516T055004Z-50395` 和最终
+  `remote-release-20260516T074522Z-71051` 复核中执行并通过该 gate。
 
 ## 下一步
 
-1. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-2. 后续按证据校验或发布 QA 闸门补充影印/权威校注本复核，不作为当前
-   M2 loader 的默认前置项。
+1. 保持 RQA release gate 闭环：后续正式 release 仍必须在当前代码策略下绑定当次
+   dependency/image scan、release ops、incident/capacity、browser review 和 live gate
+   evidence，并由 saved report validator 复核 `production_release_ready=true`。
+2. 保持 RQA Milestone L 值守证据闭环：后续正式 release 仍必须绑定当次
+   post-release monitor JSON artifact、60 分钟窗口、operator/environment、live gate
+   evidence 和 admin Action/API evidence；当前
+   `remote-release-20260516T074522Z-71051` 已证明该路径可通过。
+3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+   最终 production-ready report 已证明当前为 0，后续 release 仍必须绑定当次证据。
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+   M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

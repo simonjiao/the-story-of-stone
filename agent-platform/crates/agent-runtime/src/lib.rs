@@ -963,13 +963,17 @@ impl HermesRuntimeClient {
             pending.push_str(&String::from_utf8_lossy(&chunk));
             process_sse_lines(
                 &mut pending,
-                runtime_profile,
-                trace_id,
-                &model,
-                &mut sequence,
-                &mut content,
-                &mut events,
-                &mut unexpected_tool_calls,
+                &SseLineContext {
+                    runtime_profile,
+                    trace_id,
+                    model: &model,
+                },
+                &mut SseStreamState {
+                    sequence: &mut sequence,
+                    content: &mut content,
+                    events: &mut events,
+                    unexpected_tool_calls: &mut unexpected_tool_calls,
+                },
                 false,
             )?;
             self.reject_unexpected_stream_tool_calls(
@@ -983,13 +987,17 @@ impl HermesRuntimeClient {
         }
         process_sse_lines(
             &mut pending,
-            runtime_profile,
-            trace_id,
-            &model,
-            &mut sequence,
-            &mut content,
-            &mut events,
-            &mut unexpected_tool_calls,
+            &SseLineContext {
+                runtime_profile,
+                trace_id,
+                model: &model,
+            },
+            &mut SseStreamState {
+                sequence: &mut sequence,
+                content: &mut content,
+                events: &mut events,
+                unexpected_tool_calls: &mut unexpected_tool_calls,
+            },
             true,
         )?;
         self.reject_unexpected_stream_tool_calls(
@@ -3013,56 +3021,40 @@ fn runtime_tool_result_message(result: &RuntimeToolResult) -> CoreResult<String>
         .map_err(|_| runtime_failure("runtime tool result was not serializable"))
 }
 
-#[allow(clippy::too_many_arguments)]
+struct SseLineContext<'a> {
+    runtime_profile: &'a str,
+    trace_id: &'a str,
+    model: &'a str,
+}
+
+struct SseStreamState<'a> {
+    sequence: &'a mut u64,
+    content: &'a mut String,
+    events: &'a mut Vec<RuntimeStreamEvent>,
+    unexpected_tool_calls: &'a mut Vec<HermesStreamToolCall>,
+}
+
 fn process_sse_lines(
     pending: &mut String,
-    runtime_profile: &str,
-    trace_id: &str,
-    model: &str,
-    sequence: &mut u64,
-    content: &mut String,
-    events: &mut Vec<RuntimeStreamEvent>,
-    unexpected_tool_calls: &mut Vec<HermesStreamToolCall>,
+    context: &SseLineContext<'_>,
+    state: &mut SseStreamState<'_>,
     flush: bool,
 ) -> CoreResult<()> {
     while let Some(index) = pending.find('\n') {
         let line = pending.drain(..=index).collect::<String>();
-        process_sse_line(
-            line.trim(),
-            runtime_profile,
-            trace_id,
-            model,
-            sequence,
-            content,
-            events,
-            unexpected_tool_calls,
-        )?;
+        process_sse_line(line.trim(), context, state)?;
     }
     if flush && !pending.trim().is_empty() {
         let line = std::mem::take(pending);
-        process_sse_line(
-            line.trim(),
-            runtime_profile,
-            trace_id,
-            model,
-            sequence,
-            content,
-            events,
-            unexpected_tool_calls,
-        )?;
+        process_sse_line(line.trim(), context, state)?;
     }
     Ok(())
 }
 
 fn process_sse_line(
     line: &str,
-    runtime_profile: &str,
-    trace_id: &str,
-    model: &str,
-    sequence: &mut u64,
-    content: &mut String,
-    events: &mut Vec<RuntimeStreamEvent>,
-    unexpected_tool_calls: &mut Vec<HermesStreamToolCall>,
+    context: &SseLineContext<'_>,
+    state: &mut SseStreamState<'_>,
 ) -> CoreResult<()> {
     let Some(data) = line.strip_prefix("data:") else {
         return Ok(());
@@ -3073,7 +3065,7 @@ fn process_sse_line(
     }
     let value = serde_json::from_str::<Value>(data)
         .map_err(|_| runtime_failure("Hermes Runtime stream event was malformed"))?;
-    collect_stream_tool_calls(&value, unexpected_tool_calls);
+    collect_stream_tool_calls(&value, state.unexpected_tool_calls);
     let Some(delta) = value
         .pointer("/choices/0/delta/content")
         .or_else(|| value.pointer("/choices/0/message/content"))
@@ -3082,12 +3074,12 @@ fn process_sse_line(
     else {
         return Ok(());
     };
-    content.push_str(delta);
-    events.push(RuntimeStreamEvent {
-        sequence: *sequence,
+    state.content.push_str(delta);
+    state.events.push(RuntimeStreamEvent {
+        sequence: *state.sequence,
         event_type: RuntimeStreamEventType::Delta,
-        profile_id: runtime_profile.to_string(),
-        trace_id: trace_id.to_string(),
+        profile_id: context.runtime_profile.to_string(),
+        trace_id: context.trace_id.to_string(),
         run_id: None,
         session_id: None,
         schema_version: None,
@@ -3096,10 +3088,10 @@ fn process_sse_line(
         error_code: None,
         metadata: json!({
             "runtime": "hermes",
-            "hermes_model": model,
+            "hermes_model": context.model,
         }),
     });
-    *sequence += 1;
+    *state.sequence += 1;
     Ok(())
 }
 
@@ -6017,10 +6009,7 @@ mod tests {
             output.metadata["tool_results"][0]["tool_name"],
             "tool.metadata"
         );
-        assert_eq!(
-            output.metadata["tool_results"][0]["trace_id"].is_string(),
-            true
-        );
+        assert!(output.metadata["tool_results"][0]["trace_id"].is_string());
         assert!(output.metadata["tool_results"][0].get("metadata").is_none());
 
         let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
