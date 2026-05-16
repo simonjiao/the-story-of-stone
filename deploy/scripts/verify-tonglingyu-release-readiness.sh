@@ -285,6 +285,7 @@ python3 - "${RESULTS_JSONL}" "${REPORT_PATH}" "${READY_STATUS}" \
   "${release_target}" "${release_report_validity_hours}" <<'PY'
 import json
 import hashlib
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -385,7 +386,22 @@ def git_output(args):
     return completed.stdout.strip()
 
 
+git_commit_override = os.environ.get("TONGLINGYU_RELEASE_GIT_COMMIT", "").strip()
+git_tracked_dirty_override = os.environ.get(
+    "TONGLINGYU_RELEASE_GIT_TRACKED_DIRTY",
+    "",
+).strip().lower()
+
+
+def git_commit():
+    return git_commit_override or git_output(["rev-parse", "HEAD"])
+
+
 def git_tracked_dirty():
+    if git_tracked_dirty_override in {"1", "true", "yes", "on"}:
+        return True
+    if git_tracked_dirty_override in {"0", "false", "no", "off"}:
+        return False
     return bool(git_output(["status", "--porcelain", "--untracked-files=no"]))
 
 
@@ -416,7 +432,7 @@ def build_release_manifest():
         "object": "tonglingyu.release_manifest",
         "schema_version": 1,
         "git": {
-            "commit": git_output(["rev-parse", "HEAD"]),
+            "commit": git_commit(),
             "tracked_dirty": git_tracked_dirty(),
         },
         "runtime_config": {
@@ -529,7 +545,7 @@ def build_release_runtime_identity():
         "policy_version": "tonglingyu-release-runtime-identity-v1",
         "require_live": require_live,
         "git": {
-            "commit": git_output(["rev-parse", "HEAD"]),
+            "commit": git_commit(),
             "tracked_dirty": git_tracked_dirty(),
         },
         "image_inventory": {

@@ -198,6 +198,7 @@ required_scripts = [
     "verify-tonglingyu-rqa-capacity-load-smoke.sh",
     "verify-tonglingyu-rqa-incident-capacity.sh",
     "verify-tonglingyu-rqa-backup-restore-drill.sh",
+    "remediate-tonglingyu-kb-source-metadata.sh",
     "verify-tonglingyu-release-ops-readiness.sh",
     "verify-tonglingyu-post-release-monitor.sh",
     "verify-tonglingyu-release-security.sh",

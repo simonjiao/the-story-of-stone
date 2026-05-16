@@ -90,11 +90,20 @@ cat > .tonglingyu-release-tool-env <<EOF
 export TONGLINGYU_DEPLOY_ENV_FILE='${project_dir}/.env'
 export TONGLINGYU_RQA_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_QUALITY_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
+export TONGLINGYU_RQA_MIGRATION_PREFLIGHT_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
+export TONGLINGYU_RQA_MIGRATION_PREFLIGHT_SKIP_BUILD=true
 export TONGLINGYU_RQA_PERFORMANCE_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_PERFORMANCE_SKIP_BUILD=true
+export TONGLINGYU_RQA_API_CONTRACT_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
+export TONGLINGYU_RQA_API_CONTRACT_SKIP_BUILD=true
+export TONGLINGYU_RQA_USER_LIFECYCLE_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
+export TONGLINGYU_RQA_USER_LIFECYCLE_SKIP_BUILD=true
 export TONGLINGYU_RQA_RESTORE_DRILL_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_RESTORE_DRILL_SKIP_BUILD=true
+export TONGLINGYU_RQA_MIGRATION_PREFLIGHT_SOURCE_ROOT='${project_dir}/resources/sources/wiki'
 export TONGLINGYU_RQA_PERFORMANCE_SOURCE_ROOT='${project_dir}/resources/sources/wiki'
+export TONGLINGYU_RQA_API_CONTRACT_SOURCE_ROOT='${project_dir}/resources/sources/wiki'
+export TONGLINGYU_RQA_USER_LIFECYCLE_SOURCE_ROOT='${project_dir}/resources/sources/wiki'
 export TONGLINGYU_RQA_RESTORE_DRILL_SOURCE_ROOT='${project_dir}/resources/sources/wiki'
 EOF
 python3 - <<'PY'
@@ -137,6 +146,7 @@ verify-tonglingyu-rqa-release-automation.sh
 verify-tonglingyu-rqa-capacity-load-smoke.sh
 verify-tonglingyu-rqa-incident-capacity.sh
 verify-tonglingyu-rqa-backup-restore-drill.sh
+remediate-tonglingyu-kb-source-metadata.sh
 verify-tonglingyu-release-ops-readiness.sh
 verify-tonglingyu-post-release-monitor.sh
 verify-tonglingyu-release-security.sh

@@ -79,6 +79,7 @@ struct Args {
 #[allow(clippy::large_enum_variant)]
 enum Command {
     BuildKb(BuildKbArgs),
+    KbSourceMetadataBackfill(KbSourceMetadataBackfillArgs),
     Query(QueryArgs),
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
@@ -110,6 +111,24 @@ struct BuildKbArgs {
     eval_limit: usize,
     #[arg(long, default_value_t = false)]
     skip_diff_eval: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct KbSourceMetadataBackfillArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_SOURCE_ROOT",
+        default_value = "resources/sources/wiki"
+    )]
+    source_root: PathBuf,
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1044,6 +1063,20 @@ async fn main() -> Result<()> {
                 .runtime_schema_migration_preflight()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
+        }
+        Command::KbSourceMetadataBackfill(args) => {
+            let conn = open_db(&args.db)?;
+            let report = tonglingyu_runtime::backfill_source_metadata_from_snapshots(
+                &conn,
+                &args.source_root,
+                !args.dry_run,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report.get("status").and_then(Value::as_str) == Some("ok") {
+                Ok(())
+            } else {
+                Err(anyhow!("kb source metadata backfill failed"))
+            }
         }
         Command::BackupDb(args) => {
             backup_db(&args)?;

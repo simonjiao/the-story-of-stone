@@ -21,6 +21,7 @@ REPORT_PATH="${TONGLINGYU_RQA_USER_LIFECYCLE_REPORT_PATH:-}"
 SOURCE_DB_PATH="${TONGLINGYU_RQA_USER_LIFECYCLE_DB_PATH:-${TONGLINGYU_RQA_DB_PATH:-}}"
 SOURCE_ROOT="${TONGLINGYU_RQA_USER_LIFECYCLE_SOURCE_ROOT:-${REPO_DIR}/resources/sources/wiki}"
 GATEWAY_BIN="${TONGLINGYU_RQA_USER_LIFECYCLE_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
+SKIP_BUILD="${TONGLINGYU_RQA_USER_LIFECYCLE_SKIP_BUILD:-false}"
 BUILD_TIMEOUT_SECONDS="${TONGLINGYU_RQA_USER_LIFECYCLE_BUILD_TIMEOUT_SECONDS:-300}"
 KB_BUILD_TIMEOUT_SECONDS="${TONGLINGYU_RQA_USER_LIFECYCLE_KB_BUILD_TIMEOUT_SECONDS:-180}"
 CURL_CONNECT_TIMEOUT_SECONDS="${TONGLINGYU_RQA_USER_LIFECYCLE_CURL_CONNECT_TIMEOUT_SECONDS:-3}"
@@ -46,6 +47,13 @@ except subprocess.TimeoutExpired:
     raise SystemExit(124)
 raise SystemExit(completed.returncode)
 PY
+}
+
+is_true() {
+  case "${1:-}" in
+    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 emit_failure() {
@@ -76,13 +84,15 @@ PY
   exit 1
 }
 
-if ! (
-  cd "${REPO_DIR}/agent-platform"
-  run_with_timeout \
-    "${BUILD_TIMEOUT_SECONDS}" \
-    cargo build --quiet -p tonglingyu-gateway
-); then
-  emit_failure "gateway_build_failed"
+if ! is_true "${SKIP_BUILD}"; then
+  if ! (
+    cd "${REPO_DIR}/agent-platform"
+    run_with_timeout \
+      "${BUILD_TIMEOUT_SECONDS}" \
+      cargo build --quiet -p tonglingyu-gateway
+  ); then
+    emit_failure "gateway_build_failed"
+  fi
 fi
 
 if [[ ! -x "${GATEWAY_BIN}" ]]; then

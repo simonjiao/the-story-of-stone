@@ -14,6 +14,7 @@ SOURCE_ROOT="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_SOURCE_ROOT:-${REPO_DIR}/resou
 GATEWAY_BIN="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
 REQUIRE_LIVE="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_REQUIRE_LIVE:-${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}}"
 BACKUP_PATH_RAW="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_BACKUP_PATH:-}"
+SKIP_BUILD="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_SKIP_BUILD:-false}"
 BUILD_TIMEOUT_SECONDS="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_BUILD_TIMEOUT_SECONDS:-300}"
 KB_BUILD_TIMEOUT_SECONDS="${TONGLINGYU_RQA_MIGRATION_PREFLIGHT_KB_BUILD_TIMEOUT_SECONDS:-180}"
 
@@ -107,13 +108,15 @@ if is_true "${REQUIRE_LIVE}" && [[ -z "${BACKUP_PATH_RAW//[[:space:]]/}" ]]; the
   emit_failure "live_backup_path_missing" "${STARTED_MS}"
 fi
 
-if ! (
-  cd "${REPO_DIR}/agent-platform"
-  run_with_timeout \
-    "${BUILD_TIMEOUT_SECONDS}" \
-    cargo build --quiet -p tonglingyu-gateway
-); then
-  emit_failure "gateway_build_failed" "${STARTED_MS}"
+if ! is_true "${SKIP_BUILD}"; then
+  if ! (
+    cd "${REPO_DIR}/agent-platform"
+    run_with_timeout \
+      "${BUILD_TIMEOUT_SECONDS}" \
+      cargo build --quiet -p tonglingyu-gateway
+  ); then
+    emit_failure "gateway_build_failed" "${STARTED_MS}"
+  fi
 fi
 
 if [[ ! -x "${GATEWAY_BIN}" ]]; then

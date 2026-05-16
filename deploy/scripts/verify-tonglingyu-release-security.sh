@@ -46,15 +46,18 @@ if [[ -n "${IMAGE_SCAN_PATH}" ]]; then
   cp "${IMAGE_SCAN_PATH}" "${IMAGE_SCAN_REPORT}"
 elif is_true "${RUN_TRIVY}" && command -v trivy >/dev/null 2>&1; then
   mkdir -p "${IMAGE_SCAN_ARTIFACT_DIR}"
-  python3 - "${REPO_DIR}" "${WORK_DIR}/images.txt" <<'PY'
+  python3 - "${REPO_DIR}" "${DEPLOY_DIR}" "${WORK_DIR}/images.txt" <<'PY'
 import re
 import sys
 import os
 from pathlib import Path
 
 repo_dir = Path(sys.argv[1])
-target = Path(sys.argv[2])
-compose = repo_dir / "deploy" / "docker-compose.yml"
+deploy_dir = Path(sys.argv[2])
+target = Path(sys.argv[3])
+compose = deploy_dir / "docker-compose.yml"
+if not compose.is_file():
+    compose = repo_dir / "deploy" / "docker-compose.yml"
 images = []
 
 
@@ -189,8 +192,8 @@ Path(target).write_text(
 PY
 fi
 
-python3 - "${REPO_DIR}" "${DEPENDENCY_SCAN_REPORT}" "${IMAGE_SCAN_REPORT}" \
-  "${RISK_ACCEPTANCE_PATH}" "${REPORT_PATH}" <<'PY'
+python3 - "${REPO_DIR}" "${DEPLOY_DIR}" "${DEPENDENCY_SCAN_REPORT}" \
+  "${IMAGE_SCAN_REPORT}" "${RISK_ACCEPTANCE_PATH}" "${REPORT_PATH}" <<'PY'
 import hashlib
 import json
 import os
@@ -202,13 +205,15 @@ from pathlib import Path
 
 (
     repo_dir_raw,
+    deploy_dir_raw,
     dependency_scan_path_raw,
     image_scan_path_raw,
     risk_acceptance_path_raw,
     report_path_raw,
-) = sys.argv[1:6]
+) = sys.argv[1:7]
 
 repo_dir = Path(repo_dir_raw)
+deploy_dir = Path(deploy_dir_raw)
 dependency_scan_path = Path(dependency_scan_path_raw)
 image_scan_path = Path(image_scan_path_raw)
 risk_acceptance_path = Path(risk_acceptance_path_raw) if risk_acceptance_path_raw else None
@@ -343,8 +348,36 @@ def safe_scan_result(path, scan_type):
 
 def git_tracked_files(paths):
     command = ["git", "-C", str(repo_dir), "ls-files", *paths]
-    output = subprocess.check_output(command, text=True)
-    return [repo_dir / line for line in output.splitlines() if line.strip()]
+    try:
+        output = subprocess.check_output(command, text=True)
+        return [repo_dir / line for line in output.splitlines() if line.strip()]
+    except (OSError, subprocess.CalledProcessError):
+        files = []
+        for raw in paths:
+            candidates = [repo_dir / raw]
+            if raw.startswith("deploy/"):
+                candidates.append(deploy_dir / raw.removeprefix("deploy/"))
+            for candidate in candidates:
+                if candidate.is_file():
+                    files.append(candidate)
+                    break
+                if candidate.is_dir():
+                    files.extend(
+                        path
+                        for path in sorted(candidate.rglob("*"))
+                        if path.is_file()
+                        and ".git" not in path.parts
+                        and "target" not in path.parts
+                    )
+                    break
+        unique = []
+        seen = set()
+        for path in files:
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(path)
+        return unique
 
 
 secret_patterns = {
@@ -415,7 +448,9 @@ def resolve_compose_image_ref(raw_ref):
 
 
 def compose_image_policy():
-    compose_path = repo_dir / "deploy" / "docker-compose.yml"
+    compose_path = deploy_dir / "docker-compose.yml"
+    if not compose_path.is_file():
+        compose_path = repo_dir / "deploy" / "docker-compose.yml"
     text = compose_path.read_text(encoding="utf-8")
     refs = []
     for raw_line in text.splitlines():

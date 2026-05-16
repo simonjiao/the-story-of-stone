@@ -7083,11 +7083,15 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_source_metadata_columns(conn: &Connection) -> Result<()> {
-    let existing = conn
-        .prepare("PRAGMA table_info(sources)")?
+fn table_column_names(conn: &Connection, table: &str) -> Result<BTreeSet<String>> {
+    conn.prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn ensure_source_metadata_columns(conn: &Connection) -> Result<()> {
+    let existing = table_column_names(conn, "sources")?;
     for column in [
         "source_url",
         "license",
@@ -7101,6 +7105,170 @@ fn ensure_source_metadata_columns(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn backfill_source_metadata_from_snapshots(
+    conn: &Connection,
+    source_root: &Path,
+    apply: bool,
+) -> Result<Value> {
+    let source_dirs = list_source_dirs(source_root)?;
+    let mut metadata_by_source = BTreeMap::new();
+    let mut metadata_errors = Vec::new();
+    for source_dir in source_dirs {
+        let metadata: SourceMetadata = read_json(&source_dir.join("metadata/source.json"))?;
+        for (field, value) in [
+            ("source_url", metadata.source_url.as_deref()),
+            ("license", metadata.license.as_deref()),
+            ("license_url", metadata.license_url.as_deref()),
+            ("license_source_url", metadata.license_source_url.as_deref()),
+            ("attribution", metadata.attribution.as_deref()),
+            ("usage_boundary", metadata.usage_boundary.as_deref()),
+        ] {
+            if value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                metadata_errors.push(format!("{}.{}_missing", metadata.source_id, field));
+            }
+        }
+        metadata_by_source.insert(metadata.source_id.clone(), metadata);
+    }
+    if metadata_by_source.is_empty() {
+        metadata_errors.push("source_metadata_empty".to_string());
+    }
+
+    let columns_before = table_column_names(conn, "sources")?;
+    let missing_columns_before = [
+        "source_url",
+        "license",
+        "license_url",
+        "license_source_url",
+        "attribution",
+        "usage_boundary",
+    ]
+    .iter()
+    .filter(|column| !columns_before.contains(**column))
+    .copied()
+    .collect::<Vec<_>>();
+    let db_source_ids = conn
+        .prepare("SELECT source_id FROM sources ORDER BY source_id")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let missing_db_metadata = db_source_ids
+        .iter()
+        .filter(|source_id| !metadata_by_source.contains_key(*source_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut errors = metadata_errors.clone();
+    for source_id in &missing_db_metadata {
+        errors.push(format!("metadata_not_found_for_db_source:{source_id}"));
+    }
+
+    let mut updated_source_count = 0usize;
+    if apply && errors.is_empty() {
+        init_knowledge_base_schema(conn)?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            for source_id in &db_source_ids {
+                let Some(metadata) = metadata_by_source.get(source_id) else {
+                    continue;
+                };
+                conn.execute(
+                    r#"
+                    UPDATE sources
+                    SET source_url = ?1,
+                        license = ?2,
+                        license_url = ?3,
+                        license_source_url = ?4,
+                        attribution = ?5,
+                        usage_boundary = ?6
+                    WHERE source_id = ?7
+                    "#,
+                    params![
+                        metadata.source_url.as_deref(),
+                        metadata.license.as_deref(),
+                        metadata.license_url.as_deref(),
+                        metadata.license_source_url.as_deref(),
+                        metadata.attribution.as_deref(),
+                        metadata.usage_boundary.as_deref(),
+                        source_id,
+                    ],
+                )?;
+                updated_source_count += 1;
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            conn.execute_batch("COMMIT")?;
+        } else {
+            conn.execute_batch("ROLLBACK")?;
+            result?;
+        }
+    }
+
+    let columns_after = table_column_names(conn, "sources")?;
+    let missing_columns_after = [
+        "source_url",
+        "license",
+        "license_url",
+        "license_source_url",
+        "attribution",
+        "usage_boundary",
+    ]
+    .iter()
+    .filter(|column| !columns_after.contains(**column))
+    .copied()
+    .collect::<Vec<_>>();
+    let missing_values_after = if missing_columns_after.is_empty() {
+        let mut result = BTreeMap::new();
+        for column in [
+            "source_url",
+            "license",
+            "license_url",
+            "license_source_url",
+            "attribution",
+            "usage_boundary",
+        ] {
+            let count = conn.query_row(
+                &format!(
+                    "SELECT count(*) FROM sources WHERE {column} IS NULL OR trim({column}) = ''"
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            result.insert(column.to_string(), count);
+        }
+        result
+    } else {
+        BTreeMap::new()
+    };
+    if apply {
+        if !missing_columns_after.is_empty() {
+            errors.push("source_metadata_columns_missing_after_apply".to_string());
+        }
+        if missing_values_after.values().any(|count| *count > 0) {
+            errors.push("source_metadata_missing_after_apply".to_string());
+        }
+    }
+
+    Ok(json!({
+        "object": "tonglingyu.kb_source_metadata_backfill",
+        "schema_version": 1,
+        "status": if errors.is_empty() { "ok" } else { "failed" },
+        "applied": apply,
+        "source_root": source_root.display().to_string(),
+        "metadata_source_count": metadata_by_source.len(),
+        "db_source_count": db_source_ids.len(),
+        "missing_columns_before": missing_columns_before,
+        "missing_columns_after": missing_columns_after,
+        "missing_values_after": missing_values_after,
+        "updated_source_count": updated_source_count,
+        "additive_only": true,
+        "errors": errors,
+        "secret_values_printed": false,
+    }))
 }
 
 pub fn rebuild_knowledge_base_from_snapshots(
@@ -10749,6 +10917,110 @@ mod tests {
         ] {
             assert!(columns.contains(column), "missing column {column}");
         }
+    }
+
+    #[test]
+    fn kb_source_metadata_backfill_updates_legacy_sources_without_rebuild() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                source_category TEXT NOT NULL,
+                format TEXT,
+                title TEXT,
+                work TEXT,
+                edition TEXT,
+                language TEXT,
+                api_url TEXT,
+                fetched_at TEXT,
+                notes TEXT,
+                snapshot_contract_json TEXT NOT NULL,
+                source_hash TEXT NOT NULL
+            );
+            INSERT INTO sources (
+                source_id, source_category, format, title, work, edition,
+                language, api_url, fetched_at, notes, snapshot_contract_json,
+                source_hash
+            ) VALUES (
+                'legacy-source', 'base_material', 'mediawiki', 'Legacy',
+                'Work', 'Edition', 'zh', 'https://example.test/api',
+                '2026-05-16T00:00:00Z', 'legacy row', '{}', 'hash-before'
+            );
+            CREATE TABLE evidence_packages (package_id TEXT PRIMARY KEY);
+            INSERT INTO evidence_packages (package_id) VALUES ('pkg-before');
+            "#,
+        )
+        .expect("legacy source row");
+        let source_root = std::env::temp_dir().join(format!(
+            "tonglingyu-source-backfill-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let metadata_dir = source_root.join("legacy-source/metadata");
+        fs::create_dir_all(&metadata_dir).expect("metadata dir");
+        fs::write(
+            metadata_dir.join("source.json"),
+            serde_json::to_string(&json!({
+                "source_id": "legacy-source",
+                "source_category": "base_material",
+                "format": "mediawiki",
+                "title": "Legacy",
+                "work": "Work",
+                "edition": "Edition",
+                "language": "zh",
+                "source_url": "https://example.test/source",
+                "api_url": "https://example.test/api",
+                "fetched_at": "2026-05-16T00:00:00Z",
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://example.test/license",
+                "attribution": "Example contributors",
+                "usage_boundary": "test usage boundary",
+                "notes": "metadata row",
+                "snapshot_contract": {},
+            }))
+            .expect("source json"),
+        )
+        .expect("write source json");
+
+        let report = backfill_source_metadata_from_snapshots(&conn, &source_root, true)
+            .expect("backfill source metadata");
+
+        assert_eq!(report["status"], "ok");
+        assert_eq!(report["applied"], true);
+        assert_eq!(report["updated_source_count"], 1);
+        assert!(
+            report["missing_columns_before"]
+                .as_array()
+                .expect("missing columns")
+                .iter()
+                .any(|value| value == "source_url")
+        );
+        let row = conn
+            .query_row(
+                "SELECT source_url, license, attribution, usage_boundary FROM sources WHERE source_id = 'legacy-source'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("updated source metadata");
+        assert_eq!(row.0, "https://example.test/source");
+        assert_eq!(row.1, "CC-BY-SA-4.0");
+        assert_eq!(row.2, "Example contributors");
+        assert_eq!(row.3, "test usage boundary");
+        let package_count = conn
+            .query_row("SELECT count(*) FROM evidence_packages", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("package count");
+        assert_eq!(package_count, 1);
+        fs::remove_dir_all(source_root).ok();
     }
 
     #[test]

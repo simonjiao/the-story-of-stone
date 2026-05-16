@@ -876,6 +876,34 @@
   `model_upstream_network`、`openwebui_function`、`openwebui_admin_action` 和
   `strict_gateway` 均通过。该 artifact 仍只证明基础 live gates 通过，不能替代
   完整 live release automation / release report 绑定。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-remote-release-automation.sh`：
+  本机缺 Docker CLI 时可通过 SSH 在 `hhost` 执行完整 live release automation，
+  注入本地源 commit/dirty 状态，绑定目标 live DB、pre-migration backup、远端
+  artifact 目录，并把 release automation / release readiness / saved validator
+  artifact 回收到本地。最新 artifact：
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T023720Z-94844/remote-release-automation.json`。
+  该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，且
+  `runtime_config`、`rqa_migration_preflight`、`retrieval_quality`、
+  `rqa_performance_budget`、`rqa_api_contract`、`rqa_user_lifecycle`、
+  `openwebui_admin_action_contract`、`model_upstream_network`、`strict_gateway`、
+  `openwebui_function` 和 `openwebui_admin_action` 已在 live automation 中通过。
+  当前仍 fail-closed：`rqa_backup_restore_drill` 缺 live restore refs，
+  `security_scan` 缺真实生产镜像/依赖扫描或已审批风险例外，
+  `release_ops_readiness` 缺 post-release monitor evidence，
+  `rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
+  `openwebui_browser_review` 未确认，且本次 run 发生在未提交改动状态。
+- 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
+  `source_url`、`license`、`license_url`、`license_source_url`、
+  `attribution` 和 `usage_boundary`，导致 live RQA eval fail-closed。已新增
+  `tonglingyu-gateway kb-source-metadata-backfill` 和
+  `deploy/scripts/remediate-tonglingyu-kb-source-metadata.sh`，并在 `hhost` 容器内
+  执行 additive backfill；备份保存在
+  `hhost:/home/simon/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
+  backfill 报告显示 6 个 metadata 列补齐、5 个 source 更新、缺失值为 0。随后
+  目标 live RQA quality gate 通过，`expected_evidence_hit@8=5/5`、
+  `quality_report_coverage=103/103`、open P0 failure/task 为 0。远端 gateway
+  已重建并重启到包含该 CLI 的 `tonglingyu-gateway:formal`
+  (`sha256:f1e27233696cd2282f269d3d1a68085fefa5e972588a042960ffd89139c70b55`)。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
   `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
   `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
@@ -949,15 +977,20 @@
 
 ## 下一步
 
-1. 在目标 live 环境复核 open retrieval failures / open governance tasks 为 0；
-   本地旧 eval artifact 已审计关闭，但不能替代目标生产 DB 证明。
-2. 实现 RQA Milestone J 剩余项：目标 production DB pre-migration
-   backup/preflight artifact、live existing_refs 恢复演练，并用 release
-   automation 持久 artifact 目录保存目标 live release report、validator JSON
-   和 live runtime identity artifact。
-3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
-   post-release monitor JSON artifact、目标环境 capacity/load JSON artifact、
-   incident/audit JSON artifact；本地 gate 已 fail-closed，但不能替代真实环境证据。
-4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+1. 为目标 live restore drill 准备可审计 restore refs：当前目标 DB 没有
+   retrieval failure / governance task 记录，不能用空引用通过恢复演练；需要实现
+   或批准 closed canary 记录策略，然后运行 live `existing_refs` restore drill。
+2. 补齐真实 security evidence：生产镜像 Trivy artifact、依赖扫描 artifact，或
+   有 owner / expiry / finding scope 的已审批风险例外。
+3. 补齐 RQA Milestone L-M 的目标环境证据：post-release monitor JSON artifact、
+   目标环境 capacity/load JSON artifact、incident/audit JSON artifact 和
+   Open WebUI browser review evidence；本地 gate 已 fail-closed，但不能替代真实
+   环境证据。
+4. 提交当前远端 automation/backfill 代码后，同步 hhost 并重跑完整 live release
+   automation，确认 `tracked worktree must be clean` blocker 消失。
+5. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+   最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
+   当次 release run 的证据。
+6. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+7. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

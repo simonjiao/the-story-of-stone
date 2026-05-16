@@ -30,9 +30,12 @@ if [[ "${ARTIFACT_DIR}" != /* ]]; then
   ARTIFACT_DIR="${REPO_DIR}/${ARTIFACT_DIR}"
 fi
 REPORT_PATH="${TONGLINGYU_RQA_RELEASE_AUTOMATION_REPORT_PATH:-${ARTIFACT_DIR}/release-automation.json}"
-GIT_COMMIT="$(
-  git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || printf 'unknown'
-)"
+GIT_COMMIT="${TONGLINGYU_RELEASE_GIT_COMMIT:-}"
+if [[ -z "${GIT_COMMIT}" ]]; then
+  GIT_COMMIT="$(
+    git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || printf 'unknown'
+  )"
+fi
 RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness.json}"
 VALIDATION_REPORT_PATH="${TONGLINGYU_RQA_RELEASE_VALIDATION_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness-validation.json}"
 CONTRACT_STDOUT="${WORK_DIR}/contract-smoke.stdout"
