@@ -298,6 +298,103 @@ assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_reports_persiste
 assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_report_artifact_dir"].endswith("trivy-high-raw-reports")'
 assert_report "${trivy_high_stdout}" 'len(report["image_scan"]["raw_report_paths"]) == report["image_scan"]["image_count"]'
 assert_report "${trivy_high_stdout}" '"image_high_findings_present" in report["errors"]'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["owned_high_count"] == 2'
+
+third_party_high_artifact_dir="${WORK_DIR}/third-party-high-raw-reports"
+third_party_high_scan_json="${WORK_DIR}/third-party-high-image-scan.json"
+python3 - "${third_party_high_scan_json}" "${third_party_high_artifact_dir}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+artifact_dir = Path(sys.argv[2]).resolve()
+artifact_dir.mkdir(parents=True, exist_ok=True)
+image_refs = [
+    "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
+    "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
+    "registry.invalid/hermes@sha256:" + "c" * 64,
+    "registry.invalid/open-webui@sha256:" + "d" * 64,
+    "registry.invalid/cloudflared@sha256:" + "e" * 64,
+    "registry.invalid/postgres@sha256:" + "f" * 64,
+]
+raw_report_paths = []
+report_digests = []
+for index, image_ref in enumerate(image_refs):
+    report_path = artifact_dir / (
+        "trivy-" + hashlib.sha256(image_ref.encode("utf-8")).hexdigest() + ".json"
+    )
+    vulnerabilities = []
+    if index >= 2:
+        vulnerabilities = [
+            {"Severity": "HIGH", "VulnerabilityID": f"CVE-THIRD-PARTY-{index}"}
+        ]
+    report_path.write_text(
+        json.dumps(
+            {
+                "Results": [
+                    {
+                        "Target": image_ref,
+                        "Vulnerabilities": vulnerabilities,
+                    }
+                ]
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    raw_report_paths.append(str(report_path))
+    report_digests.append(hashlib.sha256(report_path.read_bytes()).hexdigest())
+target.write_text(
+    json.dumps(
+        {
+            "critical_count": 0,
+            "failed_image_count": 0,
+            "high_count": 4,
+            "object": "tonglingyu.security_scan_result",
+            "raw_report_artifact_dir": str(artifact_dir),
+            "raw_report_paths": raw_report_paths,
+            "raw_report_paths_sha256": hashlib.sha256(
+                ("\n".join(raw_report_paths) + "\n").encode("utf-8")
+            ).hexdigest(),
+            "raw_reports_persistent": True,
+            "scan_run_id": "third-party-high",
+            "scan_type": "image",
+            "scanned_image_count": len(image_refs),
+            "scanned_image_refs_sha256": hashlib.sha256(
+                ("\n".join(image_refs) + "\n").encode("utf-8")
+            ).hexdigest(),
+            "scanned_report_count": len(report_digests),
+            "scanned_reports_sha256": hashlib.sha256(
+                ("\n".join(sorted(report_digests)) + "\n").encode("utf-8")
+            ).hexdigest(),
+            "scanner": "trivy",
+            "secret_values_printed": False,
+            "status": "failed",
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
+third_party_high_stdout="${WORK_DIR}/third-party-high-security.stdout"
+env \
+  "${security_digest_env[@]}" \
+  "TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH=${SECURITY_DEPENDENCY_SCAN_JSON}" \
+  "TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_PATH=${third_party_high_scan_json}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-security.sh" >"${third_party_high_stdout}"
+assert_report "${third_party_high_stdout}" 'report["status"] == "ok"'
+assert_report "${third_party_high_stdout}" 'report["security_scan_passed"] is True'
+assert_report "${third_party_high_stdout}" 'report["image_scan"]["status"] == "passed"'
+assert_report "${third_party_high_stdout}" 'report["image_scan"]["owned_high_count"] == 0'
+assert_report "${third_party_high_stdout}" 'report["image_scan"]["third_party_high_count"] == 4'
+assert_report "${third_party_high_stdout}" '"third_party_image_high_findings_present" in report["nonblocking_errors"]'
+assert_report "${third_party_high_stdout}" '"image_high_findings_present" not in report["errors"]'
 
 override_guard_stderr="${WORK_DIR}/override-guard.stderr"
 if env \
@@ -1427,6 +1524,22 @@ image_refs = [
 image_refs_sha256 = hashlib.sha256(
     ("\n".join(image_refs) + "\n").encode("utf-8")
 ).hexdigest()
+owned_image_refs = image_refs[:2]
+third_party_image_refs = image_refs[2:]
+owned_image_refs_sha256 = hashlib.sha256(
+    ("\n".join(owned_image_refs) + "\n").encode("utf-8")
+).hexdigest()
+third_party_image_refs_sha256 = hashlib.sha256(
+    ("\n".join(third_party_image_refs) + "\n").encode("utf-8")
+).hexdigest()
+image_ownership = [
+    {"owner_type": "owned", "ref": image_refs[0]},
+    {"owner_type": "owned", "ref": image_refs[1]},
+    {"owner_type": "third_party", "ref": image_refs[2]},
+    {"owner_type": "third_party", "ref": image_refs[3]},
+    {"owner_type": "third_party", "ref": image_refs[4]},
+    {"owner_type": "third_party", "ref": image_refs[5]},
+]
 image_scan_artifact_dir = Path(str(target) + ".image-scan-reports").resolve()
 image_scan_artifact_dir.mkdir(parents=True, exist_ok=True)
 image_raw_report_paths = []
@@ -1934,20 +2047,42 @@ gate_stdout = {
         "errors": [],
         "generated_at": "2026-05-15T00:00:05+00:00",
         "image_scan": {
+            "blocking_critical_count": 0,
+            "blocking_high_count": 0,
             "critical_count": 0,
             "digest_missing_count": 0,
             "failed_image_count": 0,
             "high_count": 0,
             "image_count": 6,
+            "image_finding_summary": [
+                {
+                    "critical_count": 0,
+                    "high_count": 0,
+                    "image_ref_sha256": hashlib.sha256(image_ref.encode("utf-8")).hexdigest(),
+                    "owner_type": item["owner_type"],
+                }
+                for image_ref, item in zip(image_refs, image_ownership)
+            ],
+            "image_ownership": image_ownership,
+            "image_policy_version": "tonglingyu-image-ownership-v1",
             "image_refs": image_refs,
             "image_refs_sha256": image_refs_sha256,
             "mutable_tag_count": 0,
+            "owned_critical_count": 0,
+            "owned_high_count": 0,
+            "owned_image_count": 2,
+            "owned_image_refs_sha256": owned_image_refs_sha256,
             "report_sha256": "b" * 64,
             "scanner": "trivy",
             "scanned_image_count": 6,
             "scanned_image_refs_sha256": image_refs_sha256,
             "scanned_report_count": 6,
             "scanned_reports_sha256": image_scanned_reports_sha256,
+            "third_party_critical_count": 0,
+            "third_party_findings_non_blocking": True,
+            "third_party_high_count": 0,
+            "third_party_image_count": 4,
+            "third_party_image_refs_sha256": third_party_image_refs_sha256,
             "raw_reports_persistent": True,
             "raw_report_artifact_dir": str(image_scan_artifact_dir),
             "raw_report_paths": image_raw_report_paths,

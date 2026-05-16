@@ -456,11 +456,23 @@ def compose_image_policy():
     if not compose_path.is_file():
         compose_path = repo_dir / "deploy" / "docker-compose.yml"
     text = compose_path.read_text(encoding="utf-8")
-    refs = []
+    image_items = []
     for raw_line in text.splitlines():
         match = re.match(r"\s*image:\s+(.+?)\s*$", raw_line)
         if match:
-            refs.append(resolve_compose_image_ref(match.group(1)))
+            raw_ref = match.group(1)
+            resolved_ref = resolve_compose_image_ref(raw_ref)
+            image_items.append(
+                {
+                    "ref": resolved_ref,
+                    "owner_type": classify_image_owner(raw_ref, resolved_ref),
+                }
+            )
+    refs = [item["ref"] for item in image_items]
+    owned_refs = [item["ref"] for item in image_items if item["owner_type"] == "owned"]
+    third_party_refs = [
+        item["ref"] for item in image_items if item["owner_type"] == "third_party"
+    ]
     encoded_refs = ("\n".join(refs) + "\n") if refs else ""
     mutable = []
     digest_missing = []
@@ -475,13 +487,149 @@ def compose_image_policy():
         "image_refs_sha256": hashlib.sha256(
             encoded_refs.encode("utf-8")
         ).hexdigest(),
+        "image_ownership": image_items,
+        "owned_image_count": len(owned_refs),
+        "owned_image_refs_sha256": hashlib.sha256(
+            (("\n".join(owned_refs) + "\n") if owned_refs else "").encode("utf-8")
+        ).hexdigest(),
+        "third_party_image_count": len(third_party_refs),
+        "third_party_image_refs_sha256": hashlib.sha256(
+            (
+                ("\n".join(third_party_refs) + "\n") if third_party_refs else ""
+            ).encode("utf-8")
+        ).hexdigest(),
         "mutable_tag_count": len(mutable),
         "digest_missing_count": len(digest_missing),
     }
 
 
+def classify_image_owner(raw_ref, resolved_ref):
+    owned_env_vars = {
+        "AGENT_PLATFORM_IMAGE_REF",
+        "TONGLINGYU_GATEWAY_IMAGE_REF",
+    }
+    raw = str(raw_ref or "")
+    resolved = str(resolved_ref or "")
+    if any(name in raw for name in owned_env_vars):
+        return "owned"
+    if re.search(r"(^|/)(hermes-agent-platform|tonglingyu-gateway)(:|@|$)", resolved):
+        return "owned"
+    return "third_party"
+
+
 def image_ref_is_immutable(ref):
     return "@sha256:" in ref or re.fullmatch(r"sha256:[0-9a-f]{64}", ref) is not None
+
+
+def count_trivy_high_critical(report_path):
+    report = load_json_file(report_path)
+    critical_count = 0
+    high_count = 0
+    for result in report.get("Results") or []:
+        for vulnerability in result.get("Vulnerabilities") or []:
+            severity = str(vulnerability.get("Severity") or "").upper()
+            if severity == "CRITICAL":
+                critical_count += 1
+            elif severity == "HIGH":
+                high_count += 1
+    return critical_count, high_count
+
+
+def apply_image_blocking_policy(image_scan, image_policy):
+    policy_errors = []
+    nonblocking_errors = []
+    ownership = image_policy.get("image_ownership")
+    raw_report_paths = image_scan.get("raw_report_paths")
+    if not isinstance(ownership, list) or not isinstance(raw_report_paths, list):
+        image_scan.update(
+            {
+                "image_policy_version": "tonglingyu-image-ownership-v1",
+                "blocking_critical_count": None,
+                "blocking_high_count": None,
+                "owned_critical_count": None,
+                "owned_high_count": None,
+                "third_party_critical_count": None,
+                "third_party_high_count": None,
+                "third_party_findings_non_blocking": True,
+            }
+        )
+        return ["image_ownership_classification_missing"], nonblocking_errors
+    if len(ownership) != len(raw_report_paths):
+        policy_errors.append("image_ownership_report_count_mismatch")
+
+    owned_critical_count = 0
+    owned_high_count = 0
+    third_party_critical_count = 0
+    third_party_high_count = 0
+    total_critical_count = 0
+    total_high_count = 0
+    findings = []
+
+    for item, raw_report_path in zip(ownership, raw_report_paths):
+        if not isinstance(item, dict):
+            policy_errors.append("image_ownership_entry_invalid")
+            continue
+        owner_type = item.get("owner_type")
+        image_ref = str(item.get("ref") or "")
+        if owner_type not in {"owned", "third_party"}:
+            policy_errors.append("image_owner_type_invalid")
+            owner_type = "third_party"
+        candidate = Path(str(raw_report_path or ""))
+        if not candidate.is_file():
+            policy_errors.append("image_ownership_raw_report_missing")
+            continue
+        try:
+            critical_count, high_count = count_trivy_high_critical(candidate)
+        except (OSError, json.JSONDecodeError):
+            policy_errors.append("image_ownership_raw_report_invalid")
+            continue
+        total_critical_count += critical_count
+        total_high_count += high_count
+        if owner_type == "owned":
+            owned_critical_count += critical_count
+            owned_high_count += high_count
+        else:
+            third_party_critical_count += critical_count
+            third_party_high_count += high_count
+        findings.append(
+            {
+                "image_ref_sha256": hashlib.sha256(image_ref.encode("utf-8")).hexdigest(),
+                "owner_type": owner_type,
+                "critical_count": critical_count,
+                "high_count": high_count,
+            }
+        )
+
+    if owned_critical_count > 0:
+        policy_errors.append("image_owned_critical_findings_present")
+    if owned_high_count > 0:
+        policy_errors.append("image_owned_high_findings_present")
+    if third_party_critical_count > 0:
+        nonblocking_errors.append("third_party_image_critical_findings_present")
+    if third_party_high_count > 0:
+        nonblocking_errors.append("third_party_image_high_findings_present")
+
+    failed_image_count = image_scan.get("failed_image_count")
+    if not isinstance(failed_image_count, int):
+        failed_image_count = 0
+    blocking_failed = failed_image_count > 0 or bool(policy_errors)
+    image_scan.update(
+        {
+            "status": "failed" if blocking_failed else "passed",
+            "critical_count": total_critical_count,
+            "high_count": total_high_count,
+            "image_policy_version": "tonglingyu-image-ownership-v1",
+            "blocking_critical_count": owned_critical_count,
+            "blocking_high_count": owned_high_count,
+            "owned_critical_count": owned_critical_count,
+            "owned_high_count": owned_high_count,
+            "third_party_critical_count": third_party_critical_count,
+            "third_party_high_count": third_party_high_count,
+            "third_party_findings_non_blocking": True,
+            "image_finding_summary": findings,
+        }
+    )
+    return policy_errors, nonblocking_errors
 
 
 def load_risk_acceptance():
@@ -548,6 +696,22 @@ if image_policy["mutable_tag_count"] > 0:
 if image_policy["digest_missing_count"] > 0:
     image_errors.append("image_digest_missing")
 image_scan.update(image_policy)
+image_policy_errors, image_nonblocking_errors = apply_image_blocking_policy(
+    image_scan,
+    image_policy,
+)
+image_errors.extend(image_policy_errors)
+if image_scan["status"] == "passed":
+    image_errors = [
+        error
+        for error in image_errors
+        if error
+        not in {
+            "image_scan_not_passed",
+            "image_critical_findings_present",
+            "image_high_findings_present",
+        }
+    ]
 if image_scan["status"] == "passed":
     failed_image_count = image_scan.get("failed_image_count")
     if not isinstance(failed_image_count, int) or failed_image_count < 0:
@@ -665,6 +829,8 @@ payload = {
     "accepted_error_count": accepted_error_count,
     "unaccepted_error_count": len(unaccepted_errors),
     "errors": unaccepted_errors,
+    "nonblocking_error_count": len(image_nonblocking_errors),
+    "nonblocking_errors": image_nonblocking_errors,
     "secret_values_printed": False,
 }
 encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True)

@@ -2040,6 +2040,48 @@ def validate_security_scan_gate_stdout():
             != image_scan["scanned_reports_sha256"]
         ):
             errors.append("security_scan_image_raw_reports_digest_mismatch")
+        if production_ready:
+            if image_scan.get("image_policy_version") != "tonglingyu-image-ownership-v1":
+                errors.append("production_ready_security_scan_image_policy_version_invalid")
+            ownership = image_scan.get("image_ownership")
+            if not isinstance(ownership, list):
+                errors.append("production_ready_security_scan_image_ownership_missing")
+            elif isinstance(image_scan.get("image_count"), int) and len(ownership) != image_scan["image_count"]:
+                errors.append("production_ready_security_scan_image_ownership_count_mismatch")
+            for count_field in (
+                "owned_image_count",
+                "third_party_image_count",
+                "owned_critical_count",
+                "owned_high_count",
+                "third_party_critical_count",
+                "third_party_high_count",
+                "blocking_critical_count",
+                "blocking_high_count",
+            ):
+                count_value = image_scan.get(count_field)
+                if not isinstance(count_value, int) or count_value < 0:
+                    errors.append(f"production_ready_security_scan_image_{count_field}_invalid")
+            if (
+                isinstance(image_scan.get("owned_image_count"), int)
+                and isinstance(image_scan.get("third_party_image_count"), int)
+                and isinstance(image_scan.get("image_count"), int)
+                and image_scan["owned_image_count"] + image_scan["third_party_image_count"]
+                != image_scan["image_count"]
+            ):
+                errors.append("production_ready_security_scan_image_owner_count_mismatch")
+            if image_scan.get("blocking_critical_count") != image_scan.get("owned_critical_count"):
+                errors.append("production_ready_security_scan_image_blocking_critical_mismatch")
+            if image_scan.get("blocking_high_count") != image_scan.get("owned_high_count"):
+                errors.append("production_ready_security_scan_image_blocking_high_mismatch")
+            if image_scan.get("owned_critical_count") != 0:
+                errors.append("production_ready_security_scan_owned_image_critical_findings_present")
+            if image_scan.get("owned_high_count") != 0:
+                errors.append("production_ready_security_scan_owned_image_high_findings_present")
+            if (
+                (image_scan.get("third_party_critical_count") or 0) > 0
+                or (image_scan.get("third_party_high_count") or 0) > 0
+            ) and image_scan.get("third_party_findings_non_blocking") is not True:
+                errors.append("production_ready_security_scan_third_party_findings_policy_missing")
 
     script_scan = gate_json.get("release_script_scan")
     if not isinstance(script_scan, dict):
