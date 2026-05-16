@@ -31,7 +31,7 @@ if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-}" ]]; then
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS -H "Authorization: Bearer ${key}" http://tonglingyu-gateway:8090/v1/models
@@ -53,7 +53,7 @@ curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS \
@@ -68,7 +68,7 @@ curl -fsS \
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS \

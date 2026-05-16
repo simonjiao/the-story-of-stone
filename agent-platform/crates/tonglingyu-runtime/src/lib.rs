@@ -1529,7 +1529,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["system_prompt", "profile_override", "write_tools"]
             }),
             output_contract: json!({
-                "required": ["evidence_refs", "evidence_analysis", "unsupported_scope"],
+                "required": ["evidence_observation"],
+                "evidence_observation_required": ["evidence_refs", "evidence_analysis", "unsupported_scope"],
                 "must_preserve": ["original_text", "source_id", "revision_id", "block_id"]
             }),
             safety_contract: json!({
@@ -1548,7 +1549,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["system_prompt", "profile_override", "write_tools"]
             }),
             output_contract: json!({
-                "required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
+                "required": ["evidence_observation"],
+                "evidence_observation_required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
                 "must_label": ["commentary", "version_note"]
             }),
             safety_contract: json!({
@@ -1570,7 +1572,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["skip_reviewer", "disable_reviewer", "system_prompt"]
             }),
             output_contract: json!({
-                "required": ["draft_answer", "package_id", "claim_statements"],
+                "required": ["draft_candidate"],
+                "draft_candidate_required": ["draft_answer", "package_id", "claim_statements"],
                 "must_include": ["support_scope", "unsupported_scope"]
             }),
             safety_contract: json!({
@@ -1589,7 +1592,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["disable_reviewer", "profile_override", "system_prompt"]
             }),
             output_contract: json!({
-                "required": ["review_status", "issues", "severity", "required_revisions"],
+                "required": ["review_observation"],
+                "review_observation_required": ["review_status", "issues", "severity", "required_revisions"],
                 "review_status": ["passed", "needs_revision"]
             }),
             safety_contract: json!({
@@ -2622,19 +2626,19 @@ fn agent_runtime_profile_step_message(
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return result_summary as a JSON object string with keys draft_answer, package_id, and claim_statements. package_id must match step_output_json.package_id; local reviewer remains required."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[...]}}. package_id must match step_output_json.package_id; local reviewer remains required. Do not add another result_summary key."
         }
         "review_answer" => {
-            "Return result_summary as a JSON object string with keys review_status, severity, issues, and required_revisions. This is observation only; local reviewer enforcement remains authoritative."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
         }
         "text_evidence_search" => {
-            "Return result_summary as a JSON object string with keys evidence_refs, evidence_analysis, and unsupported_scope. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[...],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer. Do not add another result_summary key."
         }
         "commentary_evidence_search" => {
-            "Return result_summary as a JSON object string with keys commentary_refs, commentary_analysis, and base_text_limits. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[...],\"commentary_analysis\":\"...\",\"base_text_limits\":\"...\"}}. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone. Do not add another result_summary key."
         }
         "evidence_package_create" => {
-            "Return result_summary as a concise package summary using the package_id from step_output_json; do not invent package ids."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"...\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
         }
         _ => {
             "Return result_summary as a concise step observation that preserves the step output boundary."
@@ -2948,7 +2952,7 @@ fn extract_agent_runtime_evidence_observation(
     expected_evidence_ids: &[String],
 ) -> AgentRuntimeEvidenceObservation {
     let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+    let Some(value) = parse_agent_runtime_summary_value(trimmed) else {
         return rejected_evidence_observation(
             operation,
             profile,
@@ -2956,7 +2960,7 @@ fn extract_agent_runtime_evidence_observation(
             Some("unsupported_text_evidence"),
         );
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "evidence_observation") else {
         return rejected_evidence_observation(
             operation,
             profile,
@@ -3099,7 +3103,7 @@ fn extract_agent_runtime_package_observation(
             rejected_reason,
         };
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "package_observation") else {
         return AgentRuntimePackageObservation {
             result_format: "json",
             package_id: None,
@@ -3279,7 +3283,7 @@ fn extract_agent_runtime_draft(
         };
     }
 
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "draft_candidate") else {
         return AgentRuntimeDraftExtraction {
             draft_answer: None,
             result_format: "json",
@@ -3354,6 +3358,17 @@ fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
             .or_else(|| Some(json!(inner)));
     }
     Some(value)
+}
+
+fn object_or_named_child<'a>(
+    value: &'a Value,
+    child_key: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    let object = value.as_object()?;
+    object
+        .get(child_key)
+        .and_then(Value::as_object)
+        .or(Some(object))
 }
 
 fn package_id_from_text(text: &str, expected_package_id: &str) -> Option<String> {
@@ -3439,10 +3454,10 @@ fn extract_agent_runtime_review_observation(
     local_review_severity: &str,
 ) -> AgentRuntimeReviewObservation {
     let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+    let Some(value) = parse_agent_runtime_summary_value(trimmed) else {
         return rejected_review_observation("text", Some("unsupported_text_review"));
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "review_observation") else {
         return rejected_review_observation("json", Some("unsupported_json_review"));
     };
     let review_status = object
@@ -10415,31 +10430,45 @@ mod tests {
             Ok(RuntimeOutput {
                 result_summary: match operation {
                     "text_evidence_search" => serde_json::to_string(&json!({
-                        "evidence_refs": evidence_ids_from_step_message(&message),
-                        "evidence_analysis": "Hermes observed text evidence refs",
-                        "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        "evidence_observation": {
+                            "evidence_refs": evidence_ids_from_step_message(&message),
+                            "evidence_analysis": "Hermes observed text evidence refs",
+                            "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        }
                     }))
                     .expect("text evidence output serializes"),
                     "commentary_evidence_search" => serde_json::to_string(&json!({
-                        "commentary_refs": evidence_ids_from_step_message(&message),
-                        "commentary_analysis": "Hermes observed commentary evidence refs",
-                        "base_text_limits": "commentary cannot prove base-text facts alone",
+                        "evidence_observation": {
+                            "commentary_refs": evidence_ids_from_step_message(&message),
+                            "commentary_analysis": "Hermes observed commentary evidence refs",
+                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                        }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => {
-                        format!("Hermes full workflow draft from {operation}. context={message}")
-                    }
+                    "draft_answer" => serde_json::to_string(&json!({
+                        "draft_candidate": {
+                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "claim_statements": ["Hermes full workflow draft claim"],
+                        }
+                    }))
+                    .expect("draft output serializes"),
                     "evidence_package_create" => serde_json::to_string(&json!({
-                        "package_id": package_id_from_step_message(&message)
-                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        "summary": "Hermes observed runtime package ref",
+                        "package_observation": {
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "summary": "Hermes observed runtime package ref",
+                        }
                     }))
                     .expect("package output serializes"),
                     "review_answer" => serde_json::to_string(&json!({
-                        "review_status": "passed",
-                        "severity": "none",
-                        "issues": [],
-                        "required_revisions": [],
+                        "review_observation": {
+                            "review_status": "passed",
+                            "severity": "none",
+                            "issues": [],
+                            "required_revisions": [],
+                        }
                     }))
                     .expect("review output serializes"),
                     _ => format!("Hermes full workflow step {operation}. context={message}"),
@@ -10498,31 +10527,45 @@ mod tests {
             Ok(RuntimeOutput {
                 result_summary: match operation {
                     "text_evidence_search" => serde_json::to_string(&json!({
-                        "evidence_refs": evidence_ids_from_step_message(&message),
-                        "evidence_analysis": "Hermes observed text evidence refs without model tool calls",
-                        "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        "evidence_observation": {
+                            "evidence_refs": evidence_ids_from_step_message(&message),
+                            "evidence_analysis": "Hermes observed text evidence refs without model tool calls",
+                            "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        }
                     }))
                     .expect("text evidence output serializes"),
                     "commentary_evidence_search" => serde_json::to_string(&json!({
-                        "commentary_refs": evidence_ids_from_step_message(&message),
-                        "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
-                        "base_text_limits": "commentary cannot prove base-text facts alone",
+                        "evidence_observation": {
+                            "commentary_refs": evidence_ids_from_step_message(&message),
+                            "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
+                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                        }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => {
-                        format!("Hermes full workflow draft from {operation}. context={message}")
-                    }
+                    "draft_answer" => serde_json::to_string(&json!({
+                        "draft_candidate": {
+                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "claim_statements": ["Hermes full workflow draft claim"],
+                        }
+                    }))
+                    .expect("draft output serializes"),
                     "evidence_package_create" => serde_json::to_string(&json!({
-                        "package_id": package_id_from_step_message(&message)
-                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        "summary": "Hermes observed runtime package ref without model tool calls",
+                        "package_observation": {
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "summary": "Hermes observed runtime package ref without model tool calls",
+                        }
                     }))
                     .expect("package output serializes"),
                     "review_answer" => serde_json::to_string(&json!({
-                        "review_status": "passed",
-                        "severity": "none",
-                        "issues": [],
-                        "required_revisions": [],
+                        "review_observation": {
+                            "review_status": "passed",
+                            "severity": "none",
+                            "issues": [],
+                            "required_revisions": [],
+                        }
                     }))
                     .expect("review output serializes"),
                     _ => format!("Hermes full workflow step {operation}. context={message}"),
@@ -13094,9 +13137,11 @@ mod tests {
         workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
             serde_json::to_string(&json!({
                 "result_summary": serde_json::to_string(&json!({
-                    "draft_answer": "嵌套 Hermes 草稿：必须引用本地证据包。",
-                    "package_id": package_id,
-                    "claim_statements": ["nested claim"],
+                    "draft_candidate": {
+                        "draft_answer": "嵌套 Hermes 草稿：必须引用本地证据包。",
+                        "package_id": package_id,
+                        "claim_statements": ["nested claim"],
+                    }
                 }))
                 .expect("inner draft serializes")
             }))
@@ -13202,6 +13247,42 @@ mod tests {
     }
 
     #[test]
+    fn hermes_mode_observes_nested_result_summary_reviewer_agreement() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        workflow.steps[1].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "result_summary": serde_json::to_string(&json!({
+                    "review_observation": {
+                        "review_status": "passed",
+                        "severity": "none",
+                        "issues": [],
+                        "required_revisions": [],
+                    }
+                }))
+                .expect("inner review serializes")
+            }))
+            .expect("outer review serializes")
+        );
+
+        let observation =
+            apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("nested reviewer observation is recorded");
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.review_status.as_deref(), Some("passed"));
+        assert!(observation.agrees_with_local_reviewer);
+        assert!(!observation.local_reviewer_override);
+    }
+
+    #[test]
     fn hermes_mode_marks_reviewer_disagreement_as_local_override() {
         let mut workflow = runtime_draft_workflow(
             Vec::new(),
@@ -13270,6 +13351,22 @@ mod tests {
     }
 
     #[test]
+    fn package_observation_accepts_named_package_observation() {
+        let observation = extract_agent_runtime_package_observation(
+            r#"{"package_observation":{"package_id":"pkg-runtime-draft-test","summary":"package observed"}}"#,
+            "pkg-runtime-draft-test",
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(
+            observation.package_id.as_deref(),
+            Some("pkg-runtime-draft-test")
+        );
+        assert!(observation.matches_runtime_package);
+        assert!(observation.rejected_reason.is_none());
+    }
+
+    #[test]
     fn evidence_observation_rejects_unknown_refs() {
         let observation = extract_agent_runtime_evidence_observation(
             r#"{"evidence_refs":["ev-known","ev-unknown"],"evidence_analysis":"test","unsupported_scope":"test"}"#,
@@ -13286,6 +13383,33 @@ mod tests {
         );
         assert!(!observation.matches_runtime_evidence);
         assert_eq!(observation.rejected_reason, Some("unknown_evidence_ref"));
+    }
+
+    #[test]
+    fn evidence_observation_accepts_nested_result_summary_refs() {
+        let summary = serde_json::to_string(&json!({
+            "result_summary": serde_json::to_string(&json!({
+                "evidence_observation": {
+                    "evidence_refs": ["ev-known"],
+                    "evidence_analysis": "test",
+                    "unsupported_scope": "test",
+                }
+            }))
+            .expect("inner evidence serializes")
+        }))
+        .expect("outer evidence serializes");
+
+        let observation = extract_agent_runtime_evidence_observation(
+            &summary,
+            "text_evidence_search",
+            "honglou-text",
+            &["ev-known".to_string()],
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.evidence_ref_count, 1);
+        assert!(observation.matches_runtime_evidence);
+        assert!(observation.rejected_reason.is_none());
     }
 
     fn runtime_draft_workflow(
