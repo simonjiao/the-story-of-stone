@@ -66,6 +66,7 @@ const EVAL_NOT_APPLICABLE_SOURCE_BOUNDARY: &str =
 const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
 const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
 const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
+const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -87,6 +88,7 @@ enum Command {
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
+    RqaRestoreCanary(RqaRestoreCanaryArgs),
     RqaUserLifecycle(RqaUserLifecycleArgs),
     Serve(ServeArgs),
 }
@@ -222,6 +224,22 @@ struct PruneRuntimeArgs {
     retention_days: u32,
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RqaRestoreCanaryArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    package_id: Option<String>,
+    #[arg(long, default_value = "restore-drill")]
+    reviewer: String,
+    #[arg(long, default_value = "closed restore drill canary")]
+    review_note: String,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1087,6 +1105,15 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::RqaRestoreCanary(args) => {
+            let report = rqa_restore_canary_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("rqa restore canary did not complete"))
+            }
+        }
         Command::RqaUserLifecycle(args) => {
             let report = rqa_user_lifecycle_command(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1335,6 +1362,257 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
     prune_gateway_and_runtime_data(&args.db, args.retention_days, args.dry_run)
+}
+
+fn rqa_restore_canary_command(args: &RqaRestoreCanaryArgs) -> Result<Value> {
+    if !args.db.is_file() {
+        return Err(anyhow!(
+            "restore canary db not found: {}",
+            args.db.display()
+        ));
+    }
+    let reviewer = args.reviewer.trim();
+    if reviewer.is_empty() {
+        return Err(anyhow!("--reviewer must not be empty"));
+    }
+    let review_note = args.review_note.trim();
+    if review_note.is_empty() {
+        return Err(anyhow!("--review-note must not be empty"));
+    }
+
+    let conn = open_db(&args.db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    let package = resolve_restore_canary_package(&args.db, args.package_id.as_deref())?;
+    let package_id = package.package_id.clone();
+    let trace_id = package.trace_id.clone();
+    let started_at = now_rfc3339();
+    let (failure, task) = run_immediate_transaction(&conn, |tx| {
+        let report = restore_canary_quality_report(&package);
+        let selected_evidence_ids = package
+            .cards
+            .iter()
+            .map(|card| card.evidence_id.clone())
+            .collect::<Vec<_>>();
+        let failure = tonglingyu_runtime::create_retrieval_failure(
+            tx,
+            RetrievalFailureCreateInput {
+                trace_id: trace_id.clone(),
+                package_id: Some(package_id.clone()),
+                question: restore_canary_question(),
+                quality_report: report,
+                selected_evidence_ids: selected_evidence_ids.clone(),
+                expected_evidence_ids: selected_evidence_ids,
+                agent_diagnosis: Some(
+                    "restore_drill_canary_reference_only; no_direct_fact_mutation=true".to_string(),
+                ),
+                proposed_fix: Some(
+                    "close restore drill canary after backup/restore reference verification"
+                        .to_string(),
+                ),
+            },
+        )?;
+        let task = tonglingyu_runtime::create_governance_task_from_failure(
+            tx,
+            KnowledgeGovernanceTaskCreateFromFailureInput {
+                source_failure_id: failure.failure_id.clone(),
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p1".to_string()),
+                proposed_fix: Some(
+                    "restore drill canary closed after verification; no knowledge mutation required"
+                        .to_string(),
+                ),
+                agent_cluster_key: Some(format!(
+                    "restore-drill-canary:{}",
+                    &hash_text(&package_id)[..16]
+                )),
+            },
+        )?
+        .ok_or_else(|| anyhow!("restore canary governance task was not created"))?;
+        let failure = tonglingyu_runtime::update_retrieval_failure_status(
+            tx,
+            &failure.failure_id,
+            "resolved",
+            Some(reviewer),
+            Some(review_note),
+        )?
+        .ok_or_else(|| anyhow!("restore canary retrieval failure was not readable"))?;
+        let task = tonglingyu_runtime::update_governance_task(
+            tx,
+            &task.task_id,
+            KnowledgeGovernanceTaskUpdateInput {
+                status: "closed".to_string(),
+                reviewer: Some(reviewer.to_string()),
+                review_note: Some(review_note.to_string()),
+                evidence_ref: Some(format!("package:{package_id}")),
+                expected_updated_at: Some(task.updated_at.clone()),
+            },
+        )?
+        .ok_or_else(|| anyhow!("restore canary governance task was not readable"))?;
+        append_runtime_audit_event(
+            tx,
+            &trace_id,
+            "rqa_restore_canary_recorded",
+            &json!({
+                "failure_id": &failure.failure_id,
+                "task_id": &task.task_id,
+                "package_id": &package_id,
+                "failure_type": &failure.failure_type,
+                "failure_status": &failure.human_review_status,
+                "task_status": &task.status,
+                "task_priority": &task.priority,
+                "reviewer": reviewer,
+                "review_note_sha256": hash_text(review_note),
+                "direct_fact_mutation": false,
+                "raw_question_included": false,
+                "secret_values_printed": false,
+            }),
+        )?;
+        Ok((failure, task))
+    })?;
+    let open_p0 = restore_canary_open_p0_counts(&conn)?;
+
+    Ok(json!({
+        "object": "tonglingyu.rqa_restore_canary",
+        "schema_version": RQA_RESTORE_CANARY_SCHEMA_VERSION,
+        "status": "ok",
+        "started_at": started_at,
+        "finished_at": now_rfc3339(),
+        "db_path_sha256": hash_text(&args.db.display().to_string()),
+        "refs": {
+            "trace_id": trace_id,
+            "package_id": package_id,
+            "failure_id": failure.failure_id,
+            "task_id": task.task_id,
+        },
+        "checks": {
+            "failure_type": failure.failure_type,
+            "failure_status": failure.human_review_status,
+            "task_status": task.status,
+            "task_priority": task.priority,
+            "open_p0_retrieval_failures": open_p0.0,
+            "open_p0_governance_tasks": open_p0.1,
+            "direct_fact_mutation": false,
+        },
+        "raw_question_included": false,
+        "secret_values_printed": false,
+    }))
+}
+
+fn resolve_restore_canary_package(
+    db: &Path,
+    requested_package_id: Option<&str>,
+) -> Result<EvidencePackage> {
+    let runtime_store = TonglingyuRuntimeStore::new(db.to_path_buf());
+    if let Some(package_id) = requested_package_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return runtime_store
+            .read_package(package_id)?
+            .ok_or_else(|| anyhow!("restore canary package not found: {package_id}"));
+    }
+    runtime_store
+        .latest_package()?
+        .ok_or_else(|| anyhow!("restore canary requires at least one evidence package"))
+}
+
+fn restore_canary_question() -> String {
+    "restore drill canary reference".to_string()
+}
+
+fn restore_canary_quality_report(package: &EvidencePackage) -> RetrievalQualityReport {
+    let question = restore_canary_question();
+    let selected_types = package
+        .cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let channel_distribution =
+        package
+            .cards
+            .iter()
+            .fold(BTreeMap::<String, usize>::new(), |mut counts, card| {
+                *counts.entry(card.evidence_type.clone()).or_insert(0) += 1;
+                counts
+            });
+    RetrievalQualityReport {
+        object: "tonglingyu.retrieval_quality_report".to_string(),
+        schema_version: RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION.to_string(),
+        tool_name: "tonglingyu.rqa_restore_canary".to_string(),
+        quality_status: "failed".to_string(),
+        production_ready: false,
+        truncated: false,
+        query_summary: RetrievalQuerySummary {
+            question_sha256: hash_text(&question),
+            question_char_count: question.chars().count(),
+            raw_question_included: false,
+            redacted_terms: vec!["restore-drill-canary".to_string()],
+        },
+        expanded_terms: Vec::new(),
+        protected_terms: Vec::new(),
+        expanded_aliases: Vec::new(),
+        candidate_count: package.cards.len(),
+        selected_count: package.cards.len(),
+        channel_distribution,
+        evidence_type_coverage: RetrievalEvidenceTypeCoverage {
+            required: selected_types.clone(),
+            selected: selected_types,
+            missing: Vec::new(),
+        },
+        exact_match_coverage: Vec::new(),
+        expected_evidence_hit: Some(true),
+        expected_evidence_status: "restore_drill_canary".to_string(),
+        source_coverage_boundary: RetrievalSourceCoverageBoundary {
+            source_ids: package
+                .cards
+                .iter()
+                .map(|card| card.source_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            source_categories: package
+                .cards
+                .iter()
+                .map(|card| card.evidence_type.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            edition_boundaries: package
+                .cards
+                .iter()
+                .map(|card| card.source_title.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            kb_schema_version: KNOWLEDGE_BASE_SCHEMA_VERSION.to_string(),
+            source_snapshot_status: "source_snapshot_ready".to_string(),
+            facsimile_review_status: "not_reviewed".to_string(),
+            authoritative_edition_review_status: "not_reviewed".to_string(),
+            scholarly_collation_status: "not_scholarly_collated".to_string(),
+            expert_collation_status: "restore_drill_canary_reviewed".to_string(),
+        },
+        source_usage_refs: Vec::new(),
+        issues: vec!["restore_drill_canary".to_string()],
+        recommended_follow_up: vec![
+            "restore_drill_canary_closed_no_knowledge_mutation".to_string(),
+        ],
+    }
+}
+
+fn restore_canary_open_p0_counts(conn: &Connection) -> Result<(i64, i64)> {
+    let open_failures = conn.query_row(
+        "SELECT COUNT(*) FROM retrieval_failures WHERE human_review_status IN ('open', 'in_review')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let open_tasks = conn.query_row(
+        "SELECT COUNT(*) FROM knowledge_governance_tasks WHERE priority = 'p0' AND status IN ('open', 'in_review', 'accepted')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok((open_failures, open_tasks))
 }
 
 fn prune_gateway_and_runtime_data(db: &Path, retention_days: u32, dry_run: bool) -> Result<Value> {
@@ -7068,6 +7346,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
             "exact_term_missing",
             "source_usage_metadata_incomplete",
             "reviewer_evidence_insufficient",
+            "restore_drill_canary",
             "quality_report_not_passed",
         ],
     ) {
@@ -7365,6 +7644,71 @@ mod tests {
             confidence: "high".to_string(),
             verification_status: "verified".to_string(),
         }
+    }
+
+    #[test]
+    fn rqa_restore_canary_creates_closed_live_refs_without_open_p0() {
+        let db_path = temp_gateway_db_path("restore-canary");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let package = runtime_store
+            .create_package(
+                "trace-restore-canary-test",
+                "通灵玉正面文字在哪里？",
+                vec![eval_test_card("block-restore-canary")],
+            )
+            .expect("package creates");
+
+        let args = RqaRestoreCanaryArgs {
+            db: db_path.clone(),
+            package_id: Some(package.package_id.clone()),
+            reviewer: "restore-drill".to_string(),
+            review_note: "closed restore drill canary".to_string(),
+        };
+        let report = rqa_restore_canary_command(&args).expect("restore canary runs");
+
+        assert_eq!(report["status"], json!("ok"));
+        assert_eq!(report["refs"]["trace_id"], json!(package.trace_id));
+        assert_eq!(report["refs"]["package_id"], json!(package.package_id));
+        assert_eq!(
+            report["checks"]["failure_type"],
+            json!("restore_drill_canary")
+        );
+        assert_eq!(report["checks"]["failure_status"], json!("resolved"));
+        assert_eq!(report["checks"]["task_status"], json!("closed"));
+        assert_eq!(report["checks"]["task_priority"], json!("p1"));
+        assert_eq!(report["checks"]["open_p0_retrieval_failures"], json!(0));
+        assert_eq!(report["checks"]["open_p0_governance_tasks"], json!(0));
+
+        let rerun = rqa_restore_canary_command(&args).expect("restore canary reruns");
+        assert_eq!(rerun["refs"]["failure_id"], report["refs"]["failure_id"]);
+        assert_eq!(rerun["refs"]["task_id"], report["refs"]["task_id"]);
+
+        let conn = open_db(&db_path).expect("db opens");
+        let canary_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type = 'rqa_restore_canary_recorded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("audit count");
+        assert_eq!(canary_events, 2);
+        let failure_status: String = conn
+            .query_row(
+                "SELECT human_review_status FROM retrieval_failures WHERE failure_id = ?1",
+                params![report["refs"]["failure_id"].as_str().expect("failure id")],
+                |row| row.get(0),
+            )
+            .expect("failure status");
+        assert_eq!(failure_status, "resolved");
+        let task_status: String = conn
+            .query_row(
+                "SELECT status FROM knowledge_governance_tasks WHERE task_id = ?1",
+                params![report["refs"]["task_id"].as_str().expect("task id")],
+                |row| row.get(0),
+            )
+            .expect("task status");
+        assert_eq!(task_status, "closed");
+        remove_sqlite_file_set(&db_path);
     }
 
     fn temp_gateway_db_path(label: &str) -> PathBuf {

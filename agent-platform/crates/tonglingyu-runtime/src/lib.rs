@@ -706,6 +706,11 @@ impl TonglingyuRuntimeStore {
         }
     }
 
+    pub fn latest_package(&self) -> Result<Option<EvidencePackage>> {
+        let conn = self.open_connection()?;
+        latest_evidence_package_from_conn(&conn)
+    }
+
     pub fn replay_package(&self, package_id: &str) -> Result<Option<Value>> {
         match self.execute_tool(TonglingyuToolCall::EvidencePackageReplay {
             package_id: package_id.to_string(),
@@ -4784,7 +4789,7 @@ fn create_governance_task_for_failure_inner(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| "p0".to_string());
+        .unwrap_or_else(|| default_governance_task_priority(failure));
     validate_governance_task_priority(&priority)?;
     if let Some(existing) = load_governance_task_by_entity_type(
         conn,
@@ -5577,6 +5582,8 @@ fn retrieval_failure_type(issues: &[String]) -> String {
         .any(|issue| issue == "reviewer_evidence_insufficient")
     {
         "reviewer_evidence_insufficient".to_string()
+    } else if issues.iter().any(|issue| issue == "restore_drill_canary") {
+        "restore_drill_canary".to_string()
     } else {
         "quality_report_not_passed".to_string()
     }
@@ -6064,8 +6071,18 @@ fn default_governance_task_type(failure: &RetrievalFailureRecord) -> String {
     match failure.failure_type.as_str() {
         "source_usage_metadata_incomplete" => "source_metadata_fix",
         "expected_evidence_missing" => "expected_evidence_fix",
+        "restore_drill_canary" => "expert_review",
         "reviewer_evidence_insufficient" => "expert_review",
         _ => "retrieval_policy_fix",
+    }
+    .to_string()
+}
+
+fn default_governance_task_priority(failure: &RetrievalFailureRecord) -> String {
+    if failure.failure_type == "restore_drill_canary" {
+        "p1"
+    } else {
+        "p0"
     }
     .to_string()
 }
@@ -8677,6 +8694,20 @@ pub fn load_evidence_package_from_conn(
         claim_evidence_map,
         review: serde_json::from_str(&review_json)?,
     }))
+}
+
+pub fn latest_evidence_package_from_conn(conn: &Connection) -> Result<Option<EvidencePackage>> {
+    let package_id = conn
+        .query_row(
+            "SELECT package_id FROM evidence_packages ORDER BY created_at DESC, package_id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match package_id {
+        Some(package_id) => load_evidence_package_from_conn(conn, &package_id),
+        None => Ok(None),
+    }
 }
 
 pub fn search_evidence(

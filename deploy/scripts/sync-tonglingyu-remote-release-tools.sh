@@ -146,6 +146,7 @@ verify-tonglingyu-rqa-release-automation.sh
 verify-tonglingyu-rqa-capacity-load-smoke.sh
 verify-tonglingyu-rqa-incident-capacity.sh
 verify-tonglingyu-rqa-backup-restore-drill.sh
+prepare-tonglingyu-rqa-restore-canary.sh
 remediate-tonglingyu-kb-source-metadata.sh
 verify-tonglingyu-release-ops-readiness.sh
 verify-tonglingyu-post-release-monitor.sh
@@ -163,6 +164,7 @@ bash -n scripts/verify-tonglingyu-rqa-release-automation.sh
 bash -n scripts/verify-tonglingyu-release-readiness.sh
 bash -n scripts/verify-tonglingyu-rqa-performance-budget.sh
 bash -n scripts/verify-tonglingyu-rqa-backup-restore-drill.sh
+bash -n scripts/prepare-tonglingyu-rqa-restore-canary.sh
 bash -n scripts/verify-tonglingyu-rqa-quality-gate.sh
 . ./.tonglingyu-release-tool-env
 test -x "${TONGLINGYU_RQA_GATEWAY_BIN}"
