@@ -415,6 +415,13 @@ def is_sha256(value):
     )
 
 
+def image_ref_is_digest_pinned(value):
+    return isinstance(value, str) and (
+        "@sha256:" in value
+        or (value.startswith("sha256:") and is_sha256(value.removeprefix("sha256:")))
+    )
+
+
 def resolve_artifact_path(value):
     artifact_path = Path(value)
     if artifact_path.is_absolute():
@@ -993,7 +1000,7 @@ def validate_release_manifest():
             image_refs = security.get("image_refs")
             if not isinstance(image_refs, list) or not image_refs:
                 errors.append("production_ready_release_manifest_image_refs_missing")
-            elif any("@sha256:" not in image_ref for image_ref in image_refs):
+            elif any(not image_ref_is_digest_pinned(image_ref) for image_ref in image_refs):
                 errors.append("production_ready_release_manifest_image_refs_not_digest_pinned")
         if production_ready and security.get("image_count") != security.get("scanned_image_count"):
             errors.append("production_ready_release_manifest_image_scan_count_mismatch")

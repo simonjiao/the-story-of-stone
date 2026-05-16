@@ -1514,8 +1514,8 @@ incident_audit_evidence_sha256 = hashlib.sha256(
     incident_audit_evidence_path.read_bytes(),
 ).hexdigest()
 image_refs = [
-    "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
-    "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
+    "sha256:" + "a" * 64,
+    "sha256:" + "b" * 64,
     "registry.invalid/hermes@sha256:" + "c" * 64,
     "registry.invalid/open-webui@sha256:" + "d" * 64,
     "registry.invalid/cloudflared@sha256:" + "e" * 64,
