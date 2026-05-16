@@ -857,7 +857,16 @@
 - 2026-05-16 以 digest image refs 和 fixture image scan 复跑 preflight release
   readiness 后，`runtime_config`、`retrieval_quality`、
   `rqa_backup_restore_drill` 和 `security_scan` 均已通过；`required_failures=[]`。
-  live gates 和 browser review 仍未执行，因此仍不能声明 production-ready。
+  browser review 仍未执行，因此仍不能声明 production-ready。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-remote-live-gates.sh`
+  作为本机缺 Docker CLI 时的 SSH 远端 live gate evidence collector。已对
+  `hhost` 运行并保存 artifact：
+  `data/tonglingyu/remote-live-gates/remote-live-20260516T014927Z-75846/remote-live-gates.json`；
+  `model_upstream_network`、`openwebui_function`、`openwebui_admin_action` 和
+  `strict_gateway` 均通过。该 artifact 同时记录远端部署目录缺少当前 RQA
+  release automation、capacity/load、incident/capacity、backup/restore、ops、
+  post-release monitor 和 security 脚本，因此它只能证明基础 live gates 通过，
+  不能替代当前 release automation / release report 绑定。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
   `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
   `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
@@ -879,8 +888,9 @@
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
-  所有 required preflight gates 已通过，skipped live gates 仍包括 model
-  upstream、strict Gateway、Open WebUI Function 和 Open WebUI admin Action。
+  所有 required preflight gates 已通过；随后 `hhost` 独立 remote live-gate
+  collector 已证明 model upstream、strict Gateway、Open WebUI Function 和
+  Open WebUI admin Action 通过，但这些结果尚未进入当前 release report。
 - 后续 RQA production-ready 还必须在目标环境真实执行 live existing_refs 恢复演练，
   并保留持久备份 artifact；还必须提供真实生产镜像 scanner artifact 或已审批
   risk exception。dependency scan 当前为 clean，但最终发布仍必须在 release commit
@@ -892,11 +902,11 @@
   `verify-tonglingyu-rqa-release-automation.sh` 强制路径；后续 production-ready
   仍必须在目标 release run 中真实执行该 wrapper，并保存 automation artifact /
   release report / validator 输出，不能只引用本地人工命令。
-- RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；后续
-  production-ready 仍必须补齐目标环境 live Open WebUI admin Action 证据、目标环境
-  live/load 性能和值守证据；Open WebUI admin Action source/fixture contract 与
-  live Action gate schema 已接入 release readiness，不能替代真实 live Action
-  执行证据。
+- RQA 用户数据生命周期和 API 兼容性已具备本地 contract smoke 和策略版本；
+  `hhost` 已有独立 live Open WebUI admin Action gate artifact，但后续
+  production-ready 仍必须把当前版本的 live Action、目标环境 live/load 性能和
+  值守证据绑定进 live release report；Open WebUI admin Action source/fixture
+  contract 与单独 live gate 不能替代完整 release automation 证据。
 - Post-release monitor 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-post-release-monitor.sh` 会生成
   `tonglingyu.post_release_monitor` JSON，校验 60 分钟窗口、operator/environment、
