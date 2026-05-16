@@ -881,18 +881,29 @@
   注入本地源 commit/dirty 状态，绑定目标 live DB、pre-migration backup、远端
   artifact 目录，并把 release automation / release readiness / saved validator
   artifact 回收到本地。提交并重新同步后，最新 artifact：
-  `data/tonglingyu/remote-release-automation/remote-release-20260516T024406Z-98556/remote-release-automation.json`。
-  该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，且
-  `runtime_config`、`rqa_migration_preflight`、`retrieval_quality`、
-  `rqa_performance_budget`、`rqa_api_contract`、`rqa_user_lifecycle`、
-  `openwebui_admin_action_contract`、`model_upstream_network`、`strict_gateway`、
-  `openwebui_function` 和 `openwebui_admin_action` 已在 live automation 中通过。
-  当前仍 fail-closed：`rqa_backup_restore_drill` 缺 live restore refs，
-  `security_scan` 缺真实生产镜像/依赖扫描或已审批风险例外，
-  `release_ops_readiness` 缺 post-release monitor evidence，
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T032702Z-11150/remote-release-automation.json`。
+  该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，
+  `restore_ref_available=true`，且 `runtime_config`、`rqa_migration_preflight`、
+  `retrieval_quality`、`rqa_backup_restore_drill`、`rqa_performance_budget`、
+  `rqa_api_contract`、`rqa_user_lifecycle`、`openwebui_admin_action_contract`、
+  `model_upstream_network`、`strict_gateway`、`openwebui_function` 和
+  `openwebui_admin_action` 已在 live automation 中通过。restore drill stdout
+  记录 `source_mode=existing_refs`、`backup.execution_mode=docker`，RTO 约 23.3s
+  低于 900s，RPO 约 23.3s 低于 3600s，并重新跑过 RQA quality gate 与 saved
+  report validator。当前仍 fail-closed：`security_scan` 缺真实生产镜像/依赖扫描
+  或已审批风险例外，`release_ops_readiness` 缺 post-release monitor evidence，
   `rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
-  `openwebui_browser_review` 未确认；`tracked worktree must be clean` blocker
-  已在提交 `ecdd5d0` 后的重跑中消失。
+  `openwebui_browser_review` 未确认。
+- 2026-05-16 为 live restore drill 新增闭环 canary 路径：
+  `tonglingyu-gateway rqa-restore-canary` 使用 Runtime API 写入
+  `restore_drill_canary` retrieval failure 和关联 governance task，并在同一事务中
+  置为 `resolved` / `closed`、priority=`p1`，不留下 open P0；
+  `deploy/scripts/prepare-tonglingyu-rqa-restore-canary.sh` 会先备份 live DB，host
+  权限不足时通过 `docker compose exec tonglingyu-gateway` 在容器内执行。`hhost`
+  canary artifact 为
+  `/home/simon/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
+  restore drill 本身也已支持容器内备份并 `docker compose cp` 回 gate artifact，
+  避免 root-owned live DB 使 host tool 误判失败。
 - 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
   `source_url`、`license`、`license_url`、`license_source_url`、
   `attribution` 和 `usage_boundary`，导致 live RQA eval fail-closed。已新增
@@ -978,18 +989,15 @@
 
 ## 下一步
 
-1. 为目标 live restore drill 准备可审计 restore refs：当前目标 DB 没有
-   retrieval failure / governance task 记录，不能用空引用通过恢复演练；需要实现
-   或批准 closed canary 记录策略，然后运行 live `existing_refs` restore drill。
-2. 补齐真实 security evidence：生产镜像 Trivy artifact、依赖扫描 artifact，或
+1. 补齐真实 security evidence：生产镜像 Trivy artifact、依赖扫描 artifact，或
    有 owner / expiry / finding scope 的已审批风险例外。
-3. 补齐 RQA Milestone L-M 的目标环境证据：post-release monitor JSON artifact、
+2. 补齐 RQA Milestone L-M 的目标环境证据：post-release monitor JSON artifact、
    目标环境 capacity/load JSON artifact、incident/audit JSON artifact 和
    Open WebUI browser review evidence；本地 gate 已 fail-closed，但不能替代真实
    环境证据。
-4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
-5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-6. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
