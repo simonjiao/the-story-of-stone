@@ -1020,8 +1020,22 @@
   append。本地验证已通过：`cargo test -p tonglingyu-runtime`（55 tests）、
   `cargo test -p tonglingyu-gateway`（45 tests）、两包 `cargo clippy -D warnings`、
   `cargo fmt --check` 和 `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
-  该修复尚未部署到目标 live gateway，也尚未复跑 live capacity smoke；因此只能标记为
-  repo-local 性能修复完成，不能标记为 production-ready。
+  2026-05-16 已将提交 `4f514d0` 同步到 `hhost`，重建并重启
+  `tonglingyu-gateway`；远端 `.env` 先备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  并 pin 回新 image id
+  `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
+  完整远端 release automation
+  `remote-release-20260516T055004Z-50395` 已在默认 10 分钟 live capacity
+  窗口下通过 `rqa_incident_capacity`：`rqa_write_p95_ms=7816`、
+  `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
+  artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+  因此 RQA incident/capacity 性能 blocker 已关闭；但整体 production-ready
+  仍失败，剩余 required failures 为 `security_scan`、`release_ops_readiness` 和
+  `openwebui_browser_review`。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1029,21 +1043,21 @@
   recovery validation 和 RTO/RPO breach escalation evidence ref；live
   `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report validator
   会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境真实
-  incident drill 和 audit-history evidence 仍未执行。
+  incident drill、capacity/load 和 audit-history evidence 已在
+  `remote-release-20260516T055004Z-50395` 中执行并通过该 gate；最终
+  production-ready 仍取决于其他 required gate 全部通过。
 
 ## 下一步
 
-1. 处理真实 security blocker：当前 release inventory 的依赖扫描已 clean，镜像
-   Trivy raw reports 已持久化，但第三方镜像合计仍有 63 critical / 714 high；
-   需要替换/重建镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的
-   审批风险例外。
-2. 处理 RQA Milestone M 的目标环境性能 blocker：repo-local 已完成 Agent Runtime
-   profile step 并发化并通过本地测试；下一步必须同步到远端、重建并重启
-   `tonglingyu-gateway`，再复跑 live capacity smoke，直到默认 10s production
-   预算下通过并绑定 release report。
-3. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
+1. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
+   reports 已持久化，但 image scan 仍有 63 critical / 714 high；需要替换/重建
+   镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的审批风险例外。
+2. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
    窗口、operator/environment、live gate evidence、admin Action/API evidence 和
    Open WebUI browser review evidence 必须绑定进最终 live release report。
+3. 完成 Open WebUI browser-side review：需要生成 browser review evidence，
+   设置 ack/ref/evidence 后重新跑 release automation；当前 admin Action/function
+   contract 和 live gate 已过，但 browser 人工/浏览器侧确认仍未绑定。
 4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。

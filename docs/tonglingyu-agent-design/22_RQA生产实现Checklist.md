@@ -1102,9 +1102,10 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 
 ## Milestone M：事故响应、容量和审计完整性
 
-状态：进行中（2026-05-16；status-history audit、incident/capacity gate 和
-目标环境 live runner 已落地；当前 live RQA write 超过 10s 预算，release report
-绑定尚未闭合）
+状态：已完成本 milestone gate（2026-05-16；目标环境 live runner、默认 10 分钟
+capacity/load 窗口、incident/audit evidence 和 `rqa_incident_capacity` release
+gate 已在 `remote-release-20260516T055004Z-50395` 通过；这不代表整体
+RQA production-ready，因 security、ops 和 browser review required gate 仍失败）
 
 目标：事故或压力场景下仍保持可追责、可降级、可恢复，不能用关闭治理来伪装可用。
 
@@ -1128,8 +1129,8 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
       在预算内。
 - [x] 目标环境 live runner 通过 Open WebUI / 运行中 Gateway 生成可复核
       capacity-load、incident-audit 和 incident-capacity artifact。
-- [ ] 目标环境 capacity smoke artifact 绑定 release report。
-- [ ] 目标环境 load / soak artifact 绑定 release report。
+- [x] 目标环境 capacity smoke artifact 绑定 release report。
+- [x] 目标环境 load / soak artifact 绑定 release report。
 - [x] capacity/load smoke 必须生成可复核 JSON evidence，并由 incident/capacity
       gate 与 saved report validator 绑定哈希。
 - [x] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
@@ -1186,7 +1187,7 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   `rqa_incident_capacity` stdout，并拒绝 emergency disabled、degraded mode、
   persistence degraded、非 live 模式、缺 evidence ref、代表性数量不足、负载
   measurement 缺失、status-history 字段缺失或 incident runbook 证据缺失的报告。
-- 2026-05-16 最新远端 release automation 已正确识别 incident runbook 和
+- 2026-05-16 早期远端 release automation 已正确识别 incident runbook 和
   fail-closed 事故/容量策略；目标环境 runner 已把“缺 live evidence”推进为
   “live RQA write 超预算”的真实性能 blocker。
 - 2026-05-16 已完成 repo-local 性能修复：`tonglingyu-runtime` 将四个 Agent
@@ -1197,12 +1198,23 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   回归测试验证 profile step 确实重叠执行且 step 顺序/metadata 保持稳定；验证已通过
   `cargo test -p tonglingyu-runtime`（55 tests）、`cargo test -p tonglingyu-gateway`
   （45 tests）、两包 `cargo clippy -D warnings`、`cargo fmt --check` 和
-  `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。该修复尚未部署并
-  复测目标 live gateway，不能据此关闭 `rqa_write_p95_ms` blocker。
-- 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity/load 和
-  incident/audit evidence 已能生成，但尚未在默认 production 预算下通过，也尚未绑定
-  最终 live release report；当前完成的是本地/目标环境 runner、证据 JSON、哈希绑定、
-  失败报告和 fail-closed contract。
+  `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
+- 2026-05-16 已将提交 `4f514d0` 部署到 `hhost` 并重启
+  `tonglingyu-gateway`。远端 `.env` 已按规则备份两次：先备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  后用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  并 pin 回新 image id
+  `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
+- 完整远端 release automation `remote-release-20260516T055004Z-50395` 已在默认
+  10 分钟窗口下通过 live capacity 和 incident/capacity gate：
+  `rqa_live_capacity_load_smoke.status=ok`，`rqa_write_p95_ms=7816`、
+  `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
+  `rqa_incident_capacity.status=passed`，artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+- Milestone M 可以标记为完成；但整体 RQA production-ready 仍不能宣布完成。当前
+  release automation 的 required failures 为 `security_scan`、
+  `release_ops_readiness` 和 `openwebui_browser_review`。
 
 ## 提交节奏
 
