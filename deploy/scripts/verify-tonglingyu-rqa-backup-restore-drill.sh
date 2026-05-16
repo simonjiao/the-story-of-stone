@@ -43,8 +43,13 @@ TASK_ID="${TONGLINGYU_RQA_RESTORE_DRILL_TASK_ID:-}"
 
 GATEWAY_BIN="${TONGLINGYU_RQA_RESTORE_DRILL_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
 SKIP_BUILD="${TONGLINGYU_RQA_RESTORE_DRILL_SKIP_BUILD:-false}"
+DOCKER_FALLBACK="${TONGLINGYU_RQA_RESTORE_DRILL_DOCKER_FALLBACK:-true}"
+DOCKER_SERVICE="${TONGLINGYU_RQA_RESTORE_DRILL_DOCKER_SERVICE:-tonglingyu-gateway}"
+CONTAINER_DB_PATH="${TONGLINGYU_RQA_RESTORE_DRILL_CONTAINER_DB_PATH:-${TONGLINGYU_DB_PATH:-/data/tonglingyu.db}}"
+CONTAINER_GATEWAY_BIN="${TONGLINGYU_RQA_RESTORE_DRILL_CONTAINER_GATEWAY_BIN:-tonglingyu-gateway}"
 RESTORED_DB="${WORK_DIR}/restored.db"
 META_JSON="${WORK_DIR}/restore-drill-meta.json"
+BACKUP_EXECUTION_MODE="host"
 
 is_true() {
   case "${1:-}" in
@@ -63,6 +68,7 @@ fi
 mkdir -p "${RESTORE_ARTIFACT_DIR}"
 RESTORE_ARTIFACT_DIR="$(cd -- "${RESTORE_ARTIFACT_DIR}" && pwd)"
 BACKUP_DB="${RESTORE_ARTIFACT_DIR}/backup.db"
+CONTAINER_BACKUP_DB="/tmp/tonglingyu-restore-drill-${ARTIFACT_RUN_ID}.db"
 
 now_ms() {
   python3 - <<'PY'
@@ -300,12 +306,37 @@ PY
 )
 
 BACKUP_STARTED_MS="$(now_ms)"
-if ! "${GATEWAY_BIN}" backup-db \
-  --db "${PRIMARY_DB}" \
-  --output "${BACKUP_DB}" \
-  >"${WORK_DIR}/backup.stdout" \
-  2>"${WORK_DIR}/backup.stderr"; then
-  emit_failure "backup_command_failed" "${STARTED_MS}"
+backup_primary_db() {
+  "${GATEWAY_BIN}" backup-db \
+    --db "${PRIMARY_DB}" \
+    --output "${BACKUP_DB}" \
+    >"${WORK_DIR}/backup.stdout" \
+    2>"${WORK_DIR}/backup.stderr"
+}
+
+backup_primary_db_with_docker() {
+  BACKUP_EXECUTION_MODE="docker"
+  docker compose exec -T "${DOCKER_SERVICE}" \
+    "${CONTAINER_GATEWAY_BIN}" backup-db \
+    --db "${CONTAINER_DB_PATH}" \
+    --output "${CONTAINER_BACKUP_DB}" \
+    >"${WORK_DIR}/backup.stdout" \
+    2>"${WORK_DIR}/backup.stderr"
+  docker compose cp "${DOCKER_SERVICE}:${CONTAINER_BACKUP_DB}" "${BACKUP_DB}" \
+    >>"${WORK_DIR}/backup.stdout" \
+    2>>"${WORK_DIR}/backup.stderr"
+  docker compose exec -T "${DOCKER_SERVICE}" rm -f "${CONTAINER_BACKUP_DB}" \
+    >>"${WORK_DIR}/backup.stdout" \
+    2>>"${WORK_DIR}/backup.stderr" || true
+}
+
+if ! backup_primary_db; then
+  if ! is_true "${DOCKER_FALLBACK}"; then
+    emit_failure "backup_command_failed" "${STARTED_MS}"
+  fi
+  if ! backup_primary_db_with_docker; then
+    emit_failure "backup_command_failed" "${STARTED_MS}"
+  fi
 fi
 BACKUP_FINISHED_MS="$(now_ms)"
 
@@ -555,7 +586,7 @@ if ! python3 - "${REPORT_PATH}" "${META_JSON}" "${SOURCE_MODE}" "${PRIMARY_DB}" 
   "${WORK_DIR}/restore-release-report-validator.json" \
   "${STARTED_MS}" "${BACKUP_STARTED_MS}" "${BACKUP_FINISHED_MS}" \
   "${RESTORE_STARTED_MS}" "${FINISHED_MS}" "${RTO_TARGET_SECONDS}" \
-  "${RPO_TARGET_SECONDS}" "${OPERATOR}" "${ENVIRONMENT}" <<'PY'
+  "${RPO_TARGET_SECONDS}" "${OPERATOR}" "${ENVIRONMENT}" "${BACKUP_EXECUTION_MODE}" <<'PY'
 import hashlib
 import json
 import sys
@@ -581,7 +612,8 @@ from pathlib import Path
     rpo_target_raw,
     operator,
     environment,
-) = sys.argv[1:19]
+    backup_execution_mode,
+) = sys.argv[1:20]
 
 started_ms = int(started_raw)
 backup_started_ms = int(backup_started_raw)
@@ -652,6 +684,7 @@ payload = {
         "met": rpo_met,
     },
     "backup": {
+        "execution_mode": backup_execution_mode,
         "started_at": iso(backup_started_ms),
         "finished_at": iso(backup_finished_ms),
         "artifact_path": backup_path,
