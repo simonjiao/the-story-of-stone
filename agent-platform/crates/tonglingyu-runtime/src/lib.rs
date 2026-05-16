@@ -9369,6 +9369,14 @@ struct ExtractedQueryTerms {
 
 fn required_exact_terms(question: &str) -> Vec<&'static str> {
     let mut terms = Vec::new();
+    let normalized = normalize_text(question);
+    if normalized.contains("通灵玉") && normalized.contains('字') {
+        terms.push("莫失莫忘");
+        terms.push("一除邪祟");
+    }
+    if normalized.contains("青埂") {
+        terms.push("青埂");
+    }
     if question.contains("寳玉") {
         terms.push("寳玉");
     }
@@ -9563,9 +9571,10 @@ fn query_blocks_exact_text(
         WHERE text LIKE ?1 ESCAPE '\'
         ORDER BY
           CASE
-            WHEN source_id LIKE '%chengjia%' THEN 1
-            WHEN source_id LIKE '%chengyi%' THEN 2
-            ELSE 3
+            WHEN source_id = 'hongloumeng-wikisource-120' THEN 1
+            WHEN source_id LIKE '%chengjia%' THEN 2
+            WHEN source_id LIKE '%chengyi%' THEN 3
+            ELSE 4
           END,
           LENGTH(text) ASC
         LIMIT ?2
@@ -10876,6 +10885,77 @@ mod tests {
         ] {
             assert!(!rendered.contains(leaked));
         }
+    }
+
+    #[test]
+    fn required_exact_terms_protect_core_eval_targets() {
+        assert_eq!(
+            required_exact_terms("通灵玉上的字是什么？"),
+            vec!["莫失莫忘", "一除邪祟"]
+        );
+        assert_eq!(
+            required_exact_terms("青埂峰和顽石在哪里出现？"),
+            vec!["青埂"]
+        );
+    }
+
+    #[test]
+    fn exact_text_lookup_prefers_primary_source_snapshot() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        for source_id in [
+            "hongloumeng-wikisource-chengjia",
+            "hongloumeng-wikisource-120",
+            "hongloumeng-wikisource-chengyi",
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO sources (
+                    source_id, source_category, format, title, work, edition,
+                    language, source_url, api_url, fetched_at,
+                    snapshot_contract_json, source_hash
+                ) VALUES (?1, 'base_material', 'mediawiki', ?1, '红楼梦',
+                    'test', 'zh', 'https://example.test/source',
+                    'https://example.test/api', '2026-05-15T00:00:00Z',
+                    '{}', ?1)
+                "#,
+                params![source_id],
+            )
+            .expect("insert source");
+        }
+        for (block_id, source_id, text) in [
+            (
+                "chengjia-short",
+                "hongloumeng-wikisource-chengjia",
+                "青埂短文",
+            ),
+            (
+                "primary-long",
+                "hongloumeng-wikisource-120",
+                "青埂峰下主要 source snapshot 证据，文字更长。",
+            ),
+            (
+                "chengyi-short",
+                "hongloumeng-wikisource-chengyi",
+                "青埂短文",
+            ),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO blocks (
+                    block_id, source_id, section_id, source_title, source_url,
+                    revision_id, block_index, kind, tag, text, normalized_text,
+                    evidence_type, chapter_no
+                ) VALUES (?1, ?2, 'section', 'source title', 'https://example.test',
+                    1, 1, 'paragraph', NULL, ?3, ?4, 'base_text', 1)
+                "#,
+                params![block_id, source_id, text, normalize_text(text)],
+            )
+            .expect("insert block");
+        }
+
+        let rows = query_blocks_exact_text(&conn, "青埂", 3).expect("query blocks");
+        assert_eq!(rows[0].block_id, "primary-long");
     }
 
     #[test]

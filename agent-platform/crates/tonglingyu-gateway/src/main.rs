@@ -161,6 +161,12 @@ struct EvalArgs {
     limit: usize,
     #[arg(long)]
     report: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "TONGLINGYU_EVAL_ALLOW_DB_MUTATION",
+        default_value_t = false
+    )]
+    allow_db_mutation: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1025,7 +1031,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Eval(args) => {
-            let report = run_eval(&args)?;
+            let report = run_eval_command(&args)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report["status"] == "passed" {
                 Ok(())
@@ -1251,21 +1257,16 @@ fn eval_report_on_db_copy(db: &Path, label: &str, limit: usize) -> Result<Option
     if !TonglingyuRuntimeStore::new(db.to_path_buf()).has_knowledge_base()? {
         return Ok(None);
     }
-    let copy_path = std::env::temp_dir().join(format!(
-        "tonglingyu-{label}-{}.db",
-        uuid::Uuid::now_v7().simple()
-    ));
-    let result = (|| -> Result<Value> {
-        let conn = open_db(db)?;
-        conn.execute("VACUUM INTO ?1", params![copy_path.display().to_string()])?;
-        run_eval(&EvalArgs {
-            db: copy_path.clone(),
+    run_eval_on_db_copy(
+        &EvalArgs {
+            db: db.to_path_buf(),
             limit,
             report: None,
-        })
-    })();
-    remove_sqlite_file_set(&copy_path);
-    result.map(Some)
+            allow_db_mutation: false,
+        },
+        label,
+    )
+    .map(Some)
 }
 
 fn remove_sqlite_file_set(path: &Path) {
@@ -2953,6 +2954,30 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         .with_context(|| format!("write {}", path.display()))?;
     }
     Ok(report)
+}
+
+fn run_eval_command(args: &EvalArgs) -> Result<Value> {
+    if args.allow_db_mutation {
+        return run_eval(args);
+    }
+    run_eval_on_db_copy(args, "cli-eval")
+}
+
+fn run_eval_on_db_copy(args: &EvalArgs, label: &str) -> Result<Value> {
+    let copy_path = std::env::temp_dir().join(format!(
+        "tonglingyu-{label}-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let result = (|| -> Result<Value> {
+        let conn = open_db(&args.db)?;
+        conn.execute("VACUUM INTO ?1", params![copy_path.display().to_string()])?;
+        let mut copy_args = args.clone();
+        copy_args.db = copy_path.clone();
+        copy_args.allow_db_mutation = true;
+        run_eval(&copy_args)
+    })();
+    remove_sqlite_file_set(&copy_path);
+    result
 }
 
 fn quality_reports_from_workflow(
@@ -7719,6 +7744,27 @@ mod tests {
         assert_eq!(summary["status"], json!("passed"));
         assert_eq!(summary["expected_evidence_hit_at_8"]["ratio"], json!(1.0));
         assert_eq!(summary["source_diversity"]["count"], json!(1));
+    }
+
+    #[test]
+    fn eval_cli_defaults_to_snapshot_copy() {
+        let args = Args::try_parse_from(["tonglingyu-gateway", "eval"]).expect("parse eval args");
+        let Command::Eval(eval_args) = args.command else {
+            panic!("expected eval command");
+        };
+
+        assert!(!eval_args.allow_db_mutation);
+    }
+
+    #[test]
+    fn eval_cli_requires_explicit_db_mutation_opt_in() {
+        let args = Args::try_parse_from(["tonglingyu-gateway", "eval", "--allow-db-mutation"])
+            .expect("parse eval args");
+        let Command::Eval(eval_args) = args.command else {
+            panic!("expected eval command");
+        };
+
+        assert!(eval_args.allow_db_mutation);
     }
 
     #[test]

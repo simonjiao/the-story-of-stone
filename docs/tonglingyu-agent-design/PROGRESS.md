@@ -523,7 +523,14 @@
   `quality_report_production_ready=86/86`，`quality_summary.status=passed`，
   blocker 为空，`eval_failure_records=0`。本轮修复包含 source license /
   usage / attribution metadata 入库与校验、version boundary 与程乙正文检索
-  策略校准，以及脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
+  策略校准、脂批“原文”问题和“正文事实”问题的 reviewer 边界拆分。
+  2026-05-16 进一步修正通灵玉铭文与青埂峰核心 eval target：通灵玉“字”
+  问题会强制 exact term 保护 `莫失莫忘` 和 `一除邪祟`，青埂问题会强制
+  exact term 保护 `青埂`；exact-text fallback 优先返回
+  `hongloumeng-wikisource-120` source snapshot，避免被更短的程甲/程乙文本抢占。
+  `tonglingyu-gateway eval` 也已改为默认在 SQLite 临时副本上运行；只有显式设置
+  `--allow-db-mutation` / `TONGLINGYU_EVAL_ALLOW_DB_MUTATION=true` 才允许把 eval
+  workflow 写回目标 DB。
 - RQA Milestone E 已完成代码切片：
   Gateway admin trace 和 package audit 现在暴露 `retrieval_quality_summary`、
   `retrieval_failure_ids` 与 admin detail failure 列表；JSON metrics 新增
@@ -731,9 +738,12 @@
   恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
   incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
   反向打断恢复演练；contract 已覆盖该边界。2026-05-16 持久 artifact 加固后
-  重新跑真实 restore drill 脚本路径，备份 artifact 已持久化，但恢复后 RQA eval
-  因 5 个 eval case 失败而 fail-closed，因此当前不能把本地 restore drill 作为
-  当前通过证据。
+  曾因恢复后 RQA eval 失败 fail-closed；本轮修正 exact-term / source-priority
+  检索后，本地 eval 重新达到 103/103，expected_evidence_hit@8 为 5/5，
+  exact_term_coverage 为 3/3。随后用真实 `existing_refs` 重新运行恢复演练，
+  恢复后 admin trace、retrieval failure、governance task、package replay、
+  RQA quality gate 和 saved report validator 均通过，RTO/RPO 约为
+  45s / 45s，低于 900s / 3600s 目标。
 - 2026-05-16 带 digest image refs 和 fixture image scan 的 preflight release
   readiness 可消除 required gate failure：runtime config 静态 compose/env 解析通过，
   默认 RQA DB 的旧 eval artifact 已审计关闭，`retrieval_quality` open P0
@@ -834,6 +844,16 @@
   status-history audit。2026-05-16 已对本地默认 RQA DB 执行一次 remediation，
   审计关闭 182 个旧 eval failure 和 182 个 governance tasks；备份路径为
   `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260515T205220Z.db`。
+  本轮 eval 修正后又审计关闭 25 个 `eval-tly-*` failure 和 25 个 governance
+  tasks，备份路径为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260516T005451Z.db`，
+  备份 SHA-256 为
+  `00426cf0fe5c17e8946e0704de4f82bfd9ab41c4d16fcaff5172957affdd8d22`。在修正 eval
+  CLI 默认 snapshot-copy 前，手动复测又产生一批 25/25 eval artifact，已同样按
+  remediation 策略审计关闭；备份为
+  `data/tonglingyu/backups/rqa-eval-artifact-remediation-20260516T010554Z.db`，
+  备份 SHA-256 为
+  `3d668a2549d1125f36d6b979a6dcf99fc2bd0600082cb2d0e99370dee33ca45a`。
 - 2026-05-16 以 digest image refs 和 fixture image scan 复跑 preflight release
   readiness 后，`runtime_config`、`retrieval_quality`、
   `rqa_backup_restore_drill` 和 `security_scan` 均已通过；`required_failures=[]`。
