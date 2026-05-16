@@ -1295,6 +1295,90 @@ capacity_load_evidence_path.write_text(
 capacity_load_evidence_sha256 = hashlib.sha256(
     capacity_load_evidence_path.read_bytes(),
 ).hexdigest()
+incident_audit_evidence_path = Path(str(target) + ".incident-audit.json")
+incident_audit_evidence = {
+    "audit_history": {
+        "audit_history_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:audit-history",
+            "valid": True,
+        },
+        "audit_tombstone_count": 1,
+        "hard_delete_open_records_forbidden": True,
+        "required_fields": [
+            "actor",
+            "reason_sha256",
+            "previous_status",
+            "new_status",
+            "timestamp",
+        ],
+        "status_history_actor_count": 1,
+        "status_history_event_count": 2,
+    },
+    "checks": {
+        "conclusion_passed": True,
+        "incident_response_refs_valid": True,
+        "operator_environment_recorded": True,
+        "recovery_validation_present": True,
+        "rto_rpo_breach_escalation_present": True,
+        "status_history_actor_present": True,
+        "status_history_events_present": True,
+    },
+    "duration_minutes": 30,
+    "environment": "production",
+    "errors": [],
+    "finished_at": "2026-05-15T00:30:00+00:00",
+    "generated_at": "2026-05-15T00:30:01+00:00",
+    "incident_audit_policy_version": "tonglingyu-rqa-incident-audit-evidence-v1",
+    "incident_drill": {
+        "conclusion": "passed",
+        "first_response_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-first-response",
+            "valid": True,
+        },
+        "incident_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-response",
+            "valid": True,
+        },
+        "mitigation_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-mitigation",
+            "valid": True,
+        },
+        "owner": "rqa-oncall",
+        "recovery_validation_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-recovery-validation",
+            "valid": True,
+        },
+        "rollback_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-rollback",
+            "valid": True,
+        },
+        "rto_rpo_breach_escalation_ref": {
+            "kind": "artifact",
+            "ref": "artifact:rto-rpo-breach-escalation",
+            "valid": True,
+        },
+        "severity": "sev2",
+    },
+    "object": "tonglingyu.rqa_incident_audit_evidence",
+    "operator": "release-reviewer",
+    "schema_version": 1,
+    "secret_values_printed": False,
+    "started_at": "2026-05-15T00:00:00+00:00",
+    "status": "ok",
+}
+incident_audit_evidence_path.write_text(
+    json.dumps(incident_audit_evidence, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+incident_audit_evidence_sha256 = hashlib.sha256(
+    incident_audit_evidence_path.read_bytes(),
+).hexdigest()
 image_refs = [
     "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
     "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
@@ -2049,12 +2133,19 @@ gate_stdout = {
             "sha256": capacity_load_evidence_sha256,
             "validated": True,
         },
+        "incident_audit_evidence": {
+            "errors": [],
+            "path": str(incident_audit_evidence_path),
+            "sha256": incident_audit_evidence_sha256,
+            "validated": True,
+        },
         "checks": {
             "audit_history_live_evidence_required": True,
             "capacity_load_evidence_validated": True,
             "capacity_live_evidence_required": True,
             "emergency_flags_fail_closed": True,
             "hard_delete_open_records_forbidden": True,
+            "incident_audit_evidence_validated": True,
             "incident_runbook_defined": True,
             "load_live_evidence_required": True,
             "no_unbounded_queue": True,
@@ -2076,6 +2167,7 @@ gate_stdout = {
             "capacity_evidence_complete": True,
             "capacity_evidence_ref": "artifact:capacity-smoke",
             "incident_evidence_ref": "artifact:incident-response",
+            "incident_audit_evidence_sha256": incident_audit_evidence_sha256,
             "load_evidence_ref": "artifact:load-soak",
         },
         "generated_at": "2026-05-15T00:00:11+00:00",
@@ -3394,6 +3486,10 @@ for gate in report["gates"]:
         gate_json["capacity_load_evidence"]["errors"] = [
             "capacity_load_evidence_admin_list_page_count_mismatch"
         ]
+        gate_json["incident_audit_evidence"]["validated"] = False
+        gate_json["incident_audit_evidence"]["errors"] = [
+            "incident_audit_evidence_status_history_event_count_invalid"
+        ]
         gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
@@ -3414,6 +3510,10 @@ assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
   '"rqa_incident_capacity_capacity_load_evidence_not_validated" in report["errors"]'
 assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
   '"rqa_incident_capacity_capacity_load_evidence_errors_present" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_incident_audit_evidence_not_validated" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_incident_audit_evidence_errors_present" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" <<'PY'
 import json

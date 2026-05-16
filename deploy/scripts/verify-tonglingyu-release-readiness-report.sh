@@ -2339,6 +2339,7 @@ def validate_incident_capacity_gate_stdout():
         "load_live_evidence_required",
         "audit_history_live_evidence_required",
         "capacity_load_evidence_validated",
+        "incident_audit_evidence_validated",
     }
     if not isinstance(checks, dict):
         errors.append("rqa_incident_capacity_checks_missing")
@@ -2421,6 +2422,38 @@ def validate_incident_capacity_gate_stdout():
             if not is_sha256(evidence_sha256):
                 errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_missing")
 
+    incident_audit_evidence = gate_json.get("incident_audit_evidence")
+    if not isinstance(incident_audit_evidence, dict):
+        errors.append("rqa_incident_capacity_incident_audit_evidence_missing")
+    else:
+        evidence_path = incident_audit_evidence.get("path")
+        evidence_sha256 = incident_audit_evidence.get("sha256")
+        evidence_errors = incident_audit_evidence.get("errors")
+        if not isinstance(incident_audit_evidence.get("validated"), bool):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_validated_bool")
+        if not isinstance(evidence_errors, list):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_errors_array")
+        elif evidence_errors:
+            errors.append("rqa_incident_capacity_incident_audit_evidence_errors_present")
+        if nonempty(evidence_path):
+            evidence_file = Path(evidence_path)
+            if not evidence_file.is_absolute():
+                errors.append("rqa_incident_capacity_incident_audit_evidence_path_not_absolute")
+            elif production_ready:
+                if not evidence_file.is_file():
+                    errors.append("rqa_incident_capacity_incident_audit_evidence_file_not_found")
+                elif is_sha256(evidence_sha256) and file_sha256(evidence_file) != evidence_sha256:
+                    errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_mismatch")
+        if nonempty(evidence_sha256) and not is_sha256(evidence_sha256):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_invalid")
+        if production_ready:
+            if incident_audit_evidence.get("validated") is not True:
+                errors.append("rqa_incident_capacity_incident_audit_evidence_not_validated")
+            if not nonempty(evidence_path):
+                errors.append("rqa_incident_capacity_incident_audit_evidence_path_missing")
+            if not is_sha256(evidence_sha256):
+                errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_missing")
+
     audit_history = gate_json.get("audit_history")
     if not isinstance(audit_history, dict):
         errors.append("rqa_incident_capacity_audit_history_missing")
@@ -2484,6 +2517,8 @@ def validate_incident_capacity_gate_stdout():
                 errors.append(f"rqa_incident_capacity_{field}_missing")
         if not is_sha256(evidence.get("capacity_load_evidence_sha256")):
             errors.append("rqa_incident_capacity_capacity_load_evidence_sha256_missing")
+        if not is_sha256(evidence.get("incident_audit_evidence_sha256")):
+            errors.append("rqa_incident_capacity_incident_audit_evidence_sha256_missing")
         if gate_json.get("mode") != "live":
             errors.append("production_ready_requires_rqa_incident_capacity_live_mode")
         if gate_json.get("require_live") is not True:

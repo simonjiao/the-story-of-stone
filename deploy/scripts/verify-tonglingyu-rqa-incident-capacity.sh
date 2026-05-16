@@ -15,6 +15,7 @@ LOAD_EVIDENCE_REF="${TONGLINGYU_RQA_LOAD_EVIDENCE_REF:-}"
 AUDIT_HISTORY_EVIDENCE_REF="${TONGLINGYU_RQA_AUDIT_HISTORY_EVIDENCE_REF:-}"
 INCIDENT_EVIDENCE_REF="${TONGLINGYU_RQA_INCIDENT_EVIDENCE_REF:-}"
 CAPACITY_LOAD_EVIDENCE="${TONGLINGYU_RQA_CAPACITY_LOAD_EVIDENCE:-}"
+INCIDENT_AUDIT_EVIDENCE="${TONGLINGYU_RQA_INCIDENT_AUDIT_EVIDENCE:-}"
 CAPACITY_EVAL_REPORT_COUNT="${TONGLINGYU_RQA_CAPACITY_EVAL_REPORT_COUNT:-0}"
 CAPACITY_FAILURE_COUNT="${TONGLINGYU_RQA_CAPACITY_FAILURE_COUNT:-0}"
 CAPACITY_ADMIN_LIST_PAGE_COUNT="${TONGLINGYU_RQA_CAPACITY_ADMIN_LIST_PAGE_COUNT:-0}"
@@ -28,6 +29,7 @@ python3 - "${REPO_DIR}" "${RUNBOOK_PATH}" "${REPORT_PATH}" "${REQUIRE_LIVE}" \
   "${CAPACITY_EVIDENCE_REF}" "${LOAD_EVIDENCE_REF}" \
   "${AUDIT_HISTORY_EVIDENCE_REF}" "${INCIDENT_EVIDENCE_REF}" \
   "${CAPACITY_LOAD_EVIDENCE}" \
+  "${INCIDENT_AUDIT_EVIDENCE}" \
   "${CAPACITY_EVAL_REPORT_COUNT}" "${CAPACITY_FAILURE_COUNT}" \
   "${CAPACITY_ADMIN_LIST_PAGE_COUNT}" "${LOAD_RQA_WRITE_P95_MS}" \
   "${LOAD_ADMIN_READ_P95_MS}" "${LOAD_METRICS_READ_P95_MS}" \
@@ -53,6 +55,7 @@ from urllib.parse import urlparse
     audit_history_evidence_ref,
     incident_evidence_ref,
     capacity_load_evidence_raw,
+    incident_audit_evidence_raw,
     capacity_eval_report_count_raw,
     capacity_failure_count_raw,
     capacity_admin_list_page_count_raw,
@@ -60,7 +63,7 @@ from urllib.parse import urlparse
     load_admin_read_p95_ms_raw,
     load_metrics_read_p95_ms_raw,
     load_release_gate_ms_raw,
-) = sys.argv[1:20]
+) = sys.argv[1:21]
 
 repo_dir = Path(repo_dir_raw)
 runbook_path = Path(runbook_path_raw)
@@ -358,6 +361,96 @@ capacity_load_evidence_valid = (
     and isinstance(capacity_load_evidence, dict)
     and not capacity_load_evidence_errors
 )
+incident_audit_evidence_path = resolve_evidence_path(incident_audit_evidence_raw)
+incident_audit_evidence = None
+incident_audit_evidence_sha256 = ""
+incident_audit_evidence_valid = False
+incident_audit_evidence_errors = []
+if incident_audit_evidence_path is not None:
+    if not incident_audit_evidence_path.is_file():
+        incident_audit_evidence_errors.append("incident_audit_evidence_not_found")
+    else:
+        incident_audit_evidence_sha256 = file_sha256(incident_audit_evidence_path)
+        incident_audit_evidence = load_json_file(incident_audit_evidence_path)
+        if not isinstance(incident_audit_evidence, dict):
+            incident_audit_evidence_errors.append("incident_audit_evidence_json_invalid")
+if isinstance(incident_audit_evidence, dict):
+    if incident_audit_evidence.get("object") != "tonglingyu.rqa_incident_audit_evidence":
+        incident_audit_evidence_errors.append("incident_audit_evidence_object_invalid")
+    if incident_audit_evidence.get("schema_version") != 1:
+        incident_audit_evidence_errors.append("incident_audit_evidence_schema_version_invalid")
+    if incident_audit_evidence.get("status") != "ok":
+        incident_audit_evidence_errors.append("incident_audit_evidence_status_invalid")
+    if incident_audit_evidence.get("secret_values_printed") is not False:
+        incident_audit_evidence_errors.append("incident_audit_evidence_secret_values_printed")
+    audit_history_from_evidence = incident_audit_evidence.get("audit_history")
+    if not isinstance(audit_history_from_evidence, dict):
+        incident_audit_evidence_errors.append("incident_audit_evidence_audit_history_missing")
+    else:
+        if audit_history_from_evidence.get("status_history_event_count", 0) < 1:
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_status_history_event_count_invalid",
+            )
+        if audit_history_from_evidence.get("status_history_actor_count", 0) < 1:
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_status_history_actor_count_invalid",
+            )
+        audit_ref_from_evidence = audit_history_from_evidence.get(
+            "audit_history_evidence_ref",
+        )
+        if not isinstance(audit_ref_from_evidence, dict):
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_audit_history_ref_missing",
+            )
+        elif audit_ref_from_evidence.get("ref") != audit_ref["ref"]:
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_audit_history_ref_mismatch",
+            )
+        if audit_history_from_evidence.get("hard_delete_open_records_forbidden") is not True:
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_hard_delete_not_forbidden",
+            )
+    incident_drill_from_evidence = incident_audit_evidence.get("incident_drill")
+    if not isinstance(incident_drill_from_evidence, dict):
+        incident_audit_evidence_errors.append("incident_audit_evidence_drill_missing")
+    else:
+        incident_ref_from_evidence = incident_drill_from_evidence.get(
+            "incident_evidence_ref",
+        )
+        if not isinstance(incident_ref_from_evidence, dict):
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_incident_ref_missing",
+            )
+        elif incident_ref_from_evidence.get("ref") != incident_ref["ref"]:
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_incident_ref_mismatch",
+            )
+        if incident_drill_from_evidence.get("conclusion") != "passed":
+            incident_audit_evidence_errors.append(
+                "incident_audit_evidence_conclusion_not_passed",
+            )
+    checks_from_incident = incident_audit_evidence.get("checks")
+    if not isinstance(checks_from_incident, dict):
+        incident_audit_evidence_errors.append("incident_audit_evidence_checks_missing")
+    else:
+        for check in (
+            "status_history_events_present",
+            "status_history_actor_present",
+            "incident_response_refs_valid",
+            "recovery_validation_present",
+            "rto_rpo_breach_escalation_present",
+            "operator_environment_recorded",
+            "conclusion_passed",
+        ):
+            if checks_from_incident.get(check) is not True:
+                incident_audit_evidence_errors.append(
+                    f"incident_audit_evidence_check_failed={check}",
+                )
+incident_audit_evidence_valid = (
+    incident_audit_evidence_path is not None
+    and isinstance(incident_audit_evidence, dict)
+    and not incident_audit_evidence_errors
+)
 
 if require_live:
     for name, ref in (
@@ -386,6 +479,10 @@ if require_live:
         errors.append("capacity_load_evidence_missing")
     if not capacity_load_evidence_valid:
         errors.extend(capacity_load_evidence_errors)
+    if incident_audit_evidence_path is None:
+        errors.append("incident_audit_evidence_missing")
+    if not incident_audit_evidence_valid:
+        errors.extend(incident_audit_evidence_errors)
 
 capacity_evidence_complete = (
     require_live
@@ -404,6 +501,7 @@ capacity_evidence_complete = (
     and load_metrics_read_p95_ms is not None
     and load_release_gate_ms is not None
     and capacity_load_evidence_valid
+    and incident_audit_evidence_valid
     and not emergency_disabled
     and not degraded_mode
     and not persistence_degraded
@@ -423,6 +521,7 @@ checks = {
     "load_live_evidence_required": True,
     "audit_history_live_evidence_required": True,
     "capacity_load_evidence_validated": capacity_load_evidence_valid or not require_live,
+    "incident_audit_evidence_validated": incident_audit_evidence_valid or not require_live,
 }
 incident_capacity_ready = not errors
 
@@ -476,6 +575,12 @@ payload = {
         "validated": capacity_load_evidence_valid,
         "errors": capacity_load_evidence_errors,
     },
+    "incident_audit_evidence": {
+        "path": str(incident_audit_evidence_path) if incident_audit_evidence_path else "",
+        "sha256": incident_audit_evidence_sha256,
+        "validated": incident_audit_evidence_valid,
+        "errors": incident_audit_evidence_errors,
+    },
     "audit_history": {
         "status_history_required": True,
         "required_fields": [
@@ -504,6 +609,7 @@ payload = {
         "audit_history_evidence_ref": audit_ref["ref"],
         "incident_evidence_ref": incident_ref["ref"],
         "capacity_load_evidence_sha256": capacity_load_evidence_sha256,
+        "incident_audit_evidence_sha256": incident_audit_evidence_sha256,
     },
     "errors": errors,
     "secret_values_printed": False,

@@ -879,6 +879,14 @@
   live `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report
   validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境
   真实 capacity/load、incident drill 和 audit-history evidence 仍未执行。
+- Incident drill / audit-history 已有可复核 evidence 机制：
+  `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
+  `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
+  audit tombstone、incident severity/owner、first response、mitigation、rollback、
+  recovery validation 和 RTO/RPO breach escalation evidence ref；live
+  `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report validator
+  会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境真实
+  incident drill 和 audit-history evidence 仍未执行。
 
 ## 下一步
 
@@ -890,8 +898,7 @@
    和 live runtime identity artifact。
 3. 补齐 RQA Milestone L-M 的目标环境证据：live Open WebUI admin Action、
    post-release monitor JSON artifact、目标环境 capacity/load JSON artifact、
-   incident response drill 和 audit-history evidence；本地 gate 已 fail-closed，
-   但不能替代真实环境证据。
+   incident/audit JSON artifact；本地 gate 已 fail-closed，但不能替代真实环境证据。
 4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
 5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
