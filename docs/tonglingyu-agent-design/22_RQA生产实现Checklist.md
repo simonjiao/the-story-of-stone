@@ -1189,6 +1189,16 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 - 2026-05-16 最新远端 release automation 已正确识别 incident runbook 和
   fail-closed 事故/容量策略；目标环境 runner 已把“缺 live evidence”推进为
   “live RQA write 超预算”的真实性能 blocker。
+- 2026-05-16 已完成 repo-local 性能修复：`tonglingyu-runtime` 将四个 Agent
+  Runtime profile step 从串行执行改为并发执行，并在所有 profile 返回后按原
+  workflow step 顺序写回 `agent_runtime` metadata。该改动没有绕过 Hermes/tool
+  约束：required tool enforcement、output_ref 绑定校验、Hermes draft/reviewer
+  本地治理、stream/admin summary 和后续 SQLite audit append 均保留。本地新增
+  回归测试验证 profile step 确实重叠执行且 step 顺序/metadata 保持稳定；验证已通过
+  `cargo test -p tonglingyu-runtime`（55 tests）、`cargo test -p tonglingyu-gateway`
+  （45 tests）、两包 `cargo clippy -D warnings`、`cargo fmt --check` 和
+  `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。该修复尚未部署并
+  复测目标 live gateway，不能据此关闭 `rqa_write_p95_ms` blocker。
 - 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity/load 和
   incident/audit evidence 已能生成，但尚未在默认 production 预算下通过，也尚未绑定
   最终 live release report；当前完成的是本地/目标环境 runner、证据 JSON、哈希绑定、

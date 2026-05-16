@@ -1011,6 +1011,17 @@
   incident audit 和 quality gate 均可执行，但 `rqa_write_p95_ms=11567`，超过当前
   10s production 预算，因此 capacity/load evidence 和 `rqa_incident_capacity`
   仍 fail-closed。不能通过调松预算或缩短窗口来宣布 production-ready。
+- 已定位 live `rqa_write_p95_ms` 超预算的主要代码风险：RQA 写请求会先完成本地
+  deterministic workflow，再逐个串行执行四个 Agent Runtime profile step；这些
+  profile step 只绑定和审计对应 step output，不参与本地证据/包/reviewer 的因果
+  生成链。`tonglingyu-runtime` 已把 profile step execution 改为并发执行，并按
+  原 workflow step index 写回 `agent_runtime` metadata，同时保留 required tool
+  enforcement、output_ref 校验、Hermes draft/reviewer 本地治理和后续按序 audit
+  append。本地验证已通过：`cargo test -p tonglingyu-runtime`（55 tests）、
+  `cargo test -p tonglingyu-gateway`（45 tests）、两包 `cargo clippy -D warnings`、
+  `cargo fmt --check` 和 `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
+  该修复尚未部署到目标 live gateway，也尚未复跑 live capacity smoke；因此只能标记为
+  repo-local 性能修复完成，不能标记为 production-ready。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1026,10 +1037,10 @@
    Trivy raw reports 已持久化，但第三方镜像合计仍有 63 critical / 714 high；
    需要替换/重建镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的
    审批风险例外。
-2. 处理 RQA Milestone M 的目标环境性能 blocker：live runner 已能生成目标环境
-   capacity/load 与 incident/audit artifact，但当前 live `rqa_write_p95_ms` 超过
-   10s 预算；需要优化 live 请求路径、上游延迟、gateway/RQA 写入边界或运行配置后
-   复跑，直到默认 production 预算下通过。
+2. 处理 RQA Milestone M 的目标环境性能 blocker：repo-local 已完成 Agent Runtime
+   profile step 并发化并通过本地测试；下一步必须同步到远端、重建并重启
+   `tonglingyu-gateway`，再复跑 live capacity smoke，直到默认 10s production
+   预算下通过并绑定 release report。
 3. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
    窗口、operator/environment、live gate evidence、admin Action/API evidence 和
    Open WebUI browser review evidence 必须绑定进最终 live release report。
