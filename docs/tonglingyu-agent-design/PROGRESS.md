@@ -880,8 +880,8 @@
   本机缺 Docker CLI 时可通过 SSH 在 `hhost` 执行完整 live release automation，
   注入本地源 commit/dirty 状态，绑定目标 live DB、pre-migration backup、远端
   artifact 目录，并把 release automation / release readiness / saved validator
-  artifact 回收到本地。最新 artifact：
-  `data/tonglingyu/remote-release-automation/remote-release-20260516T023720Z-94844/remote-release-automation.json`。
+  artifact 回收到本地。提交并重新同步后，最新 artifact：
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T024406Z-98556/remote-release-automation.json`。
   该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，且
   `runtime_config`、`rqa_migration_preflight`、`retrieval_quality`、
   `rqa_performance_budget`、`rqa_api_contract`、`rqa_user_lifecycle`、
@@ -891,7 +891,8 @@
   `security_scan` 缺真实生产镜像/依赖扫描或已审批风险例外，
   `release_ops_readiness` 缺 post-release monitor evidence，
   `rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
-  `openwebui_browser_review` 未确认，且本次 run 发生在未提交改动状态。
+  `openwebui_browser_review` 未确认；`tracked worktree must be clean` blocker
+  已在提交 `ecdd5d0` 后的重跑中消失。
 - 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
   `source_url`、`license`、`license_url`、`license_source_url`、
   `attribution` 和 `usage_boundary`，导致 live RQA eval fail-closed。已新增
@@ -986,11 +987,9 @@
    目标环境 capacity/load JSON artifact、incident/audit JSON artifact 和
    Open WebUI browser review evidence；本地 gate 已 fail-closed，但不能替代真实
    环境证据。
-4. 提交当前远端 automation/backfill 代码后，同步 hhost 并重跑完整 live release
-   automation，确认 `tracked worktree must be clean` blocker 消失。
-5. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
-6. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-7. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+6. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
