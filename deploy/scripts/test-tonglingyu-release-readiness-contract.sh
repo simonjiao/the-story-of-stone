@@ -51,6 +51,7 @@ TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-
 TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
 TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
 TAMPERED_SECURITY_GATE_IMAGE_INVENTORY_REPORT="${WORK_DIR}/tampered-security-gate-image-inventory-report.json"
+TAMPERED_SECURITY_GATE_IMAGE_RAW_REPORTS_REPORT="${WORK_DIR}/tampered-security-gate-image-raw-reports-report.json"
 TAMPERED_RELEASE_OPS_STDOUT_REPORT="${WORK_DIR}/tampered-release-ops-stdout-report.json"
 TAMPERED_RELEASE_OPS_MONITOR_REPORT="${WORK_DIR}/tampered-release-ops-monitor-report.json"
 TAMPERED_RELEASE_OPS_ALERT_REPORT="${WORK_DIR}/tampered-release-ops-alert-report.json"
@@ -264,10 +265,12 @@ security_digest_env=(
 )
 
 trivy_high_stdout="${WORK_DIR}/trivy-high-security.stdout"
+trivy_high_artifact_dir="${WORK_DIR}/trivy-high-raw-reports"
 if env \
   "${security_digest_env[@]}" \
   "PATH=${FAKE_TRIVY_DIR}:${PATH}" \
   "TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH=${SECURITY_DEPENDENCY_SCAN_JSON}" \
+  "TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR=${trivy_high_artifact_dir}" \
   "TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY=true" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-security.sh" >"${trivy_high_stdout}"; then
   echo "security gate must fail when real Trivy JSON contains high findings" >&2
@@ -276,6 +279,9 @@ fi
 assert_report "${trivy_high_stdout}" 'report["status"] == "failed"'
 assert_report "${trivy_high_stdout}" 'report["image_scan"]["high_count"] == report["image_scan"]["image_count"]'
 assert_report "${trivy_high_stdout}" 'report["image_scan"]["scanned_report_count"] == report["image_scan"]["image_count"]'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_reports_persistent"] is True'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_report_artifact_dir"].endswith("trivy-high-raw-reports")'
+assert_report "${trivy_high_stdout}" 'len(report["image_scan"]["raw_report_paths"]) == report["image_scan"]["image_count"]'
 assert_report "${trivy_high_stdout}" '"image_high_findings_present" in report["errors"]'
 
 override_guard_stderr="${WORK_DIR}/override-guard.stderr"
@@ -1390,6 +1396,38 @@ image_refs = [
 image_refs_sha256 = hashlib.sha256(
     ("\n".join(image_refs) + "\n").encode("utf-8")
 ).hexdigest()
+image_scan_artifact_dir = Path(str(target) + ".image-scan-reports").resolve()
+image_scan_artifact_dir.mkdir(parents=True, exist_ok=True)
+image_raw_report_paths = []
+image_report_digests = []
+for image_ref in image_refs:
+    report_path = image_scan_artifact_dir / (
+        "trivy-" + hashlib.sha256(image_ref.encode("utf-8")).hexdigest() + ".json"
+    )
+    report_path.write_text(
+        json.dumps(
+            {
+                "Results": [
+                    {
+                        "Target": image_ref,
+                        "Vulnerabilities": [],
+                    },
+                ],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    image_raw_report_paths.append(str(report_path))
+    image_report_digests.append(hashlib.sha256(report_path.read_bytes()).hexdigest())
+image_raw_report_paths_sha256 = hashlib.sha256(
+    ("\n".join(image_raw_report_paths) + "\n").encode("utf-8")
+).hexdigest()
+image_scanned_reports_sha256 = hashlib.sha256(
+    ("\n".join(sorted(image_report_digests)) + "\n").encode("utf-8")
+).hexdigest()
 production_default_thresholds = {
     "eval_case_classification": 1.0,
     "exact_term_coverage": 1.0,
@@ -1863,7 +1901,12 @@ gate_stdout = {
             "scanned_image_count": 6,
             "scanned_image_refs_sha256": image_refs_sha256,
             "scanned_report_count": 6,
-            "scanned_reports_sha256": "d" * 64,
+            "scanned_reports_sha256": image_scanned_reports_sha256,
+            "raw_reports_persistent": True,
+            "raw_report_artifact_dir": str(image_scan_artifact_dir),
+            "raw_report_paths": image_raw_report_paths,
+            "raw_report_paths_sha256": image_raw_report_paths_sha256,
+            "scan_run_id": "synthetic-trivy-run",
             "status": "passed",
         },
         "object": "tonglingyu.release_security_gate",
@@ -2481,6 +2524,9 @@ release_manifest = {
         "scanned_image_refs_sha256": image_scan["scanned_image_refs_sha256"],
         "scanned_report_count": image_scan["scanned_report_count"],
         "scanned_reports_sha256": image_scan["scanned_reports_sha256"],
+        "raw_reports_persistent": image_scan["raw_reports_persistent"],
+        "raw_report_artifact_dir": image_scan["raw_report_artifact_dir"],
+        "raw_report_paths_sha256": image_scan["raw_report_paths_sha256"],
     },
 }
 report["release_manifest"] = release_manifest
@@ -2502,6 +2548,9 @@ release_runtime_identity = {
         "scanned_image_count": image_scan["scanned_image_count"],
         "scanned_report_count": image_scan["scanned_report_count"],
         "scanned_reports_sha256": image_scan["scanned_reports_sha256"],
+        "raw_reports_persistent": image_scan["raw_reports_persistent"],
+        "raw_report_artifact_dir": image_scan["raw_report_artifact_dir"],
+        "raw_report_paths_sha256": image_scan["raw_report_paths_sha256"],
     },
     "running_images": {
         "source_gate": "strict_gateway",
@@ -2640,7 +2689,8 @@ registry_entries = [
         "scan_report_collection",
         release_manifest["security"]["scanned_reports_sha256"],
         "security_scan",
-        ref=f"reports:{release_manifest['security']['scanned_report_count']}",
+        ref=release_manifest["security"]["raw_report_paths_sha256"],
+        path=release_manifest["security"]["raw_report_artifact_dir"],
     ),
 ]
 browser_validation = report.get("browser_review_validation")
@@ -3329,6 +3379,30 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_security_gate_image_inventory_stdout}" \
   '"security_scan_image_inventory_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_IMAGE_RAW_REPORTS_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "security_scan":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        gate_json["image_scan"]["raw_reports_persistent"] = False
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_security_gate_image_raw_reports_stdout="${WORK_DIR}/tampered-security-gate-image-raw-reports.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_SECURITY_GATE_IMAGE_RAW_REPORTS_REPORT}" >"${tampered_security_gate_image_raw_reports_stdout}"; then
+  echo "production-ready reports must reject image scans without persistent raw reports" >&2
+  exit 1
+fi
+assert_report "${tampered_security_gate_image_raw_reports_stdout}" \
+  '"security_scan_image_raw_reports_not_persistent" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_OPS_STDOUT_REPORT}" <<'PY'
 import json

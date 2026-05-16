@@ -11,6 +11,9 @@ IMAGE_SCAN_PATH="${TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_PATH:-}"
 RISK_ACCEPTANCE_PATH="${TONGLINGYU_RELEASE_SECURITY_RISK_ACCEPTANCE_PATH:-}"
 RUN_TRIVY="${TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY:-false}"
 REPORT_PATH="${TONGLINGYU_RELEASE_SECURITY_REPORT_PATH:-}"
+IMAGE_SCAN_ARTIFACT_ROOT="${TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_ROOT:-${REPO_DIR}/data/tonglingyu/security-image-scans}"
+IMAGE_SCAN_ARTIFACT_RUN_ID="${TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_RUN_ID:-$(date -u +"%Y%m%dT%H%M%SZ")-$$}"
+IMAGE_SCAN_ARTIFACT_DIR="${TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR:-${IMAGE_SCAN_ARTIFACT_ROOT}/${IMAGE_SCAN_ARTIFACT_RUN_ID}}"
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
@@ -40,6 +43,7 @@ fi
 if [[ -n "${IMAGE_SCAN_PATH}" ]]; then
   cp "${IMAGE_SCAN_PATH}" "${IMAGE_SCAN_REPORT}"
 elif is_true "${RUN_TRIVY}" && command -v trivy >/dev/null 2>&1; then
+  mkdir -p "${IMAGE_SCAN_ARTIFACT_DIR}"
   python3 - "${REPO_DIR}" "${WORK_DIR}/images.txt" <<'PY'
 import re
 import sys
@@ -92,29 +96,40 @@ print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())
 PY
     )"
     if ! trivy image --quiet --format json "${image_ref}" \
-      >"${WORK_DIR}/trivy-${image_hash}.json" \
+      >"${IMAGE_SCAN_ARTIFACT_DIR}/trivy-${image_hash}.json" \
       2>"${WORK_DIR}/trivy-${image_hash}.stderr"; then
       trivy_status="failed"
       failed_image_count=$((failed_image_count + 1))
     fi
   done <"${WORK_DIR}/images.txt"
   python3 - "${IMAGE_SCAN_REPORT}" "${trivy_status}" "${failed_image_count}" \
-    "${WORK_DIR}/images.txt" "${WORK_DIR}" <<'PY'
+    "${WORK_DIR}/images.txt" "${IMAGE_SCAN_ARTIFACT_DIR}" \
+    "${IMAGE_SCAN_ARTIFACT_RUN_ID}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-target, status, failed_image_count, image_refs_path, work_dir = sys.argv[1:6]
+(
+    target,
+    status,
+    failed_image_count,
+    image_refs_path,
+    artifact_dir_raw,
+    scan_run_id,
+) = sys.argv[1:7]
 image_refs_raw = Path(image_refs_path).read_text(encoding="utf-8")
 image_refs = [line for line in image_refs_raw.splitlines() if line.strip()]
+artifact_dir = Path(artifact_dir_raw).resolve()
 critical_count = 0
 high_count = 0
 failed_image_count = int(failed_image_count)
 report_digests = []
+raw_report_paths = []
 for image_ref in image_refs:
     image_hash = hashlib.sha256(image_ref.encode("utf-8")).hexdigest()
-    report_path = Path(work_dir) / f"trivy-{image_hash}.json"
+    report_path = artifact_dir / f"trivy-{image_hash}.json"
+    raw_report_paths.append(str(report_path))
     if not report_path.is_file():
         status = "failed"
         failed_image_count += 1
@@ -154,6 +169,13 @@ Path(target).write_text(
             "scanned_reports_sha256": hashlib.sha256(
                 ("\n".join(sorted(report_digests)) + "\n").encode("utf-8")
             ).hexdigest(),
+            "raw_reports_persistent": True,
+            "raw_report_artifact_dir": str(artifact_dir),
+            "raw_report_paths": raw_report_paths,
+            "raw_report_paths_sha256": hashlib.sha256(
+                ("\n".join(raw_report_paths) + "\n").encode("utf-8")
+            ).hexdigest(),
+            "scan_run_id": scan_run_id,
             "secret_values_printed": False,
         },
         ensure_ascii=True,
@@ -290,6 +312,15 @@ def safe_scan_result(path, scan_type):
         result["scanned_reports_sha256"] = str(
             value.get("scanned_reports_sha256") or ""
         )
+        result["raw_reports_persistent"] = value.get("raw_reports_persistent")
+        result["raw_report_artifact_dir"] = str(
+            value.get("raw_report_artifact_dir") or ""
+        )
+        result["raw_report_paths"] = value.get("raw_report_paths")
+        result["raw_report_paths_sha256"] = str(
+            value.get("raw_report_paths_sha256") or ""
+        )
+        result["scan_run_id"] = str(value.get("scan_run_id") or "")
     result_errors = []
     if value.get("secret_values_printed") is True:
         result_errors.append(f"{scan_type}_scan_secret_values_printed")
@@ -500,6 +531,59 @@ if image_scan["status"] == "passed":
         r"[0-9a-f]{64}", scanned_reports_sha256
     ):
         image_errors.append("image_scan_reports_digest_invalid")
+    raw_report_artifact_dir = image_scan.get("raw_report_artifact_dir")
+    if image_scan.get("raw_reports_persistent") is not True:
+        image_errors.append("image_scan_raw_reports_not_persistent")
+    if not isinstance(raw_report_artifact_dir, str) or not raw_report_artifact_dir:
+        image_errors.append("image_scan_raw_report_artifact_dir_missing")
+    else:
+        raw_report_artifact_path = Path(raw_report_artifact_dir)
+        if not raw_report_artifact_path.is_absolute():
+            image_errors.append("image_scan_raw_report_artifact_dir_not_absolute")
+        elif not raw_report_artifact_path.is_dir():
+            image_errors.append("image_scan_raw_report_artifact_dir_missing")
+    raw_report_paths = image_scan.get("raw_report_paths")
+    raw_report_paths_sha256 = image_scan.get("raw_report_paths_sha256")
+    if not isinstance(raw_report_paths, list) or not all(
+        isinstance(item, str) and item for item in raw_report_paths
+    ):
+        image_errors.append("image_scan_raw_report_paths_invalid")
+        raw_report_paths = []
+    elif (
+        isinstance(scanned_report_count, int)
+        and scanned_report_count >= 0
+        and len(raw_report_paths) != scanned_report_count
+    ):
+        image_errors.append("image_scan_raw_report_paths_count_mismatch")
+    if not isinstance(raw_report_paths_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", raw_report_paths_sha256
+    ):
+        image_errors.append("image_scan_raw_report_paths_digest_invalid")
+    elif raw_report_paths_sha256 != hashlib.sha256(
+        ("\n".join(raw_report_paths) + "\n").encode("utf-8")
+    ).hexdigest():
+        image_errors.append("image_scan_raw_report_paths_digest_mismatch")
+    raw_report_digests = []
+    for raw_report_path in raw_report_paths:
+        candidate = Path(raw_report_path)
+        if not candidate.is_absolute():
+            image_errors.append("image_scan_raw_report_path_not_absolute")
+            continue
+        if not candidate.is_file():
+            image_errors.append("image_scan_raw_report_path_missing")
+            continue
+        raw_report_digests.append(file_sha256(candidate))
+    if (
+        raw_report_paths
+        and len(raw_report_digests) == len(raw_report_paths)
+        and isinstance(scanned_reports_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", scanned_reports_sha256)
+        and scanned_reports_sha256
+        != hashlib.sha256(
+            ("\n".join(sorted(raw_report_digests)) + "\n").encode("utf-8")
+        ).hexdigest()
+    ):
+        image_errors.append("image_scan_raw_reports_digest_mismatch")
 
 risk_acceptance, risk_errors = load_risk_acceptance()
 coverable_errors = dependency_errors + image_errors + script_errors

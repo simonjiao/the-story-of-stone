@@ -964,6 +964,9 @@ def validate_release_manifest():
             "scanned_image_refs_sha256",
             "scanned_report_count",
             "scanned_reports_sha256",
+            "raw_reports_persistent",
+            "raw_report_artifact_dir",
+            "raw_report_paths_sha256",
         ):
             if security.get(field) != image_scan.get(field):
                 errors.append(f"release_manifest_security_{field}_mismatch")
@@ -972,9 +975,14 @@ def validate_release_manifest():
             "image_refs_sha256",
             "scanned_image_refs_sha256",
             "scanned_reports_sha256",
+            "raw_report_paths_sha256",
         ):
             if not is_sha256(security.get(field)):
                 errors.append(f"release_manifest_security_{field}_invalid")
+        if production_ready and security.get("raw_reports_persistent") is not True:
+            errors.append("production_ready_release_manifest_image_raw_reports_not_persistent")
+        if production_ready and not nonempty(security.get("raw_report_artifact_dir")):
+            errors.append("production_ready_release_manifest_image_raw_report_artifact_dir_missing")
         if production_ready and security.get("digest_missing_count") != 0:
             errors.append("production_ready_release_manifest_image_digest_missing")
         if production_ready and security.get("mutable_tag_count") != 0:
@@ -1138,6 +1146,9 @@ def validate_release_artifact_registry():
         "image_scan_reports": {
             "digest": manifest_security.get("scanned_reports_sha256"),
             "source_gate": "security_scan",
+            "path": manifest_security.get("raw_report_artifact_dir") or "",
+            "ref": manifest_security.get("raw_report_paths_sha256")
+            or f"reports:{manifest_security.get('scanned_report_count') or 0}",
         },
     }
     if isinstance(browser_review_validation, dict):
@@ -1941,6 +1952,56 @@ def validate_security_scan_gate_stdout():
             and image_scan["image_count"] != image_scan["scanned_report_count"]
         ):
             errors.append("security_scan_image_report_count_mismatch")
+        raw_report_artifact_dir = image_scan.get("raw_report_artifact_dir")
+        if image_scan.get("raw_reports_persistent") is not True:
+            errors.append("security_scan_image_raw_reports_not_persistent")
+        if not nonempty(raw_report_artifact_dir):
+            errors.append("security_scan_image_raw_report_artifact_dir_missing")
+            raw_report_artifact_path = None
+        else:
+            raw_report_artifact_path = Path(raw_report_artifact_dir)
+            if not raw_report_artifact_path.is_absolute():
+                errors.append("security_scan_image_raw_report_artifact_dir_not_absolute")
+            elif not raw_report_artifact_path.is_dir():
+                errors.append("security_scan_image_raw_report_artifact_dir_missing")
+        raw_report_paths = image_scan.get("raw_report_paths")
+        if not isinstance(raw_report_paths, list) or not all(
+            isinstance(item, str) and item for item in raw_report_paths
+        ):
+            errors.append("security_scan_image_raw_report_paths_invalid")
+            raw_report_paths = []
+        elif (
+            isinstance(image_scan.get("scanned_report_count"), int)
+            and len(raw_report_paths) != image_scan["scanned_report_count"]
+        ):
+            errors.append("security_scan_image_raw_report_paths_count_mismatch")
+        raw_report_paths_sha256 = image_scan.get("raw_report_paths_sha256")
+        if not is_sha256(raw_report_paths_sha256):
+            errors.append("security_scan_image_raw_report_paths_sha256_invalid")
+        elif hashlib.sha256(
+            ("\n".join(raw_report_paths) + "\n").encode("utf-8")
+        ).hexdigest() != raw_report_paths_sha256:
+            errors.append("security_scan_image_raw_report_paths_sha256_mismatch")
+        raw_report_digests = []
+        for raw_report_path in raw_report_paths:
+            candidate = Path(raw_report_path)
+            if not candidate.is_absolute():
+                errors.append("security_scan_image_raw_report_path_not_absolute")
+                continue
+            if not candidate.is_file():
+                errors.append("security_scan_image_raw_report_path_missing")
+                continue
+            raw_report_digests.append(file_sha256(candidate))
+        if (
+            raw_report_paths
+            and len(raw_report_digests) == len(raw_report_paths)
+            and is_sha256(image_scan.get("scanned_reports_sha256"))
+            and hashlib.sha256(
+                ("\n".join(sorted(raw_report_digests)) + "\n").encode("utf-8")
+            ).hexdigest()
+            != image_scan["scanned_reports_sha256"]
+        ):
+            errors.append("security_scan_image_raw_reports_digest_mismatch")
 
     script_scan = gate_json.get("release_script_scan")
     if not isinstance(script_scan, dict):
@@ -3309,6 +3370,9 @@ else:
         "scanned_image_count",
         "scanned_report_count",
         "scanned_reports_sha256",
+        "raw_reports_persistent",
+        "raw_report_artifact_dir",
+        "raw_report_paths_sha256",
     ):
         if image_inventory.get(field) != manifest_security.get(field):
             errors.append(f"release_runtime_identity_image_{field}_mismatch")

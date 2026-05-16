@@ -308,6 +308,26 @@ TONGLINGYU_POST_RELEASE_MONITOR_CONCLUSION=passed \
 ```
 <!-- markdownlint-enable MD013 -->
 
+## Security Scan Evidence
+
+Production image scanning must keep the raw per-image Trivy JSON reports, not
+only the summarized security gate stdout. By default, the security gate writes
+raw reports under `data/tonglingyu/security-image-scans/<run_id>/`; operators may
+set an explicit artifact directory when release evidence is collected elsewhere.
+
+The saved production-ready report validator rejects image scan summaries that do
+not bind readable raw report paths, the path-list hash, and the raw report
+content hash.
+
+<!-- markdownlint-disable MD013 -->
+```bash
+TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH="${DEPENDENCY_SCAN_REPORT_PATH:?}" \
+TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY=true \
+TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR="${IMAGE_SCAN_ARTIFACT_DIR:?}" \
+./scripts/verify-tonglingyu-release-security.sh
+```
+<!-- markdownlint-enable MD013 -->
+
 <!-- tonglingyu:release-runbook:release_report_reproduction -->
 
 ## Release Report Reproduction

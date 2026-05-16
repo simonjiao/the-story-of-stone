@@ -481,6 +481,9 @@ def build_release_manifest():
             "scanned_image_refs_sha256": image_scan.get("scanned_image_refs_sha256"),
             "scanned_report_count": image_scan.get("scanned_report_count"),
             "scanned_reports_sha256": image_scan.get("scanned_reports_sha256"),
+            "raw_reports_persistent": image_scan.get("raw_reports_persistent"),
+            "raw_report_artifact_dir": image_scan.get("raw_report_artifact_dir"),
+            "raw_report_paths_sha256": image_scan.get("raw_report_paths_sha256"),
         },
     }
     return manifest
@@ -538,6 +541,9 @@ def build_release_runtime_identity():
             "scanned_image_count": image_scan.get("scanned_image_count"),
             "scanned_report_count": image_scan.get("scanned_report_count"),
             "scanned_reports_sha256": image_scan.get("scanned_reports_sha256"),
+            "raw_reports_persistent": image_scan.get("raw_reports_persistent"),
+            "raw_report_artifact_dir": image_scan.get("raw_report_artifact_dir"),
+            "raw_report_paths_sha256": image_scan.get("raw_report_paths_sha256"),
         },
         "running_images": {
             "source_gate": "strict_gateway",
@@ -716,7 +722,9 @@ def build_release_artifact_registry():
         "scan_report_collection",
         manifest_security.get("scanned_reports_sha256"),
         "security_scan",
-        ref=f"reports:{manifest_security.get('scanned_report_count') or 0}",
+        ref=manifest_security.get("raw_report_paths_sha256")
+        or f"reports:{manifest_security.get('scanned_report_count') or 0}",
+        path=manifest_security.get("raw_report_artifact_dir") or "",
     )
     if isinstance(browser_review_validation, dict):
         add_entry(

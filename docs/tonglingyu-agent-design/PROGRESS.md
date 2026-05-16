@@ -841,10 +841,15 @@
   `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
   lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
   扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
-  fixture image scan 和 digest refs 通过；真实 Trivy 路径会解析每个 image report
-  的 HIGH/CRITICAL vulnerability，image scan artifact 已绑定当前 compose image
-  inventory hash 和 per-image report hash，saved report validator 会拒绝 scan refs
-  与 release refs 不一致的报告。生产镜像的真实 Trivy artifact 仍未生成。
+  fixture image scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
+  JSON 持久化到 `data/tonglingyu/security-image-scans/<run_id>/` 或显式
+  `TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR`，并解析每个 image
+  report 的 HIGH/CRITICAL vulnerability。image scan artifact 已绑定当前
+  compose image inventory hash、per-image report content hash、raw report
+  path hash 和 raw report artifact dir；saved report validator 会重算 raw
+  report path/content digest，并拒绝 scan refs 与 release refs 不一致、raw
+  report 缺失或 raw report 不可读取的 production-ready 报告。生产镜像的真实
+  Trivy artifact 仍未生成。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
