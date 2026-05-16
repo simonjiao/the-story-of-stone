@@ -1043,8 +1043,12 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 - [x] 事故 runbook 定义 RTO/RPO breach 的升级路径和发布状态处理。
 - [x] incident drill / audit-history 必须生成可复核 JSON evidence，并由
       incident/capacity gate 与 saved report validator 绑定哈希。
-- [ ] capacity smoke 覆盖代表性 eval report 数量、failure 数量和 admin list 翻页。
-- [ ] load / soak smoke 覆盖 RQA 写入、admin 查询、metrics 和 release gate 在默认预算内。
+- [x] 本地 capacity smoke runner 覆盖代表性 eval report 数量、failure 数量和
+      admin list 翻页。
+- [x] 本地 load smoke runner 覆盖 RQA 写入、admin 查询、metrics 和 release gate
+      在预算内。
+- [ ] 目标环境 capacity smoke artifact 绑定 release report。
+- [ ] 目标环境 load / soak artifact 绑定 release report。
 - [x] capacity/load smoke 必须生成可复核 JSON evidence，并由 incident/capacity
       gate 与 saved report validator 绑定哈希。
 - [x] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
@@ -1071,6 +1075,13 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   写入、admin 查询、metrics 查询和 release gate，并按默认预算校验。live
   `rqa_incident_capacity` gate 现在必须绑定该 evidence path/hash；saved report
   validator 会拒绝未校验、缺失或哈希不匹配的 production-ready 报告。
+- 2026-05-16 已新增
+  `deploy/scripts/verify-tonglingyu-rqa-capacity-load-smoke.sh`：它会实际执行
+  performance budget gate，提取代表性 counts、admin pagination、metrics read、
+  status-history audit 和 p95 耗时，生成 capacity/load evidence 与
+  incident/audit evidence，再以 live 模式运行 `rqa_incident_capacity` gate 绑定
+  evidence path/hash。该 runner 的输出 scope 明确为 `local_gateway_smoke`，
+  不能替代目标环境 load/soak 或 incident drill。
 - 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh`：
   生成并校验 `tonglingyu.rqa_incident_audit_evidence` JSON，要求 status-history
   event/actor 覆盖、audit tombstone、incident severity/owner、first response、
@@ -1083,7 +1094,7 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   measurement 缺失、status-history 字段缺失或 incident runbook 证据缺失的报告。
 - 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity smoke、
   load/soak smoke、incident response drill 和 audit-history live evidence 尚未生成；
-  当前只完成本地闸门与 fail-closed contract。
+  当前完成的是本地执行 runner、证据 JSON、哈希绑定与 fail-closed contract。
 
 ## 提交节奏
 

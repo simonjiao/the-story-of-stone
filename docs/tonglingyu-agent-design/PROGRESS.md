@@ -911,6 +911,13 @@
   live `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report
   validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境
   真实 capacity/load、incident drill 和 audit-history evidence 仍未执行。
+- Capacity/load smoke 现在已有真实执行 runner：
+  `deploy/scripts/verify-tonglingyu-rqa-capacity-load-smoke.sh` 会实际运行本地
+  performance budget gate，提取代表性 counts、admin pagination、metrics read、
+  status-history audit 和 p95 耗时，生成 capacity/load evidence 与
+  incident/audit evidence，再以 live 模式运行 `rqa_incident_capacity` gate 绑定
+  evidence path/hash。该输出 scope 是 `local_gateway_smoke`，明确不是目标环境
+  live/load 证据。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、

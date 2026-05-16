@@ -26,6 +26,7 @@ BUDGET_RQA_WRITE_MS="${TONGLINGYU_RQA_PERF_BUDGET_WRITE_MS:-10000}"
 BUDGET_ADMIN_TRACE_READ_MS="${TONGLINGYU_RQA_PERF_BUDGET_ADMIN_TRACE_READ_MS:-2000}"
 BUDGET_ADMIN_FAILURE_LIST_MS="${TONGLINGYU_RQA_PERF_BUDGET_ADMIN_FAILURE_LIST_MS:-2000}"
 BUDGET_ADMIN_TASK_LIST_MS="${TONGLINGYU_RQA_PERF_BUDGET_ADMIN_TASK_LIST_MS:-2000}"
+BUDGET_ADMIN_METRICS_READ_MS="${TONGLINGYU_RQA_PERF_BUDGET_ADMIN_METRICS_READ_MS:-2000}"
 BUDGET_ADMIN_STATUS_UPDATE_MS="${TONGLINGYU_RQA_PERF_BUDGET_ADMIN_STATUS_UPDATE_MS:-3000}"
 BUDGET_RQA_QUALITY_GATE_MS="${TONGLINGYU_RQA_PERF_BUDGET_QUALITY_GATE_MS:-90000}"
 
@@ -264,16 +265,45 @@ if ! curl "${CURL_ARGS[@]}" "${ADMIN_HEADER[@]}" \
 fi
 TASK_LIST_FINISHED_MS="$(now_ms)"
 
+if ! curl "${CURL_ARGS[@]}" "${ADMIN_HEADER[@]}" \
+  "http://127.0.0.1:${PORT}/v1/admin/retrieval-failures?limit=1&offset=1" \
+  >"${WORK_DIR}/admin-failures-page2.json" \
+  2>"${WORK_DIR}/admin-failures-page2.stderr"; then
+  emit_failure "admin_failure_list_page2_failed"
+fi
+if ! curl "${CURL_ARGS[@]}" "${ADMIN_HEADER[@]}" \
+  "http://127.0.0.1:${PORT}/v1/admin/governance/tasks?limit=1&offset=1" \
+  >"${WORK_DIR}/admin-tasks-page2.json" \
+  2>"${WORK_DIR}/admin-tasks-page2.stderr"; then
+  emit_failure "admin_task_list_page2_failed"
+fi
+
+METRICS_STARTED_MS="$(now_ms)"
+if ! curl "${CURL_ARGS[@]}" "${ADMIN_HEADER[@]}" \
+  "http://127.0.0.1:${PORT}/v1/admin/metrics" \
+  >"${WORK_DIR}/admin-metrics.json" \
+  2>"${WORK_DIR}/admin-metrics.stderr"; then
+  emit_failure "admin_metrics_read_failed"
+fi
+METRICS_FINISHED_MS="$(now_ms)"
+
 if ! python3 - "${WORK_DIR}/admin-failures.json" "${WORK_DIR}/admin-tasks.json" \
-  "${FAILURE_ID}" "${TASK_ID}" <<'PY'
+  "${WORK_DIR}/admin-failures-page2.json" "${WORK_DIR}/admin-tasks-page2.json" \
+  "${WORK_DIR}/admin-metrics.json" "${FAILURE_ID}" "${TASK_ID}" <<'PY'
 import json
 import sys
 
-failure_path, task_path, failure_id, task_id = sys.argv[1:5]
+failure_path, task_path, failure_page2_path, task_page2_path, metrics_path, failure_id, task_id = sys.argv[1:8]
 with open(failure_path, "r", encoding="utf-8") as handle:
     failures = json.load(handle)
 with open(task_path, "r", encoding="utf-8") as handle:
     tasks = json.load(handle)
+with open(failure_page2_path, "r", encoding="utf-8") as handle:
+    failure_page2 = json.load(handle)
+with open(task_page2_path, "r", encoding="utf-8") as handle:
+    task_page2 = json.load(handle)
+with open(metrics_path, "r", encoding="utf-8") as handle:
+    metrics = json.load(handle)
 failure_page = failures.get("list")
 task_page = tasks.get("list")
 failure_list = failure_page.get("items") if isinstance(failure_page, dict) else None
@@ -286,6 +316,20 @@ if not isinstance(task_list, list) or not any(
     item.get("task_id") == task_id for item in task_list if isinstance(item, dict)
 ):
     raise SystemExit("created governance task missing from admin list")
+for page_name, page in (("failure_page2", failure_page2), ("task_page2", task_page2)):
+    page_value = page.get("list")
+    if not isinstance(page_value, dict):
+        raise SystemExit(f"{page_name} missing list")
+    if page_value.get("offset") != 1:
+        raise SystemExit(f"{page_name} offset mismatch")
+    if page_value.get("limit") != 1:
+        raise SystemExit(f"{page_name} limit mismatch")
+    if not isinstance(page_value.get("items"), list):
+        raise SystemExit(f"{page_name} items missing")
+if metrics.get("object") != "tonglingyu.gateway_metrics":
+    raise SystemExit("admin metrics object mismatch")
+if not isinstance(metrics.get("rqa"), dict):
+    raise SystemExit("admin metrics missing rqa summary")
 PY
 then
   emit_failure "admin_lists_missing_created_rqa_refs"
@@ -356,20 +400,24 @@ fi
 QUALITY_FINISHED_MS="$(now_ms)"
 
 python3 - "${REPORT_PATH}" "${WORK_DIR}/ids.json" \
+  "${DB_PATH}" \
   "${CHAT_STARTED_MS}" "${CHAT_FINISHED_MS}" \
   "${TRACE_STARTED_MS}" "${TRACE_FINISHED_MS}" \
   "${FAILURE_LIST_STARTED_MS}" "${FAILURE_LIST_FINISHED_MS}" \
   "${TASK_LIST_STARTED_MS}" "${TASK_LIST_FINISHED_MS}" \
+  "${METRICS_STARTED_MS}" "${METRICS_FINISHED_MS}" \
   "${UPDATE_STARTED_MS}" "${UPDATE_FINISHED_MS}" \
   "${QUALITY_STARTED_MS}" "${QUALITY_FINISHED_MS}" \
   "${BUDGET_RQA_WRITE_MS}" "${BUDGET_ADMIN_TRACE_READ_MS}" \
   "${BUDGET_ADMIN_FAILURE_LIST_MS}" "${BUDGET_ADMIN_TASK_LIST_MS}" \
-  "${BUDGET_ADMIN_STATUS_UPDATE_MS}" "${BUDGET_RQA_QUALITY_GATE_MS}" \
+  "${BUDGET_ADMIN_METRICS_READ_MS}" "${BUDGET_ADMIN_STATUS_UPDATE_MS}" \
+  "${BUDGET_RQA_QUALITY_GATE_MS}" \
   "${BUILD_TIMEOUT_SECONDS}" "${KB_BUILD_TIMEOUT_SECONDS}" \
   "${EVAL_TIMEOUT_SECONDS}" "${QUALITY_GATE_TIMEOUT_SECONDS}" \
   "${CURL_CONNECT_TIMEOUT_SECONDS}" "${CURL_MAX_TIME_SECONDS}" <<'PY'
 import hashlib
 import json
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,6 +425,7 @@ from pathlib import Path
 (
     report_path,
     ids_path,
+    db_path,
     chat_start,
     chat_finish,
     trace_start,
@@ -385,6 +434,8 @@ from pathlib import Path
     failure_list_finish,
     task_list_start,
     task_list_finish,
+    metrics_start,
+    metrics_finish,
     update_start,
     update_finish,
     quality_start,
@@ -393,6 +444,7 @@ from pathlib import Path
     budget_trace,
     budget_failure_list,
     budget_task_list,
+    budget_metrics,
     budget_update,
     budget_quality,
     build_timeout,
@@ -401,7 +453,7 @@ from pathlib import Path
     quality_gate_timeout,
     curl_connect_timeout,
     curl_max_time,
-) = sys.argv[1:27]
+) = sys.argv[1:31]
 
 with open(ids_path, "r", encoding="utf-8") as handle:
     ids = json.load(handle)
@@ -420,6 +472,7 @@ budgets = {
     "admin_trace_read_ms": int(budget_trace),
     "admin_failure_list_ms": int(budget_failure_list),
     "admin_governance_task_list_ms": int(budget_task_list),
+    "admin_metrics_read_ms": int(budget_metrics),
     "admin_status_update_ms": int(budget_update),
     "rqa_quality_gate_ms": int(budget_quality),
 }
@@ -428,6 +481,7 @@ measurements = {
     "admin_trace_read_ms": duration(trace_start, trace_finish),
     "admin_failure_list_ms": duration(failure_list_start, failure_list_finish),
     "admin_governance_task_list_ms": duration(task_list_start, task_list_finish),
+    "admin_metrics_read_ms": duration(metrics_start, metrics_finish),
     "admin_status_update_ms": duration(update_start, update_finish),
     "rqa_quality_gate_ms": duration(quality_start, quality_finish),
 }
@@ -444,6 +498,36 @@ errors = [
     for key, value in budget_results.items()
     if value["met"] is not True
 ]
+
+status_history_event_count = 0
+status_history_actors = set()
+try:
+    conn = sqlite3.connect(db_path)
+    try:
+        for (payload_json,) in conn.execute(
+            """
+            SELECT payload_json
+            FROM audit_events
+            WHERE event_type IN (
+              'retrieval_failure_status_updated',
+              'governance_task_status_updated'
+            )
+            """
+        ):
+            try:
+                payload = json.loads(payload_json)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload.get("status_history"), dict):
+                status_history_event_count += 1
+                actor = payload.get("actor") or payload.get("reviewer")
+                if isinstance(actor, str) and actor.strip():
+                    status_history_actors.add(actor.strip())
+    finally:
+        conn.close()
+except sqlite3.Error:
+    errors.append("audit_history_query_failed")
+
 payload = {
     "object": "tonglingyu.rqa_performance_budget_gate",
     "schema_version": 1,
@@ -462,11 +546,23 @@ payload = {
     },
     "measurements": measurements,
     "budget_results": budget_results,
+    "capacity_counts": {
+        "eval_report_count": 1,
+        "failure_count": 1,
+        "admin_list_page_count": 2,
+    },
+    "audit_history_counts": {
+        "status_history_event_count": status_history_event_count,
+        "status_history_actor_count": len(status_history_actors),
+        "audit_tombstone_count": 0,
+    },
     "checks": {
         "rqa_write_created_failure": True,
         "rqa_write_created_governance_task": True,
         "admin_trace_readable": True,
         "admin_lists_readable": True,
+        "admin_list_pagination_readable": True,
+        "admin_metrics_readable": True,
         "admin_status_updates_closed_open_p0": True,
         "rqa_quality_gate_reran": True,
     },
