@@ -151,6 +151,7 @@ remediate-tonglingyu-kb-source-metadata.sh
 verify-tonglingyu-release-ops-readiness.sh
 verify-tonglingyu-post-release-monitor.sh
 verify-tonglingyu-release-security.sh
+prepare-tonglingyu-remote-security-evidence.sh
 verify-tonglingyu-release-readiness.sh
 verify-tonglingyu-release-readiness-report.sh
 '

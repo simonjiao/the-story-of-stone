@@ -2,6 +2,7 @@ use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(name = "agentctl")]
@@ -29,11 +30,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Healthcheck(HealthcheckCommand),
     Requests(RequestsCommand),
     Agents(AgentsCommand),
     Runs(RunsCommand),
     Audit(AuditCommand),
     Observer(ObserverCommand),
+}
+
+#[derive(Debug, Args)]
+struct HealthcheckCommand {
+    #[arg(long, default_value = "http://127.0.0.1:8088/healthz")]
+    url: String,
+    #[arg(long, default_value_t = 5)]
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
     let headers = headers(&cli)?;
     let manager_url = cli.manager_url.clone();
     let value = match cli.command {
+        Command::Healthcheck(command) => healthcheck(&client, &command).await?,
         Command::Requests(command) => match command.command {
             RequestsSubcommand::List { limit } => {
                 get(
@@ -437,6 +448,29 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+async fn healthcheck(
+    client: &reqwest::Client,
+    command: &HealthcheckCommand,
+) -> anyhow::Result<Value> {
+    let response = client
+        .get(&command.url)
+        .timeout(Duration::from_secs(command.timeout_seconds))
+        .send()
+        .await
+        .context("healthcheck request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("healthcheck returned {status}: {}", body.trim());
+    }
+    Ok(json!({
+        "object": "agentctl.healthcheck",
+        "status": "ok",
+        "url": command.url,
+        "http_status": status.as_u16(),
+    }))
 }
 
 fn headers(cli: &Cli) -> anyhow::Result<HeaderMap> {

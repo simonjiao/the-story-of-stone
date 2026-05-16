@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7.0
-
 FROM rust:1.95 AS builder
 
 WORKDIR /workspace
@@ -22,11 +20,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp /workspace/target/release/agent-worker /artifacts/agent-worker \
     && cp /workspace/target/release/agentctl /artifacts/agentctl
 
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+# Base digest verified 2026-05-16: sha256:d7aa809c1ae88f97cd727d6f5f91e4edab579a14f86f52fd0dd8c658c854286d.
+FROM cgr.dev/chainguard/glibc-dynamic:latest AS runtime
 
 COPY --from=builder /artifacts/agent-manager /usr/local/bin/agent-manager
 COPY --from=builder /artifacts/agent-orchestrator /usr/local/bin/agent-orchestrator

@@ -349,7 +349,11 @@ def safe_scan_result(path, scan_type):
 def git_tracked_files(paths):
     command = ["git", "-C", str(repo_dir), "ls-files", *paths]
     try:
-        output = subprocess.check_output(command, text=True)
+        output = subprocess.check_output(
+            command,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
         return [repo_dir / line for line in output.splitlines() if line.strip()]
     except (OSError, subprocess.CalledProcessError):
         files = []
@@ -461,7 +465,7 @@ def compose_image_policy():
     mutable = []
     digest_missing = []
     for ref in refs:
-        if "@sha256:" not in ref:
+        if not image_ref_is_immutable(ref):
             digest_missing.append(ref)
         if re.search(r"(:|\:-)(latest|main)([}:]|$)", ref):
             mutable.append(ref)
@@ -474,6 +478,10 @@ def compose_image_policy():
         "mutable_tag_count": len(mutable),
         "digest_missing_count": len(digest_missing),
     }
+
+
+def image_ref_is_immutable(ref):
+    return "@sha256:" in ref or re.fullmatch(r"sha256:[0-9a-f]{64}", ref) is not None
 
 
 def load_risk_acceptance():

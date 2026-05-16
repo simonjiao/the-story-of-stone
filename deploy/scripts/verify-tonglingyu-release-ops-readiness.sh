@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/resolve-layout.sh"
 resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
-RUNBOOK_PATH="${TONGLINGYU_RELEASE_OPS_RUNBOOK_PATH:-${REPO_DIR}/deploy/runbooks/tonglingyu-rqa-release-runbook.md}"
+RUNBOOK_PATH="${TONGLINGYU_RELEASE_OPS_RUNBOOK_PATH:-${DEPLOY_DIR}/runbooks/tonglingyu-rqa-release-runbook.md}"
 REPORT_PATH="${TONGLINGYU_RELEASE_OPS_REPORT_PATH:-}"
 REQUIRE_LIVE="${TONGLINGYU_RELEASE_OPS_REQUIRE_LIVE:-${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}}"
 OPERATOR="${TONGLINGYU_RELEASE_OPS_OPERATOR:-${TONGLINGYU_RELEASE_OPERATOR:-}}"

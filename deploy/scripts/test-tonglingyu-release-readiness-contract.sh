@@ -5,6 +5,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
+for leaked_env_name in \
+  "${!TONGLINGYU_RELEASE_@}" \
+  "${!TONGLINGYU_RQA_@}" \
+  "${!TONGLINGYU_BROWSER_REVIEW_@}" \
+  "${!MODEL_UPSTREAM_PROBE_@}" \
+  TONGLINGYU_DEPLOY_ENV_FILE \
+  PUBLIC_WEBUI_URL \
+  OPEN_WEBUI_BASE_URL; do
+  unset "${leaked_env_name}"
+done
+
 PASS_CMD="${WORK_DIR}/gate-pass.sh"
 FAIL_CMD="${WORK_DIR}/gate-fail.sh"
 BROWSER_NO_VALIDATION_CMD="${WORK_DIR}/browser-gate-no-validation.sh"
@@ -240,6 +251,8 @@ common_env=(
   "TONGLINGYU_RELEASE_ALLOW_GATE_CMD_OVERRIDE=true"
   "TONGLINGYU_RELEASE_ENVIRONMENT=contract-live"
   "TONGLINGYU_RELEASE_TARGET=contract-target"
+  "TONGLINGYU_RELEASE_GIT_COMMIT=1111111111111111111111111111111111111111"
+  "TONGLINGYU_RELEASE_GIT_TRACKED_DIRTY=false"
   "TONGLINGYU_RELEASE_RUNTIME_CONFIG_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_MIGRATION_PREFLIGHT_CMD=${PASS_CMD}"
   "TONGLINGYU_RELEASE_RQA_QUALITY_CMD=${PASS_CMD}"
@@ -271,6 +284,7 @@ if env \
   "${security_digest_env[@]}" \
   "PATH=${FAKE_TRIVY_DIR}:${PATH}" \
   "TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH=${SECURITY_DEPENDENCY_SCAN_JSON}" \
+  "TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_PATH=" \
   "TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR=${trivy_high_artifact_dir}" \
   "TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY=true" \
   "${SCRIPT_DIR}/verify-tonglingyu-release-security.sh" >"${trivy_high_stdout}"; then
@@ -848,7 +862,23 @@ assert_report "${conditions_report}" '"gate command overrides were used" in repo
 assert_report "${conditions_report}" '"live running image inventory was not captured" in report["release_blockers"]'
 assert_report "${conditions_report}" '"live migration preflight was not captured" in report["release_blockers"]'
 assert_report "${conditions_report}" '"pending migrations must be zero for live release" in report["release_blockers"]'
-assert_report "${conditions_report}" '"tracked worktree must be clean for live release" in report["release_blockers"]'
+assert_report "${conditions_report}" '"tracked worktree must be clean for live release" not in report["release_blockers"]'
+assert_report "${conditions_report}" 'report["release_runtime_identity"]["git"]["tracked_dirty"] is False'
+
+dirty_worktree_report="${WORK_DIR}/live-dirty-worktree.json"
+env "${common_env[@]}" \
+  TONGLINGYU_RELEASE_GIT_TRACKED_DIRTY=true \
+  TONGLINGYU_RELEASE_REQUIRE_LIVE=true \
+  TONGLINGYU_RELEASE_SUMMARY_ONLY=true \
+  TONGLINGYU_RELEASE_ACK_OPENWEBUI_BROWSER_REVIEW=true \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_REF=mock-browser-review \
+  TONGLINGYU_RELEASE_OPENWEBUI_PUBLIC_URL=https://example.invalid \
+  TONGLINGYU_RELEASE_OPENWEBUI_BROWSER_REVIEW_EVIDENCE="${BROWSER_EVIDENCE_JSON}" \
+  TONGLINGYU_RELEASE_REPORT_PATH="${dirty_worktree_report}" \
+  "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" >/dev/null
+assert_report "${dirty_worktree_report}" 'report["release_conditions_met"] is False'
+assert_report "${dirty_worktree_report}" 'report["release_runtime_identity"]["git"]["tracked_dirty"] is True'
+assert_report "${dirty_worktree_report}" '"tracked worktree must be clean for live release" in report["release_blockers"]'
 
 python3 - "${conditions_report}" "${TAMPERED_BROWSER_POINTERS_REPORT}" <<'PY'
 import json

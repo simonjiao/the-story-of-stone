@@ -90,6 +90,7 @@ enum Command {
     PruneRuntime(PruneRuntimeArgs),
     RqaRestoreCanary(RqaRestoreCanaryArgs),
     RqaUserLifecycle(RqaUserLifecycleArgs),
+    Healthcheck(HealthcheckArgs),
     Serve(ServeArgs),
 }
 
@@ -256,6 +257,14 @@ struct RqaUserLifecycleArgs {
     action: RqaUserLifecycleAction,
     #[arg(long, default_value = "operator_requested")]
     reason: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct HealthcheckArgs {
+    #[arg(long, default_value = "http://127.0.0.1:8090/healthz")]
+    url: String,
+    #[arg(long, default_value_t = 5)]
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1123,8 +1132,33 @@ async fn main() -> Result<()> {
                 Err(anyhow!("rqa user lifecycle action did not complete"))
             }
         }
+        Command::Healthcheck(args) => {
+            let report = healthcheck_command(&args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Command::Serve(args) => serve(args).await,
     }
+}
+
+async fn healthcheck_command(args: &HealthcheckArgs) -> Result<Value> {
+    let response = reqwest::Client::new()
+        .get(&args.url)
+        .timeout(Duration::from_secs(args.timeout_seconds))
+        .send()
+        .await
+        .context("healthcheck request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("healthcheck returned {status}: {}", body.trim()));
+    }
+    Ok(json!({
+        "object": "tonglingyu.healthcheck",
+        "status": "ok",
+        "url": args.url,
+        "http_status": status.as_u16(),
+    }))
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {

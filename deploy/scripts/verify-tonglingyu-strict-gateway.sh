@@ -26,8 +26,8 @@ VERIFY_RUN_ID="${TONGLINGYU_GATEWAY_VERIFY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$
 cd "${DEPLOY_DIR}"
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway \
-    curl -fsS http://127.0.0.1:8090/healthz >"${HEALTH_JSON}"
+  docker compose exec -T open-webui \
+    curl -fsS http://tonglingyu-gateway:8090/healthz >"${HEALTH_JSON}"
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-}" ]]; then
@@ -39,16 +39,16 @@ curl -fsS -H "Authorization: Bearer ${key}" http://tonglingyu-gateway:8090/v1/mo
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_METRICS_JSON:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" http://127.0.0.1:8090/v1/admin/metrics
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:8090/v1/admin/metrics
 ' >"${METRICS_JSON}"
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_PROMETHEUS_TXT:-}" ]]; then
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" http://127.0.0.1:8090/v1/admin/metrics/prometheus
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:8090/v1/admin/metrics/prometheus
 ' >"${PROMETHEUS_TXT}"
 fi
 
@@ -94,9 +94,9 @@ if not trace_id:
 print(trace_id)
 PY
 )"
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0.1:8090/v1/admin/traces/'"${TRACE_ID}"'"
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/traces/'"${TRACE_ID}"'"
 ' >"${TRACE_JSON}"
 fi
 
@@ -120,9 +120,9 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 raise SystemExit("stream response missing trace_id")
 PY
 )"
-  docker compose exec -T tonglingyu-gateway sh -lc '
-test -n "${TONGLINGYU_ADMIN_API_KEY}"
-curl -fsS -H "Authorization: Bearer ${TONGLINGYU_ADMIN_API_KEY}" "http://127.0.0.1:8090/v1/admin/traces/'"${STREAM_TRACE_ID}"'"
+  docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/traces/'"${STREAM_TRACE_ID}"'"
 ' >"${STREAM_TRACE_JSON}"
 fi
 

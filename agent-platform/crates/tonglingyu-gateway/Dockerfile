@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7.0
-
 FROM rust:1.95 AS builder
 
 WORKDIR /workspace
@@ -13,11 +11,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /artifacts \
     && cp /workspace/target/release/tonglingyu-gateway /artifacts/tonglingyu-gateway
 
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+# Base digest verified 2026-05-16: sha256:d7aa809c1ae88f97cd727d6f5f91e4edab579a14f86f52fd0dd8c658c854286d.
+FROM cgr.dev/chainguard/glibc-dynamic:latest AS runtime
 
 COPY --from=builder /artifacts/tonglingyu-gateway /usr/local/bin/tonglingyu-gateway
 

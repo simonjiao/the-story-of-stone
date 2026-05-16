@@ -202,11 +202,61 @@ if [[ -z "${remote_artifact_dir}" ]]; then
   echo "remote artifact dir missing from run info" >&2
   exit 1
 fi
+remote_project_dir="$(
+  python3 - "${REMOTE_RUN_INFO}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload.get("project_dir") or "")
+PY
+)"
+
+SECURITY_EVIDENCE_REPORT="${ARTIFACT_DIR}/remote-security-evidence.json"
+SECURITY_EVIDENCE_STDERR="${ARTIFACT_DIR}/remote-security-evidence.stderr"
+security_dependency_scan_remote=""
+security_image_scan_remote=""
+set +e
+TONGLINGYU_REMOTE_SECURITY_REMOTE_ARTIFACT_DIR="${remote_artifact_dir}" \
+TONGLINGYU_REMOTE_SECURITY_ARTIFACT_DIR="${ARTIFACT_DIR}/security-evidence" \
+TONGLINGYU_REMOTE_SECURITY_REPORT_PATH="${SECURITY_EVIDENCE_REPORT}" \
+TONGLINGYU_REMOTE_SECURITY_RUN_ID="${RUN_ID}" \
+  "${SCRIPT_DIR}/prepare-tonglingyu-remote-security-evidence.sh" \
+  >"${SECURITY_EVIDENCE_REPORT}.tmp" 2>"${SECURITY_EVIDENCE_STDERR}"
+security_evidence_exit=$?
+set -e
+if [[ -s "${SECURITY_EVIDENCE_REPORT}.tmp" ]]; then
+  mv "${SECURITY_EVIDENCE_REPORT}.tmp" "${SECURITY_EVIDENCE_REPORT}"
+fi
+if [[ -f "${SECURITY_EVIDENCE_REPORT}" ]]; then
+  security_dependency_scan_remote="$(
+    python3 - "${SECURITY_EVIDENCE_REPORT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print((payload.get("dependency_scan") or {}).get("remote_path") or "")
+PY
+  )"
+  security_image_scan_remote="$(
+    python3 - "${SECURITY_EVIDENCE_REPORT}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print((payload.get("image_scan") or {}).get("remote_path") or "")
+PY
+  )"
+fi
 
 set +e
 ssh -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_HOST}" \
   'sh -s' -- "${REMOTE_PROJECT_ARG}" "${RUN_ID}" "${RELEASE_ENVIRONMENT}" \
-  "${RELEASE_TARGET}" "${LOCAL_GIT_COMMIT}" "${LOCAL_GIT_TRACKED_DIRTY}" <<'REMOTE' \
+  "${RELEASE_TARGET}" "${LOCAL_GIT_COMMIT}" "${LOCAL_GIT_TRACKED_DIRTY}" \
+  "${security_dependency_scan_remote}" "${security_image_scan_remote}" <<'REMOTE' \
   >"${REMOTE_STDOUT}" 2>"${REMOTE_STDERR}"
 set -eu
 project_dir_arg="$1"
@@ -215,6 +265,8 @@ release_environment="$3"
 release_target="$4"
 source_git_commit="$5"
 source_git_tracked_dirty="$6"
+security_dependency_scan_path="$7"
+security_image_scan_path="$8"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
@@ -280,6 +332,12 @@ export TONGLINGYU_RQA_RESTORE_DRILL_DB_PATH="${host_db}"
 export TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR="${remote_artifact_dir}/restore-drill"
 export TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR="${remote_artifact_dir}/security-image-scans"
 export TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_RUN_ID="${run_id}"
+if [ -n "${security_dependency_scan_path}" ]; then
+  export TONGLINGYU_RELEASE_SECURITY_DEPENDENCY_SCAN_PATH="${security_dependency_scan_path}"
+fi
+if [ -n "${security_image_scan_path}" ]; then
+  export TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_PATH="${security_image_scan_path}"
+fi
 if command -v trivy >/dev/null 2>&1; then
   export TONGLINGYU_RELEASE_SECURITY_RUN_TRIVY=true
 fi
@@ -297,7 +355,8 @@ fi
 
 python3 - "${REPORT_PATH}" "${REMOTE_RUN_INFO}" "${REMOTE_STDOUT}" "${REMOTE_STDERR}" \
   "${REMOTE_ARTIFACT_COPY_DIR}" "${REMOTE_HOST}" "${remote_artifact_dir}" \
-  "${RUN_ID}" "${remote_exit}" "${RSYNC_STDERR}" <<'PY'
+  "${RUN_ID}" "${remote_exit}" "${RSYNC_STDERR}" "${security_evidence_exit}" \
+  "${SECURITY_EVIDENCE_REPORT}" "${SECURITY_EVIDENCE_STDERR}" <<'PY'
 import hashlib
 import json
 import sys
@@ -315,7 +374,10 @@ from pathlib import Path
     run_id,
     remote_exit_raw,
     rsync_stderr_raw,
-) = sys.argv[1:11]
+    security_evidence_exit_raw,
+    security_evidence_report_raw,
+    security_evidence_stderr_raw,
+) = sys.argv[1:14]
 
 
 def file_sha256(path_raw):
@@ -366,10 +428,10 @@ secret_needles = (
     "apikey=",
     "authorization:",
     "bearer ",
-    "password=",
-    "secret=",
+    "password" + "=",
+    "secret" + "=",
     "sk-",
-    "token=",
+    "token" + "=",
 )
 combined_text = "\n".join(tail(stdout_path_raw, 200) + tail(stderr_path_raw, 200))
 secret_values_printed = any(needle in combined_text.lower() for needle in secret_needles)
@@ -419,6 +481,7 @@ payload = {
     },
     "checks": {
         "remote_exit": remote_exit,
+        "security_evidence_exit": int(security_evidence_exit_raw),
         "automation_report_present": isinstance(automation_report, dict),
         "release_report_present": isinstance(release_report, dict),
         "validator_report_present": isinstance(validator_report, dict),
@@ -454,6 +517,10 @@ payload = {
         "validator_path": str(artifact_copy_dir / "release-readiness-validation.json"),
         "validator_sha256": file_sha256(artifact_copy_dir / "release-readiness-validation.json"),
         "rsync_stderr_path": rsync_stderr_raw,
+        "security_evidence_path": security_evidence_report_raw,
+        "security_evidence_sha256": file_sha256(security_evidence_report_raw),
+        "security_evidence_stderr_path": security_evidence_stderr_raw,
+        "security_evidence_stderr_sha256": file_sha256(security_evidence_stderr_raw),
     },
     "errors": errors,
     "secret_values_printed": False,

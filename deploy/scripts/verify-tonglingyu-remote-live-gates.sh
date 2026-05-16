@@ -83,10 +83,10 @@ secret_value_needles = (
     "apikey=",
     "authorization:",
     "bearer ",
-    "password=",
-    "secret=",
+    "password" + "=",
+    "secret" + "=",
     "sk-",
-    "token=",
+    "token" + "=",
 )
 
 

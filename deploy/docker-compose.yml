@@ -1,14 +1,14 @@
 name: hermes-home
 
 x-agent-platform-image: &agent-platform-image
-  image: "${AGENT_PLATFORM_IMAGE_REF:-hermes-agent-platform:${AGENT_PLATFORM_IMAGE_TAG:-formal}}"
+  image: "${AGENT_PLATFORM_IMAGE_REF:-hermes-agent-platform:formal}"
   build:
     context: "${AGENT_PLATFORM_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: Dockerfile
   restart: unless-stopped
 
 x-tonglingyu-gateway-image: &tonglingyu-gateway-image
-  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:${TONGLINGYU_GATEWAY_IMAGE_TAG:-formal}}"
+  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:formal}"
   build:
     context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: crates/tonglingyu-gateway/Dockerfile
@@ -16,7 +16,7 @@ x-tonglingyu-gateway-image: &tonglingyu-gateway-image
 
 services:
   hermes:
-    image: "${HERMES_IMAGE_REF:-nousresearch/hermes-agent:${HERMES_IMAGE_TAG:-latest}}"
+    image: "${HERMES_IMAGE_REF:-nousresearch/hermes-agent:latest}"
     container_name: hermes-agent
     restart: unless-stopped
     command: gateway run
@@ -52,7 +52,7 @@ services:
       start_period: 30s
 
   open-webui:
-    image: "${OPEN_WEBUI_IMAGE_REF:-ghcr.io/open-webui/open-webui:${OPEN_WEBUI_IMAGE_TAG:-main}}"
+    image: "${OPEN_WEBUI_IMAGE_REF:-ghcr.io/open-webui/open-webui:main}"
     container_name: hermes-open-webui
     restart: unless-stopped
     depends_on:
@@ -142,14 +142,21 @@ services:
       hermes-internal:
         ipv4_address: "${TONGLINGYU_GATEWAY_IP:-172.20.0.14}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/healthz >/dev/null"]
+      test:
+        [
+          "CMD",
+          "tonglingyu-gateway",
+          "healthcheck",
+          "--url",
+          "http://127.0.0.1:8090/healthz",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 30s
 
   cloudflared:
-    image: "${CLOUDFLARED_IMAGE_REF:-cloudflare/cloudflared:${CLOUDFLARED_IMAGE_TAG:-latest}}"
+    image: "${CLOUDFLARED_IMAGE_REF:-cloudflare/cloudflared:latest}"
     container_name: hermes-cloudflared
     restart: unless-stopped
     network_mode: host
@@ -163,7 +170,7 @@ services:
         condition: service_started
 
   agent-platform-postgres:
-    image: "${AGENT_PLATFORM_POSTGRES_IMAGE_REF:-postgres:${AGENT_PLATFORM_POSTGRES_IMAGE_TAG:-18-alpine}}"
+    image: "${AGENT_PLATFORM_POSTGRES_IMAGE_REF:-postgres:18-alpine}"
     container_name: agent-platform-postgres
     restart: unless-stopped
     environment:
@@ -209,7 +216,14 @@ services:
       hermes-internal:
         ipv4_address: "${AGENT_ACTION_GATEWAY_IP:-172.20.0.14}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8091/healthz >/dev/null"]
+      test:
+        [
+          "CMD",
+          "agentctl",
+          "healthcheck",
+          "--url",
+          "http://127.0.0.1:8091/healthz",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -242,7 +256,14 @@ services:
       hermes-internal:
         ipv4_address: "${AGENT_MANAGER_IP:-172.20.0.10}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/healthz >/dev/null"]
+      test:
+        [
+          "CMD",
+          "agentctl",
+          "healthcheck",
+          "--url",
+          "http://127.0.0.1:8088/healthz",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -280,7 +301,14 @@ services:
       hermes-internal:
         ipv4_address: "${AGENT_ORCHESTRATOR_IP:-172.20.0.11}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz >/dev/null"]
+      test:
+        [
+          "CMD",
+          "agentctl",
+          "healthcheck",
+          "--url",
+          "http://127.0.0.1:8080/healthz",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5

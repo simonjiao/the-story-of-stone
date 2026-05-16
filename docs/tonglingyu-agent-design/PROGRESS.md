@@ -451,9 +451,10 @@
   installer 更新并重启 `hermes-open-webui`；复测
   `verify-openwebui-function.sh` 与
   `verify-openwebui-gateway-admin-action.sh` 均通过。
-- 最新远端 production readiness 显示 runtime config、model upstream network、
+- 此前 R5D 生产入口 readiness 显示 runtime config、model upstream network、
   strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
-  `openwebui_browser_review` 均已通过；`production_release_ready=true`。
+  `openwebui_browser_review` 通过；该记录只证明 R5D 入口基线，不能替代本轮
+  RQA release automation / security / ops / capacity 生产门禁。
 - 已新增 `deploy/scripts/verify-model-upstream-network.sh`，release readiness
   live mode 会在 strict Gateway 之前运行该 gate；它从 `sub2api`/Hermes 容器内
   检查模型上游 DNS、198.18.0.0/15 fake-IP 和 TLS 握手状态，只输出 host、
@@ -880,20 +881,22 @@
   本机缺 Docker CLI 时可通过 SSH 在 `hhost` 执行完整 live release automation，
   注入本地源 commit/dirty 状态，绑定目标 live DB、pre-migration backup、远端
   artifact 目录，并把 release automation / release readiness / saved validator
-  artifact 回收到本地。提交并重新同步后，最新 artifact：
-  `data/tonglingyu/remote-release-automation/remote-release-20260516T032702Z-11150/remote-release-automation.json`。
+  artifact 回收到本地。同步当前工具后，最新 artifact：
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-release-automation.json`。
   该 run 证明目标 DB 的 open retrieval failures / governance tasks 均为 0，
-  `restore_ref_available=true`，且 `runtime_config`、`rqa_migration_preflight`、
+  `restore_ref_available=true`，contract smoke 和 saved report validator 通过，且
+  `runtime_config`、`rqa_migration_preflight`、
   `retrieval_quality`、`rqa_backup_restore_drill`、`rqa_performance_budget`、
   `rqa_api_contract`、`rqa_user_lifecycle`、`openwebui_admin_action_contract`、
   `model_upstream_network`、`strict_gateway`、`openwebui_function` 和
   `openwebui_admin_action` 已在 live automation 中通过。restore drill stdout
-  记录 `source_mode=existing_refs`、`backup.execution_mode=docker`，RTO 约 23.3s
-  低于 900s，RPO 约 23.3s 低于 3600s，并重新跑过 RQA quality gate 与 saved
-  report validator。当前仍 fail-closed：`security_scan` 缺真实生产镜像/依赖扫描
-  或已审批风险例外，`release_ops_readiness` 缺 post-release monitor evidence，
-  `rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
-  `openwebui_browser_review` 未确认。
+  记录 `source_mode=existing_refs`、`backup.execution_mode=docker`，并重新跑过
+  RQA quality gate 与 saved report validator。当前仍 fail-closed：
+  `security_scan` 已有真实依赖/镜像扫描，但 6 镜像 aggregate Trivy report 存在
+  未审批 high/critical findings；`release_ops_readiness` 缺 post-release monitor
+  evidence，`rqa_incident_capacity` 缺 capacity/load 与 incident/audit live evidence，
+  `openwebui_browser_review` 未确认。提交后复跑已确认
+  `tracked worktree must be clean for live release` blocker 消失。
 - 2026-05-16 为 live restore drill 新增闭环 canary 路径：
   `tonglingyu-gateway rqa-restore-canary` 使用 Runtime API 写入
   `restore_drill_canary` retrieval failure 和关联 governance task，并在同一事务中
@@ -932,8 +935,26 @@
   compose image inventory hash、per-image report content hash、raw report
   path hash 和 raw report artifact dir；saved report validator 会重算 raw
   report path/content digest，并拒绝 scan refs 与 release refs 不一致、raw
-  report 缺失或 raw report 不可读取的 production-ready 报告。生产镜像的真实
-  Trivy artifact 仍未生成。
+  report 缺失或 raw report 不可读取的 production-ready 报告。
+- 2026-05-16 已把 `agent-platform` 与 `tonglingyu-gateway` runtime image 切到
+  Chainguard `glibc-dynamic` 基线，并在 first-party 容器内改用内置
+  `healthcheck` 子命令，移除对 runtime `curl`/apt 包的依赖。远端当前 first-party
+  image refs 已更新为
+  `AGENT_PLATFORM_IMAGE_REF=sha256:c559d34b96a430bb53650906ce8a23f64948904c4f2af7028c6e588a8f537a77`
+  和
+  `TONGLINGYU_GATEWAY_IMAGE_REF=sha256:084aa51d528359e6f86b3b574ebb59f4f7ddd72e4dda1adae0323190e6546bcb`；
+  这两个 first-party image 的 Trivy raw report 为 0 critical / 0 high。
+- 2026-05-16 已新增
+  `deploy/scripts/prepare-tonglingyu-remote-security-evidence.sh`，完整远端 release
+  automation 会先生成并同步真实 `cargo audit` dependency scan、当前 compose
+  image inventory 和 6 个 per-image Trivy raw reports。最新 security evidence
+  artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-security-evidence.json`：
+  dependency scan 0 critical / 0 high，image refs 均 immutable 且 raw reports
+  可读取，但 aggregate image scan 仍 fail-closed：`critical_count=63`、
+  `high_count=714`，来源为第三方 `hermes-agent`、`open-webui`、`cloudflared`
+  和 `postgres` 镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
+  production-ready artifact。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
@@ -941,10 +962,10 @@
   独立 remote live-gate collector 证明 model upstream、strict Gateway、Open
   WebUI Function 和 Open WebUI admin Action 通过，但这些结果尚未进入当前
   release report。
-- 后续 RQA production-ready 还必须在目标环境真实执行 live existing_refs 恢复演练，
-  并保留持久备份 artifact；还必须提供真实生产镜像 scanner artifact 或已审批
-  risk exception。dependency scan 当前为 clean，但最终发布仍必须在 release commit
-  上复跑并绑定报告 hash。
+- 目标环境 live `existing_refs` 恢复演练已在 release automation 中执行并保留
+  持久备份 artifact；后续 RQA production-ready 仍必须处理当前真实 image scan
+  high/critical findings，并在干净 release commit 上复跑 dependency/image scan
+  且绑定报告 hash。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
   budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
   与值守验证。
@@ -989,8 +1010,10 @@
 
 ## 下一步
 
-1. 补齐真实 security evidence：生产镜像 Trivy artifact、依赖扫描 artifact，或
-   有 owner / expiry / finding scope 的已审批风险例外。
+1. 处理真实 security blocker：当前 release inventory 的依赖扫描已 clean，镜像
+   Trivy raw reports 已持久化，但第三方镜像合计仍有 63 critical / 714 high；
+   需要替换/重建镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的
+   审批风险例外。
 2. 补齐 RQA Milestone L-M 的目标环境证据：post-release monitor JSON artifact、
    目标环境 capacity/load JSON artifact、incident/audit JSON artifact 和
    Open WebUI browser review evidence；本地 gate 已 fail-closed，但不能替代真实
