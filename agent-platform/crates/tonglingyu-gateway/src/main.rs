@@ -6007,26 +6007,8 @@ async fn chat_completions(
             );
         }
     };
-    if request.messages.len() > state.max_messages {
-        let _ = record_workflow_state(
-            &conn,
-            &trace_id,
-            None,
-            None,
-            "Failed with Controlled Response",
-            "request_too_large",
-            &json!({
-                "message_count": request.messages.len(),
-                "max_messages": state.max_messages,
-            }),
-        );
-        return error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request_too_large",
-            "request contains too many messages",
-            Some(&trace_id),
-        );
-    }
+    let message_count = request.messages.len();
+    let history_over_limit = message_count > state.max_messages;
     let requested_model = request.model.as_deref().unwrap_or(&state.model_id);
     if requested_model != state.model_id {
         let _ = record_workflow_state(
@@ -6092,9 +6074,29 @@ async fn chat_completions(
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
             "external_message_id_provided": context.external_message_id_provided,
+            "message_count": message_count,
+            "max_messages": state.max_messages,
+            "history_over_limit": history_over_limit,
             "question_chars": question_chars,
         }),
     );
+    if history_over_limit {
+        let detail = json!({
+            "message_count": message_count,
+            "max_messages": state.max_messages,
+            "behavior": "processed_last_user_message_only",
+        });
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Message History Truncated",
+            "ok",
+            &detail,
+        );
+        let _ = insert_audit_event(&conn, &trace_id, "message_history_truncated", &detail);
+    }
     let _ = insert_audit_event(
         &conn,
         &trace_id,
@@ -6104,7 +6106,8 @@ async fn chat_completions(
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
-            "message_count": request.messages.len(),
+            "message_count": message_count,
+            "history_over_limit": history_over_limit,
             "question_chars": question_chars,
         }),
     );
@@ -9298,6 +9301,66 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_accepts_long_openwebui_history() {
+        let db_path = temp_gateway_db_path("tonglingyu-long-history");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Guidelines:
+- The output must be a single, raw JSON object, without any markdown code fences.
+### Output:
+JSON format: { "title": "your concise title here" }
+### Chat History:
+<chat_history>
+USER: 介绍尤三姐
+</chat_history>"#;
+        let mut messages = Vec::new();
+        for index in 0..state.max_messages {
+            messages.push(json!({
+                "role": "user",
+                "content": format!("历史消息 {index}"),
+            }));
+        }
+        messages.push(json!({"role": "user", "content": metadata_prompt}));
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": messages,
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-long-history-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(body.get("trace_id").is_none());
+        assert!(body.get("evidence_package_id").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM workflow_states WHERE state = 'Message History Truncated'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("history truncation state count"),
+            1
+        );
+        assert_eq!(audit_event_count(&db_path, "message_history_truncated"), 1);
+
+        remove_sqlite_file_set(&db_path);
     }
 
     #[test]
