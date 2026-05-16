@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
 REMOTE_HOST="${TONGLINGYU_REMOTE_RELEASE_HOST:-hhost}"
 REMOTE_PROJECT_DIR="${TONGLINGYU_REMOTE_RELEASE_PROJECT_DIR:-}"

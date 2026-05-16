@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
 REPORT_PATH="${TONGLINGYU_RQA_CAPACITY_LOAD_REPORT_PATH:-}"
 OPERATOR="${TONGLINGYU_RQA_CAPACITY_LOAD_OPERATOR:-${TONGLINGYU_RELEASE_OPERATOR:-}}"

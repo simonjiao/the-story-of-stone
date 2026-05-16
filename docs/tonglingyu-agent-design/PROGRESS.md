@@ -858,15 +858,24 @@
   readiness 后，`runtime_config`、`retrieval_quality`、
   `rqa_backup_restore_drill` 和 `security_scan` 均已通过；`required_failures=[]`。
   browser review 仍未执行，因此仍不能声明 production-ready。
+- 2026-05-16 已新增 `deploy/scripts/sync-tonglingyu-remote-release-tools.sh`：
+  它通过 SSH/rsync 同步当前 `scripts/`、runbook、Open WebUI Function、
+  `agent-platform` 源码和 `resources` 到 `hhost`，不覆盖远端 `.env`；同时从正在
+  运行的 `tonglingyu-gateway` 容器复制 Gateway 二进制到
+  `agent-platform/target/debug/tonglingyu-gateway`，并写入不含 secret 的
+  `.tonglingyu-release-tool-env`，让远端无 Rust toolchain 时也能运行当前 RQA
+  gates。最新同步 artifact 为
+  `data/tonglingyu/remote-release-tools/remote-tools-20260516T020637Z-81768/remote-release-tools-sync.json`。
 - 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-remote-live-gates.sh`
-  作为本机缺 Docker CLI 时的 SSH 远端 live gate evidence collector。已对
-  `hhost` 运行并保存 artifact：
-  `data/tonglingyu/remote-live-gates/remote-live-20260516T014927Z-75846/remote-live-gates.json`；
+  作为本机缺 Docker CLI 时的 SSH 远端 live gate evidence collector。同步当前
+  release 工具、升级远端 `tonglingyu_gateway_admin` Action、重建并重启
+  `tonglingyu-gateway:formal` 后，远端运行镜像 digest 为
+  `sha256:a117351dd4436659b7f3d9abd3be43a95b6f06dbaa5b9b6325693b92c8f774b8`，
+  最新 live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260516T020657Z-81956/remote-live-gates.json`；
   `model_upstream_network`、`openwebui_function`、`openwebui_admin_action` 和
-  `strict_gateway` 均通过。该 artifact 同时记录远端部署目录缺少当前 RQA
-  release automation、capacity/load、incident/capacity、backup/restore、ops、
-  post-release monitor 和 security 脚本，因此它只能证明基础 live gates 通过，
-  不能替代当前 release automation / release report 绑定。
+  `strict_gateway` 均通过。该 artifact 仍只证明基础 live gates 通过，不能替代
+  完整 live release automation / release report 绑定。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
   `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
   `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
@@ -888,9 +897,10 @@
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
-  所有 required preflight gates 已通过；随后 `hhost` 独立 remote live-gate
-  collector 已证明 model upstream、strict Gateway、Open WebUI Function 和
-  Open WebUI admin Action 通过，但这些结果尚未进入当前 release report。
+  所有 required preflight gates 已通过；随后 `hhost` 已同步当前 release 工具并由
+  独立 remote live-gate collector 证明 model upstream、strict Gateway、Open
+  WebUI Function 和 Open WebUI admin Action 通过，但这些结果尚未进入当前
+  release report。
 - 后续 RQA production-ready 还必须在目标环境真实执行 live existing_refs 恢复演练，
   并保留持久备份 artifact；还必须提供真实生产镜像 scanner artifact 或已审批
   risk exception。dependency scan 当前为 clean，但最终发布仍必须在 release commit

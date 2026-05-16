@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 WORK_DIR="$(mktemp -d)"
 trap 'cleanup' EXIT
 
@@ -19,6 +21,7 @@ REPORT_PATH="${TONGLINGYU_RQA_PERFORMANCE_REPORT_PATH:-}"
 SOURCE_DB_PATH="${TONGLINGYU_RQA_PERFORMANCE_DB_PATH:-${TONGLINGYU_RQA_DB_PATH:-}}"
 SOURCE_ROOT="${TONGLINGYU_RQA_PERFORMANCE_SOURCE_ROOT:-${REPO_DIR}/resources/sources/wiki}"
 GATEWAY_BIN="${TONGLINGYU_RQA_PERFORMANCE_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
+SKIP_BUILD="${TONGLINGYU_RQA_PERFORMANCE_SKIP_BUILD:-false}"
 EVAL_LIMIT="${TONGLINGYU_RQA_EVAL_LIMIT:-8}"
 UPSTREAM_MODEL="${TONGLINGYU_UPSTREAM_MODEL:-${AGENT_RUNTIME_HERMES_MODEL:-hermes-agent}}"
 
@@ -66,6 +69,13 @@ raise SystemExit(completed.returncode)
 PY
 }
 
+is_true() {
+  case "${1:-}" in
+    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 emit_failure() {
   local error_code="$1"
   python3 - "${error_code}" "${REPORT_PATH}" <<'PY'
@@ -94,13 +104,15 @@ PY
   exit 1
 }
 
-if ! (
-  cd "${REPO_DIR}/agent-platform"
-  run_with_timeout \
-    "${BUILD_TIMEOUT_SECONDS}" \
-    cargo build --quiet -p tonglingyu-gateway
-); then
-  emit_failure "gateway_build_failed"
+if ! is_true "${SKIP_BUILD}"; then
+  if ! (
+    cd "${REPO_DIR}/agent-platform"
+    run_with_timeout \
+      "${BUILD_TIMEOUT_SECONDS}" \
+      cargo build --quiet -p tonglingyu-gateway
+  ); then
+    emit_failure "gateway_build_failed"
+  fi
 fi
 
 if [[ ! -x "${GATEWAY_BIN}" ]]; then

@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 WORK_DIR="$(mktemp -d)"
 KEEP_WORK_DIR="${TONGLINGYU_RQA_RESTORE_DRILL_KEEP_WORK_DIR:-false}"
 
@@ -40,6 +42,7 @@ FAILURE_ID="${TONGLINGYU_RQA_RESTORE_DRILL_FAILURE_ID:-}"
 TASK_ID="${TONGLINGYU_RQA_RESTORE_DRILL_TASK_ID:-}"
 
 GATEWAY_BIN="${TONGLINGYU_RQA_RESTORE_DRILL_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
+SKIP_BUILD="${TONGLINGYU_RQA_RESTORE_DRILL_SKIP_BUILD:-false}"
 RESTORED_DB="${WORK_DIR}/restored.db"
 META_JSON="${WORK_DIR}/restore-drill-meta.json"
 
@@ -120,11 +123,13 @@ if is_true "${REQUIRE_LIVE}" && [[ "${refs_provided}" != "true" ]]; then
   emit_failure "live_restore_reference_missing" "${STARTED_MS}"
 fi
 
-if ! (
-  cd "${REPO_DIR}/agent-platform"
-  cargo build --quiet -p tonglingyu-gateway
-); then
-  emit_failure "gateway_build_failed" "${STARTED_MS}"
+if ! is_true "${SKIP_BUILD}"; then
+  if ! (
+    cd "${REPO_DIR}/agent-platform"
+    cargo build --quiet -p tonglingyu-gateway
+  ); then
+    emit_failure "gateway_build_failed" "${STARTED_MS}"
+  fi
 fi
 
 if [[ ! -x "${GATEWAY_BIN}" ]]; then

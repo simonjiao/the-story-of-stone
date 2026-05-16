@@ -2,8 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-REPO_DIR="$(cd -- "${DEPLOY_DIR}/.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 WORK_DIR="$(mktemp -d)"
 RESULTS_JSONL="${WORK_DIR}/results.jsonl"
 READY_STATUS="${WORK_DIR}/production-ready.status"

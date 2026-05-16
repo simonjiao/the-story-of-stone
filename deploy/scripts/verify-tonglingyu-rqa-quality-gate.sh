@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -10,6 +12,7 @@ DB_PATH="${TONGLINGYU_RQA_DB_PATH:-${REPO_DIR}/data/tonglingyu/tonglingyu.db}"
 EVAL_LIMIT="${TONGLINGYU_RQA_EVAL_LIMIT:-8}"
 EVAL_REPORT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_PATH:-}"
 EVAL_REPORT_OUTPUT_PATH="${TONGLINGYU_RQA_EVAL_REPORT_OUTPUT_PATH:-}"
+GATEWAY_BIN="${TONGLINGYU_RQA_QUALITY_GATEWAY_BIN:-${TONGLINGYU_RQA_GATEWAY_BIN:-}}"
 GENERATED_REPORT="false"
 EVAL_DB_PATH="${DB_PATH}"
 
@@ -53,15 +56,33 @@ print(json.dumps({
 PY
     exit 1
   fi
-  if ! (
-    cd "${REPO_DIR}/agent-platform"
-    cargo run -p tonglingyu-gateway -- eval \
+  if [[ -n "${GATEWAY_BIN}" && -x "${GATEWAY_BIN}" ]]; then
+    if ! "${GATEWAY_BIN}" eval \
       --db "${EVAL_DB_PATH}" \
       --limit "${EVAL_LIMIT}" \
       --report "${EVAL_REPORT_PATH}" \
       >"${WORK_DIR}/eval.stdout" \
-      2>"${WORK_DIR}/eval.stderr"
-  ); then
+      2>"${WORK_DIR}/eval.stderr"; then
+      eval_failed="true"
+    else
+      eval_failed="false"
+    fi
+  else
+    if ! (
+      cd "${REPO_DIR}/agent-platform"
+      cargo run -p tonglingyu-gateway -- eval \
+        --db "${EVAL_DB_PATH}" \
+        --limit "${EVAL_LIMIT}" \
+        --report "${EVAL_REPORT_PATH}" \
+        >"${WORK_DIR}/eval.stdout" \
+        2>"${WORK_DIR}/eval.stderr"
+    ); then
+      eval_failed="true"
+    else
+      eval_failed="false"
+    fi
+  fi
+  if [[ "${eval_failed}" == "true" ]]; then
     python3 - <<'PY'
 import json
 

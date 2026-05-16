@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
 REPORT_PATH="${TONGLINGYU_RQA_INCIDENT_CAPACITY_REPORT_PATH:-}"
 RUNBOOK_PATH="${TONGLINGYU_RQA_INCIDENT_RUNBOOK_PATH:-${REPO_DIR}/deploy/runbooks/tonglingyu-rqa-release-runbook.md}"
