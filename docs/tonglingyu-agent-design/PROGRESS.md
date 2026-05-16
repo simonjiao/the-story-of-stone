@@ -1066,14 +1066,15 @@
   `evidence_package_id`，trace 为 `tly-019e2f90fc947651abccbdb2b91f6f00`；随后 live
   DB 复核 `open_failures=0`、`open_p0_tasks=0`、metadata audit events `>=1`。
 - 最新完整远端 release automation
-  `remote-release-20260516T065506Z-59843` 已证明 browser/RQA 队列 blocker 关闭：
-  `openwebui_browser_review.status=passed`，`remote_run_info.open_p0.retrieval_failures=0`，
-  `remote_run_info.open_p0.governance_tasks=0`，required failures 收敛为
-  `security_scan` 和 `release_ops_readiness`。该 run 仍不是 production-ready：
-  `security_scan` 因真实 image scan 中 `critical_count=63`、`high_count=714`
-  fail-closed；`release_ops_readiness` 仍缺 rollback/RTO-RPO/alert/post-release
-  monitor/operator/admin-action evidence。另有 `tracked worktree must be clean for
-  live release` blocker，是因为本轮修复尚未提交即同步远端验证；提交并重同步后应消失。
+  `remote-release-20260516T071215Z-62555` 已在提交
+  `dd80c124acc25360c5e7a5e737998e8ab2d74976` 并重同步远端后执行，确认
+  clean-worktree blocker 已消失。该 run 已证明 browser/RQA 队列 blocker 关闭：
+  `openwebui_browser_review.status=passed`，open P0 retrieval failures /
+  governance tasks 均为 0，required failures 只剩 `security_scan` 和
+  `release_ops_readiness`。该 run 仍不是 production-ready：`security_scan`
+  因真实 image scan 中 `critical_count=63`、`high_count=714` fail-closed；
+  `release_ops_readiness` 仍缺 rollback/RTO-RPO/alert/post-release
+  monitor/operator/admin-action evidence。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1087,18 +1088,16 @@
 
 ## 下一步
 
-1. 生成提交并重同步远端，消除 `tracked worktree must be clean for live release`
-   blocker，然后复跑 release automation 确认只剩真实生产门禁。
-2. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
+1. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
    reports 已持久化，但 image scan 仍有 63 critical / 714 high；需要替换/重建
    镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的审批风险例外。
-3. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
+2. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
    窗口、operator/environment、live gate evidence 和 admin Action/API evidence 必须
    绑定进最终 live release report；browser review evidence 已绑定，不再作为当前
    blocker。
-4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
-5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-6. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
