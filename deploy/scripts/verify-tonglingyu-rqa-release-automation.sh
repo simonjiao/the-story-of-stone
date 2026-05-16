@@ -101,7 +101,11 @@ if [[ "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}" =~ ^(1|true|TRUE|yes|YES|on|ON
       # shellcheck disable=SC1090
       . "${post_release_ops_env_path}"
       readiness_status="failed"
+      second_preflight_backup="${ARTIFACT_DIR}/pre-migration-backup-post-release-ops.db"
+      second_restore_drill_dir="${ARTIFACT_DIR}/restore-drill-post-release-ops"
       if env "TONGLINGYU_RELEASE_REPORT_PATH=${RELEASE_REPORT_PATH}" \
+        "TONGLINGYU_RQA_MIGRATION_PREFLIGHT_BACKUP_PATH=${second_preflight_backup}" \
+        "TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR=${second_restore_drill_dir}" \
         "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" \
         >"${READINESS_STDOUT}" 2>"${READINESS_STDERR}"; then
         readiness_status="passed"
