@@ -30,6 +30,9 @@ ENVIRONMENT="${TONGLINGYU_RQA_RESTORE_DRILL_ENVIRONMENT:-local}"
 EVAL_LIMIT="${TONGLINGYU_RQA_EVAL_LIMIT:-8}"
 REQUIRE_LIVE="${TONGLINGYU_RQA_RESTORE_DRILL_REQUIRE_LIVE:-false}"
 UPSTREAM_MODEL="${TONGLINGYU_UPSTREAM_MODEL:-${AGENT_RUNTIME_HERMES_MODEL:-hermes-agent}}"
+ARTIFACT_ROOT="${TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_ROOT:-${REPO_DIR}/data/tonglingyu/restore-drills}"
+ARTIFACT_RUN_ID="${TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_RUN_ID:-$(date -u +"%Y%m%dT%H%M%SZ")-$$}"
+ARTIFACT_DIR_OVERRIDE="${TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR:-}"
 
 TRACE_ID="${TONGLINGYU_RQA_RESTORE_DRILL_TRACE_ID:-}"
 PACKAGE_ID="${TONGLINGYU_RQA_RESTORE_DRILL_PACKAGE_ID:-}"
@@ -37,7 +40,6 @@ FAILURE_ID="${TONGLINGYU_RQA_RESTORE_DRILL_FAILURE_ID:-}"
 TASK_ID="${TONGLINGYU_RQA_RESTORE_DRILL_TASK_ID:-}"
 
 GATEWAY_BIN="${TONGLINGYU_RQA_RESTORE_DRILL_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}"
-BACKUP_DB="${WORK_DIR}/backup.db"
 RESTORED_DB="${WORK_DIR}/restored.db"
 META_JSON="${WORK_DIR}/restore-drill-meta.json"
 
@@ -47,6 +49,17 @@ is_true() {
     *) return 1 ;;
   esac
 }
+
+if [[ -n "${ARTIFACT_DIR_OVERRIDE}" ]]; then
+  RESTORE_ARTIFACT_DIR="${ARTIFACT_DIR_OVERRIDE}"
+elif is_true "${REQUIRE_LIVE}"; then
+  RESTORE_ARTIFACT_DIR="${ARTIFACT_ROOT}/${ARTIFACT_RUN_ID}"
+else
+  RESTORE_ARTIFACT_DIR="${WORK_DIR}"
+fi
+mkdir -p "${RESTORE_ARTIFACT_DIR}"
+RESTORE_ARTIFACT_DIR="$(cd -- "${RESTORE_ARTIFACT_DIR}" && pwd)"
+BACKUP_DB="${RESTORE_ARTIFACT_DIR}/backup.db"
 
 now_ms() {
   python3 - <<'PY'
@@ -593,6 +606,8 @@ with open(rqa_gate_path, "r", encoding="utf-8") as handle:
 with open(validator_path, "r", encoding="utf-8") as handle:
     validator = json.load(handle)
 
+backup_path = str(Path(backup_db).resolve())
+artifact_dir = str(Path(backup_db).resolve().parent)
 rto_actual = (finished_ms - restore_started_ms) / 1000
 rpo_actual = (finished_ms - backup_finished_ms) / 1000
 rto_met = rto_actual <= rto_target
@@ -614,6 +629,8 @@ payload = {
     "drill_result": "passed" if result_ok else "failed",
     "source_mode": source_mode,
     "policy_version": "tonglingyu-rqa-backup-restore-drill-v1",
+    "artifact_dir": artifact_dir,
+    "artifact_dir_sha256": hash_text(artifact_dir),
     "started_at": iso(started_ms),
     "finished_at": iso(finished_ms),
     "duration_ms": finished_ms - started_ms,
@@ -632,7 +649,8 @@ payload = {
     "backup": {
         "started_at": iso(backup_started_ms),
         "finished_at": iso(backup_finished_ms),
-        "artifact_path": str(Path(backup_db)),
+        "artifact_path": backup_path,
+        "artifact_path_sha256": hash_text(backup_path),
         "artifact_sha256": file_sha256(backup_db),
         "size_bytes": Path(backup_db).stat().st_size,
         "source_db_sha256": file_sha256(primary_db),

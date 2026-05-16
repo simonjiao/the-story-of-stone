@@ -47,6 +47,7 @@ TAMPERED_RQA_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-gate-stdout-report.jso
 TAMPERED_RQA_RESTORE_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-rqa-restore-gate-stdout-report.json"
 TAMPERED_RQA_RESTORE_FIXTURE_REPORT="${WORK_DIR}/tampered-rqa-restore-fixture-report.json"
 TAMPERED_RQA_RESTORE_RTO_REPORT="${WORK_DIR}/tampered-rqa-restore-rto-report.json"
+TAMPERED_RQA_RESTORE_BACKUP_ARTIFACT_REPORT="${WORK_DIR}/tampered-rqa-restore-backup-artifact-report.json"
 TAMPERED_SECURITY_GATE_STDOUT_REPORT="${WORK_DIR}/tampered-security-gate-stdout-report.json"
 TAMPERED_SECURITY_GATE_RISK_REPORT="${WORK_DIR}/tampered-security-gate-risk-report.json"
 TAMPERED_SECURITY_GATE_SCRIPT_REPORT="${WORK_DIR}/tampered-security-gate-script-report.json"
@@ -1428,6 +1429,17 @@ image_raw_report_paths_sha256 = hashlib.sha256(
 image_scanned_reports_sha256 = hashlib.sha256(
     ("\n".join(sorted(image_report_digests)) + "\n").encode("utf-8")
 ).hexdigest()
+restore_artifact_dir = Path(str(target) + ".restore-artifacts").resolve()
+restore_artifact_dir.mkdir(parents=True, exist_ok=True)
+restore_backup_path = restore_artifact_dir / "backup.db"
+restore_backup_path.write_bytes(b"synthetic restore drill backup evidence\n")
+restore_artifact_dir_sha256 = hashlib.sha256(
+    str(restore_artifact_dir).encode("utf-8")
+).hexdigest()
+restore_backup_path_sha256 = hashlib.sha256(
+    str(restore_backup_path).encode("utf-8")
+).hexdigest()
+restore_backup_sha256 = hashlib.sha256(restore_backup_path.read_bytes()).hexdigest()
 production_default_thresholds = {
     "eval_case_classification": 1.0,
     "exact_term_coverage": 1.0,
@@ -1579,15 +1591,19 @@ gate_stdout = {
         },
     },
     "rqa_backup_restore_drill": {
+        "artifact_dir": str(restore_artifact_dir),
+        "artifact_dir_sha256": restore_artifact_dir_sha256,
         "artifacts": {
             "rqa_quality_gate_sha256": "b" * 64,
             "saved_release_report_sha256": "c" * 64,
             "saved_report_validator_sha256": "d" * 64,
         },
         "backup": {
-            "artifact_sha256": "e" * 64,
+            "artifact_path": str(restore_backup_path),
+            "artifact_path_sha256": restore_backup_path_sha256,
+            "artifact_sha256": restore_backup_sha256,
             "finished_at": "2026-05-15T00:00:02+00:00",
-            "size_bytes": 4096,
+            "size_bytes": restore_backup_path.stat().st_size,
             "source_db_sha256": "f" * 64,
             "started_at": "2026-05-15T00:00:01+00:00",
         },
@@ -3282,6 +3298,35 @@ if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
 fi
 assert_report "${tampered_rqa_restore_rto_stdout}" \
   '"rqa_backup_restore_drill_rto_not_met" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_RESTORE_BACKUP_ARTIFACT_REPORT}" <<'PY'
+import hashlib
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "rqa_backup_restore_drill":
+        gate_json = json.loads(gate["stdout_tail"][0])
+        missing_path = "/tmp/tonglingyu-missing-restore-backup.db"
+        gate_json["backup"]["artifact_path"] = missing_path
+        gate_json["backup"]["artifact_path_sha256"] = hashlib.sha256(
+            missing_path.encode("utf-8")
+        ).hexdigest()
+        gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_rqa_restore_backup_artifact_stdout="${WORK_DIR}/tampered-rqa-restore-backup-artifact.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_RQA_RESTORE_BACKUP_ARTIFACT_REPORT}" >"${tampered_rqa_restore_backup_artifact_stdout}"; then
+  echo "production-ready reports must reject missing RQA restore backup artifacts" >&2
+  exit 1
+fi
+assert_report "${tampered_rqa_restore_backup_artifact_stdout}" \
+  '"production_ready_rqa_restore_backup_artifact_missing" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_SECURITY_GATE_STDOUT_REPORT}" <<'PY'
 import json

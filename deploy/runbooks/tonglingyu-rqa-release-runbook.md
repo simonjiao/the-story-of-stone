@@ -46,12 +46,19 @@ gate must use live references for production:
 
 ```bash
 TONGLINGYU_RQA_RESTORE_DRILL_REQUIRE_LIVE=true \
+TONGLINGYU_RQA_RESTORE_DRILL_TRACE_ID="${LIVE_TRACE_ID:?}" \
+TONGLINGYU_RQA_RESTORE_DRILL_PACKAGE_ID="${LIVE_PACKAGE_ID:?}" \
+TONGLINGYU_RQA_RESTORE_DRILL_FAILURE_ID="${LIVE_FAILURE_ID:?}" \
+TONGLINGYU_RQA_RESTORE_DRILL_TASK_ID="${LIVE_TASK_ID:?}" \
+TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR="${RESTORE_DRILL_ARTIFACT_DIR:?}" \
 ./scripts/verify-tonglingyu-rqa-backup-restore-drill.sh
 ```
 
 The release cannot proceed if this drill uses fixture-only references, misses
 post-restore checks, or fails to rerun the RQA quality gate and saved report
-validator.
+validator. The saved production-ready report validator also re-reads the
+persisted restore-drill backup artifact and checks that its content hash still
+matches the gate stdout.
 
 <!-- tonglingyu:release-runbook:backup -->
 

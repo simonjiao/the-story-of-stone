@@ -195,6 +195,8 @@ gate_stdout_requirements = {
     "rqa_backup_restore_drill": {
         "object": "tonglingyu.rqa_backup_restore_drill",
         "required_fields": [
+            "artifact_dir",
+            "artifact_dir_sha256",
             "artifacts",
             "backup",
             "checks",
@@ -1747,6 +1749,21 @@ def validate_restore_drill_gate_stdout():
         errors.append("rqa_backup_restore_drill_source_mode_invalid")
     if production_ready and gate_json.get("source_mode") != "existing_refs":
         errors.append("production_ready_requires_live_rqa_restore_drill_refs")
+    artifact_dir = gate_json.get("artifact_dir")
+    if not nonempty(artifact_dir):
+        errors.append("rqa_backup_restore_drill_artifact_dir_missing")
+    else:
+        if hashlib.sha256(artifact_dir.encode("utf-8")).hexdigest() != gate_json.get(
+            "artifact_dir_sha256"
+        ):
+            errors.append("rqa_backup_restore_drill_artifact_dir_sha256_mismatch")
+        artifact_dir_path = Path(artifact_dir)
+        if production_ready and not artifact_dir_path.is_absolute():
+            errors.append("production_ready_rqa_restore_artifact_dir_not_absolute")
+        elif production_ready and not artifact_dir_path.is_dir():
+            errors.append("production_ready_rqa_restore_artifact_dir_missing")
+    if not is_sha256(gate_json.get("artifact_dir_sha256")):
+        errors.append("rqa_backup_restore_drill_artifact_dir_sha256_invalid")
     if parse_timestamp(gate_json.get("started_at")) is None:
         errors.append("rqa_backup_restore_drill_started_at_invalid")
     if parse_timestamp(gate_json.get("finished_at")) is None:
@@ -1774,9 +1791,30 @@ def validate_restore_drill_gate_stdout():
     if not isinstance(backup, dict):
         errors.append("rqa_backup_restore_drill_backup_missing")
     else:
+        artifact_path = backup.get("artifact_path")
         for field in ("started_at", "finished_at"):
             if parse_timestamp(backup.get(field)) is None:
                 errors.append(f"rqa_backup_restore_drill_backup_{field}_invalid")
+        if not nonempty(artifact_path):
+            errors.append("rqa_backup_restore_drill_backup_artifact_path_missing")
+        else:
+            if hashlib.sha256(artifact_path.encode("utf-8")).hexdigest() != backup.get(
+                "artifact_path_sha256"
+            ):
+                errors.append(
+                    "rqa_backup_restore_drill_backup_artifact_path_sha256_mismatch"
+                )
+            artifact_path_obj = Path(artifact_path)
+            if production_ready and not artifact_path_obj.is_absolute():
+                errors.append("production_ready_rqa_restore_backup_artifact_path_not_absolute")
+            elif production_ready and not artifact_path_obj.is_file():
+                errors.append("production_ready_rqa_restore_backup_artifact_missing")
+            elif production_ready and file_sha256(artifact_path_obj) != backup.get(
+                "artifact_sha256"
+            ):
+                errors.append("production_ready_rqa_restore_backup_artifact_sha256_mismatch")
+        if not is_sha256(backup.get("artifact_path_sha256")):
+            errors.append("rqa_backup_restore_drill_backup_artifact_path_sha256_invalid")
         if not is_sha256(backup.get("artifact_sha256")):
             errors.append("rqa_backup_restore_drill_backup_artifact_sha256_invalid")
         if not is_sha256(backup.get("source_db_sha256")):

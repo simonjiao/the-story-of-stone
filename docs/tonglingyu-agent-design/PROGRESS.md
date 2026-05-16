@@ -646,10 +646,13 @@
   task/package 读取、package replay、恢复后 RQA quality gate 和 saved report
   validator 复跑。默认 RTO/RPO 为 900s / 3600s，gate stdout 写入
   started_at、finished_at、operator、environment、RTO/RPO、artifact hash 和
-  post-restore checks。
+  post-restore checks。live mode 现在默认把 restore-drill 备份证据持久化到
+  `data/tonglingyu/restore-drills/<run_id>/`，也可通过
+  `TONGLINGYU_RQA_RESTORE_DRILL_ARTIFACT_DIR` 显式绑定 artifact 目录。
 - saved report validator 已要求 `rqa_backup_restore_drill` gate 存在并校验
   RTO/RPO、backup/restore hash、恢复后 checks；production-ready report 若使用
-  fixture-only restore drill 会失败，live release 必须提供真实 trace/package/failure/
+  fixture-only restore drill、缺失持久备份 artifact，或备份 artifact 内容 hash
+  与 gate stdout 不一致会失败，live release 必须提供真实 trace/package/failure/
   governance task restore refs。
 - Release security gate 已接入 release readiness 必跑路径：
   `deploy/scripts/verify-tonglingyu-release-security.sh` 会记录 dependency scan、
@@ -727,7 +730,10 @@
 - RQA backup/restore drill 的嵌套 release report 已同步新增 gate 边界：
   恢复后 report 会显式处理 performance、API、lifecycle、security、ops、
   incident/capacity 和 Open WebUI admin Action contract gates，避免新增 gate
-  反向打断恢复演练；2026-05-16 本地 fixture 恢复演练已重新通过。
+  反向打断恢复演练；contract 已覆盖该边界。2026-05-16 持久 artifact 加固后
+  重新跑真实 restore drill 脚本路径，备份 artifact 已持久化，但恢复后 RQA eval
+  因 5 个 eval case 失败而 fail-closed，因此当前不能把本地 restore drill 作为
+  当前通过证据。
 - 2026-05-16 带 digest image refs 和 fixture image scan 的 preflight release
   readiness 可消除 required gate failure：runtime config 静态 compose/env 解析通过，
   默认 RQA DB 的旧 eval artifact 已审计关闭，`retrieval_quality` open P0
@@ -855,9 +861,10 @@
   digest image refs 和 fixture image scan 复跑 preflight release readiness 后，
   所有 required preflight gates 已通过，skipped live gates 仍包括 model
   upstream、strict Gateway、Open WebUI Function 和 Open WebUI admin Action。
-- 后续 RQA production-ready 还必须提供 live existing_refs 恢复演练证据，以及真实
-  生产镜像 scanner artifact 或已审批 risk exception；dependency scan 当前为 clean，
-  但最终发布仍必须在 release commit 上复跑并绑定报告 hash。
+- 后续 RQA production-ready 还必须在目标环境真实执行 live existing_refs 恢复演练，
+  并保留持久备份 artifact；还必须提供真实生产镜像 scanner artifact 或已审批
+  risk exception。dependency scan 当前为 clean，但最终发布仍必须在 release commit
+  上复跑并绑定报告 hash。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
   budget gate 证明 release 门禁可执行并 fail-closed，但不能替代目标生产环境容量
   与值守验证。
