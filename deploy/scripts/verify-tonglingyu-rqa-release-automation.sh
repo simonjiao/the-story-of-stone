@@ -44,6 +44,8 @@ LIVE_CAPACITY_STDOUT="${WORK_DIR}/live-capacity-load-smoke.stdout"
 LIVE_CAPACITY_STDERR="${WORK_DIR}/live-capacity-load-smoke.stderr"
 READINESS_STDOUT="${WORK_DIR}/release-readiness.stdout"
 READINESS_STDERR="${WORK_DIR}/release-readiness.stderr"
+POST_RELEASE_OPS_STDOUT="${WORK_DIR}/post-release-ops.stdout"
+POST_RELEASE_OPS_STDERR="${WORK_DIR}/post-release-ops.stderr"
 VALIDATOR_STDOUT="${WORK_DIR}/saved-report-validator.stdout"
 VALIDATOR_STDERR="${WORK_DIR}/saved-report-validator.stderr"
 mkdir -p "${ARTIFACT_DIR}"
@@ -84,6 +86,30 @@ if env "TONGLINGYU_RELEASE_REPORT_PATH=${RELEASE_REPORT_PATH}" \
   readiness_status="passed"
 fi
 
+post_release_ops_status="not_run"
+post_release_ops_env_path="${ARTIFACT_DIR}/post-release-ops/post-release-ops.env"
+if [[ "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && [[ "${TONGLINGYU_RQA_RELEASE_GENERATE_POST_RELEASE_OPS_EVIDENCE:-true}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
+  post_release_ops_status="failed"
+  if env \
+    "TONGLINGYU_POST_RELEASE_OPS_ARTIFACT_DIR=${ARTIFACT_DIR}/post-release-ops" \
+    "TONGLINGYU_POST_RELEASE_OPS_ENV_PATH=${post_release_ops_env_path}" \
+    "${SCRIPT_DIR}/generate-tonglingyu-post-release-ops-evidence.sh" \
+    >"${POST_RELEASE_OPS_STDOUT}" 2>"${POST_RELEASE_OPS_STDERR}"; then
+    post_release_ops_status="passed"
+    if [[ -f "${post_release_ops_env_path}" ]]; then
+      # shellcheck disable=SC1090
+      . "${post_release_ops_env_path}"
+      readiness_status="failed"
+      if env "TONGLINGYU_RELEASE_REPORT_PATH=${RELEASE_REPORT_PATH}" \
+        "${SCRIPT_DIR}/verify-tonglingyu-release-readiness.sh" \
+        >"${READINESS_STDOUT}" 2>"${READINESS_STDERR}"; then
+        readiness_status="passed"
+      fi
+    fi
+  fi
+fi
+
 validator_status="not_run"
 if [[ -f "${RELEASE_REPORT_PATH}" ]]; then
   validator_status="failed"
@@ -95,11 +121,13 @@ fi
 
 python3 - "${REPORT_PATH}" "${ARTIFACT_DIR}" "${WORK_DIR}" \
   "${RUN_ID}" "${GIT_COMMIT}" \
-  "${contract_status}" "${live_capacity_status}" "${readiness_status}" "${validator_status}" \
+  "${contract_status}" "${live_capacity_status}" "${readiness_status}" \
+  "${post_release_ops_status}" "${validator_status}" \
   "${RELEASE_REPORT_PATH}" "${VALIDATION_REPORT_PATH}" \
   "${CONTRACT_STDOUT}" "${CONTRACT_STDERR}" \
   "${LIVE_CAPACITY_STDOUT}" "${LIVE_CAPACITY_STDERR}" "${live_capacity_report_path}" \
   "${READINESS_STDOUT}" "${READINESS_STDERR}" \
+  "${POST_RELEASE_OPS_STDOUT}" "${POST_RELEASE_OPS_STDERR}" "${post_release_ops_env_path}" \
   "${VALIDATOR_STDOUT}" "${VALIDATOR_STDERR}" <<'PY'
 import hashlib
 import json
@@ -116,6 +144,7 @@ from pathlib import Path
     contract_status,
     live_capacity_status,
     readiness_status,
+    post_release_ops_status,
     validator_status,
     release_report_path_raw,
     validation_report_path_raw,
@@ -126,9 +155,12 @@ from pathlib import Path
     live_capacity_report_path_raw,
     readiness_stdout_raw,
     readiness_stderr_raw,
+    post_release_ops_stdout_raw,
+    post_release_ops_stderr_raw,
+    post_release_ops_env_path_raw,
     validator_stdout_raw,
     validator_stderr_raw,
-) = sys.argv[1:21]
+) = sys.argv[1:25]
 
 
 def tail(path_raw, limit=20):
@@ -239,6 +271,8 @@ if contract_status != "passed":
     errors.append("contract_smoke_failed")
 if readiness_status != "passed":
     errors.append("release_readiness_failed")
+if post_release_ops_status == "failed":
+    errors.append("post_release_ops_evidence_failed")
 if live_capacity_status == "failed":
     errors.append("live_capacity_load_smoke_failed")
 if validator_status != "passed":
@@ -275,6 +309,7 @@ payload = {
     "checks": {
         "contract_smoke": contract_status,
         "live_capacity_load_smoke": live_capacity_status,
+        "post_release_ops_evidence": post_release_ops_status,
         "release_readiness": readiness_status,
         "saved_report_validator": validator_status,
     },
@@ -312,6 +347,9 @@ payload = {
         "live_capacity_stdout_sha256": file_sha256(live_capacity_stdout_raw),
         "live_capacity_report_path": str(Path(live_capacity_report_path_raw)),
         "live_capacity_report_sha256": file_sha256(live_capacity_report_path_raw),
+        "post_release_ops_stdout_sha256": file_sha256(post_release_ops_stdout_raw),
+        "post_release_ops_env_path": str(Path(post_release_ops_env_path_raw)),
+        "post_release_ops_env_sha256": file_sha256(post_release_ops_env_path_raw),
         "readiness_stdout_sha256": file_sha256(readiness_stdout_raw),
         "artifact_persistence": {
             "release_report_persistent": release_report_persistent,
@@ -341,6 +379,7 @@ payload = {
     "tails": {
         "contract_stderr": tail(contract_stderr_raw),
         "live_capacity_stderr": tail(live_capacity_stderr_raw),
+        "post_release_ops_stderr": tail(post_release_ops_stderr_raw),
         "readiness_stderr": tail(readiness_stderr_raw),
         "validator_stderr": tail(validator_stderr_raw),
     },

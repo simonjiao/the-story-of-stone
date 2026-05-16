@@ -151,6 +151,7 @@ prepare-tonglingyu-rqa-restore-canary.sh
 remediate-tonglingyu-kb-source-metadata.sh
 verify-tonglingyu-release-ops-readiness.sh
 verify-tonglingyu-post-release-monitor.sh
+generate-tonglingyu-post-release-ops-evidence.sh
 verify-tonglingyu-release-security.sh
 prepare-tonglingyu-remote-security-evidence.sh
 verify-tonglingyu-release-readiness.sh
@@ -164,6 +165,7 @@ for script in ${required_scripts}; do
 done
 bash -n scripts/verify-tonglingyu-rqa-release-automation.sh
 bash -n scripts/verify-tonglingyu-release-readiness.sh
+bash -n scripts/generate-tonglingyu-post-release-ops-evidence.sh
 bash -n scripts/verify-tonglingyu-rqa-live-capacity-load-smoke.sh
 bash -n scripts/verify-tonglingyu-rqa-performance-budget.sh
 bash -n scripts/verify-tonglingyu-rqa-backup-restore-drill.sh

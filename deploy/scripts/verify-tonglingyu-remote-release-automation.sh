@@ -12,6 +12,7 @@ REMOTE_PROJECT_ARG="${REMOTE_PROJECT_DIR:-__DEFAULT_REMOTE_PROJECT_DIR__}"
 RUN_ID="${TONGLINGYU_REMOTE_RELEASE_AUTOMATION_RUN_ID:-remote-release-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RELEASE_ENVIRONMENT="${TONGLINGYU_REMOTE_RELEASE_ENVIRONMENT:-hhost}"
 RELEASE_TARGET="${TONGLINGYU_REMOTE_RELEASE_TARGET:-tonglingyu-rqa}"
+RELEASE_OPERATOR="${TONGLINGYU_REMOTE_RELEASE_OPERATOR:-codex-release-automation}"
 ARTIFACT_ROOT="${TONGLINGYU_REMOTE_RELEASE_AUTOMATION_ARTIFACT_ROOT:-${REPO_DIR}/data/tonglingyu/remote-release-automation}"
 if [[ "${ARTIFACT_ROOT}" != /* ]]; then
   ARTIFACT_ROOT="${REPO_DIR}/${ARTIFACT_ROOT}"
@@ -255,7 +256,7 @@ fi
 set +e
 ssh -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_HOST}" \
   'sh -s' -- "${REMOTE_PROJECT_ARG}" "${RUN_ID}" "${RELEASE_ENVIRONMENT}" \
-  "${RELEASE_TARGET}" "${LOCAL_GIT_COMMIT}" "${LOCAL_GIT_TRACKED_DIRTY}" \
+  "${RELEASE_TARGET}" "${RELEASE_OPERATOR}" "${LOCAL_GIT_COMMIT}" "${LOCAL_GIT_TRACKED_DIRTY}" \
   "${security_dependency_scan_remote}" "${security_image_scan_remote}" <<'REMOTE' \
   >"${REMOTE_STDOUT}" 2>"${REMOTE_STDERR}"
 set -eu
@@ -263,10 +264,11 @@ project_dir_arg="$1"
 run_id="$2"
 release_environment="$3"
 release_target="$4"
-source_git_commit="$5"
-source_git_tracked_dirty="$6"
-security_dependency_scan_path="$7"
-security_image_scan_path="$8"
+release_operator="$5"
+source_git_commit="$6"
+source_git_tracked_dirty="$7"
+security_dependency_scan_path="$8"
+security_image_scan_path="$9"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
@@ -323,6 +325,7 @@ export TONGLINGYU_RQA_RELEASE_VALIDATION_REPORT_PATH="${remote_artifact_dir}/rel
 export TONGLINGYU_RELEASE_REQUIRE_LIVE=true
 export TONGLINGYU_RELEASE_ENVIRONMENT="${release_environment}"
 export TONGLINGYU_RELEASE_TARGET="${release_target}"
+export TONGLINGYU_RELEASE_OPERATOR="${release_operator}"
 export TONGLINGYU_RELEASE_GIT_COMMIT="${source_git_commit}"
 export TONGLINGYU_RELEASE_GIT_TRACKED_DIRTY="${source_git_tracked_dirty}"
 export TONGLINGYU_RQA_DB_PATH="${host_db}"
