@@ -5860,6 +5860,67 @@ async fn admin_access_denial_endpoint(
     .into_response()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenWebUiMetadataTask {
+    Title,
+    Tags,
+}
+
+impl OpenWebUiMetadataTask {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Tags => "tags",
+        }
+    }
+}
+
+fn detect_openwebui_metadata_task(question: &str) -> Option<OpenWebUiMetadataTask> {
+    let normalized = question.trim();
+    if !normalized.contains("### Task:") || !normalized.contains("### Chat History:") {
+        return None;
+    }
+    if normalized.contains("Generate a concise, 3-5 word title")
+        && normalized.contains(r#"JSON format: { "title""#)
+    {
+        return Some(OpenWebUiMetadataTask::Title);
+    }
+    if normalized.contains("Generate 1-3 broad tags")
+        && normalized.contains(r#"JSON format: { "tags""#)
+    {
+        return Some(OpenWebUiMetadataTask::Tags);
+    }
+    None
+}
+
+fn openwebui_metadata_completion_content(task: OpenWebUiMetadataTask, question: &str) -> String {
+    let use_chinese = contains_cjk(question);
+    match task {
+        OpenWebUiMetadataTask::Title => {
+            let title = if use_chinese {
+                "通灵玉证据复核"
+            } else {
+                "Evidence Review"
+            };
+            json!({ "title": title }).to_string()
+        }
+        OpenWebUiMetadataTask::Tags => {
+            let tags = if use_chinese {
+                vec!["文学", "证据审校", "通灵玉"]
+            } else {
+                vec!["Arts", "Literature", "Evidence Review"]
+            };
+            json!({ "tags": tags }).to_string()
+        }
+    }
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5883,6 +5944,15 @@ async fn chat_completions(
             );
         }
     };
+    if let Err(error) = tonglingyu_runtime::init_runtime_schema(&conn) {
+        tracing::warn!(%trace_id, error = %error, "runtime schema unavailable");
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime_schema_unavailable",
+            "runtime schema unavailable",
+            Some(&trace_id),
+        );
+    }
     let _ = record_workflow_state(
         &conn,
         &trace_id,
@@ -6082,6 +6152,72 @@ async fn chat_completions(
             Some(&session_id),
         );
         return Json(value).into_response();
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &question);
+        let mut value = completion_value(&state.model_id, content, None, Some(&session_id));
+        value["trace_id"] = json!(&trace_id);
+        if let Ok(request_hash) = hash_value(&payload) {
+            let _ = store_gateway_message(
+                &conn,
+                GatewayMessageRecord {
+                    session_id: &session_id,
+                    context: &context,
+                    trace_id: &trace_id,
+                    package_id: None,
+                    request_hash: &request_hash,
+                    question: &question,
+                    response: &value,
+                },
+            );
+        }
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Open WebUI Metadata Request Handled",
+            "ok",
+            &json!({
+                "metadata_task": metadata_task.as_str(),
+                "question_sha256": hash_text(&question),
+                "evidence_package_created": false,
+                "rqa_governance_mutated": false,
+            }),
+        );
+        let _ = insert_audit_event(
+            &conn,
+            &trace_id,
+            "openwebui_metadata_request_handled",
+            &json!({
+                "session_id": &session_id,
+                "user_ref": &context.user_ref,
+                "chat_ref": &context.chat_ref,
+                "external_message_id": &context.external_message_id,
+                "metadata_task": metadata_task.as_str(),
+                "question_sha256": hash_text(&question),
+                "evidence_package_created": false,
+                "rqa_governance_mutated": false,
+            }),
+        );
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Finalized",
+            "metadata_response",
+            &json!({
+                "stream": request.stream.unwrap_or(false),
+                "elapsed_ms": elapsed_ms(started),
+            }),
+        );
+        return if request.stream.unwrap_or(false) {
+            streaming_response_from_completion_value(&value)
+        } else {
+            Json(value).into_response()
+        };
     }
 
     let mut policy = search_policy(&question);
@@ -9075,6 +9211,120 @@ mod tests {
             })
             .expect("list user feedback governance tasks");
         assert!(tasks.items.is_empty());
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn openwebui_metadata_task_detection_is_narrow() {
+        let title_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+
+### Output:
+JSON format: { "title": "your concise title here" }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
+        let tags_prompt = r#"### Task:
+Generate 1-3 broad tags categorizing the main themes of the chat history.
+
+### Output:
+JSON format: { "tags": ["tag1", "tag2", "tag3"] }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
+
+        assert_eq!(
+            detect_openwebui_metadata_task(title_prompt),
+            Some(OpenWebUiMetadataTask::Title)
+        );
+        assert_eq!(
+            detect_openwebui_metadata_task(tags_prompt),
+            Some(OpenWebUiMetadataTask::Tags)
+        );
+        assert_eq!(detect_openwebui_metadata_task("通灵玉是什么？"), None);
+    }
+
+    #[tokio::test]
+    async fn openwebui_metadata_request_does_not_mutate_rqa_governance() {
+        let db_path = temp_gateway_db_path("tonglingyu-openwebui-metadata");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Guidelines:
+- The output must be a single, raw JSON object, without any markdown code fences.
+### Output:
+JSON format: { "title": "your concise title here" }
+### Chat History:
+<chat_history>
+USER: Please answer briefly: what evidence appears when Lin Daiyu first arrives in chapter 3?
+ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回证据不足。
+</chat_history>"#;
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": metadata_prompt}],
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-title-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("metadata content");
+        let metadata_json: Value = serde_json::from_str(content).expect("metadata content is json");
+        assert_eq!(metadata_json["title"], json!("通灵玉证据复核"));
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(
+            body["trace_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("tly-"))
+        );
+        assert_eq!(body["evidence_package_id"], Value::Null);
+
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        assert_eq!(
+            table_count(&conn, "retrieval_failures").expect("failure count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "knowledge_governance_tasks").expect("task count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata message count"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "openwebui_metadata_request_handled"),
+            1
+        );
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

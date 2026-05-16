@@ -1036,6 +1036,44 @@
   因此 RQA incident/capacity 性能 blocker 已关闭；但整体 production-ready
   仍失败，剩余 required failures 为 `security_scan`、`release_ops_readiness` 和
   `openwebui_browser_review`。
+- 2026-05-16 已修复 Open WebUI 普通用户模型可见性：新增
+  `deploy/scripts/ensure-openwebui-tonglingyu-model-access.sh`，在 live Open WebUI
+  DB 中确保 `model:tonglingyu` active 且存在 `access_grant user:* read`。远端执行
+  结果为 `public_read_grant_count=1`，普通用户内部 `/api/models` 验证
+  `has_tonglingyu=true`。
+- 同日已完成 Open WebUI browser-side review evidence，并绑定进远端 `.env`
+  （更新前已备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
+  evidence ref 为 `browser-review-20260516T063114Z`，远端 evidence JSON 为
+  `/home/simon/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
+  `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
+  visibility、streaming chat UX、admin audit visibility 和 persisted provider
+  settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
+- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签后台任务也会
+  走 `tonglingyu`，旧 gateway 会把这些非 RQA metadata prompt 当成文学问答处理，
+  从而写入 open P0 retrieval failure / governance task。`tonglingyu-gateway`
+  已新增 Open WebUI metadata prompt 隔离：识别 title/tags 任务后返回确定性 JSON，
+  记录 `openwebui_metadata_request_handled` audit event，但不创建 evidence package、
+  retrieval failure 或治理任务。本地验证：
+  `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+  47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
+  tonglingyu-gateway -- -D warnings` 通过。
+- 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
+  `tonglingyu-gateway` 已重建并 pin 到 image id
+  `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
+  远端 metadata smoke 证明 title prompt 返回 JSON、没有
+  `evidence_package_id`，trace 为 `tly-019e2f90fc947651abccbdb2b91f6f00`；随后 live
+  DB 复核 `open_failures=0`、`open_p0_tasks=0`、metadata audit events `>=1`。
+- 最新完整远端 release automation
+  `remote-release-20260516T065506Z-59843` 已证明 browser/RQA 队列 blocker 关闭：
+  `openwebui_browser_review.status=passed`，`remote_run_info.open_p0.retrieval_failures=0`，
+  `remote_run_info.open_p0.governance_tasks=0`，required failures 收敛为
+  `security_scan` 和 `release_ops_readiness`。该 run 仍不是 production-ready：
+  `security_scan` 因真实 image scan 中 `critical_count=63`、`high_count=714`
+  fail-closed；`release_ops_readiness` 仍缺 rollback/RTO-RPO/alert/post-release
+  monitor/operator/admin-action evidence。另有 `tracked worktree must be clean for
+  live release` blocker，是因为本轮修复尚未提交即同步远端验证；提交并重同步后应消失。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1049,15 +1087,15 @@
 
 ## 下一步
 
-1. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
+1. 生成提交并重同步远端，消除 `tracked worktree must be clean for live release`
+   blocker，然后复跑 release automation 确认只剩真实生产门禁。
+2. 处理真实 security blocker：最新远端 automation 的依赖扫描 clean，Trivy raw
    reports 已持久化，但 image scan 仍有 63 critical / 714 high；需要替换/重建
    镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的审批风险例外。
-2. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
-   窗口、operator/environment、live gate evidence、admin Action/API evidence 和
-   Open WebUI browser review evidence 必须绑定进最终 live release report。
-3. 完成 Open WebUI browser-side review：需要生成 browser review evidence，
-   设置 ack/ref/evidence 后重新跑 release automation；当前 admin Action/function
-   contract 和 live gate 已过，但 browser 人工/浏览器侧确认仍未绑定。
+3. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
+   窗口、operator/environment、live gate evidence 和 admin Action/API evidence 必须
+   绑定进最终 live release report；browser review evidence 已绑定，不再作为当前
+   blocker。
 4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
