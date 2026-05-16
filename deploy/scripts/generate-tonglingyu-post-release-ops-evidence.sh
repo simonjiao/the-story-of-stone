@@ -321,7 +321,8 @@ TONGLINGYU_POST_RELEASE_MONITOR_CONCLUSION=passed \
   "${SCRIPT_DIR}/verify-tonglingyu-post-release-monitor.sh" >/dev/null
 
 python3 - "${ENV_PATH}" "${OPERATOR}" "${ARTIFACT_DIR}" "${sample_log}" \
-  "${monitor_evidence}" "${WINDOW_MINUTES}" <<'PY'
+  "${monitor_evidence}" <<'PY'
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -331,7 +332,8 @@ operator = sys.argv[2]
 artifact_dir = Path(sys.argv[3])
 sample_log = Path(sys.argv[4])
 monitor_evidence = Path(sys.argv[5])
-window_minutes = sys.argv[6]
+monitor_payload = json.loads(monitor_evidence.read_text(encoding="utf-8"))
+window_minutes = str(monitor_payload.get("window_minutes") or 60)
 values = {
     "TONGLINGYU_RELEASE_OPERATOR": operator,
     "TONGLINGYU_RELEASE_ROLLBACK_EVIDENCE_REF": str(artifact_dir / "rollback-evidence.json"),
