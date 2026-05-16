@@ -1010,6 +1010,8 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 - [x] 事故 runbook 定义 RTO/RPO breach 的升级路径和发布状态处理。
 - [ ] capacity smoke 覆盖代表性 eval report 数量、failure 数量和 admin list 翻页。
 - [ ] load / soak smoke 覆盖 RQA 写入、admin 查询、metrics 和 release gate 在默认预算内。
+- [x] capacity/load smoke 必须生成可复核 JSON evidence，并由 incident/capacity
+      gate 与 saved report validator 绑定哈希。
 - [x] release gate 缺少 capacity / incident / audit-history / RTO-RPO / security-scan
       证据时不能
       production-ready。
@@ -1028,6 +1030,12 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   规则、无无界队列静态检查、幂等标记、status-history audit 标记和 incident
   runbook 结构就绪；live 模式缺容量、负载、审计历史或事故响应证据会
   fail-closed。
+- 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-rqa-capacity-load-evidence.sh`：
+  生成并校验 `tonglingyu.rqa_capacity_load_evidence` JSON，要求 capacity smoke
+  覆盖代表性 eval report、failure 和 admin list 翻页，load/soak smoke 覆盖 RQA
+  写入、admin 查询、metrics 查询和 release gate，并按默认预算校验。live
+  `rqa_incident_capacity` gate 现在必须绑定该 evidence path/hash；saved report
+  validator 会拒绝未校验、缺失或哈希不匹配的 production-ready 报告。
 - Saved report validator 已要求 production-ready report 绑定
   `rqa_incident_capacity` stdout，并拒绝 emergency disabled、degraded mode、
   persistence degraded、非 live 模式、缺 evidence ref、代表性数量不足、负载

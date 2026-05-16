@@ -1218,6 +1218,83 @@ post_release_monitor_evidence_path.write_text(
 post_release_monitor_evidence_sha256 = hashlib.sha256(
     post_release_monitor_evidence_path.read_bytes(),
 ).hexdigest()
+capacity_load_evidence_path = Path(str(target) + ".capacity-load.json")
+capacity_load_evidence = {
+    "budget_results": {
+        "admin_read_p95_ms": True,
+        "metrics_read_p95_ms": True,
+        "release_gate_ms": True,
+        "rqa_write_p95_ms": True,
+    },
+    "capacity_load_policy_version": "tonglingyu-rqa-capacity-load-evidence-v1",
+    "checks": {
+        "admin_read_budget_passed": True,
+        "metrics_read_budget_passed": True,
+        "operator_environment_recorded": True,
+        "release_gate_budget_passed": True,
+        "representative_capacity_covered": True,
+        "rqa_write_budget_passed": True,
+        "window_at_least_minimum": True,
+    },
+    "environment": "production",
+    "errors": [],
+    "evidence_refs": {
+        "audit_history_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:audit-history",
+            "valid": True,
+        },
+        "capacity_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:capacity-smoke",
+            "valid": True,
+        },
+        "incident_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:incident-response",
+            "valid": True,
+        },
+        "load_evidence_ref": {
+            "kind": "artifact",
+            "ref": "artifact:load-soak",
+            "valid": True,
+        },
+    },
+    "finished_at": "2026-05-15T00:10:00+00:00",
+    "generated_at": "2026-05-15T00:10:01+00:00",
+    "load_budgets_ms": {
+        "admin_read_p95_ms": 2000,
+        "metrics_read_p95_ms": 2000,
+        "release_gate_ms": 90000,
+        "rqa_write_p95_ms": 10000,
+    },
+    "load_measurements": {
+        "admin_read_p95_ms": 80,
+        "metrics_read_p95_ms": 60,
+        "release_gate_ms": 3000,
+        "rqa_write_p95_ms": 900,
+    },
+    "min_window_minutes": 10,
+    "object": "tonglingyu.rqa_capacity_load_evidence",
+    "operator": "release-reviewer",
+    "representative_counts": {
+        "admin_list_page_count": 2,
+        "eval_report_count": 1,
+        "failure_count": 1,
+    },
+    "schema_version": 1,
+    "secret_values_printed": False,
+    "started_at": "2026-05-15T00:00:00+00:00",
+    "status": "ok",
+    "window_minutes": 10,
+}
+capacity_load_evidence_path.write_text(
+    json.dumps(capacity_load_evidence, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+capacity_load_evidence_sha256 = hashlib.sha256(
+    capacity_load_evidence_path.read_bytes(),
+).hexdigest()
 image_refs = [
     "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
     "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
@@ -1952,6 +2029,7 @@ gate_stdout = {
             },
             "load_measurements": {
                 "admin_read_p95_ms": 80,
+                "metrics_read_p95_ms": 60,
                 "release_gate_ms": 3000,
                 "rqa_write_p95_ms": 900,
             },
@@ -1965,8 +2043,15 @@ gate_stdout = {
             "retry_idempotency_required": True,
             "write_queue_policy": "synchronous_write_no_unbounded_queue",
         },
+        "capacity_load_evidence": {
+            "errors": [],
+            "path": str(capacity_load_evidence_path),
+            "sha256": capacity_load_evidence_sha256,
+            "validated": True,
+        },
         "checks": {
             "audit_history_live_evidence_required": True,
+            "capacity_load_evidence_validated": True,
             "capacity_live_evidence_required": True,
             "emergency_flags_fail_closed": True,
             "hard_delete_open_records_forbidden": True,
@@ -1987,6 +2072,7 @@ gate_stdout = {
         "errors": [],
         "evidence": {
             "audit_history_evidence_ref": "artifact:audit-history",
+            "capacity_load_evidence_sha256": capacity_load_evidence_sha256,
             "capacity_evidence_complete": True,
             "capacity_evidence_ref": "artifact:capacity-smoke",
             "incident_evidence_ref": "artifact:incident-response",
@@ -3304,6 +3390,10 @@ for gate in report["gates"]:
             "ref": "",
             "valid": False,
         }
+        gate_json["capacity_load_evidence"]["validated"] = False
+        gate_json["capacity_load_evidence"]["errors"] = [
+            "capacity_load_evidence_admin_list_page_count_mismatch"
+        ]
         gate["stdout_tail"] = [json.dumps(gate_json, sort_keys=True)]
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
@@ -3320,6 +3410,10 @@ assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
   '"rqa_incident_capacity_capacity_evidence_ref_missing" in report["errors"]'
 assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
   '"rqa_incident_capacity_admin_list_page_count_below_minimum" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_capacity_load_evidence_not_validated" in report["errors"]'
+assert_report "${tampered_rqa_incident_capacity_evidence_stdout}" \
+  '"rqa_incident_capacity_capacity_load_evidence_errors_present" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RQA_PERFORMANCE_GATE_STDOUT_REPORT}" <<'PY'
 import json

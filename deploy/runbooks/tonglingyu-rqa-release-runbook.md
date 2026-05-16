@@ -213,6 +213,36 @@ and saved report validation are recorded. If RQA write paths are disabled during
 mitigation, preserve existing evidence, audit tombstones, and release report
 artifacts before rollback or deletion.
 
+## Capacity And Load Evidence
+
+Capacity/load smoke must produce a JSON artifact before the live release report
+can be considered production-ready. The artifact binds representative eval
+report count, failure count, admin list pagination, RQA write p95, admin query
+p95, metrics query p95, release gate runtime, audit-history evidence, and
+incident evidence.
+
+<!-- markdownlint-disable MD013 -->
+```bash
+TONGLINGYU_RQA_CAPACITY_LOAD_REPORT_PATH="${CAPACITY_LOAD_REPORT_PATH:?}" \
+TONGLINGYU_RQA_CAPACITY_LOAD_OPERATOR="${TONGLINGYU_RELEASE_OPERATOR:?}" \
+TONGLINGYU_RQA_CAPACITY_LOAD_ENVIRONMENT="${TONGLINGYU_RELEASE_ENVIRONMENT:?}" \
+TONGLINGYU_RQA_CAPACITY_LOAD_STARTED_AT="${CAPACITY_LOAD_STARTED_AT:?}" \
+TONGLINGYU_RQA_CAPACITY_LOAD_FINISHED_AT="${CAPACITY_LOAD_FINISHED_AT:?}" \
+TONGLINGYU_RQA_CAPACITY_EVIDENCE_REF="${TONGLINGYU_RQA_CAPACITY_EVIDENCE_REF:?}" \
+TONGLINGYU_RQA_LOAD_EVIDENCE_REF="${TONGLINGYU_RQA_LOAD_EVIDENCE_REF:?}" \
+TONGLINGYU_RQA_AUDIT_HISTORY_EVIDENCE_REF="${TONGLINGYU_RQA_AUDIT_HISTORY_EVIDENCE_REF:?}" \
+TONGLINGYU_RQA_INCIDENT_EVIDENCE_REF="${TONGLINGYU_RQA_INCIDENT_EVIDENCE_REF:?}" \
+TONGLINGYU_RQA_CAPACITY_EVAL_REPORT_COUNT="${TONGLINGYU_RQA_CAPACITY_EVAL_REPORT_COUNT:?}" \
+TONGLINGYU_RQA_CAPACITY_FAILURE_COUNT="${TONGLINGYU_RQA_CAPACITY_FAILURE_COUNT:?}" \
+TONGLINGYU_RQA_CAPACITY_ADMIN_LIST_PAGE_COUNT="${TONGLINGYU_RQA_CAPACITY_ADMIN_LIST_PAGE_COUNT:?}" \
+TONGLINGYU_RQA_LOAD_RQA_WRITE_P95_MS="${TONGLINGYU_RQA_LOAD_RQA_WRITE_P95_MS:?}" \
+TONGLINGYU_RQA_LOAD_ADMIN_READ_P95_MS="${TONGLINGYU_RQA_LOAD_ADMIN_READ_P95_MS:?}" \
+TONGLINGYU_RQA_LOAD_METRICS_READ_P95_MS="${TONGLINGYU_RQA_LOAD_METRICS_READ_P95_MS:?}" \
+TONGLINGYU_RQA_LOAD_RELEASE_GATE_MS="${TONGLINGYU_RQA_LOAD_RELEASE_GATE_MS:?}" \
+./scripts/verify-tonglingyu-rqa-capacity-load-evidence.sh
+```
+<!-- markdownlint-enable MD013 -->
+
 <!-- tonglingyu:release-runbook:post_release_monitor -->
 
 ## Post-Release Monitor

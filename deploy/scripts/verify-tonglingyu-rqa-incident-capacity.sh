@@ -14,20 +14,24 @@ CAPACITY_EVIDENCE_REF="${TONGLINGYU_RQA_CAPACITY_EVIDENCE_REF:-}"
 LOAD_EVIDENCE_REF="${TONGLINGYU_RQA_LOAD_EVIDENCE_REF:-}"
 AUDIT_HISTORY_EVIDENCE_REF="${TONGLINGYU_RQA_AUDIT_HISTORY_EVIDENCE_REF:-}"
 INCIDENT_EVIDENCE_REF="${TONGLINGYU_RQA_INCIDENT_EVIDENCE_REF:-}"
+CAPACITY_LOAD_EVIDENCE="${TONGLINGYU_RQA_CAPACITY_LOAD_EVIDENCE:-}"
 CAPACITY_EVAL_REPORT_COUNT="${TONGLINGYU_RQA_CAPACITY_EVAL_REPORT_COUNT:-0}"
 CAPACITY_FAILURE_COUNT="${TONGLINGYU_RQA_CAPACITY_FAILURE_COUNT:-0}"
 CAPACITY_ADMIN_LIST_PAGE_COUNT="${TONGLINGYU_RQA_CAPACITY_ADMIN_LIST_PAGE_COUNT:-0}"
 LOAD_RQA_WRITE_P95_MS="${TONGLINGYU_RQA_LOAD_RQA_WRITE_P95_MS:-0}"
 LOAD_ADMIN_READ_P95_MS="${TONGLINGYU_RQA_LOAD_ADMIN_READ_P95_MS:-0}"
+LOAD_METRICS_READ_P95_MS="${TONGLINGYU_RQA_LOAD_METRICS_READ_P95_MS:-0}"
 LOAD_RELEASE_GATE_MS="${TONGLINGYU_RQA_LOAD_RELEASE_GATE_MS:-0}"
 
 python3 - "${REPO_DIR}" "${RUNBOOK_PATH}" "${REPORT_PATH}" "${REQUIRE_LIVE}" \
   "${EMERGENCY_DISABLED}" "${DEGRADED_MODE}" "${PERSISTENCE_DEGRADED}" \
   "${CAPACITY_EVIDENCE_REF}" "${LOAD_EVIDENCE_REF}" \
   "${AUDIT_HISTORY_EVIDENCE_REF}" "${INCIDENT_EVIDENCE_REF}" \
+  "${CAPACITY_LOAD_EVIDENCE}" \
   "${CAPACITY_EVAL_REPORT_COUNT}" "${CAPACITY_FAILURE_COUNT}" \
   "${CAPACITY_ADMIN_LIST_PAGE_COUNT}" "${LOAD_RQA_WRITE_P95_MS}" \
-  "${LOAD_ADMIN_READ_P95_MS}" "${LOAD_RELEASE_GATE_MS}" <<'PY'
+  "${LOAD_ADMIN_READ_P95_MS}" "${LOAD_METRICS_READ_P95_MS}" \
+  "${LOAD_RELEASE_GATE_MS}" <<'PY'
 import hashlib
 import json
 import re
@@ -48,13 +52,15 @@ from urllib.parse import urlparse
     load_evidence_ref,
     audit_history_evidence_ref,
     incident_evidence_ref,
+    capacity_load_evidence_raw,
     capacity_eval_report_count_raw,
     capacity_failure_count_raw,
     capacity_admin_list_page_count_raw,
     load_rqa_write_p95_ms_raw,
     load_admin_read_p95_ms_raw,
+    load_metrics_read_p95_ms_raw,
     load_release_gate_ms_raw,
-) = sys.argv[1:18]
+) = sys.argv[1:20]
 
 repo_dir = Path(repo_dir_raw)
 runbook_path = Path(runbook_path_raw)
@@ -77,6 +83,13 @@ def file_sha256(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def load_json_file(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def positive_number(value):
@@ -143,6 +156,16 @@ def checked_ref(value):
         "kind": ref_kind(value),
         "valid": ref_valid(value),
     }
+
+
+def resolve_evidence_path(path_raw):
+    value = str(path_raw or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return repo_dir / path
 
 
 def read_text(relative):
@@ -217,11 +240,124 @@ capacity_failure_count = non_negative_int(capacity_failure_count_raw)
 capacity_admin_list_page_count = non_negative_int(capacity_admin_list_page_count_raw)
 load_rqa_write_p95_ms = positive_number(load_rqa_write_p95_ms_raw)
 load_admin_read_p95_ms = positive_number(load_admin_read_p95_ms_raw)
+load_metrics_read_p95_ms = positive_number(load_metrics_read_p95_ms_raw)
 load_release_gate_ms = positive_number(load_release_gate_ms_raw)
 capacity_ref = checked_ref(capacity_evidence_ref)
 load_ref = checked_ref(load_evidence_ref)
 audit_ref = checked_ref(audit_history_evidence_ref)
 incident_ref = checked_ref(incident_evidence_ref)
+capacity_load_evidence_path = resolve_evidence_path(capacity_load_evidence_raw)
+capacity_load_evidence = None
+capacity_load_evidence_sha256 = ""
+capacity_load_evidence_valid = False
+capacity_load_evidence_errors = []
+if capacity_load_evidence_path is not None:
+    if not capacity_load_evidence_path.is_file():
+        capacity_load_evidence_errors.append("capacity_load_evidence_not_found")
+    else:
+        capacity_load_evidence_sha256 = file_sha256(capacity_load_evidence_path)
+        capacity_load_evidence = load_json_file(capacity_load_evidence_path)
+        if not isinstance(capacity_load_evidence, dict):
+            capacity_load_evidence_errors.append("capacity_load_evidence_json_invalid")
+if isinstance(capacity_load_evidence, dict):
+    if capacity_load_evidence.get("object") != "tonglingyu.rqa_capacity_load_evidence":
+        capacity_load_evidence_errors.append("capacity_load_evidence_object_invalid")
+    if capacity_load_evidence.get("schema_version") != 1:
+        capacity_load_evidence_errors.append("capacity_load_evidence_schema_version_invalid")
+    if capacity_load_evidence.get("status") != "ok":
+        capacity_load_evidence_errors.append("capacity_load_evidence_status_invalid")
+    if capacity_load_evidence.get("secret_values_printed") is not False:
+        capacity_load_evidence_errors.append("capacity_load_evidence_secret_values_printed")
+    counts_from_evidence = capacity_load_evidence.get("representative_counts")
+    if not isinstance(counts_from_evidence, dict):
+        capacity_load_evidence_errors.append("capacity_load_evidence_counts_missing")
+    else:
+        expected_counts = {
+            "eval_report_count": capacity_eval_report_count,
+            "failure_count": capacity_failure_count,
+            "admin_list_page_count": capacity_admin_list_page_count,
+        }
+        for field, expected in expected_counts.items():
+            if counts_from_evidence.get(field) != expected:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_{field}_mismatch",
+                )
+    measurements_from_evidence = capacity_load_evidence.get("load_measurements")
+    if not isinstance(measurements_from_evidence, dict):
+        capacity_load_evidence_errors.append("capacity_load_evidence_measurements_missing")
+    else:
+        expected_measurements = {
+            "rqa_write_p95_ms": load_rqa_write_p95_ms,
+            "admin_read_p95_ms": load_admin_read_p95_ms,
+            "metrics_read_p95_ms": load_metrics_read_p95_ms,
+            "release_gate_ms": load_release_gate_ms,
+        }
+        for field, expected in expected_measurements.items():
+            if measurements_from_evidence.get(field) != expected:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_{field}_mismatch",
+                )
+    budget_results = capacity_load_evidence.get("budget_results")
+    if not isinstance(budget_results, dict):
+        capacity_load_evidence_errors.append("capacity_load_evidence_budget_results_missing")
+    else:
+        for field in (
+            "rqa_write_p95_ms",
+            "admin_read_p95_ms",
+            "metrics_read_p95_ms",
+            "release_gate_ms",
+        ):
+            if budget_results.get(field) is not True:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_budget_failed={field}",
+                )
+    evidence_refs = capacity_load_evidence.get("evidence_refs")
+    if not isinstance(evidence_refs, dict):
+        capacity_load_evidence_errors.append("capacity_load_evidence_refs_missing")
+    else:
+        expected_refs = {
+            "capacity_evidence_ref": capacity_ref,
+            "load_evidence_ref": load_ref,
+            "audit_history_evidence_ref": audit_ref,
+            "incident_evidence_ref": incident_ref,
+        }
+        for field, expected_ref in expected_refs.items():
+            actual_ref = evidence_refs.get(field)
+            if not isinstance(actual_ref, dict):
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_{field}_missing",
+                )
+                continue
+            if actual_ref.get("ref") != expected_ref["ref"]:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_{field}_mismatch",
+                )
+            if actual_ref.get("valid") is not True:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_{field}_invalid",
+                )
+    checks_from_evidence = capacity_load_evidence.get("checks")
+    if not isinstance(checks_from_evidence, dict):
+        capacity_load_evidence_errors.append("capacity_load_evidence_checks_missing")
+    else:
+        for check in (
+            "representative_capacity_covered",
+            "rqa_write_budget_passed",
+            "admin_read_budget_passed",
+            "metrics_read_budget_passed",
+            "release_gate_budget_passed",
+            "operator_environment_recorded",
+            "window_at_least_minimum",
+        ):
+            if checks_from_evidence.get(check) is not True:
+                capacity_load_evidence_errors.append(
+                    f"capacity_load_evidence_check_failed={check}",
+                )
+capacity_load_evidence_valid = (
+    capacity_load_evidence_path is not None
+    and isinstance(capacity_load_evidence, dict)
+    and not capacity_load_evidence_errors
+)
 
 if require_live:
     for name, ref in (
@@ -242,8 +378,14 @@ if require_live:
         errors.append("load_rqa_write_p95_ms_invalid")
     if load_admin_read_p95_ms is None:
         errors.append("load_admin_read_p95_ms_invalid")
+    if load_metrics_read_p95_ms is None:
+        errors.append("load_metrics_read_p95_ms_invalid")
     if load_release_gate_ms is None:
         errors.append("load_release_gate_ms_invalid")
+    if capacity_load_evidence_path is None:
+        errors.append("capacity_load_evidence_missing")
+    if not capacity_load_evidence_valid:
+        errors.extend(capacity_load_evidence_errors)
 
 capacity_evidence_complete = (
     require_live
@@ -259,7 +401,9 @@ capacity_evidence_complete = (
     and capacity_admin_list_page_count >= 2
     and load_rqa_write_p95_ms is not None
     and load_admin_read_p95_ms is not None
+    and load_metrics_read_p95_ms is not None
     and load_release_gate_ms is not None
+    and capacity_load_evidence_valid
     and not emergency_disabled
     and not degraded_mode
     and not persistence_degraded
@@ -278,6 +422,7 @@ checks = {
     "capacity_live_evidence_required": True,
     "load_live_evidence_required": True,
     "audit_history_live_evidence_required": True,
+    "capacity_load_evidence_validated": capacity_load_evidence_valid or not require_live,
 }
 incident_capacity_ready = not errors
 
@@ -321,8 +466,15 @@ payload = {
         "load_measurements": {
             "rqa_write_p95_ms": load_rqa_write_p95_ms or 0,
             "admin_read_p95_ms": load_admin_read_p95_ms or 0,
+            "metrics_read_p95_ms": load_metrics_read_p95_ms or 0,
             "release_gate_ms": load_release_gate_ms or 0,
         },
+    },
+    "capacity_load_evidence": {
+        "path": str(capacity_load_evidence_path) if capacity_load_evidence_path else "",
+        "sha256": capacity_load_evidence_sha256,
+        "validated": capacity_load_evidence_valid,
+        "errors": capacity_load_evidence_errors,
     },
     "audit_history": {
         "status_history_required": True,
@@ -351,6 +503,7 @@ payload = {
         "load_evidence_ref": load_ref["ref"],
         "audit_history_evidence_ref": audit_ref["ref"],
         "incident_evidence_ref": incident_ref["ref"],
+        "capacity_load_evidence_sha256": capacity_load_evidence_sha256,
     },
     "errors": errors,
     "secret_values_printed": False,
