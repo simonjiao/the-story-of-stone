@@ -179,10 +179,15 @@ if [[ ! -f "${SOURCE_DB_PATH}" ]]; then
 fi
 
 if ! is_true "${SKIP_BUILD}"; then
-  if ! (
-    cd "${REPO_DIR}/agent-platform"
-    cargo build --quiet -p tonglingyu-gateway
-  ); then
+  if command -v cargo >/dev/null 2>&1; then
+    if ! (
+      cd "${REPO_DIR}/agent-platform"
+      cargo build --quiet -p tonglingyu-gateway
+    ); then
+      emit_report "failed" "gateway_build_failed"
+      exit 1
+    fi
+  elif [[ ! -x "${GATEWAY_BIN}" ]]; then
     emit_report "failed" "gateway_build_failed"
     exit 1
   fi
