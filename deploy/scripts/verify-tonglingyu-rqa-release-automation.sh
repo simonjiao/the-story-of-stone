@@ -40,6 +40,8 @@ RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-${ARTIFACT_DIR}/release-r
 VALIDATION_REPORT_PATH="${TONGLINGYU_RQA_RELEASE_VALIDATION_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness-validation.json}"
 CONTRACT_STDOUT="${WORK_DIR}/contract-smoke.stdout"
 CONTRACT_STDERR="${WORK_DIR}/contract-smoke.stderr"
+LIVE_CAPACITY_STDOUT="${WORK_DIR}/live-capacity-load-smoke.stdout"
+LIVE_CAPACITY_STDERR="${WORK_DIR}/live-capacity-load-smoke.stderr"
 READINESS_STDOUT="${WORK_DIR}/release-readiness.stdout"
 READINESS_STDERR="${WORK_DIR}/release-readiness.stderr"
 VALIDATOR_STDOUT="${WORK_DIR}/saved-report-validator.stdout"
@@ -53,6 +55,26 @@ contract_status="failed"
 if "${SCRIPT_DIR}/test-tonglingyu-release-readiness-contract.sh" \
   >"${CONTRACT_STDOUT}" 2>"${CONTRACT_STDERR}"; then
   contract_status="passed"
+fi
+
+live_capacity_status="not_run"
+live_capacity_report_path="${ARTIFACT_DIR}/rqa-live-capacity-load-smoke.json"
+live_capacity_artifact_dir="${ARTIFACT_DIR}/live-capacity-load"
+if [[ "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]] \
+  && [[ "${TONGLINGYU_RQA_RELEASE_GENERATE_LIVE_CAPACITY_EVIDENCE:-true}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
+  live_capacity_status="failed"
+  if env \
+    "TONGLINGYU_RQA_LIVE_CAPACITY_ARTIFACT_DIR=${live_capacity_artifact_dir}" \
+    "TONGLINGYU_RQA_LIVE_CAPACITY_REPORT_PATH=${live_capacity_report_path}" \
+    "${SCRIPT_DIR}/verify-tonglingyu-rqa-live-capacity-load-smoke.sh" \
+    >"${LIVE_CAPACITY_STDOUT}" 2>"${LIVE_CAPACITY_STDERR}"; then
+    live_capacity_status="passed"
+  fi
+  live_capacity_env="${live_capacity_artifact_dir}/live-capacity-load.env"
+  if [[ -f "${live_capacity_env}" ]]; then
+    # shellcheck disable=SC1090
+    . "${live_capacity_env}"
+  fi
 fi
 
 readiness_status="failed"
@@ -73,9 +95,10 @@ fi
 
 python3 - "${REPORT_PATH}" "${ARTIFACT_DIR}" "${WORK_DIR}" \
   "${RUN_ID}" "${GIT_COMMIT}" \
-  "${contract_status}" "${readiness_status}" "${validator_status}" \
+  "${contract_status}" "${live_capacity_status}" "${readiness_status}" "${validator_status}" \
   "${RELEASE_REPORT_PATH}" "${VALIDATION_REPORT_PATH}" \
   "${CONTRACT_STDOUT}" "${CONTRACT_STDERR}" \
+  "${LIVE_CAPACITY_STDOUT}" "${LIVE_CAPACITY_STDERR}" "${live_capacity_report_path}" \
   "${READINESS_STDOUT}" "${READINESS_STDERR}" \
   "${VALIDATOR_STDOUT}" "${VALIDATOR_STDERR}" <<'PY'
 import hashlib
@@ -91,17 +114,21 @@ from pathlib import Path
     run_id,
     git_commit,
     contract_status,
+    live_capacity_status,
     readiness_status,
     validator_status,
     release_report_path_raw,
     validation_report_path_raw,
     contract_stdout_raw,
     contract_stderr_raw,
+    live_capacity_stdout_raw,
+    live_capacity_stderr_raw,
+    live_capacity_report_path_raw,
     readiness_stdout_raw,
     readiness_stderr_raw,
     validator_stdout_raw,
     validator_stderr_raw,
-) = sys.argv[1:17]
+) = sys.argv[1:21]
 
 
 def tail(path_raw, limit=20):
@@ -194,6 +221,7 @@ automation_report_persistent = target_is_outside_work_dir(report_path_raw)
 
 production_ready = (
     contract_status == "passed"
+    and live_capacity_status != "failed"
     and readiness_status == "passed"
     and validator_status == "passed"
     and isinstance(release_report, dict)
@@ -211,6 +239,8 @@ if contract_status != "passed":
     errors.append("contract_smoke_failed")
 if readiness_status != "passed":
     errors.append("release_readiness_failed")
+if live_capacity_status == "failed":
+    errors.append("live_capacity_load_smoke_failed")
 if validator_status != "passed":
     errors.append("saved_report_validator_failed")
 if isinstance(release_report, dict):
@@ -244,6 +274,7 @@ payload = {
     "artifact_dir": str(Path(artifact_dir_raw)),
     "checks": {
         "contract_smoke": contract_status,
+        "live_capacity_load_smoke": live_capacity_status,
         "release_readiness": readiness_status,
         "saved_report_validator": validator_status,
     },
@@ -278,6 +309,9 @@ payload = {
         ),
         "validator_stdout_sha256": file_sha256(validator_stdout_raw),
         "contract_stdout_sha256": file_sha256(contract_stdout_raw),
+        "live_capacity_stdout_sha256": file_sha256(live_capacity_stdout_raw),
+        "live_capacity_report_path": str(Path(live_capacity_report_path_raw)),
+        "live_capacity_report_sha256": file_sha256(live_capacity_report_path_raw),
         "readiness_stdout_sha256": file_sha256(readiness_stdout_raw),
         "artifact_persistence": {
             "release_report_persistent": release_report_persistent,
@@ -306,6 +340,7 @@ payload = {
     },
     "tails": {
         "contract_stderr": tail(contract_stderr_raw),
+        "live_capacity_stderr": tail(live_capacity_stderr_raw),
         "readiness_stderr": tail(readiness_stderr_raw),
         "validator_stderr": tail(validator_stderr_raw),
     },

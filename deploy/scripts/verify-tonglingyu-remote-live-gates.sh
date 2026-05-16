@@ -196,6 +196,7 @@ from pathlib import Path
 required_scripts = [
     "verify-tonglingyu-rqa-release-automation.sh",
     "verify-tonglingyu-rqa-capacity-load-smoke.sh",
+    "verify-tonglingyu-rqa-live-capacity-load-smoke.sh",
     "verify-tonglingyu-rqa-incident-capacity.sh",
     "verify-tonglingyu-rqa-backup-restore-drill.sh",
     "remediate-tonglingyu-kb-source-metadata.sh",

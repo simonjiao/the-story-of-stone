@@ -999,6 +999,18 @@
   incident/audit evidence，再以 live 模式运行 `rqa_incident_capacity` gate 绑定
   evidence path/hash。该输出 scope 是 `local_gateway_smoke`，明确不是目标环境
   live/load 证据。
+- 2026-05-16 已新增目标环境 live runner
+  `deploy/scripts/verify-tonglingyu-rqa-live-capacity-load-smoke.sh`，并接入
+  `verify-tonglingyu-rqa-release-automation.sh` 的 live release 路径和远端工具同步
+  校验。该 runner 通过 Open WebUI 容器访问正在运行的 `tonglingyu-gateway`，
+  创建 RQA failure / governance task，再通过 live admin API 查询、翻页、metrics、
+  状态关闭和 live DB quality gate 生成 capacity/load、incident/audit 和
+  `rqa_incident_capacity` evidence。短窗口远端 smoke 已证明脚本可生成完整失败报告：
+  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
+  的 `tonglingyu.rqa_live_capacity_load_smoke` 显示 live gateway 请求、admin 查询、
+  incident audit 和 quality gate 均可执行，但 `rqa_write_p95_ms=11567`，超过当前
+  10s production 预算，因此 capacity/load evidence 和 `rqa_incident_capacity`
+  仍 fail-closed。不能通过调松预算或缩短窗口来宣布 production-ready。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1014,13 +1026,16 @@
    Trivy raw reports 已持久化，但第三方镜像合计仍有 63 critical / 714 high；
    需要替换/重建镜像、升级基础镜像，或形成有 owner / expiry / finding scope 的
    审批风险例外。
-2. 补齐 RQA Milestone L-M 的目标环境证据：post-release monitor JSON artifact、
-   目标环境 capacity/load JSON artifact、incident/audit JSON artifact 和
-   Open WebUI browser review evidence；本地 gate 已 fail-closed，但不能替代真实
-   环境证据。
-3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
+2. 处理 RQA Milestone M 的目标环境性能 blocker：live runner 已能生成目标环境
+   capacity/load 与 incident/audit artifact，但当前 live `rqa_write_p95_ms` 超过
+   10s 预算；需要优化 live 请求路径、上游延迟、gateway/RQA 写入边界或运行配置后
+   复跑，直到默认 production 预算下通过。
+3. 补齐 RQA Milestone L 的值守证据：post-release monitor JSON artifact、60 分钟
+   窗口、operator/environment、live gate evidence、admin Action/API evidence 和
+   Open WebUI browser review evidence 必须绑定进最终 live release report。
+4. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最新远端 automation 已证明当前为 0，但最终 production-ready report 仍必须绑定
    当次 release run 的证据。
-4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
+5. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
+6. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
    M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。

@@ -1102,8 +1102,9 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
 
 ## Milestone M：事故响应、容量和审计完整性
 
-状态：进行中（2026-05-16；status-history audit 与 incident/capacity gate
-已落地；目标环境容量、负载、事故演练和审计历史 live evidence 尚未闭合）
+状态：进行中（2026-05-16；status-history audit、incident/capacity gate 和
+目标环境 live runner 已落地；当前 live RQA write 超过 10s 预算，release report
+绑定尚未闭合）
 
 目标：事故或压力场景下仍保持可追责、可降级、可恢复，不能用关闭治理来伪装可用。
 
@@ -1125,6 +1126,8 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
       admin list 翻页。
 - [x] 本地 load smoke runner 覆盖 RQA 写入、admin 查询、metrics 和 release gate
       在预算内。
+- [x] 目标环境 live runner 通过 Open WebUI / 运行中 Gateway 生成可复核
+      capacity-load、incident-audit 和 incident-capacity artifact。
 - [ ] 目标环境 capacity smoke artifact 绑定 release report。
 - [ ] 目标环境 load / soak artifact 绑定 release report。
 - [x] capacity/load smoke 必须生成可复核 JSON evidence，并由 incident/capacity
@@ -1160,6 +1163,19 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   incident/audit evidence，再以 live 模式运行 `rqa_incident_capacity` gate 绑定
   evidence path/hash。该 runner 的输出 scope 明确为 `local_gateway_smoke`，
   不能替代目标环境 load/soak 或 incident drill。
+- 2026-05-16 已新增
+  `deploy/scripts/verify-tonglingyu-rqa-live-capacity-load-smoke.sh`：它通过
+  Open WebUI 容器访问正在运行的 `tonglingyu-gateway`，创建 RQA failure /
+  governance task，再经 live admin API 查询、翻页、metrics、状态关闭和 live DB
+  quality gate 生成目标环境 evidence；`verify-tonglingyu-rqa-release-automation.sh`
+  在 live release 下会先运行该 runner 并 source 其 env artifact。
+- 同日 1 分钟远端 smoke 证明目标环境 runner 能生成完整失败报告：
+  `rqa_live_capacity_load_smoke` 的 live gateway/admin/incident audit/quality
+  gate 路径可执行，artifact 位于
+  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`；
+  但 `rqa_write_p95_ms=11567` 超过 10s production 预算，导致
+  `rqa_capacity_load_evidence` 与 `rqa_incident_capacity` fail-closed。后续不能
+  用调松预算或短窗口替代修复，必须优化实际 live 路径后再绑定 release report。
 - 2026-05-16 已新增 `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh`：
   生成并校验 `tonglingyu.rqa_incident_audit_evidence` JSON，要求 status-history
   event/actor 覆盖、audit tombstone、incident severity/owner、first response、
@@ -1171,11 +1187,12 @@ RQA production-ready，live Open WebUI admin Action、目标环境 live/load 性
   persistence degraded、非 live 模式、缺 evidence ref、代表性数量不足、负载
   measurement 缺失、status-history 字段缺失或 incident runbook 证据缺失的报告。
 - 2026-05-16 最新远端 release automation 已正确识别 incident runbook 和
-  fail-closed 事故/容量策略；live gate 剩余失败集中在 capacity/load evidence、
-  audit-history evidence、incident evidence、代表性计数和负载 p95 指标缺失。
-- 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity smoke、
-  load/soak smoke、incident response drill 和 audit-history live evidence 尚未生成；
-  当前完成的是本地执行 runner、证据 JSON、哈希绑定与 fail-closed contract。
+  fail-closed 事故/容量策略；目标环境 runner 已把“缺 live evidence”推进为
+  “live RQA write 超预算”的真实性能 blocker。
+- 仍不能宣布 M 完成或整体 RQA production-ready：目标环境 capacity/load 和
+  incident/audit evidence 已能生成，但尚未在默认 production 预算下通过，也尚未绑定
+  最终 live release report；当前完成的是本地/目标环境 runner、证据 JSON、哈希绑定、
+  失败报告和 fail-closed contract。
 
 ## 提交节奏
 

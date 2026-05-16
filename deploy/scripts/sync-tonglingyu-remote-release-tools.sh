@@ -144,6 +144,7 @@ cd "${project_dir}"
 required_scripts='
 verify-tonglingyu-rqa-release-automation.sh
 verify-tonglingyu-rqa-capacity-load-smoke.sh
+verify-tonglingyu-rqa-live-capacity-load-smoke.sh
 verify-tonglingyu-rqa-incident-capacity.sh
 verify-tonglingyu-rqa-backup-restore-drill.sh
 prepare-tonglingyu-rqa-restore-canary.sh
@@ -163,6 +164,7 @@ for script in ${required_scripts}; do
 done
 bash -n scripts/verify-tonglingyu-rqa-release-automation.sh
 bash -n scripts/verify-tonglingyu-release-readiness.sh
+bash -n scripts/verify-tonglingyu-rqa-live-capacity-load-smoke.sh
 bash -n scripts/verify-tonglingyu-rqa-performance-budget.sh
 bash -n scripts/verify-tonglingyu-rqa-backup-restore-drill.sh
 bash -n scripts/prepare-tonglingyu-rqa-restore-canary.sh
