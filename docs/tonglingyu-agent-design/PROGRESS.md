@@ -19,9 +19,11 @@
   `home-cloudflared`，Open WebUI 只连接
   `http://tonglingyu-gateway:8090/v1`。
 - 2026-05-17 已在 `hhost` 完成 Tonglingyu-only 重建：当前部署目录为
-  `$HOME/tonglingyu-home-deploy`，运行时目录为
-  `$HOME/tonglingyu-home-runtime`，运行容器为 `tonglingyu-hermes-agent`、
-  `tonglingyu-gateway`、`home-open-webui` 和 `home-cloudflared`。
+  `$HOME/tonglingyu-home-deploy`；Open WebUI 前置层运行时目录为
+  `$HOME/huixiangdou-home-runtime`，Cloudflared 无本地 runtime data dir；
+  Tonglingyu/Hermes 运行时目录为 `$HOME/tonglingyu-home-runtime`。运行容器为
+  `tonglingyu-hermes-agent`、`tonglingyu-gateway`、`home-open-webui` 和
+  `home-cloudflared`。
 - `hhost` 重建后 runtime config、`agent_identity_bridge`、
   `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
   chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
