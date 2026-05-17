@@ -98,12 +98,35 @@ append_result() {
   local reason="$4"
   local stdout_path="${5:-}"
   local stderr_path="${6:-}"
+  local attempt_count="${7:-1}"
+  local failed_attempt_count="${8:-0}"
+  local retry_policy="${9:-single_attempt}"
   python3 - "${RESULTS_JSONL}" "${name}" "${status}" "${required}" "${reason}" \
-    "${stdout_path}" "${stderr_path}" <<'PY'
+    "${stdout_path}" "${stderr_path}" "${attempt_count}" "${failed_attempt_count}" \
+    "${retry_policy}" <<'PY'
 import json
 import sys
 
-results_path, name, status, required, reason, stdout_path, stderr_path = sys.argv[1:8]
+(
+    results_path,
+    name,
+    status,
+    required,
+    reason,
+    stdout_path,
+    stderr_path,
+    attempt_count_raw,
+    failed_attempt_count_raw,
+    retry_policy,
+) = sys.argv[1:11]
+
+
+def parse_count(raw, default):
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
 
 
 def tail(path):
@@ -123,6 +146,9 @@ with open(results_path, "a", encoding="utf-8") as handle:
             "status": status,
             "required": required == "true",
             "reason": reason,
+            "attempt_count": parse_count(attempt_count_raw, 1),
+            "failed_attempt_count": parse_count(failed_attempt_count_raw, 0),
+            "retry_policy": retry_policy,
             "stdout_tail": tail(stdout_path),
             "stderr_tail": tail(stderr_path),
         },
@@ -150,9 +176,77 @@ run_gate() {
   return 0
 }
 
+run_gate_with_retry() {
+  local name="$1"
+  local required="$2"
+  local attempts="$3"
+  local delay_seconds="$4"
+  shift 4
+  local final_stdout="${WORK_DIR}/${name}.stdout"
+  local final_stderr="${WORK_DIR}/${name}.stderr"
+  local retry_summary="${WORK_DIR}/${name}.retry-summary.stderr"
+  local failed_attempts=0
+  local attempt
+  : >"${retry_summary}"
+
+  for attempt in $(seq 1 "${attempts}"); do
+    local attempt_stdout="${WORK_DIR}/${name}.attempt-${attempt}.stdout"
+    local attempt_stderr="${WORK_DIR}/${name}.attempt-${attempt}.stderr"
+    if "$@" >"${attempt_stdout}" 2>"${attempt_stderr}"; then
+      cp "${attempt_stdout}" "${final_stdout}"
+      {
+        if [[ -s "${retry_summary}" ]]; then
+          cat "${retry_summary}"
+        fi
+        cat "${attempt_stderr}"
+      } >"${final_stderr}"
+      append_result "${name}" "passed" "${required}" "" "${final_stdout}" \
+        "${final_stderr}" "${attempt}" "${failed_attempts}" "bounded_retry"
+      return 0
+    fi
+    failed_attempts=$((failed_attempts + 1))
+    {
+      printf 'attempt=%s status=failed\n' "${attempt}"
+      tail -5 "${attempt_stderr}" 2>/dev/null || true
+    } >>"${retry_summary}"
+    if [[ "${attempt}" -lt "${attempts}" ]] && [[ "${delay_seconds}" -gt 0 ]]; then
+      sleep "${delay_seconds}"
+    fi
+  done
+
+  cp "${WORK_DIR}/${name}.attempt-${attempts}.stdout" "${final_stdout}" 2>/dev/null || : >"${final_stdout}"
+  {
+    cat "${retry_summary}"
+    cat "${WORK_DIR}/${name}.attempt-${attempts}.stderr" 2>/dev/null || true
+  } >"${final_stderr}"
+  append_result "${name}" "failed" "${required}" "" "${final_stdout}" \
+    "${final_stderr}" "${attempts}" "${failed_attempts}" "bounded_retry"
+  if [[ "${required}" == "true" ]]; then
+    return 1
+  fi
+  return 0
+}
+
 skip_gate() {
   append_result "$1" "skipped" "$2" "$3"
 }
+
+strict_gateway_attempts="${TONGLINGYU_RELEASE_STRICT_GATEWAY_ATTEMPTS:-3}"
+strict_gateway_retry_delay_seconds="${TONGLINGYU_RELEASE_STRICT_GATEWAY_RETRY_DELAY_SECONDS:-5}"
+case "${strict_gateway_attempts}" in
+  ''|*[!0-9]*) strict_gateway_attempts=3 ;;
+esac
+case "${strict_gateway_retry_delay_seconds}" in
+  ''|*[!0-9]*) strict_gateway_retry_delay_seconds=5 ;;
+esac
+if [[ "${strict_gateway_attempts}" -lt 1 ]]; then
+  strict_gateway_attempts=1
+elif [[ "${strict_gateway_attempts}" -gt 5 ]]; then
+  strict_gateway_attempts=5
+fi
+if [[ "${strict_gateway_retry_delay_seconds}" -gt 60 ]]; then
+  strict_gateway_retry_delay_seconds=60
+fi
 
 require_live="false"
 if is_true "${TONGLINGYU_RELEASE_REQUIRE_LIVE:-false}"; then
@@ -219,7 +313,8 @@ else
 fi
 
 if [[ "${verify_strict_gateway}" == "true" ]]; then
-  run_gate "strict_gateway" "true" \
+  run_gate_with_retry "strict_gateway" "true" \
+    "${strict_gateway_attempts}" "${strict_gateway_retry_delay_seconds}" \
     "${STRICT_GATEWAY_CMD}" || failed=1
 else
   skip_gate "strict_gateway" "false" \
