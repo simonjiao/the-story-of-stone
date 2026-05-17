@@ -46,7 +46,7 @@ run_id="$2"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
-  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/hermes-home-deploy}"
+  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/tonglingyu-home-deploy}"
 fi
 cd "${project_dir}"
 if [ ! -f .env ]; then
@@ -272,7 +272,7 @@ security_image_scan_path="$9"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
-  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/hermes-home-deploy}"
+  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/tonglingyu-home-deploy}"
 fi
 cd "${project_dir}"
 . ./.tonglingyu-release-tool-env

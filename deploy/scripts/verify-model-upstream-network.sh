@@ -50,7 +50,7 @@ def choose_container() -> str:
     configured = os.environ.get("MODEL_UPSTREAM_PROBE_CONTAINER", "").strip()
     if configured:
         return configured
-    for candidate in ["sub2api", "hermes-agent", "tonglingyu-gateway"]:
+    for candidate in ["sub2api", "tonglingyu-hermes-agent", "tonglingyu-gateway"]:
         if docker_container_exists(candidate):
             return candidate
     return ""

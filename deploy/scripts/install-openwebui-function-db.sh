@@ -47,17 +47,17 @@ if not admin:
 
 now = int(time.time())
 meta = json.dumps(
-    {"description": "Injects signed Agent Platform identity context for Hermes Agent requests."},
+    {"description": "Injects signed Open WebUI identity context for Tonglingyu Agent requests."},
     ensure_ascii=False,
 )
 valves = json.dumps(
     {
         "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
         "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
-        "TARGET_MODEL": os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "hermes-agent"),
+        "TARGET_MODEL": os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "tonglingyu"),
         "TARGET_MODELS": os.environ.get(
             "AGENT_BRIDGE_TARGET_MODELS",
-            os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "hermes-agent"),
+            os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "tonglingyu"),
         ),
     },
     ensure_ascii=False,

@@ -85,6 +85,7 @@ def set_value(key: str, value: str) -> None:
 
 
 planned_changes = []
+gateway_base_url = "http://tonglingyu-gateway:8090/v1"
 gateway_key = clean(values.get("TONGLINGYU_GATEWAY_API_KEY", ""))
 admin_key = clean(values.get("TONGLINGYU_ADMIN_API_KEY", ""))
 if not gateway_key:
@@ -101,16 +102,15 @@ if allow_admin.lower() not in {"false", "0", "no", "off"}:
     planned_changes.append("TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY")
 
 base_urls = split_base_urls(values.get("OPEN_WEBUI_OPENAI_API_BASE_URLS", ""))
+if base_urls != [gateway_base_url]:
+    planned_changes.append("OPEN_WEBUI_OPENAI_API_BASE_URLS")
 raw_provider_value = values.get("OPEN_WEBUI_OPENAI_API_KEYS", "")
 provider_keys = split_provider_keys(raw_provider_value)
-entry_count = max(len(base_urls), len(provider_keys), 1)
-provider_keys.extend([""] * (entry_count - len(provider_keys)))
 if admin_key in {item for item in provider_keys if item}:
     raise SystemExit("OPEN_WEBUI_OPENAI_API_KEYS must not contain TONGLINGYU_ADMIN_API_KEY")
-if not provider_keys or provider_keys[0] != gateway_key:
+if provider_keys != [gateway_key]:
     planned_changes.append("OPEN_WEBUI_OPENAI_API_KEYS")
-provider_keys[0] = gateway_key
-provider_value = ";".join(provider_keys[:entry_count])
+provider_value = gateway_key
 if raw_provider_value.strip() != provider_value:
     planned_changes.append("OPEN_WEBUI_OPENAI_API_KEYS")
 
@@ -123,6 +123,7 @@ if mode == "--apply" and planned_changes:
     set_value("TONGLINGYU_GATEWAY_API_KEY", gateway_key)
     set_value("TONGLINGYU_ADMIN_API_KEY", admin_key)
     set_value("TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY", "false")
+    set_value("OPEN_WEBUI_OPENAI_API_BASE_URLS", gateway_base_url)
     set_value("OPEN_WEBUI_OPENAI_API_KEYS", provider_value)
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
@@ -135,7 +136,7 @@ print(json.dumps(
         "env_file": str(env_path),
         "changed_keys": sorted(set(planned_changes)),
         "backup_created": bool(backup_path),
-        "provider_key_entries": entry_count,
+        "provider_key_entries": 1,
         "secret_values_printed": False,
     },
     ensure_ascii=True,

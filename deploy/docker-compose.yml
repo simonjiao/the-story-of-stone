@@ -1,11 +1,4 @@
-name: hermes-home
-
-x-agent-platform-image: &agent-platform-image
-  image: "${AGENT_PLATFORM_IMAGE_REF:-hermes-agent-platform:formal}"
-  build:
-    context: "${AGENT_PLATFORM_BUILD_CONTEXT:-../agent-platform}"
-    dockerfile: Dockerfile
-  restart: unless-stopped
+name: tonglingyu-home
 
 x-tonglingyu-gateway-image: &tonglingyu-gateway-image
   image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:formal}"
@@ -37,7 +30,7 @@ services:
       - "8642"
       - "9119"
     networks:
-      hermes-internal:
+      tonglingyu-internal:
         ipv4_address: "${HERMES_AGENT_IP:-172.20.0.2}"
       local-openai-network: {}
     healthcheck:
@@ -53,15 +46,13 @@ services:
 
   open-webui:
     image: "${OPEN_WEBUI_IMAGE_REF:-ghcr.io/open-webui/open-webui:main}"
-    container_name: hermes-open-webui
+    container_name: tonglingyu-open-webui
     restart: unless-stopped
     depends_on:
       tonglingyu-gateway:
         condition: service_healthy
-      agent-orchestrator:
-        condition: service_healthy
     environment:
-      WEBUI_NAME: "${OPEN_WEBUI_NAME:-Hermes Home}"
+      WEBUI_NAME: "${OPEN_WEBUI_NAME:-Tonglingyu Home}"
       WEBUI_URL: "${PUBLIC_WEBUI_URL:?set PUBLIC_WEBUI_URL in .env}"
       WEBUI_SECRET_KEY: "${OPEN_WEBUI_SECRET_KEY:?set OPEN_WEBUI_SECRET_KEY in .env}"
       WEBUI_AUTH: "${OPEN_WEBUI_AUTH:-true}"
@@ -77,16 +68,16 @@ services:
       RAG_EMBEDDING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_EMBEDDING_MODEL_AUTO_UPDATE:-false}"
       RAG_RERANKING_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_RAG_RERANKING_MODEL_AUTO_UPDATE:-false}"
       WHISPER_MODEL_AUTO_UPDATE: "${OPEN_WEBUI_WHISPER_MODEL_AUTO_UPDATE:-false}"
-      OPENAI_API_BASE_URLS: "${OPEN_WEBUI_OPENAI_API_BASE_URLS:-http://tonglingyu-gateway:8090/v1;http://agent-orchestrator:8080/v1}"
+      OPENAI_API_BASE_URLS: "${OPEN_WEBUI_OPENAI_API_BASE_URLS:-http://tonglingyu-gateway:8090/v1}"
       OPENAI_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
-      OPENAI_API_KEYS: "${OPEN_WEBUI_OPENAI_API_KEYS:-${TONGLINGYU_GATEWAY_API_KEY};}"
+      OPENAI_API_KEYS: "${OPEN_WEBUI_OPENAI_API_KEYS:-${TONGLINGYU_GATEWAY_API_KEY}}"
       ENABLE_OLLAMA_API: "${OPEN_WEBUI_ENABLE_OLLAMA_API:-false}"
     volumes:
       - "${OPEN_WEBUI_DATA_DIR:?set OPEN_WEBUI_DATA_DIR in .env}:/app/backend/data"
     expose:
       - "8080"
     networks:
-      hermes-internal:
+      tonglingyu-internal:
         ipv4_address: "${OPEN_WEBUI_ORIGIN_IP:-172.20.0.3}"
 
   tonglingyu-gateway:
@@ -132,14 +123,14 @@ services:
       TONGLINGYU_PROFILE_TEXT: "${TONGLINGYU_PROFILE_TEXT:-honglou-text}"
       TONGLINGYU_PROFILE_COMMENTARY: "${TONGLINGYU_PROFILE_COMMENTARY:-honglou-commentary}"
       TONGLINGYU_PROFILE_REVIEWER: "${TONGLINGYU_PROFILE_REVIEWER:-honglou-reviewer}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
+      RUST_LOG: "${TONGLINGYU_RUST_LOG:-info}"
     volumes:
       - "${TONGLINGYU_SOURCE_ROOT:-../resources/sources/wiki}:/app/resources/sources/wiki:ro"
       - "${TONGLINGYU_DATA_DIR:-./data/tonglingyu}:/data"
     expose:
       - "8090"
     networks:
-      hermes-internal:
+      tonglingyu-internal:
         ipv4_address: "${TONGLINGYU_GATEWAY_IP:-172.20.0.14}"
     healthcheck:
       test:
@@ -157,7 +148,7 @@ services:
 
   cloudflared:
     image: "${CLOUDFLARED_IMAGE_REF:-cloudflare/cloudflared:latest}"
-    container_name: hermes-cloudflared
+    container_name: tonglingyu-cloudflared
     restart: unless-stopped
     network_mode: host
     command: tunnel --no-autoupdate --protocol ${CLOUDFLARED_PROTOCOL:-auto} run
@@ -169,204 +160,9 @@ services:
       open-webui:
         condition: service_started
 
-  agent-platform-postgres:
-    image: "${AGENT_PLATFORM_POSTGRES_IMAGE_REF:-postgres:18-alpine}"
-    container_name: agent-platform-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: "${AGENT_PLATFORM_POSTGRES_USER:-agent_platform}"
-      POSTGRES_PASSWORD: "${AGENT_PLATFORM_POSTGRES_PASSWORD:?set AGENT_PLATFORM_POSTGRES_PASSWORD in .env}"
-      POSTGRES_DB: "${AGENT_PLATFORM_POSTGRES_DB:-agent_platform}"
-      PGDATA: "/var/lib/postgresql/data/pgdata"
-    volumes:
-      - "${AGENT_PLATFORM_POSTGRES_DATA_DIR:?set AGENT_PLATFORM_POSTGRES_DATA_DIR in .env}:/var/lib/postgresql/data"
-    expose:
-      - "5432"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_PLATFORM_POSTGRES_IP:-172.20.0.4}"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-
-  agent-action-gateway:
-    <<: *agent-platform-image
-    profiles: ["action-gateway-smoke"]
-    container_name: agent-action-gateway
-    command: ["agent-action-gateway", "--bind", "0.0.0.0:8091"]
-    environment:
-      AGENT_ACTION_GATEWAY_TARGET_LOG: "${AGENT_ACTION_GATEWAY_TARGET_LOG:-/app/data/actions.jsonl}"
-      AGENT_ACTION_GATEWAY_API_KEY: "${AGENT_ACTION_GATEWAY_API_KEY:-}"
-      AGENT_ACTION_GATEWAY_ALLOWED_SCOPES: "${AGENT_ACTION_GATEWAY_ALLOWED_SCOPES:-agent-platform:action-gateway-smoke}"
-      AGENT_ACTION_GATEWAY_CONNECTOR: "${AGENT_ACTION_GATEWAY_CONNECTOR:-action-journal}"
-      AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS: "${AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS:-300}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
-    volumes:
-      - "${AGENT_ACTION_GATEWAY_DATA_DIR:-./data/agent-action-gateway}:/app/data"
-    expose:
-      - "8091"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_ACTION_GATEWAY_IP:-172.20.0.14}"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "agentctl",
-          "healthcheck",
-          "--url",
-          "http://127.0.0.1:8091/healthz",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
-
-  agent-manager:
-    <<: *agent-platform-image
-    container_name: agent-manager
-    command: ["agent-manager", "--bind", "0.0.0.0:8088"]
-    depends_on:
-      agent-platform-postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
-      AGENT_ALLOW_DEV_HEADERS: "${AGENT_PLATFORM_ALLOW_DEV_HEADERS:-true}"
-      AGENT_JWT_SECRET: "${AGENT_JWT_SECRET:-}"
-      AGENT_CREDENTIAL_PROVIDER_BASE_URL: "${AGENT_CREDENTIAL_PROVIDER_BASE_URL:-}"
-      AGENT_CREDENTIAL_PROVIDER_API_KEY: "${AGENT_CREDENTIAL_PROVIDER_API_KEY:-}"
-      AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS: "${AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS:-10}"
-      AGENT_CREDENTIAL_LEASE_TTL_SECONDS: "${AGENT_CREDENTIAL_LEASE_TTL_SECONDS:-300}"
-      AGENT_WRITE_CONNECTOR_BASE_URL: "${AGENT_WRITE_CONNECTOR_BASE_URL:-}"
-      AGENT_WRITE_CONNECTOR_API_KEY: "${AGENT_WRITE_CONNECTOR_API_KEY:-}"
-      AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS: "${AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS:-30}"
-      AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS: "${AGENT_WRITE_CONNECTOR_MAX_ATTEMPTS:-3}"
-      AGENT_EXTERNAL_ACTION_LOCK_LEASE_SECONDS: "${AGENT_EXTERNAL_ACTION_LOCK_LEASE_SECONDS:-300}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
-    expose:
-      - "8088"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_MANAGER_IP:-172.20.0.10}"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "agentctl",
-          "healthcheck",
-          "--url",
-          "http://127.0.0.1:8088/healthz",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-
-  agent-orchestrator:
-    <<: *agent-platform-image
-    container_name: agent-orchestrator
-    command: ["agent-orchestrator", "--bind", "0.0.0.0:8080"]
-    depends_on:
-      hermes:
-        condition: service_healthy
-      agent-manager:
-        condition: service_healthy
-    environment:
-      AGENT_MANAGER_URL: "http://agent-manager:8088"
-      AGENT_ORCHESTRATOR_UPSTREAM_BASE_URL: "http://hermes:8642/v1"
-      AGENT_ORCHESTRATOR_UPSTREAM_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
-      AGENT_BRIDGE_SECRET: "${AGENT_BRIDGE_SECRET:-}"
-      AGENT_BRIDGE_ISSUER: "${AGENT_BRIDGE_ISSUER:-open-webui}"
-      AGENT_BRIDGE_MAX_CLOCK_SKEW_SECONDS: "${AGENT_BRIDGE_MAX_CLOCK_SKEW_SECONDS:-300}"
-      AGENT_BRIDGE_RESOURCE_ALLOWLIST: "${AGENT_BRIDGE_RESOURCE_ALLOWLIST:-resource:team/default}"
-      AGENT_BRIDGE_USER_ROLE: "${AGENT_BRIDGE_USER_ROLE:-viewer}"
-      AGENT_BRIDGE_ADMIN_ROLE_MAPPING: "${AGENT_BRIDGE_ADMIN_ROLE_MAPPING:-disabled}"
-      AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING: "${AGENT_BRIDGE_OBSERVER_ADMIN_ROLE_MAPPING:-operator}"
-      AGENT_BRIDGE_RUN_WAIT_TIMEOUT_SECONDS: "${AGENT_BRIDGE_RUN_WAIT_TIMEOUT_SECONDS:-20}"
-      AGENT_BRIDGE_RUN_POLL_INTERVAL_MS: "${AGENT_BRIDGE_RUN_POLL_INTERVAL_MS:-500}"
-      AGENT_JWT_SECRET: "${AGENT_JWT_SECRET:-}"
-      AGENT_MANAGER_SERVICE_ID: "${AGENT_MANAGER_SERVICE_ID:-agent-orchestrator}"
-      AGENT_MANAGER_JWT_TTL_SECONDS: "${AGENT_MANAGER_JWT_TTL_SECONDS:-300}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
-    expose:
-      - "8080"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_ORCHESTRATOR_IP:-172.20.0.11}"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "agentctl",
-          "healthcheck",
-          "--url",
-          "http://127.0.0.1:8080/healthz",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-
-  agent-worker:
-    <<: *agent-platform-image
-    container_name: agent-worker
-    command:
-      [
-        "agent-worker",
-        "worker",
-        "--worker-id",
-        "${AGENT_WORKER_ID:-worker-primary}",
-        "--interval-ms",
-        "${AGENT_WORKER_INTERVAL_MS:-1000}",
-      ]
-    depends_on:
-      agent-platform-postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
-      AGENT_RUNTIME_MODE: "${AGENT_RUNTIME_MODE:-hermes}"
-      AGENT_RUNTIME_HERMES_BASE_URL: "${AGENT_RUNTIME_HERMES_BASE_URL:-http://hermes:8642/v1}"
-      AGENT_RUNTIME_HERMES_MODEL: "${AGENT_RUNTIME_HERMES_MODEL:-hermes-agent}"
-      AGENT_RUNTIME_HERMES_PROFILE_MODELS: "${AGENT_RUNTIME_HERMES_PROFILE_MODELS:-}"
-      AGENT_RUNTIME_HERMES_API_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
-      AGENT_RUNTIME_TIMEOUT_SECONDS: "${AGENT_RUNTIME_TIMEOUT_SECONDS:-30}"
-      AGENT_READ_ONLY_CONNECTOR_BASE_URL: "${AGENT_READ_ONLY_CONNECTOR_BASE_URL:-}"
-      AGENT_READ_ONLY_CONNECTOR_API_KEY: "${AGENT_READ_ONLY_CONNECTOR_API_KEY:-}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_WORKER_IP:-172.20.0.12}"
-
-  agent-observer:
-    <<: *agent-platform-image
-    container_name: agent-observer
-    command:
-      [
-        "agent-worker",
-        "observer",
-        "--interval-ms",
-        "${AGENT_OBSERVER_INTERVAL_MS:-30000}",
-      ]
-    depends_on:
-      agent-platform-postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: "${AGENT_PLATFORM_DATABASE_URL:?set AGENT_PLATFORM_DATABASE_URL in .env}"
-      RUST_LOG: "${AGENT_PLATFORM_RUST_LOG:-info}"
-    networks:
-      hermes-internal:
-        ipv4_address: "${AGENT_OBSERVER_IP:-172.20.0.13}"
-
 networks:
-  hermes-internal:
-    name: hermes-internal
+  tonglingyu-internal:
+    name: tonglingyu-internal
     driver: bridge
     ipam:
       config:

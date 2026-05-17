@@ -15,7 +15,7 @@ load_optional_deploy_env_file
 FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 FUNCTION_NAME="${FUNCTION_NAME:-Agent Identity Bridge}"
-TARGET_MODEL="${AGENT_BRIDGE_TARGET_MODEL:-hermes-agent}"
+TARGET_MODEL="${AGENT_BRIDGE_TARGET_MODEL:-tonglingyu}"
 TARGET_MODELS="${AGENT_BRIDGE_TARGET_MODELS:-${TARGET_MODEL}}"
 BASE_URL="${OPEN_WEBUI_BASE_URL:-${PUBLIC_WEBUI_URL:-}}"
 ADMIN_TOKEN="${OPEN_WEBUI_ADMIN_TOKEN:-}"
@@ -80,7 +80,7 @@ payload = {
     "type": "filter",
     "content": content,
     "meta": {
-        "description": "Injects signed Agent Platform identity context for Hermes Agent requests.",
+        "description": "Injects signed Open WebUI identity context for Tonglingyu Agent requests.",
     },
     "is_active": True,
     "is_global": True,

@@ -43,7 +43,7 @@ script_name="$2"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
-  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/hermes-home-deploy}"
+  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/tonglingyu-home-deploy}"
 fi
 cd "${project_dir}"
 if [ ! -x "scripts/${script_name}" ]; then
@@ -186,7 +186,7 @@ project_dir_arg="$1"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
-  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/hermes-home-deploy}"
+  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/tonglingyu-home-deploy}"
 fi
 cd "${project_dir}"
 python3 - <<'PY'
