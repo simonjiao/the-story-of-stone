@@ -1138,6 +1138,28 @@
    `remote-release-20260516T074522Z-71051` 已证明该路径可通过。
 3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最终 production-ready report 已证明当前为 0，后续 release 仍必须绑定当次证据。
-4. 补齐人物、关系、事件、诗词判词和评测题库的人工标注层。
-5. 按证据校验与发布 QA 闸门后续再补充影印/权威校注本复核，不作为当前
-   M2 loader 的默认前置项；当前版本继续保持“通俗分析优先”。
+4. 建立分层知识标记：人物、关系、事件、诗词判词和评测题先允许经过 LLM、规则、
+   eval 或其他系统校准后进入 `system_calibrated`；这不是自动上线许可，必须再由
+   runtime policy 明确提升为 `runtime_usable` 后，才能进入普通回答、证据包或 eval
+   样本。人工复核不是前置批处理，而是在运行中把稳定条目升级为带“人工标记”字样的
+   `human_marked`。
+5. 当前知识治理先基于已登记 Wikisource source snapshot 推进，不把尚未入库的
+   影印件、权威校注本或学术整理本设为前置项；待分层标记、低置信清单、
+   retrieval failure 修正和 KB rebuild eval diff 稳定后，再在知识治理末尾评估并
+   引入程甲/程乙影印件、庚辰/甲戌脂本影印、权威校注本和可标注页码卷册的
+   学术整理本。
+6. 2026-05-17 已新增 `24_知识状态与系统校准Checklist.md` 作为下一阶段执行口径：
+   前 5 个节点必须依次覆盖知识状态模型、系统校准入口、Runtime/Gateway 使用规则、
+   运行中人工复核入口、KB diff/eval/release gate；完成前不得声明运行中知识状态
+   治理闭环已完成。
+7. 系统校准中的 LLM 必须是配置化 Runtime/Hermes 校准执行者，并绑定 profile
+   contract、model/upstream、prompt digest、tool policy、timeout 和 release report；
+   fake LLM 只能用于测试。校准必须覆盖全部 KnowledgeItemKind，不能用最小实现切片
+   替代完成口径。
+8. 知识校准按离线批处理或运行中异步任务执行；普通 chat/streaming/package replay
+   不得同步调用校准 LLM 并使用同次结果。Milestone B/E 必须补齐 calibration job id、
+   input/output digest、lease/heartbeat、幂等、retry、audit、run summary 和 saved
+   report validator 证据，否则不能声明系统校准入口或知识状态治理闭环完成。
+9. `system_calibrated` 与 `runtime_usable` 必须分离：没有 runtime policy version、
+   promotion summary、per-kind coverage matrix、release run 和 saved report validator
+   证据时，不能把系统校准条目放入 selected evidence，也不能声明知识状态治理闭环完成。
