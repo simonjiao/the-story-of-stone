@@ -2976,6 +2976,16 @@ struct EvalQualityAccumulator {
     edition_labels: BTreeSet<String>,
     eval_failure_records: usize,
     blockers: BTreeSet<String>,
+    knowledge_state_selected_count: usize,
+    knowledge_state_runtime_usable_count: usize,
+    knowledge_state_human_marked_count: usize,
+    knowledge_state_system_calibrated_rejected_count: usize,
+    knowledge_state_rejected_or_deprecated_count: usize,
+    knowledge_state_candidate_or_source_snapshot_count: usize,
+    knowledge_state_runtime_policy_rejected_count: usize,
+    knowledge_state_reviewer_downgrade_cases: usize,
+    knowledge_state_forbidden_failure_cases: usize,
+    knowledge_state_eval_failure_cases: usize,
 }
 
 #[derive(Debug)]
@@ -3249,6 +3259,9 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         } else {
             quality.forbidden_conclusion_avoided += 1;
         }
+        let knowledge_state_quality =
+            eval_case_knowledge_state_quality(package, forbidden_conclusion_hit);
+        record_eval_knowledge_state_quality(&mut quality, &knowledge_state_quality, &mut failures);
         if package.review.status == case.expected_review_status {
             quality.reviewer_status_matched += 1;
         }
@@ -3317,6 +3330,7 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                 "source_ids": package.cards.iter().map(|card| card.source_id.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "edition_labels": package.cards.iter().map(|card| card.source_title.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+                "knowledge_state_summary": knowledge_state_quality,
             },
             "package_id": &package.package_id,
             "trace_id": &package.trace_id,
@@ -3580,6 +3594,129 @@ fn fallback_eval_quality_report(
     }
 }
 
+fn eval_case_knowledge_state_quality(
+    package: &EvidencePackage,
+    forbidden_conclusion_hit: bool,
+) -> Value {
+    let summary = &package.knowledge_state_summary;
+    let reviewer_downgrade =
+        summary.system_calibrated_rejected_count > 0 && package.review.status == "needs_revision";
+    let forbidden_failure = forbidden_conclusion_hit && summary.runtime_policy_rejected_count > 0;
+    json!({
+        "object": "tonglingyu.eval_case_knowledge_state_quality",
+        "policy_version": &summary.policy_version,
+        "selected_count": summary.selected_count,
+        "runtime_usable_selected_count": summary.runtime_usable_count,
+        "human_marked_selected_count": summary.human_marked_count,
+        "system_calibrated_rejected_count": summary.system_calibrated_rejected_count,
+        "rejected_or_deprecated_selected_count": summary.rejected_or_deprecated_count,
+        "candidate_or_source_snapshot_rejected_count": summary.candidate_or_source_snapshot_count,
+        "runtime_policy_rejected_count": summary.runtime_policy_rejected_count,
+        "reviewer_downgrade_case": reviewer_downgrade,
+        "forbidden_failure_case": forbidden_failure,
+        "state_grouped_eval": {
+            "runtime_usable": {
+                "selected_count": summary.runtime_usable_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": false,
+            },
+            "human_marked": {
+                "selected_count": summary.human_marked_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": false,
+            },
+            "system_calibrated": {
+                "rejected_count": summary.system_calibrated_rejected_count,
+                "reviewer_downgrade_case": reviewer_downgrade,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.system_calibrated_rejected_count > 0,
+            },
+            "rejected_or_deprecated": {
+                "matched_count": summary.rejected_or_deprecated_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.rejected_or_deprecated_count > 0,
+            },
+            "candidate_or_source_snapshot": {
+                "rejected_count": summary.candidate_or_source_snapshot_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.candidate_or_source_snapshot_count > 0,
+            },
+        },
+    })
+}
+
+fn record_eval_knowledge_state_quality(
+    quality: &mut EvalQualityAccumulator,
+    case_quality: &Value,
+    failures: &mut Vec<String>,
+) {
+    let selected_count = eval_quality_usize(case_quality, "selected_count");
+    let runtime_usable_count = eval_quality_usize(case_quality, "runtime_usable_selected_count");
+    let human_marked_count = eval_quality_usize(case_quality, "human_marked_selected_count");
+    let system_calibrated_rejected_count =
+        eval_quality_usize(case_quality, "system_calibrated_rejected_count");
+    let rejected_or_deprecated_count =
+        eval_quality_usize(case_quality, "rejected_or_deprecated_selected_count");
+    let candidate_or_source_snapshot_count =
+        eval_quality_usize(case_quality, "candidate_or_source_snapshot_rejected_count");
+    let runtime_policy_rejected_count =
+        eval_quality_usize(case_quality, "runtime_policy_rejected_count");
+    let reviewer_downgrade_case = case_quality
+        .get("reviewer_downgrade_case")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let forbidden_failure_case = case_quality
+        .get("forbidden_failure_case")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    quality.knowledge_state_selected_count += selected_count;
+    quality.knowledge_state_runtime_usable_count += runtime_usable_count;
+    quality.knowledge_state_human_marked_count += human_marked_count;
+    quality.knowledge_state_system_calibrated_rejected_count += system_calibrated_rejected_count;
+    quality.knowledge_state_rejected_or_deprecated_count += rejected_or_deprecated_count;
+    quality.knowledge_state_candidate_or_source_snapshot_count +=
+        candidate_or_source_snapshot_count;
+    quality.knowledge_state_runtime_policy_rejected_count += runtime_policy_rejected_count;
+    if reviewer_downgrade_case {
+        quality.knowledge_state_reviewer_downgrade_cases += 1;
+    }
+    if forbidden_failure_case {
+        quality.knowledge_state_forbidden_failure_cases += 1;
+    }
+    if runtime_policy_rejected_count > 0
+        || rejected_or_deprecated_count > 0
+        || reviewer_downgrade_case
+        || forbidden_failure_case
+    {
+        quality.knowledge_state_eval_failure_cases += 1;
+    }
+    if runtime_policy_rejected_count > 0 {
+        failures.push(format!(
+            "knowledge state runtime policy rejected {} matched item(s)",
+            runtime_policy_rejected_count
+        ));
+    }
+    if rejected_or_deprecated_count > 0 {
+        failures.push(format!(
+            "rejected or deprecated knowledge matched selected evidence: {}",
+            rejected_or_deprecated_count
+        ));
+    }
+    if reviewer_downgrade_case {
+        failures.push("system_calibrated knowledge caused reviewer downgrade".to_string());
+    }
+    if forbidden_failure_case {
+        failures.push("knowledge state rejection coincided with forbidden conclusion".to_string());
+    }
+}
+
+fn eval_quality_usize(value: &Value, key: &str) -> usize {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
 fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     let mut blockers = quality.blockers.clone();
     if quality.quality_report_cases != quality.total_cases {
@@ -3627,6 +3764,18 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     if quality.reviewer_status_matched != quality.total_cases {
         blockers.insert("reviewer_status_matched_below_100_percent".to_string());
     }
+    if quality.knowledge_state_runtime_policy_rejected_count > 0 {
+        blockers.insert("knowledge_state_runtime_policy_rejected".to_string());
+    }
+    if quality.knowledge_state_rejected_or_deprecated_count > 0 {
+        blockers.insert("knowledge_state_rejected_or_deprecated_selected".to_string());
+    }
+    if quality.knowledge_state_reviewer_downgrade_cases > 0 {
+        blockers.insert("knowledge_state_reviewer_downgrade".to_string());
+    }
+    if quality.knowledge_state_forbidden_failure_cases > 0 {
+        blockers.insert("knowledge_state_forbidden_failure".to_string());
+    }
     json!({
         "schema_version": EVAL_QUALITY_SCHEMA_VERSION,
         "status": if blockers.is_empty() { "passed" } else { "failed" },
@@ -3662,6 +3811,51 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
             quality.forbidden_conclusion_cases,
         ),
         "reviewer_status_matched": ratio_json(quality.reviewer_status_matched, quality.total_cases),
+        "knowledge_state_quality": {
+            "object": "tonglingyu.eval_knowledge_state_quality",
+            "policy_version": tonglingyu_runtime::KNOWLEDGE_RUNTIME_POLICY_VERSION,
+            "selected_count": quality.knowledge_state_selected_count,
+            "runtime_usable_selected_count": quality.knowledge_state_runtime_usable_count,
+            "human_marked_selected_count": quality.knowledge_state_human_marked_count,
+            "system_calibrated_rejected_count": quality
+                .knowledge_state_system_calibrated_rejected_count,
+            "rejected_or_deprecated_selected_count": quality
+                .knowledge_state_rejected_or_deprecated_count,
+            "candidate_or_source_snapshot_rejected_count": quality
+                .knowledge_state_candidate_or_source_snapshot_count,
+            "runtime_policy_rejected_count": quality
+                .knowledge_state_runtime_policy_rejected_count,
+            "reviewer_downgrade_cases": quality.knowledge_state_reviewer_downgrade_cases,
+            "forbidden_failure_cases": quality.knowledge_state_forbidden_failure_cases,
+            "eval_failure_cases": quality.knowledge_state_eval_failure_cases,
+            "state_grouped_eval": {
+                "runtime_usable": {
+                    "selected_count": quality.knowledge_state_runtime_usable_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "human_marked": {
+                    "selected_count": quality.knowledge_state_human_marked_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "system_calibrated": {
+                    "rejected_count": quality.knowledge_state_system_calibrated_rejected_count,
+                    "reviewer_downgrade_cases": quality.knowledge_state_reviewer_downgrade_cases,
+                    "forbidden_failure_cases": quality.knowledge_state_forbidden_failure_cases,
+                },
+                "rejected_or_deprecated": {
+                    "matched_count": quality.knowledge_state_rejected_or_deprecated_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "candidate_or_source_snapshot": {
+                    "rejected_count": quality.knowledge_state_candidate_or_source_snapshot_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+            },
+        },
         "eval_failure_records": quality.eval_failure_records,
         "source_coverage_boundary": {
             "source_snapshot_status": "wikisource_source_snapshot",
@@ -8772,6 +8966,46 @@ mod tests {
         assert_eq!(summary["status"], json!("passed"));
         assert_eq!(summary["expected_evidence_hit_at_8"]["ratio"], json!(1.0));
         assert_eq!(summary["source_diversity"]["count"], json!(1));
+    }
+
+    #[test]
+    fn eval_quality_summary_fails_closed_on_knowledge_state_rejection() {
+        let quality = EvalQualityAccumulator {
+            total_cases: 1,
+            quality_report_cases: 1,
+            quality_report_production_ready_required_cases: 1,
+            quality_report_production_ready_cases: 1,
+            classified_cases: 1,
+            expected_evidence_cases: 1,
+            expected_hit_at_1: 1,
+            expected_hit_at_3: 1,
+            expected_hit_at_8: 1,
+            required_type_cases: 1,
+            required_type_passed: 1,
+            exact_term_total: 1,
+            exact_term_passed: 1,
+            source_boundary_confirmation_cases: 1,
+            source_boundary_confirmation_avoided: 1,
+            forbidden_conclusion_cases: 1,
+            forbidden_conclusion_avoided: 1,
+            reviewer_status_matched: 1,
+            knowledge_state_runtime_policy_rejected_count: 1,
+            knowledge_state_system_calibrated_rejected_count: 1,
+            knowledge_state_reviewer_downgrade_cases: 1,
+            ..EvalQualityAccumulator::default()
+        };
+
+        let summary = eval_quality_summary(&quality);
+
+        assert_eq!(summary["status"], json!("failed"));
+        assert_eq!(
+            summary["knowledge_state_quality"]["runtime_policy_rejected_count"],
+            json!(1)
+        );
+        assert!(summary["blockers"].as_array().is_some_and(|items| {
+            items.contains(&json!("knowledge_state_runtime_policy_rejected"))
+                && items.contains(&json!("knowledge_state_reviewer_downgrade"))
+        }));
     }
 
     #[test]

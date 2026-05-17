@@ -180,16 +180,25 @@ gate_stdout_requirements = {
             "eval_run_id",
             "eval_suite_version",
             "kb_build_hash",
+            "kb_diff_report",
+            "kb_diff_report_sha256",
             "kb_version",
+            "calibration_job_summary",
+            "eval_impact",
+            "knowledge_state_summary",
+            "knowledge_state_summary_sha256",
             "open_p0_governance_tasks",
             "open_p0_retrieval_failures",
+            "per_kind_coverage_matrix",
             "quality_gate_passed",
             "quality_summary",
             "production_default_thresholds",
             "rqa_schema_version",
+            "runtime_policy_promotion_summary",
             "source_license_summary",
             "source_snapshot_digest",
             "threshold_config",
+            "unresolved_calibration_gaps",
         ],
     },
     "rqa_backup_restore_drill": {
@@ -864,6 +873,43 @@ def validate_release_manifest():
         if production_ready and not is_sha256(rqa.get("source_license_summary_digest")):
             errors.append("production_ready_requires_source_license_summary_digest")
 
+    knowledge_state = manifest.get("knowledge_state")
+    if not isinstance(knowledge_state, dict):
+        errors.append("release_manifest_knowledge_state_missing")
+    elif rqa_gate is not None:
+        rqa_knowledge_state = rqa_gate.get("knowledge_state_summary") or {}
+        kb_diff_report = rqa_gate.get("kb_diff_report") or {}
+        eval_impact = rqa_gate.get("eval_impact") or {}
+        expected_fields = {
+            "state_summary_sha256": rqa_gate.get("knowledge_state_summary_sha256"),
+            "runtime_policy_version": rqa_knowledge_state.get("runtime_policy_version"),
+            "state_counts": rqa_knowledge_state.get("state_counts"),
+            "per_kind_coverage_matrix": rqa_gate.get("per_kind_coverage_matrix"),
+            "calibration_job_summary": rqa_gate.get("calibration_job_summary"),
+            "runtime_policy_promotion_summary": rqa_gate.get(
+                "runtime_policy_promotion_summary"
+            ),
+            "unresolved_calibration_gaps": rqa_gate.get("unresolved_calibration_gaps"),
+            "kb_diff_report_id": kb_diff_report.get("report_id"),
+            "kb_diff_report_sha256": rqa_gate.get("kb_diff_report_sha256"),
+            "kb_diff_sha256": kb_diff_report.get("diff_sha256"),
+            "eval_diff_sha256": kb_diff_report.get("eval_diff_sha256"),
+            "eval_impact_sha256": canonical_digest(eval_impact) if eval_impact else "",
+            "open_p0_governance_tasks": rqa_gate.get("open_p0_governance_tasks"),
+        }
+        for field, expected in expected_fields.items():
+            if knowledge_state.get(field) != expected:
+                errors.append(f"release_manifest_knowledge_state_{field}_mismatch")
+        for field in (
+            "state_summary_sha256",
+            "kb_diff_report_sha256",
+            "kb_diff_sha256",
+            "eval_diff_sha256",
+            "eval_impact_sha256",
+        ):
+            if not is_sha256(knowledge_state.get(field)):
+                errors.append(f"release_manifest_knowledge_state_{field}_invalid")
+
     migration_gate = success_json_from_gate_stdout(
         gates_by_name.get("rqa_migration_preflight"),
         "tonglingyu.rqa_migration_preflight_gate",
@@ -1082,6 +1128,11 @@ def validate_release_artifact_registry():
         if isinstance(manifest.get("behavior_config"), dict)
         else {}
     )
+    manifest_knowledge_state = (
+        manifest.get("knowledge_state")
+        if isinstance(manifest.get("knowledge_state"), dict)
+        else {}
+    )
     manifest_security = (
         manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
     )
@@ -1127,6 +1178,21 @@ def validate_release_artifact_registry():
             "digest": manifest_rqa.get("source_license_summary_digest"),
             "source_gate": "retrieval_quality",
             "ref": manifest_rqa.get("source_snapshot_digest") or "",
+        },
+        "knowledge_state_summary": {
+            "digest": manifest_knowledge_state.get("state_summary_sha256"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_knowledge_state.get("runtime_policy_version") or "",
+        },
+        "kb_version_diff_report": {
+            "digest": manifest_knowledge_state.get("kb_diff_report_sha256"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_knowledge_state.get("kb_diff_report_id") or "",
+        },
+        "knowledge_state_eval_impact": {
+            "digest": manifest_knowledge_state.get("eval_impact_sha256"),
+            "source_gate": "retrieval_quality",
+            "ref": manifest_rqa.get("eval_run_id") or "",
         },
         "migration_preflight": {
             "digest": manifest_migration.get("migration_preflight_sha256"),
@@ -1221,6 +1287,16 @@ def recompute_eval_quality_from_cases(cases):
     reviewer_status_matched = 0
     eval_failure_records = 0
     source_ids = set()
+    knowledge_state_selected_count = 0
+    knowledge_state_runtime_usable_count = 0
+    knowledge_state_human_marked_count = 0
+    knowledge_state_system_calibrated_rejected_count = 0
+    knowledge_state_rejected_or_deprecated_count = 0
+    knowledge_state_candidate_or_source_snapshot_count = 0
+    knowledge_state_runtime_policy_rejected_count = 0
+    knowledge_state_reviewer_downgrade_cases = 0
+    knowledge_state_forbidden_failure_cases = 0
+    knowledge_state_eval_failure_cases = 0
 
     for case in cases:
         if not isinstance(case, dict):
@@ -1304,6 +1380,59 @@ def recompute_eval_quality_from_cases(cases):
         for source_id in quality.get("source_ids") or []:
             if isinstance(source_id, str):
                 source_ids.add(source_id)
+        knowledge_state = quality.get("knowledge_state_summary")
+        if not isinstance(knowledge_state, dict):
+            return None
+        selected_count = knowledge_state.get("selected_count")
+        runtime_usable_count = knowledge_state.get("runtime_usable_selected_count")
+        human_marked_count = knowledge_state.get("human_marked_selected_count")
+        system_calibrated_count = knowledge_state.get(
+            "system_calibrated_rejected_count"
+        )
+        rejected_or_deprecated_count = knowledge_state.get(
+            "rejected_or_deprecated_selected_count"
+        )
+        candidate_or_source_snapshot_count = knowledge_state.get(
+            "candidate_or_source_snapshot_rejected_count"
+        )
+        runtime_policy_rejected_count = knowledge_state.get(
+            "runtime_policy_rejected_count"
+        )
+        if not all(
+            isinstance(value, int)
+            for value in (
+                selected_count,
+                runtime_usable_count,
+                human_marked_count,
+                system_calibrated_count,
+                rejected_or_deprecated_count,
+                candidate_or_source_snapshot_count,
+                runtime_policy_rejected_count,
+            )
+        ):
+            return None
+        knowledge_state_selected_count += selected_count
+        knowledge_state_runtime_usable_count += runtime_usable_count
+        knowledge_state_human_marked_count += human_marked_count
+        knowledge_state_system_calibrated_rejected_count += system_calibrated_count
+        knowledge_state_rejected_or_deprecated_count += rejected_or_deprecated_count
+        knowledge_state_candidate_or_source_snapshot_count += (
+            candidate_or_source_snapshot_count
+        )
+        knowledge_state_runtime_policy_rejected_count += runtime_policy_rejected_count
+        reviewer_downgrade_case = knowledge_state.get("reviewer_downgrade_case")
+        forbidden_failure_case = knowledge_state.get("forbidden_failure_case")
+        if reviewer_downgrade_case is True:
+            knowledge_state_reviewer_downgrade_cases += 1
+        if forbidden_failure_case is True:
+            knowledge_state_forbidden_failure_cases += 1
+        if (
+            runtime_policy_rejected_count
+            or rejected_or_deprecated_count
+            or reviewer_downgrade_case is True
+            or forbidden_failure_case is True
+        ):
+            knowledge_state_eval_failure_cases += 1
 
     return {
         "quality_report_coverage": ratio_json(quality_report_cases, total_cases),
@@ -1328,6 +1457,53 @@ def recompute_eval_quality_from_cases(cases):
         ),
         "reviewer_status_matched": ratio_json(reviewer_status_matched, total_cases),
         "eval_failure_records": eval_failure_records,
+        "knowledge_state_quality": {
+            "object": "tonglingyu.eval_knowledge_state_quality",
+            "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+            "selected_count": knowledge_state_selected_count,
+            "runtime_usable_selected_count": knowledge_state_runtime_usable_count,
+            "human_marked_selected_count": knowledge_state_human_marked_count,
+            "system_calibrated_rejected_count": (
+                knowledge_state_system_calibrated_rejected_count
+            ),
+            "rejected_or_deprecated_selected_count": (
+                knowledge_state_rejected_or_deprecated_count
+            ),
+            "candidate_or_source_snapshot_rejected_count": (
+                knowledge_state_candidate_or_source_snapshot_count
+            ),
+            "runtime_policy_rejected_count": knowledge_state_runtime_policy_rejected_count,
+            "reviewer_downgrade_cases": knowledge_state_reviewer_downgrade_cases,
+            "forbidden_failure_cases": knowledge_state_forbidden_failure_cases,
+            "eval_failure_cases": knowledge_state_eval_failure_cases,
+            "state_grouped_eval": {
+                "runtime_usable": {
+                    "selected_count": knowledge_state_runtime_usable_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "human_marked": {
+                    "selected_count": knowledge_state_human_marked_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "system_calibrated": {
+                    "rejected_count": knowledge_state_system_calibrated_rejected_count,
+                    "reviewer_downgrade_cases": knowledge_state_reviewer_downgrade_cases,
+                    "forbidden_failure_cases": knowledge_state_forbidden_failure_cases,
+                },
+                "rejected_or_deprecated": {
+                    "matched_count": knowledge_state_rejected_or_deprecated_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "candidate_or_source_snapshot": {
+                    "rejected_count": knowledge_state_candidate_or_source_snapshot_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+            },
+        },
         "source_diversity": {
             "count": len(source_ids),
             "source_ids": sorted(source_ids),
@@ -1392,6 +1568,7 @@ def validate_retrieval_quality_eval_report_artifact(gate_json):
         "source_boundary_confirmation_avoided",
         "forbidden_conclusion_avoided",
         "reviewer_status_matched",
+        "knowledge_state_quality",
         "eval_failure_records",
         "source_coverage_boundary",
     ):
@@ -1422,6 +1599,7 @@ def validate_retrieval_quality_eval_report_artifact(gate_json):
         "source_boundary_confirmation_avoided",
         "forbidden_conclusion_avoided",
         "reviewer_status_matched",
+        "knowledge_state_quality",
         "eval_failure_records",
     ):
         if eval_summary.get(field) != recomputed.get(field):
@@ -1715,6 +1893,96 @@ def validate_retrieval_quality_gate_stdout():
         sources = source_license.get("sources")
         if not isinstance(sources, list) or not sources:
             errors.append("retrieval_quality_source_license_sources_missing")
+    knowledge_state = gate_json.get("knowledge_state_summary")
+    if not isinstance(knowledge_state, dict):
+        errors.append("retrieval_quality_knowledge_state_summary_missing")
+        knowledge_state = {}
+    else:
+        expected_digest = canonical_digest({
+            "state_counts": knowledge_state.get("state_counts"),
+            "by_kind": knowledge_state.get("by_kind"),
+            "calibration_report_summary": knowledge_state.get(
+                "calibration_report_summary"
+            ),
+            "calibration_job_summary": knowledge_state.get("calibration_job_summary"),
+            "runtime_policy_promotion_summary": knowledge_state.get(
+                "runtime_policy_promotion_summary"
+            ),
+            "per_kind_coverage_matrix": knowledge_state.get("per_kind_coverage_matrix"),
+            "unresolved_gaps": knowledge_state.get("unresolved_gaps"),
+        })
+        if knowledge_state.get("summary_sha256") != expected_digest:
+            errors.append("retrieval_quality_knowledge_state_summary_digest_mismatch")
+        if gate_json.get("knowledge_state_summary_sha256") != expected_digest:
+            errors.append("retrieval_quality_knowledge_state_gate_digest_mismatch")
+        state_counts = knowledge_state.get("state_counts")
+        if not isinstance(state_counts, dict):
+            errors.append("retrieval_quality_knowledge_state_counts_missing")
+        else:
+            states = state_counts.get("states")
+            if not isinstance(states, dict):
+                errors.append("retrieval_quality_knowledge_state_states_missing")
+            else:
+                for state in (
+                    "source_snapshot",
+                    "candidate",
+                    "system_calibrated",
+                    "runtime_usable",
+                    "human_marked",
+                    "rejected",
+                    "deprecated",
+                ):
+                    if not isinstance(states.get(state), int):
+                        errors.append(f"retrieval_quality_knowledge_state_{state}_count_invalid")
+        calibration_jobs = knowledge_state.get("calibration_job_summary")
+        if not isinstance(calibration_jobs, dict):
+            errors.append("retrieval_quality_calibration_job_summary_missing")
+        elif calibration_jobs.get("failed_or_retry_waiting") != 0:
+            errors.append("retrieval_quality_calibration_jobs_failed_or_retry_waiting")
+        if gate_json.get("calibration_job_summary") != calibration_jobs:
+            errors.append("retrieval_quality_calibration_job_summary_mismatch")
+        if gate_json.get("runtime_policy_promotion_summary") != knowledge_state.get(
+            "runtime_policy_promotion_summary"
+        ):
+            errors.append("retrieval_quality_runtime_policy_promotion_summary_mismatch")
+        if gate_json.get("per_kind_coverage_matrix") != knowledge_state.get(
+            "per_kind_coverage_matrix"
+        ):
+            errors.append("retrieval_quality_per_kind_coverage_matrix_mismatch")
+        if gate_json.get("unresolved_calibration_gaps") != knowledge_state.get(
+            "unresolved_gaps"
+        ):
+            errors.append("retrieval_quality_unresolved_calibration_gaps_mismatch")
+    kb_diff_report = gate_json.get("kb_diff_report")
+    if not isinstance(kb_diff_report, dict):
+        errors.append("retrieval_quality_kb_diff_report_missing")
+    else:
+        if kb_diff_report.get("object") != "tonglingyu.kb_version_diff_release_ref":
+            errors.append("retrieval_quality_kb_diff_report_object_invalid")
+        if not is_sha256(kb_diff_report.get("report_sha256")):
+            errors.append("retrieval_quality_kb_diff_report_hash_invalid")
+        if gate_json.get("kb_diff_report_sha256") != kb_diff_report.get("report_sha256"):
+            errors.append("retrieval_quality_kb_diff_report_hash_mismatch")
+        if not isinstance(kb_diff_report.get("knowledge_state_diff"), dict):
+            errors.append("retrieval_quality_kb_diff_knowledge_state_missing")
+    quality_for_knowledge = quality if isinstance(quality, dict) else {}
+    knowledge_quality = quality_for_knowledge.get("knowledge_state_quality")
+    if not isinstance(knowledge_quality, dict):
+        errors.append("retrieval_quality_knowledge_state_quality_missing")
+    else:
+        for field in (
+            "runtime_policy_rejected_count",
+            "rejected_or_deprecated_selected_count",
+            "reviewer_downgrade_cases",
+            "forbidden_failure_cases",
+        ):
+            if knowledge_quality.get(field) != 0:
+                errors.append(f"retrieval_quality_{field}_not_zero")
+    eval_impact = gate_json.get("eval_impact")
+    if not isinstance(eval_impact, dict):
+        errors.append("retrieval_quality_eval_impact_missing")
+    elif eval_impact.get("knowledge_state_quality") != knowledge_quality:
+        errors.append("retrieval_quality_eval_impact_knowledge_state_mismatch")
     if gate_json.get("open_p0_retrieval_failures") != 0:
         errors.append("retrieval_quality_open_p0_retrieval_failures_not_zero")
     if gate_json.get("open_p0_governance_tasks") != 0:

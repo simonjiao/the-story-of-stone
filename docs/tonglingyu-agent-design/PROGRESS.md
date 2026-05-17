@@ -1200,3 +1200,17 @@
     runtime/gateway 单包测试、clippy 和 Open WebUI admin action contract。Milestone D
     完成不表示 KB diff、eval impact、saved report validator 或 release gate 闭合；
     Milestone E 仍未完成，不能声明完整知识状态治理闭环完成。
+14. 2026-05-17 已完成 Knowledge State Milestone E：`tonglingyu-runtime` 的
+    KB summary/diff 记录 knowledge state counts、state change refs、calibration
+    report refs、human review refs、audit refs、runtime policy promotion summary、
+    calibration job summary 和 unresolved gaps；`tonglingyu-gateway` eval report
+    新增 `knowledge_state_quality`，对未提升 `system_calibrated`、
+    rejected/deprecated selected evidence、reviewer downgrade 和 forbidden failure
+    fail-closed；RQA quality gate、release manifest、artifact registry 和 saved
+    report validator 绑定 knowledge state summary、KB diff hash、eval impact、
+    calibration run/job digest、promotion summary、per-kind coverage matrix 和
+    open P0 governance state。已通过 runtime/gateway 单包测试、clippy 和
+    `test-tonglingyu-release-readiness-contract.sh`。前 5 个 milestone repo-local
+    已闭合，但这仍不是目标 live 环境当次 production-ready release；正式上线仍必须
+    重新生成并验证当次 release readiness、KB diff、calibration report、saved report
+    validator 和 Open WebUI/Gateway 证据。

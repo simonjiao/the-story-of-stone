@@ -43,6 +43,8 @@ TAMPERED_STALE_READY_REPORT="${WORK_DIR}/tampered-stale-ready-report.json"
 TAMPERED_PRODUCTION_FLAG_REPORT="${WORK_DIR}/tampered-production-flag-report.json"
 TAMPERED_RELEASE_MANIFEST_REPORT="${WORK_DIR}/tampered-release-manifest-report.json"
 TAMPERED_RELEASE_MANIFEST_DIGEST_REPORT="${WORK_DIR}/tampered-release-manifest-digest-report.json"
+TAMPERED_KNOWLEDGE_STATE_REPORT="${WORK_DIR}/tampered-knowledge-state-report.json"
+TAMPERED_KNOWLEDGE_EVAL_REPORT="${WORK_DIR}/tampered-knowledge-eval-report.json"
 TAMPERED_RELEASE_CONTEXT_REPORT="${WORK_DIR}/tampered-release-context-report.json"
 TAMPERED_RELEASE_CONTEXT_VALIDITY_REPORT="${WORK_DIR}/tampered-release-context-validity-report.json"
 TAMPERED_RUNTIME_IDENTITY_REPORT="${WORK_DIR}/tampered-runtime-identity-report.json"
@@ -673,6 +675,7 @@ import sys
 source, target = sys.argv[1:3]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
+
 report["production_release_ready"] = True
 with open(target, "w", encoding="utf-8") as handle:
     json.dump(report, handle)
@@ -1036,6 +1039,19 @@ from pathlib import Path
 source, target, eval_report_path, db_path, runbook_path = sys.argv[1:6]
 with open(source, encoding="utf-8") as handle:
     report = json.load(handle)
+
+
+def digest_json(value):
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 report["production_release_ready"] = True
 report["gate_command_overrides_used"] = False
 report["summary_only"] = False
@@ -1043,6 +1059,100 @@ report["exit_policy"] = "production_release_ready"
 report["status"] = "passed"
 report["release_blockers"] = []
 report["release_conditions_met"] = True
+knowledge_state_quality = {
+    "object": "tonglingyu.eval_knowledge_state_quality",
+    "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "selected_count": 1,
+    "runtime_usable_selected_count": 1,
+    "human_marked_selected_count": 0,
+    "system_calibrated_rejected_count": 0,
+    "rejected_or_deprecated_selected_count": 0,
+    "candidate_or_source_snapshot_rejected_count": 0,
+    "runtime_policy_rejected_count": 0,
+    "reviewer_downgrade_cases": 0,
+    "forbidden_failure_cases": 0,
+    "eval_failure_cases": 0,
+    "state_grouped_eval": {
+        "runtime_usable": {
+            "selected_count": 1,
+            "reviewer_downgrade_cases": 0,
+            "forbidden_failure_cases": 0,
+        },
+        "human_marked": {
+            "selected_count": 0,
+            "reviewer_downgrade_cases": 0,
+            "forbidden_failure_cases": 0,
+        },
+        "system_calibrated": {
+            "rejected_count": 0,
+            "reviewer_downgrade_cases": 0,
+            "forbidden_failure_cases": 0,
+        },
+        "rejected_or_deprecated": {
+            "matched_count": 0,
+            "reviewer_downgrade_cases": 0,
+            "forbidden_failure_cases": 0,
+        },
+        "candidate_or_source_snapshot": {
+            "rejected_count": 0,
+            "reviewer_downgrade_cases": 0,
+            "forbidden_failure_cases": 0,
+        },
+    },
+}
+case_knowledge_state_selected = {
+    "object": "tonglingyu.eval_case_knowledge_state_quality",
+    "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "selected_count": 1,
+    "runtime_usable_selected_count": 1,
+    "human_marked_selected_count": 0,
+    "system_calibrated_rejected_count": 0,
+    "rejected_or_deprecated_selected_count": 0,
+    "candidate_or_source_snapshot_rejected_count": 0,
+    "runtime_policy_rejected_count": 0,
+    "reviewer_downgrade_case": False,
+    "forbidden_failure_case": False,
+    "state_grouped_eval": {
+        "runtime_usable": {
+            "selected_count": 1,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+        "human_marked": {
+            "selected_count": 0,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+        "system_calibrated": {
+            "rejected_count": 0,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+        "rejected_or_deprecated": {
+            "matched_count": 0,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+        "candidate_or_source_snapshot": {
+            "rejected_count": 0,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+    },
+}
+case_knowledge_state_empty = {
+    **case_knowledge_state_selected,
+    "selected_count": 0,
+    "runtime_usable_selected_count": 0,
+    "state_grouped_eval": {
+        **case_knowledge_state_selected["state_grouped_eval"],
+        "runtime_usable": {
+            "selected_count": 0,
+            "reviewer_downgrade_case": False,
+            "forbidden_failure_case": False,
+        },
+    },
+}
 quality_summary = {
     "blockers": [],
     "eval_case_classification": {"passed": 2, "ratio": 1.0, "total": 2},
@@ -1053,6 +1163,7 @@ quality_summary = {
     "expected_evidence_hit_at_3": {"passed": 1, "ratio": 1.0, "total": 1},
     "expected_evidence_hit_at_8": {"passed": 1, "ratio": 1.0, "total": 1},
     "forbidden_conclusion_avoided": {"passed": 2, "ratio": 1.0, "total": 2},
+    "knowledge_state_quality": knowledge_state_quality,
     "quality_report_coverage": {"passed": 2, "ratio": 1.0, "total": 2},
     "quality_report_production_ready": {"passed": 1, "ratio": 1.0, "total": 1},
     "required_type_coverage": {"passed": 2, "ratio": 1.0, "total": 2},
@@ -1108,6 +1219,7 @@ eval_report = {
                 "source_boundary_confirmation_avoided": False,
                 "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
                 "source_ids": ["hongloumeng-wikisource-120"],
+                "knowledge_state_summary": case_knowledge_state_selected,
             },
             "question": "synthetic release eval case",
             "required_evidence_type": "base_text",
@@ -1144,6 +1256,7 @@ eval_report = {
                 "source_boundary_confirmation_avoided": True,
                 "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
                 "source_ids": ["hongloumeng-wikisource-120"],
+                "knowledge_state_summary": case_knowledge_state_empty,
             },
             "question": "synthetic source boundary confirmation case",
             "required_evidence_type": "base_text",
@@ -1185,6 +1298,48 @@ conn.executescript(
         status TEXT,
         priority TEXT
     );
+    CREATE TABLE knowledge_items (
+        kind TEXT,
+        state TEXT,
+        payload_json TEXT
+    );
+    CREATE TABLE knowledge_item_state_history (
+        item_id TEXT,
+        state_version INTEGER
+    );
+    CREATE TABLE knowledge_calibration_reports (
+        report_id TEXT,
+        report_ref TEXT,
+        report_hash TEXT,
+        decision TEXT,
+        created_at TEXT
+    );
+    CREATE TABLE knowledge_calibration_jobs (
+        job_id TEXT,
+        status TEXT,
+        input_digest TEXT,
+        config_digest TEXT,
+        report_id TEXT,
+        updated_at TEXT,
+        input_kind TEXT,
+        method TEXT,
+        last_error_sha256 TEXT
+    );
+    CREATE TABLE kb_version_diff_reports (
+        report_id TEXT,
+        schema_version TEXT,
+        before_version_id TEXT,
+        after_version_id TEXT,
+        source_root TEXT,
+        before_summary_json TEXT,
+        after_summary_json TEXT,
+        diff_json TEXT,
+        eval_before_summary_json TEXT,
+        eval_after_summary_json TEXT,
+        eval_diff_json TEXT,
+        created_at TEXT,
+        updated_at TEXT
+    );
     """
 )
 conn.execute(
@@ -1210,19 +1365,136 @@ conn.execute(
         "synthetic usage boundary",
     ),
 )
+conn.execute(
+    "INSERT INTO knowledge_items VALUES (?, ?, ?)",
+    (
+        "term",
+        "runtime_usable",
+        json.dumps({
+            "runtime_policy": {
+                "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+                "release_run_id": "release-synthetic",
+            },
+        }, sort_keys=True),
+    ),
+)
+conn.execute(
+    "INSERT INTO knowledge_calibration_reports VALUES (?, ?, ?, ?, ?)",
+    (
+        "report-synthetic",
+        "knowledge-calibration-report://synthetic",
+        "6" * 64,
+        "system_calibrated",
+        "2026-05-15T00:00:00Z",
+    ),
+)
+conn.execute(
+    "INSERT INTO knowledge_calibration_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    (
+        "job-synthetic",
+        "succeeded",
+        "7" * 64,
+        "8" * 64,
+        "report-synthetic",
+        "2026-05-15T00:00:01Z",
+        "source_snapshot",
+        "rule",
+        None,
+    ),
+)
+kb_diff_knowledge_state = {
+    "object": "tonglingyu.knowledge_state_kb_diff",
+    "schema_version": "tonglingyu-knowledge-item-state-v1",
+    "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "state_counts": {
+        "source_snapshot": {"before": 0, "after": 0, "delta": 0},
+        "candidate": {"before": 0, "after": 0, "delta": 0},
+        "system_calibrated": {"before": 0, "after": 0, "delta": 0},
+        "runtime_usable": {"before": 0, "after": 1, "delta": 1},
+        "human_marked": {"before": 0, "after": 0, "delta": 0},
+        "rejected": {"before": 0, "after": 0, "delta": 0},
+        "deprecated": {"before": 0, "after": 0, "delta": 0},
+    },
+    "by_kind": {"term": {"runtime_usable": 1}},
+    "state_change_refs": [],
+    "runtime_policy_promotion_summary": {
+        "object": "tonglingyu.knowledge_runtime_policy_promotion_summary",
+        "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+        "runtime_usable_count": 1,
+        "human_marked_count": 0,
+        "by_kind": {"term": {"runtime_usable": 1}},
+        "release_run_refs": ["sha256:" + digest_json("release-synthetic")],
+    },
+    "calibration_job_summary": {
+        "object": "tonglingyu.knowledge_calibration_job_summary",
+        "total": 1,
+        "by_status": {"succeeded": 1},
+        "failed_or_retry_waiting": 0,
+    },
+    "unresolved_gaps": {
+        "candidate_or_source_snapshot": 0,
+        "system_calibrated_not_runtime_usable": 0,
+        "rejected_or_deprecated": 0,
+    },
+}
+kb_after_summary = {
+    "object": "tonglingyu.kb_version_summary",
+    "schema_version": "tonglingyu-kb-v1",
+    "knowledge_state": {
+        "object": "tonglingyu.knowledge_state_kb_summary",
+        "schema_version": "tonglingyu-knowledge-item-state-v1",
+        "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+        "state_counts": {
+            "object": "tonglingyu.knowledge_state_counts",
+            "states": {
+                "source_snapshot": 0,
+                "candidate": 0,
+                "system_calibrated": 0,
+                "runtime_usable": 1,
+                "human_marked": 0,
+                "rejected": 0,
+                "deprecated": 0,
+            },
+        },
+    },
+}
+kb_diff_json = {
+    "object": "tonglingyu.kb_version_diff",
+    "schema_version": "tonglingyu-kb-version-diff-v1",
+    "knowledge_state": kb_diff_knowledge_state,
+}
+eval_diff_json = {
+    "object": "tonglingyu.eval_quality_summary_diff",
+    "schema_version": "tonglingyu-kb-version-diff-v1",
+    "after_status": "passed",
+    "after_blockers": [],
+    "metrics": {
+        "knowledge_state_quality": {
+            "before": None,
+            "after": knowledge_state_quality,
+        },
+    },
+}
+conn.execute(
+    "INSERT INTO kb_version_diff_reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    (
+        "kb-diff-synthetic",
+        "tonglingyu-kb-version-diff-v1",
+        None,
+        "kb-synthetic",
+        "resources/sources/wiki",
+        None,
+        json.dumps(kb_after_summary, sort_keys=True),
+        json.dumps(kb_diff_json, sort_keys=True),
+        None,
+        json.dumps(quality_summary, sort_keys=True),
+        json.dumps(eval_diff_json, sort_keys=True),
+        "2026-05-15T00:00:02Z",
+        "2026-05-15T00:00:02Z",
+    ),
+)
 conn.commit()
 conn.close()
-
-
-def digest_json(value):
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 behavior_config = {
@@ -1593,6 +1865,109 @@ production_default_thresholds = {
     "reviewer_status_matched": 1.0,
     "source_boundary_confirmation_avoided": 1.0,
 }
+synthetic_eval_run_id = f"rqa-eval-{eval_report_sha256[:16]}"
+knowledge_state_state_counts = {
+    "object": "tonglingyu.knowledge_state_counts",
+    "states": {
+        "source_snapshot": 0,
+        "candidate": 0,
+        "system_calibrated": 0,
+        "runtime_usable": 1,
+        "human_marked": 0,
+        "rejected": 0,
+        "deprecated": 0,
+    },
+    "runtime_usable_count": 1,
+    "human_marked_count": 0,
+    "system_calibrated_count": 0,
+    "rejected_or_deprecated_count": 0,
+    "candidate_or_source_snapshot_count": 0,
+    "total_count": 1,
+}
+knowledge_calibration_job_summary = {
+    "object": "tonglingyu.knowledge_calibration_job_summary",
+    "total": 1,
+    "by_status": {"succeeded": 1},
+    "latest_run_id": "job-synthetic",
+    "latest_input_artifact_digest": "7" * 64,
+    "latest_output_report_digest": "6" * 64,
+    "config_digests": ["8" * 64],
+    "failed_task_summary": [],
+    "failed_or_retry_waiting": 0,
+}
+knowledge_runtime_policy_promotion_summary = {
+    "object": "tonglingyu.knowledge_runtime_policy_promotion_summary",
+    "policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "runtime_usable_count": 1,
+    "human_marked_count": 0,
+    "by_kind": {"term": {"runtime_usable": 1}},
+    "release_run_refs": ["sha256:" + hashlib.sha256(b"release-synthetic").hexdigest()],
+}
+per_kind_coverage_matrix = [{
+    "kind": "term",
+    "state_counts": {"runtime_usable": 1},
+    "total": 1,
+    "runtime_or_human_usable": 1,
+    "runtime_or_human_ratio": 1.0,
+}]
+unresolved_calibration_gaps = {
+    "candidate_or_source_snapshot": 0,
+    "system_calibrated_not_runtime_usable": 0,
+    "rejected_or_deprecated": 0,
+    "calibration_failed_or_retry_waiting": 0,
+}
+calibration_report_summary = {
+    "total": 1,
+    "by_decision": {"system_calibrated": 1},
+    "latest_report_ref": "knowledge-calibration-report://synthetic",
+    "latest_report_hash": "6" * 64,
+}
+knowledge_state_summary = {
+    "object": "tonglingyu.knowledge_state_release_summary",
+    "schema_version": "tonglingyu-knowledge-item-state-v1",
+    "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "state_counts": knowledge_state_state_counts,
+    "by_kind": {"term": {"runtime_usable": 1}},
+    "calibration_report_summary": calibration_report_summary,
+    "calibration_job_summary": knowledge_calibration_job_summary,
+    "runtime_policy_promotion_summary": knowledge_runtime_policy_promotion_summary,
+    "per_kind_coverage_matrix": per_kind_coverage_matrix,
+    "unresolved_gaps": unresolved_calibration_gaps,
+}
+knowledge_state_summary["summary_sha256"] = digest_json({
+    "state_counts": knowledge_state_summary["state_counts"],
+    "by_kind": knowledge_state_summary["by_kind"],
+    "calibration_report_summary": calibration_report_summary,
+    "calibration_job_summary": knowledge_calibration_job_summary,
+    "runtime_policy_promotion_summary": knowledge_runtime_policy_promotion_summary,
+    "per_kind_coverage_matrix": per_kind_coverage_matrix,
+    "unresolved_gaps": unresolved_calibration_gaps,
+})
+kb_diff_report = {
+    "object": "tonglingyu.kb_version_diff_release_ref",
+    "report_id": "kb-diff-synthetic",
+    "schema_version": "tonglingyu-kb-version-diff-v1",
+    "before_version_id": None,
+    "after_version_id": "kb-synthetic",
+    "created_at": "2026-05-15T00:00:02Z",
+    "updated_at": "2026-05-15T00:00:02Z",
+    "report_sha256": digest_json({
+        "report_id": "kb-diff-synthetic",
+        "diff": kb_diff_json,
+        "eval_diff": eval_diff_json,
+    }),
+    "diff_sha256": digest_json(kb_diff_json),
+    "eval_diff_sha256": digest_json(eval_diff_json),
+    "knowledge_state_diff": kb_diff_knowledge_state,
+    "eval_diff": eval_diff_json,
+}
+eval_impact = {
+    "object": "tonglingyu.knowledge_state_eval_impact",
+    "eval_run_id": synthetic_eval_run_id,
+    "quality_summary_status": quality_summary["status"],
+    "knowledge_state_quality": knowledge_state_quality,
+    "kb_diff_eval_diff": eval_diff_json,
+}
 gate_stdout = {
     "runtime_config": {
         "checked_policy_fields": ["TONGLINGYU_AGENT_RUNTIME_MODE"],
@@ -1669,9 +2044,12 @@ gate_stdout = {
         "eval_report_generated_by_gate": True,
         "eval_report_path": eval_report_path,
         "eval_report_sha256": eval_report_sha256,
-        "eval_run_id": f"rqa-eval-{eval_report_sha256[:16]}",
+        "eval_run_id": synthetic_eval_run_id,
+        "eval_impact": eval_impact,
         "eval_suite_version": "tonglingyu-eval-quality-v1",
         "kb_build_hash": "2" * 64,
+        "kb_diff_report": kb_diff_report,
+        "kb_diff_report_sha256": kb_diff_report["report_sha256"],
         "kb_version": {
             "block_count": 10419,
             "built_at": "2026-05-15T00:00:00Z",
@@ -1681,8 +2059,12 @@ gate_stdout = {
             "version_id": "kb-synthetic",
         },
         "object": "tonglingyu.rqa_quality_gate",
+        "calibration_job_summary": knowledge_calibration_job_summary,
+        "knowledge_state_summary": knowledge_state_summary,
+        "knowledge_state_summary_sha256": knowledge_state_summary["summary_sha256"],
         "open_p0_governance_tasks": 0,
         "open_p0_retrieval_failures": 0,
+        "per_kind_coverage_matrix": per_kind_coverage_matrix,
         "production_default_thresholds": production_default_thresholds,
         "quality_gate_passed": True,
         "quality_summary": {
@@ -1693,6 +2075,7 @@ gate_stdout = {
             "expected_evidence_denominator": quality_summary["expected_evidence_denominator"],
             "expected_evidence_hit_at_8": quality_summary["expected_evidence_hit_at_8"],
             "forbidden_conclusion_avoided": quality_summary["forbidden_conclusion_avoided"],
+            "knowledge_state_quality": quality_summary["knowledge_state_quality"],
             "quality_report_coverage": quality_summary["quality_report_coverage"],
             "quality_report_production_ready": quality_summary["quality_report_production_ready"],
             "required_type_coverage": quality_summary["required_type_coverage"],
@@ -1703,6 +2086,7 @@ gate_stdout = {
             "status": quality_summary["status"],
         },
         "rqa_schema_version": "tonglingyu-retrieval-failures-v1",
+        "runtime_policy_promotion_summary": knowledge_runtime_policy_promotion_summary,
         "schema_version": 1,
         "secret_values_printed": False,
         "source_license_summary": {
@@ -1728,6 +2112,7 @@ gate_stdout = {
             "production_ready_thresholds_enforced": True,
             "source": "production_defaults",
         },
+        "unresolved_calibration_gaps": unresolved_calibration_gaps,
     },
     "rqa_backup_restore_drill": {
         "artifact_dir": str(restore_artifact_dir),
@@ -2664,6 +3049,21 @@ release_manifest = {
             rqa_gate["source_license_summary"]
         ),
     },
+    "knowledge_state": {
+        "state_summary_sha256": rqa_gate["knowledge_state_summary_sha256"],
+        "runtime_policy_version": rqa_gate["knowledge_state_summary"]["runtime_policy_version"],
+        "state_counts": rqa_gate["knowledge_state_summary"]["state_counts"],
+        "per_kind_coverage_matrix": rqa_gate["per_kind_coverage_matrix"],
+        "calibration_job_summary": rqa_gate["calibration_job_summary"],
+        "runtime_policy_promotion_summary": rqa_gate["runtime_policy_promotion_summary"],
+        "unresolved_calibration_gaps": rqa_gate["unresolved_calibration_gaps"],
+        "kb_diff_report_id": rqa_gate["kb_diff_report"]["report_id"],
+        "kb_diff_report_sha256": rqa_gate["kb_diff_report_sha256"],
+        "kb_diff_sha256": rqa_gate["kb_diff_report"]["diff_sha256"],
+        "eval_diff_sha256": rqa_gate["kb_diff_report"]["eval_diff_sha256"],
+        "eval_impact_sha256": canonical_digest(rqa_gate["eval_impact"]),
+        "open_p0_governance_tasks": rqa_gate["open_p0_governance_tasks"],
+    },
     "migration": {
         "applied_migration_count": migration_counts["applied"],
         "backup_artifact_path": migration_backup["artifact_path"],
@@ -2826,6 +3226,27 @@ registry_entries = [
         ref=release_manifest["rqa"]["source_snapshot_digest"],
     ),
     artifact_entry(
+        "knowledge_state_summary",
+        "inline_json",
+        release_manifest["knowledge_state"]["state_summary_sha256"],
+        "retrieval_quality",
+        ref=release_manifest["knowledge_state"]["runtime_policy_version"],
+    ),
+    artifact_entry(
+        "kb_version_diff_report",
+        "inline_json",
+        release_manifest["knowledge_state"]["kb_diff_report_sha256"],
+        "retrieval_quality",
+        ref=release_manifest["knowledge_state"]["kb_diff_report_id"],
+    ),
+    artifact_entry(
+        "knowledge_state_eval_impact",
+        "inline_json",
+        release_manifest["knowledge_state"]["eval_impact_sha256"],
+        "retrieval_quality",
+        ref=release_manifest["rqa"]["eval_run_id"],
+    ),
+    artifact_entry(
         "migration_preflight",
         "inline_json",
         release_manifest["migration"]["migration_preflight_sha256"],
@@ -2897,6 +3318,58 @@ with open(target, "w", encoding="utf-8") as handle:
 PY
 "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
   "${SYNTHETIC_READY_REPORT}" >/dev/null
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_KNOWLEDGE_STATE_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        payload = json.loads(gate["stdout_tail"][-1])
+        payload["knowledge_state_summary"]["state_counts"]["states"]["runtime_usable"] = 2
+        gate["stdout_tail"][-1] = json.dumps(payload, sort_keys=True)
+        break
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_knowledge_state_stdout="${WORK_DIR}/tampered-knowledge-state.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_KNOWLEDGE_STATE_REPORT}" >"${tampered_knowledge_state_stdout}"; then
+  echo "production-ready reports must reject tampered knowledge state summaries" >&2
+  exit 1
+fi
+assert_report "${tampered_knowledge_state_stdout}" \
+  '"retrieval_quality_knowledge_state_summary_digest_mismatch" in report["errors"]'
+
+python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_KNOWLEDGE_EVAL_REPORT}" <<'PY'
+import json
+import sys
+
+source, target = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    report = json.load(handle)
+for gate in report["gates"]:
+    if gate.get("name") == "retrieval_quality":
+        payload = json.loads(gate["stdout_tail"][-1])
+        payload["quality_summary"]["knowledge_state_quality"][
+            "runtime_policy_rejected_count"
+        ] = 1
+        gate["stdout_tail"][-1] = json.dumps(payload, sort_keys=True)
+        break
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump(report, handle)
+PY
+tampered_knowledge_eval_stdout="${WORK_DIR}/tampered-knowledge-eval.stdout"
+if "${SCRIPT_DIR}/verify-tonglingyu-release-readiness-report.sh" \
+  "${TAMPERED_KNOWLEDGE_EVAL_REPORT}" >"${tampered_knowledge_eval_stdout}"; then
+  echo "production-ready reports must reject knowledge state eval regressions" >&2
+  exit 1
+fi
+assert_report "${tampered_knowledge_eval_stdout}" \
+  '"retrieval_quality_runtime_policy_rejected_count_not_zero" in report["errors"]'
 
 python3 - "${SYNTHETIC_READY_REPORT}" "${TAMPERED_RELEASE_MANIFEST_REPORT}" <<'PY'
 import hashlib

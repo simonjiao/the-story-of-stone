@@ -424,6 +424,9 @@ def build_release_manifest():
     behavior_config = rqa_gate.get("behavior_config") or {}
     kb_version = rqa_gate.get("kb_version") or {}
     source_license = rqa_gate.get("source_license_summary") or {}
+    knowledge_state = rqa_gate.get("knowledge_state_summary") or {}
+    kb_diff_report = rqa_gate.get("kb_diff_report") or {}
+    eval_impact = rqa_gate.get("eval_impact") or {}
     migration_preflight = migration_gate.get("migration_preflight") or {}
     migration_counts = migration_gate.get("migration_counts") or {}
     migration_backup = migration_gate.get("backup") or {}
@@ -458,6 +461,23 @@ def build_release_manifest():
             "source_license_summary_digest": (
                 canonical_digest(source_license) if source_license else ""
             ),
+        },
+        "knowledge_state": {
+            "state_summary_sha256": rqa_gate.get("knowledge_state_summary_sha256"),
+            "runtime_policy_version": knowledge_state.get("runtime_policy_version"),
+            "state_counts": knowledge_state.get("state_counts"),
+            "per_kind_coverage_matrix": rqa_gate.get("per_kind_coverage_matrix"),
+            "calibration_job_summary": rqa_gate.get("calibration_job_summary"),
+            "runtime_policy_promotion_summary": rqa_gate.get(
+                "runtime_policy_promotion_summary"
+            ),
+            "unresolved_calibration_gaps": rqa_gate.get("unresolved_calibration_gaps"),
+            "kb_diff_report_id": kb_diff_report.get("report_id"),
+            "kb_diff_report_sha256": rqa_gate.get("kb_diff_report_sha256"),
+            "kb_diff_sha256": kb_diff_report.get("diff_sha256"),
+            "eval_diff_sha256": kb_diff_report.get("eval_diff_sha256"),
+            "eval_impact_sha256": canonical_digest(eval_impact) if eval_impact else "",
+            "open_p0_governance_tasks": rqa_gate.get("open_p0_governance_tasks"),
         },
         "migration": {
             "policy_version": migration_gate.get("policy_version"),
@@ -624,6 +644,7 @@ def build_release_artifact_registry():
         "tonglingyu.rqa_quality_gate",
     ) or {}
     manifest_rqa = release_manifest.get("rqa") or {}
+    manifest_knowledge_state = release_manifest.get("knowledge_state") or {}
     manifest_runtime = release_manifest.get("runtime_config") or {}
     manifest_migration = release_manifest.get("migration") or {}
     manifest_behavior = release_manifest.get("behavior_config") or {}
@@ -697,6 +718,27 @@ def build_release_artifact_registry():
         manifest_rqa.get("source_license_summary_digest"),
         "retrieval_quality",
         ref=manifest_rqa.get("source_snapshot_digest"),
+    )
+    add_entry(
+        "knowledge_state_summary",
+        "inline_json",
+        manifest_knowledge_state.get("state_summary_sha256"),
+        "retrieval_quality",
+        ref=manifest_knowledge_state.get("runtime_policy_version"),
+    )
+    add_entry(
+        "kb_version_diff_report",
+        "inline_json",
+        manifest_knowledge_state.get("kb_diff_report_sha256"),
+        "retrieval_quality",
+        ref=manifest_knowledge_state.get("kb_diff_report_id"),
+    )
+    add_entry(
+        "knowledge_state_eval_impact",
+        "inline_json",
+        manifest_knowledge_state.get("eval_impact_sha256"),
+        "retrieval_quality",
+        ref=manifest_rqa.get("eval_run_id"),
     )
     add_entry(
         "migration_preflight",

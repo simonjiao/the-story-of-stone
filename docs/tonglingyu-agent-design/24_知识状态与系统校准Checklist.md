@@ -391,40 +391,86 @@ bash deploy/scripts/test-openwebui-gateway-admin-action-contract.sh
 
 ## Milestone E：KB diff、eval 和 release gate
 
-状态：未开始。
+状态：已完成，2026-05-17；提交见本节点提交。
 
 目标：每次知识状态变化都能被 KB diff、eval 和 release gate 复核，避免提前宣布胜利。
 
-- [ ] KB rebuild diff 记录新增、系统校准、runtime_usable、human_marked、rejected 和
+- [x] KB rebuild diff 记录新增、系统校准、runtime_usable、human_marked、rejected 和
   deprecated 的数量与摘要。
-- [ ] KB diff 记录每个状态变化的 source refs、calibration report refs、human review
+- [x] KB diff 记录每个状态变化的 source refs、calibration report refs、human review
   refs 和 audit refs。
-- [ ] eval report 输出按 knowledge state 分组的命中率、失败率、forbidden conclusion
+- [x] eval report 输出按 knowledge state 分组的命中率、失败率、forbidden conclusion
   avoidance 和 reviewer downgrade。
-- [ ] RQA quality gate 校验 rejected/deprecated 条目没有进入 selected evidence。
-- [ ] release report 记录 knowledge state summary、KB diff hash、eval impact 和
+- [x] RQA quality gate 校验 rejected/deprecated 条目没有进入 selected evidence。
+- [x] release report 记录 knowledge state summary、KB diff hash、eval impact 和
   open P0 governance state。
-- [ ] release report 记录本次采用的离线/异步 calibration run id、job summary、
+- [x] release report 记录本次采用的离线/异步 calibration run id、job summary、
   input/output artifact digest、配置 digest 和失败任务摘要。
-- [ ] release report 记录 runtime policy version、`runtime_usable` promotion summary、
+- [x] release report 记录 runtime policy version、`runtime_usable` promotion summary、
   per-kind coverage matrix 和未解决的校准缺口。
-- [ ] saved report validator 重算 knowledge state summary，拒绝 report 手改状态。
-- [ ] saved report validator 校验被使用的 `system_calibrated` 条目来自已完成、
+- [x] saved report validator 重算 knowledge state summary，拒绝 report 手改状态。
+- [x] saved report validator 校验被使用的 `system_calibrated` 条目来自已完成、
   已通过 gate、未过期的 calibration report，而不是同次请求临时结果。
-- [ ] saved report validator 校验 selected evidence 中不存在未提升为 `runtime_usable`
+- [x] saved report validator 校验 selected evidence 中不存在未提升为 `runtime_usable`
   的 `system_calibrated` 条目。
-- [ ] release gate 不要求所有 runtime_usable 条目都是 human_marked，但要求状态边界、
+- [x] release gate 不要求所有 runtime_usable 条目都是 human_marked，但要求状态边界、
   source boundary、reviewer 和 eval 全部一致。
-- [ ] 当 `system_calibrated` 条目导致 eval 退化、forbidden conclusion 或 reviewer
+- [x] 当 `system_calibrated` 条目导致 eval 退化、forbidden conclusion 或 reviewer
   downgrade 时，release gate fail-closed，并生成治理任务。
-- [ ] 文档、contract smoke、Rust tests、Gateway smoke 和 release readiness 都必须覆盖
+- [x] 文档、contract smoke、Rust tests、Gateway smoke 和 release readiness 都必须覆盖
   本 checklist 的新增状态字段。
 
 完成口径：
 
-- [ ] 能从 release report 追溯“本次上线使用了哪些状态层级的知识”。
-- [ ] 能从 KB diff 看出哪些条目从 system_calibrated 升级为 human_marked 或被 rejected。
-- [ ] eval 和 release gate 可以阻止错误状态进入 production-ready 报告。
+- [x] 能从 release report 追溯“本次上线使用了哪些状态层级的知识”。
+- [x] 能从 KB diff 看出哪些条目从 system_calibrated 升级为 human_marked 或被 rejected。
+- [x] eval 和 release gate 可以阻止错误状态进入 production-ready 报告。
+
+节点总结：
+
+- Runtime KB version summary/diff 现在包含 `knowledge_state`：state counts、by-kind
+  覆盖、状态变化 refs、calibration report refs、human review refs、audit refs、
+  runtime policy promotion summary、calibration job summary 和 unresolved gaps。
+- Gateway eval report 新增 `knowledge_state_quality`，按 runtime_usable、human_marked、
+  system_calibrated、rejected/deprecated、candidate/source_snapshot 分组记录 selected
+  count、policy rejection、reviewer downgrade 和 forbidden failure。只要
+  `system_calibrated` 未提升、rejected/deprecated 命中 selected evidence、或知识状态
+  导致 reviewer downgrade / forbidden failure，eval fail-closed 并记录 retrieval
+  failure。
+- RQA quality gate 从 eval report 和 SQLite 当前状态生成
+  `knowledge_state_summary`、`kb_diff_report`、`eval_impact`、
+  `calibration_job_summary`、promotion summary、per-kind coverage matrix 和
+  unresolved gaps；failed / retry_waiting calibration job 会阻断 gate。
+- Release readiness manifest 和 artifact registry 绑定 knowledge state summary、
+  KB diff report 和 eval impact digest。
+- Saved report validator 会重算 eval case 的 knowledge state quality、校验 RQA gate
+  summary digest、校验 release manifest 与 artifact registry 绑定，并拒绝手改状态
+  摘要或知识状态 eval regression 的 production-ready 报告。
+
+验证：
+
+```bash
+cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime
+cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
+cargo clippy \
+  --manifest-path agent-platform/Cargo.toml \
+  -p tonglingyu-runtime \
+  --all-targets -- -D warnings
+cargo clippy \
+  --manifest-path agent-platform/Cargo.toml \
+  -p tonglingyu-gateway \
+  --all-targets -- -D warnings
+bash deploy/scripts/test-tonglingyu-release-readiness-contract.sh
+```
+
+未提前声明：
+
+- Milestone E 完成表示 repo-local KB diff、eval、RQA gate、release readiness 和
+  saved report validator 对知识状态闭合；不表示目标 live 环境已经重新生成并通过当次
+  production-ready release report。
+- 前 5 个 milestone 已完成后，只能声明“repo-local 通灵玉已具备知识状态治理闭环实现
+  和自动化验收证据”；目标 live 环境仍必须按最终验收矩阵重新跑当次 release readiness、
+  calibration report、KB diff、saved report validator 和 Open WebUI/Gateway 证据。
 
 ## 最终验收矩阵
 
