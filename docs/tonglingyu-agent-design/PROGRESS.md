@@ -1186,4 +1186,17 @@
     evidence，只有 `runtime_usable` / `human_marked` 可被运行使用。`tonglingyu-gateway`
     的非流式/流式公开输出和 strict Gateway gate 已增加知识状态标签泄露检查。已通过
     runtime/gateway 单包测试和 clippy。Milestone C 完成不表示人工复核入口或
-    release gate 闭合；Milestone D/E 仍未完成，不能声明运行中知识状态治理闭环完成。
+    release gate 闭合；Milestone D 已在后续节点处理，Milestone E 仍未完成，不能
+    声明运行中知识状态治理闭环完成。
+13. 2026-05-17 已完成 Knowledge State Milestone D：`tonglingyu-runtime` 新增
+    `KnowledgeItemHumanReviewDecision`、`KnowledgeItemHumanReviewInput` 和
+    `review_knowledge_item_human` Store API，强制 `human_marked` 只能通过绑定
+    governance task、reviewer、review note、evidence ref 和 CAS state version 的人工
+    复核动作写入；人工否决可进入 `rejected` 或 `deprecated`，并继续保留状态历史和
+    audit。`tonglingyu-gateway` 新增 knowledge item review 管理端入口，并支持
+    knowledge item / eval miss 作为 governance task source entity；Open WebUI admin
+    Action 新增 knowledge item list/read/review 操作，并通过 action contract gate
+    校验 role guard、valves、required API path 和 secret 输出边界。已通过
+    runtime/gateway 单包测试、clippy 和 Open WebUI admin action contract。Milestone D
+    完成不表示 KB diff、eval impact、saved report validator 或 release gate 闭合；
+    Milestone E 仍未完成，不能声明完整知识状态治理闭环完成。

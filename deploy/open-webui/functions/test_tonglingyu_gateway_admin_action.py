@@ -425,6 +425,104 @@ class TonglingyuGatewayAdminActionTest(unittest.TestCase):
             "tonglingyu.knowledge_patch_proposal_admin_create", result["content"]
         )
 
+    def test_knowledge_items_list_supports_filters(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                json.dumps(
+                    {
+                        "object": "tonglingyu.knowledge_item_admin_list",
+                        "list": {
+                            "schema_version": "tonglingyu-knowledge-item-states-v1",
+                            "items": [],
+                        },
+                    }
+                )
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "kind": "alias",
+                        "state": "system_calibrated",
+                        "limit": 20,
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="knowledge_items",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/knowledge/items?kind=alias&state=system_calibrated&limit=20",
+        )
+        self.assertIn("tonglingyu.knowledge_item_admin_list", result["content"])
+
+    def test_knowledge_item_read_uses_get(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse('{"object":"tonglingyu.knowledge_item_admin_read"}'),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "messages": [{"content": "item_id: ki-alias-1"}],
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="knowledge_item",
+                )
+            )
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/knowledge/items/ki-alias-1",
+        )
+        self.assertIn("tonglingyu.knowledge_item_admin_read", result["content"])
+
+    def test_knowledge_item_review_uses_post_json(self) -> None:
+        action = self.action_with_key()
+        with patch(
+            "tonglingyu_gateway_admin_action.urllib.request.urlopen",
+            return_value=FakeResponse(
+                '{"object":"tonglingyu.knowledge_item_admin_review"}'
+            ),
+        ) as urlopen:
+            result = asyncio.run(
+                action.action(
+                    {
+                        "model": "tonglingyu",
+                        "item_id": "ki-alias-1",
+                        "task_id": "kgt-1",
+                        "decision": "accept",
+                        "trace_id": "trace-1",
+                        "reviewer": "admin-1",
+                        "review_note": "accepted",
+                        "evidence_ref": "source://review-note/001",
+                        "if_match_state_version": 2,
+                        "if_match_task_updated_at": "2026-05-17T00:00:00Z",
+                    },
+                    __user__={"id": "admin-1", "role": "admin"},
+                    __id__="knowledge_item_review",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "http://tonglingyu-gateway:8090/v1/admin/knowledge/items/ki-alias-1/review",
+        )
+        self.assertEqual(payload["decision"], "accept")
+        self.assertEqual(payload["task_id"], "kgt-1")
+        self.assertEqual(payload["if_match_state_version"], 2)
+        self.assertEqual(request.get_header("X-tonglingyu-subject"), "admin-1")
+        self.assertIn("tonglingyu.knowledge_item_admin_review", result["content"])
+
     def test_governance_task_update_uses_patch_json(self) -> None:
         action = self.action_with_key()
         with patch(

@@ -154,6 +154,9 @@ required_actions = [
     "governance_task_create",
     "governance_task_from_failure",
     "governance_task_update",
+    "knowledge_items",
+    "knowledge_item",
+    "knowledge_item_review",
     "knowledge_patch_proposal",
 ]
 checks = {
@@ -174,6 +177,8 @@ checks = {
         for token in (
             "tonglingyu-retrieval-failures-v1",
             "tonglingyu-knowledge-governance-tasks-v2",
+            "tonglingyu-knowledge-item-states-v1",
+            "tonglingyu.knowledge_item_admin_review",
             '"next_offset": 20',
         )
     ),

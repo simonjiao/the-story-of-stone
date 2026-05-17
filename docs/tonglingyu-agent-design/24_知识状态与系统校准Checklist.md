@@ -328,28 +328,66 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 ## Milestone D：运行中人工复核入口
 
-状态：未开始。
+状态：已完成。
 
 目标：人工复核作为运行中的治理动作，只负责升级、否决和纠错，不作为系统启动前置。
 
-- [ ] admin 可以把 trace、package、knowledge item、retrieval failure、eval miss 或用户
+- [x] admin 可以把 trace、package、knowledge item、retrieval failure、eval miss 或用户
   feedback 标记为复核对象。
-- [ ] 复核任务必须绑定 source entity、evidence ref、reason、priority、reviewer 和
+- [x] 复核任务必须绑定 source entity、evidence ref、reason、priority、reviewer 和
   status history。
-- [ ] 人工通过后，条目只能升级为 `human_marked`，并写“人工标记”所需 metadata。
-- [ ] 人工否决后，条目进入 `rejected` 或 `deprecated`，Runtime 不再使用。
-- [ ] 人工复核不能直接改 source snapshot 原文、已登记 source metadata 或 audit history。
-- [ ] 人工复核不能绕过 KB rebuild、eval diff 和 release gate。
-- [ ] Open WebUI admin Action 覆盖 list/read/update/review 知识状态入口，并保留 role
+- [x] 人工通过后，条目只能升级为 `human_marked`，并写“人工标记”所需 metadata。
+- [x] 人工否决后，条目进入 `rejected` 或 `deprecated`，Runtime 不再使用。
+- [x] 人工复核不能直接改 source snapshot 原文、已登记 source metadata 或 audit history。
+- [x] 人工复核不能绕过 KB rebuild、eval diff 和 release gate。
+- [x] Open WebUI admin Action 覆盖 list/read/update/review 知识状态入口，并保留 role
   guard、valves 和 secret 输出边界。
-- [ ] 普通用户 feedback 只能生成候选复核任务，不能直接升级条目。
-- [ ] 单测覆盖 admin role、普通用户拒绝、CAS 冲突、幂等提交、audit 和状态历史。
+- [x] 普通用户 feedback 只能生成候选复核任务，不能直接升级条目。
+- [x] 单测覆盖 admin role、普通用户拒绝、CAS 冲突、幂等提交、audit 和状态历史。
 
 完成口径：
 
-- [ ] 运行中发现的问题可以进入复核队列。
-- [ ] 人工通过能升级为 `human_marked`，人工否决能阻止 Runtime 使用。
-- [ ] 所有复核动作可审计、可回放、可进入 KB diff。
+- [x] 运行中发现的问题可以进入复核队列。
+- [x] 人工通过能升级为 `human_marked`，人工否决能阻止 Runtime 使用。
+- [x] 所有复核动作可审计、可回放、可作为 Milestone E 的 KB diff 输入。
+
+节点总结：
+
+- Runtime 新增 `KnowledgeItemHumanReviewDecision`、
+  `KnowledgeItemHumanReviewInput` 和 `review_knowledge_item_human` Store API；
+  `human_marked` 不能再通过通用 state update 直接写入，必须绑定 governance task。
+- Governance task source entity 扩展到 `knowledge_item` 和 `eval_miss`；Gateway
+  管理端创建任务时支持 trace/package/retrieval failure/knowledge item/eval miss/user
+  feedback 复核对象。
+- 人工通过写入 `human_marked` 和 `human_review` metadata；人工否决写入
+  `rejected` 或 `deprecated`。复核 payload 只记录 reviewer、evidence ref 和 note
+  hash，不写原文 note 到 audit。
+- Gateway 新增 `/v1/admin/knowledge/items/{item_id}/review`，并保留 admin auth、
+  rate limit、CAS conflict、idempotent retry 和 admin audit。
+- Open WebUI admin Action 新增 `knowledge_items`、`knowledge_item` 和
+  `knowledge_item_review`，contract gate 校验 required actions、API path、role
+  guard、valves 和 secret 输出边界。
+
+验证：
+
+```bash
+cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime
+cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
+cargo clippy \
+  --manifest-path agent-platform/Cargo.toml \
+  -p tonglingyu-runtime \
+  --all-targets -- -D warnings
+cargo clippy \
+  --manifest-path agent-platform/Cargo.toml \
+  -p tonglingyu-gateway \
+  --all-targets -- -D warnings
+bash deploy/scripts/test-openwebui-gateway-admin-action-contract.sh
+```
+
+未提前声明：
+
+- Milestone D 完成只表示运行中人工复核入口闭合；KB diff、eval impact、saved report
+  validator 和 release gate 仍属于 Milestone E，不能声明完整知识状态治理闭环完成。
 
 ## Milestone E：KB diff、eval 和 release gate
 

@@ -261,6 +261,8 @@ pub const KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION: &str =
 pub const KNOWLEDGE_RUNTIME_POLICY_VERSION: &str = "tonglingyu-knowledge-runtime-policy-v1";
 pub const KNOWLEDGE_RUNTIME_POLICY_SCHEMA_VERSION: &str =
     "tonglingyu-knowledge-runtime-policy-schema-v1";
+pub const KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION: &str =
+    "tonglingyu-knowledge-item-human-review-v1";
 pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
 pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
 pub const KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE: usize = 50;
@@ -408,6 +410,75 @@ pub struct KnowledgeItemStateUpdateInput {
     pub reason: String,
     pub evidence_refs: Vec<String>,
     pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeItemHumanReviewDecision {
+    Accept,
+    Reject,
+    Deprecate,
+}
+
+impl KnowledgeItemHumanReviewDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Reject => "reject",
+            Self::Deprecate => "deprecate",
+        }
+    }
+
+    pub fn target_state(self) -> KnowledgeState {
+        match self {
+            Self::Accept => KnowledgeState::HumanMarked,
+            Self::Reject => KnowledgeState::Rejected,
+            Self::Deprecate => KnowledgeState::Deprecated,
+        }
+    }
+
+    pub fn task_status(self) -> &'static str {
+        match self {
+            Self::Accept => "accepted",
+            Self::Reject | Self::Deprecate => "rejected",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "accept" | "accepted" | "human_marked" => Ok(Self::Accept),
+            "reject" | "rejected" => Ok(Self::Reject),
+            "deprecate" | "deprecated" => Ok(Self::Deprecate),
+            _ => Err(anyhow!(
+                "invalid knowledge item human review decision {value}"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeItemHumanReviewInput {
+    pub task_id: String,
+    pub decision: KnowledgeItemHumanReviewDecision,
+    pub trace_id: String,
+    pub actor: String,
+    pub reviewer: String,
+    pub review_note: String,
+    pub evidence_ref: String,
+    pub expected_state_version: i64,
+    pub expected_task_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeItemHumanReviewResult {
+    pub object: String,
+    pub schema_version: String,
+    pub decision: KnowledgeItemHumanReviewDecision,
+    pub item: KnowledgeItemRecord,
+    pub task: KnowledgeGovernanceTaskRecord,
+    pub kb_rebuild_required: bool,
+    pub eval_diff_required: bool,
+    pub release_gate_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1544,6 +1615,15 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Option<KnowledgeItemRecord>> {
         let conn = self.open_connection()?;
         promote_knowledge_item_runtime_usable(&conn, item_id, input)
+    }
+
+    pub fn review_knowledge_item_human(
+        &self,
+        item_id: &str,
+        input: KnowledgeItemHumanReviewInput,
+    ) -> Result<Option<KnowledgeItemHumanReviewResult>> {
+        let conn = self.open_connection()?;
+        review_knowledge_item_human(&conn, item_id, input)
     }
 
     pub fn create_knowledge_calibration_job(
@@ -6538,6 +6618,11 @@ fn update_knowledge_item_state_inner(
     let reason = validate_knowledge_item_reason(&input.reason)?;
     let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
     let evidence_refs = normalize_knowledge_refs("evidence_refs", input.evidence_refs)?;
+    if input.new_state == KnowledgeState::HumanMarked {
+        return Err(anyhow!(
+            "human_marked knowledge item state requires human review action"
+        ));
+    }
     if current.state == input.new_state {
         return Ok(Some(current));
     }
@@ -6681,20 +6766,23 @@ fn promote_knowledge_item_runtime_usable_inner(
     );
     let payload = canonical_json_value(&payload);
     let payload_json = serde_json::to_string(&payload)?;
+    let payload_sha256 = hash_text(&payload_json);
     let next_state_version = current.state_version + 1;
     conn.execute(
         r#"
         UPDATE knowledge_items
         SET state = ?2,
             payload_json = ?3,
-            updated_at = ?4,
-            state_version = ?5
-        WHERE item_id = ?1 AND state_version = ?6
+            payload_sha256 = ?4,
+            updated_at = ?5,
+            state_version = ?6
+        WHERE item_id = ?1 AND state_version = ?7
         "#,
         params![
             item_id,
             KnowledgeState::RuntimeUsable.as_str(),
             payload_json,
+            payload_sha256,
             &now,
             next_state_version,
             input.expected_state_version,
@@ -6732,6 +6820,236 @@ fn promote_knowledge_item_runtime_usable_inner(
         }),
     )?;
     Ok(Some(record))
+}
+
+pub fn review_knowledge_item_human(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeItemHumanReviewInput,
+) -> Result<Option<KnowledgeItemHumanReviewResult>> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = review_knowledge_item_human_inner(conn, item_id, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        review_knowledge_item_human_inner(conn, item_id, input)
+    }
+}
+
+fn review_knowledge_item_human_inner(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeItemHumanReviewInput,
+) -> Result<Option<KnowledgeItemHumanReviewResult>> {
+    let current = match load_knowledge_item(conn, item_id)? {
+        Some(record) => record,
+        None => return Ok(None),
+    };
+    let task_id = bounded_optional_text(&input.task_id, 160)
+        .ok_or_else(|| anyhow!("knowledge item human review task_id is required"))?;
+    let task = load_governance_task(conn, &task_id)?
+        .ok_or_else(|| anyhow!("knowledge item human review governance task not found"))?;
+    if task.source_entity_type != "knowledge_item" || task.source_entity_id != item_id {
+        return Err(anyhow!(
+            "knowledge item human review task must target the reviewed knowledge item"
+        ));
+    }
+    if !matches!(
+        task.status.as_str(),
+        "open" | "in_review" | "accepted" | "rejected"
+    ) {
+        return Err(anyhow!(
+            "knowledge item human review task status {} is not reviewable",
+            task.status
+        ));
+    }
+    let target_state = input.decision.target_state();
+    let target_task_status = input.decision.task_status();
+    let actor = validate_knowledge_item_actor(&input.actor)?;
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let reviewer = validate_knowledge_review_reviewer(&input.reviewer)?;
+    let review_note = validate_knowledge_item_reason(&input.review_note)?;
+    let evidence_ref = validate_knowledge_review_evidence_ref(&input.evidence_ref)?;
+    if task.trace_id != trace_id {
+        return Err(anyhow!(
+            "knowledge item human review trace_id must match governance task"
+        ));
+    }
+    let task_already_matches = task.status == target_task_status
+        && task.reviewer.as_deref() == Some(reviewer.as_str())
+        && task.review_note.as_deref() == Some(review_note.as_str())
+        && task.evidence_ref.as_deref() == Some(evidence_ref.as_str());
+    if current.state == target_state {
+        if task_already_matches
+            && (input.expected_state_version == current.state_version
+                || input.expected_state_version + 1 == current.state_version)
+        {
+            return Ok(Some(KnowledgeItemHumanReviewResult {
+                object: "tonglingyu.knowledge_item_human_review".to_string(),
+                schema_version: KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION.to_string(),
+                decision: input.decision,
+                item: current,
+                task,
+                kb_rebuild_required: true,
+                eval_diff_required: true,
+                release_gate_required: true,
+            }));
+        }
+        return Err(anyhow!(
+            "knowledge item human review has already been recorded with different metadata"
+        ));
+    }
+    if current.state_version != input.expected_state_version {
+        return Err(anyhow!("knowledge item human review conflict"));
+    }
+    if input.decision == KnowledgeItemHumanReviewDecision::Accept
+        && matches!(
+            current.state,
+            KnowledgeState::Rejected | KnowledgeState::Deprecated
+        )
+    {
+        return Err(anyhow!(
+            "rejected or deprecated knowledge item cannot be accepted as human_marked"
+        ));
+    }
+    if matches!(task.status.as_str(), "accepted" | "rejected") && !task_already_matches {
+        return Err(anyhow!(
+            "knowledge item human review task already has a different terminal decision"
+        ));
+    }
+
+    let mut evidence_refs = current.evidence_refs.clone();
+    evidence_refs.push(evidence_ref.clone());
+    let evidence_refs = normalize_knowledge_refs("evidence_refs", evidence_refs)?;
+    let evidence_refs_json = serde_json::to_string(&evidence_refs)?;
+    let mut payload = canonical_json_value(&current.payload);
+    let payload_object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("knowledge item payload must be an object"))?;
+    let now = now_rfc3339();
+    payload_object.insert(
+        "human_review".to_string(),
+        json!({
+            "schema_version": KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
+            "decision": input.decision.as_str(),
+            "target_state": target_state.as_str(),
+            "task_id": &task_id,
+            "reviewer": &reviewer,
+            "review_note_sha256": hash_text(&review_note),
+            "evidence_ref": &evidence_ref,
+            "reviewed_at": &now,
+            "actor": &actor,
+            "kb_rebuild_required": true,
+            "eval_diff_required": true,
+            "release_gate_required": true,
+        }),
+    );
+    let payload = canonical_json_value(&payload);
+    let payload_json = serde_json::to_string(&payload)?;
+    let payload_sha256 = hash_text(&payload_json);
+    let next_state_version = current.state_version + 1;
+    let updated = conn.execute(
+        r#"
+        UPDATE knowledge_items
+        SET state = ?2,
+            evidence_refs_json = ?3,
+            payload_json = ?4,
+            payload_sha256 = ?5,
+            updated_at = ?6,
+            state_version = ?7
+        WHERE item_id = ?1 AND state_version = ?8
+        "#,
+        params![
+            item_id,
+            target_state.as_str(),
+            evidence_refs_json,
+            payload_json,
+            payload_sha256,
+            &now,
+            next_state_version,
+            input.expected_state_version,
+        ],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!("knowledge item human review conflict"));
+    }
+    let reason = format!(
+        "human_review_decision={}; task_id={}; note={}",
+        input.decision.as_str(),
+        task_id,
+        review_note
+    );
+    insert_knowledge_item_state_history(
+        conn,
+        KnowledgeItemStateHistoryInsert {
+            item_id,
+            previous_state: Some(current.state),
+            new_state: target_state,
+            actor: &actor,
+            reason: &reason,
+            evidence_refs: &evidence_refs,
+            state_version: next_state_version,
+            created_at: &now,
+        },
+    )?;
+    let updated_task = update_governance_task(
+        conn,
+        &task_id,
+        KnowledgeGovernanceTaskUpdateInput {
+            status: target_task_status.to_string(),
+            reviewer: Some(reviewer.clone()),
+            review_note: Some(review_note.clone()),
+            evidence_ref: Some(evidence_ref.clone()),
+            expected_updated_at: input.expected_task_updated_at,
+        },
+    )?
+    .ok_or_else(|| anyhow!("knowledge item human review governance task not found"))?;
+    let record = load_knowledge_item(conn, item_id)?
+        .ok_or_else(|| anyhow!("knowledge item disappeared after human review"))?;
+    append_runtime_audit_event(
+        conn,
+        &trace_id,
+        "knowledge_item_human_reviewed",
+        &json!({
+            "item_id": &record.item_id,
+            "kind": record.kind.as_str(),
+            "task_id": &updated_task.task_id,
+            "decision": input.decision.as_str(),
+            "previous_state": current.state.as_str(),
+            "new_state": record.state.as_str(),
+            "state_version": record.state_version,
+            "actor": actor,
+            "reviewer": reviewer,
+            "review_note_sha256": hash_text(&review_note),
+            "evidence_ref_sha256": hash_text(&evidence_ref),
+            "source_ref_count": record.source_refs.len(),
+            "evidence_ref_count": record.evidence_refs.len(),
+            "payload_sha256": &record.payload_sha256,
+            "schema_version": &record.schema_version,
+            "kb_rebuild_required": true,
+            "eval_diff_required": true,
+            "release_gate_required": true,
+        }),
+    )?;
+    Ok(Some(KnowledgeItemHumanReviewResult {
+        object: "tonglingyu.knowledge_item_human_review".to_string(),
+        schema_version: KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION.to_string(),
+        decision: input.decision,
+        item: record,
+        task: updated_task,
+        kb_rebuild_required: true,
+        eval_diff_required: true,
+        release_gate_required: true,
+    }))
 }
 
 pub async fn execute_knowledge_calibration_llm_evidence_judge(
@@ -9134,6 +9452,8 @@ fn validate_governance_source_entity_type(source_entity_type: &str) -> Result<()
             | "retrieval_failure_cluster"
             | "trace"
             | "package"
+            | "knowledge_item"
+            | "eval_miss"
             | "user_feedback"
             | "knowledge_patch_proposal"
     ) {
@@ -9506,6 +9826,16 @@ fn validate_knowledge_item_reason(reason: &str) -> Result<String> {
 fn validate_knowledge_item_trace_id(trace_id: &str) -> Result<String> {
     bounded_optional_text(trace_id, 160)
         .ok_or_else(|| anyhow!("knowledge item trace_id is required"))
+}
+
+fn validate_knowledge_review_reviewer(reviewer: &str) -> Result<String> {
+    bounded_optional_text(reviewer, 80)
+        .ok_or_else(|| anyhow!("knowledge item human review reviewer is required"))
+}
+
+fn validate_knowledge_review_evidence_ref(evidence_ref: &str) -> Result<String> {
+    bounded_optional_text(evidence_ref, 240)
+        .ok_or_else(|| anyhow!("knowledge item human review evidence_ref is required"))
 }
 
 fn stable_knowledge_item_id(
@@ -15783,6 +16113,28 @@ mod tests {
         }
     }
 
+    fn sample_knowledge_item_review_task(
+        conn: &Connection,
+        item: &KnowledgeItemRecord,
+        marker: &str,
+    ) -> KnowledgeGovernanceTaskRecord {
+        create_governance_task(
+            conn,
+            KnowledgeGovernanceTaskCreateInput {
+                source_entity_type: "knowledge_item".to_string(),
+                source_entity_id: item.item_id.clone(),
+                trace_id: format!("trace-human-review-{marker}"),
+                package_id: None,
+                source_failure_id: None,
+                task_type: "expert_review".to_string(),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("review knowledge item state without fact mutation".to_string()),
+                agent_cluster_key: Some(format!("knowledge_item:{marker}")),
+            },
+        )
+        .expect("create knowledge item review task")
+    }
+
     fn valid_calibration_env() -> BTreeMap<String, String> {
         let digest_a = "a".repeat(64);
         let digest_b = "b".repeat(64);
@@ -16136,6 +16488,188 @@ mod tests {
             )
             .expect("history count");
         assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn knowledge_item_state_update_rejects_direct_human_marked() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let created = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Alias, "direct-human-forbidden"),
+        )
+        .expect("create knowledge item");
+
+        let error = update_knowledge_item_state(
+            &conn,
+            &created.item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::HumanMarked,
+                trace_id: "trace-direct-human-forbidden".to_string(),
+                actor: "manual-state-patch".to_string(),
+                reason: "attempt to bypass human review action".to_string(),
+                evidence_refs: vec!["block://wikisource/direct-human-forbidden".to_string()],
+                expected_state_version: created.state_version,
+            },
+        )
+        .expect_err("direct human_marked transition is rejected");
+        assert!(error.to_string().contains("requires human review action"));
+        let current = read_knowledge_item(&conn, &created.item_id)
+            .expect("read knowledge item")
+            .expect("knowledge item exists");
+        assert_eq!(current.state, KnowledgeState::Candidate);
+        assert_eq!(current.state_version, created.state_version);
+    }
+
+    #[test]
+    fn knowledge_item_human_review_accepts_with_task_and_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let created = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, "human-review-accept"),
+        )
+        .expect("create knowledge item");
+        let task = sample_knowledge_item_review_task(&conn, &created, "human-review-accept");
+
+        let input = KnowledgeItemHumanReviewInput {
+            task_id: task.task_id.clone(),
+            decision: KnowledgeItemHumanReviewDecision::Accept,
+            trace_id: task.trace_id.clone(),
+            actor: "openwebui-admin-action".to_string(),
+            reviewer: "admin-1".to_string(),
+            review_note: "证据边界清楚，人工复核通过。".to_string(),
+            evidence_ref: "source://review-note/human-review-accept".to_string(),
+            expected_state_version: created.state_version,
+            expected_task_updated_at: Some(task.updated_at.clone()),
+        };
+        let accepted = review_knowledge_item_human(&conn, &created.item_id, input.clone())
+            .expect("human review succeeds")
+            .expect("item exists");
+        assert_eq!(accepted.object, "tonglingyu.knowledge_item_human_review");
+        assert_eq!(accepted.decision, KnowledgeItemHumanReviewDecision::Accept);
+        assert_eq!(accepted.item.state, KnowledgeState::HumanMarked);
+        assert_eq!(accepted.task.status, "accepted");
+        assert_eq!(accepted.task.reviewer.as_deref(), Some("admin-1"));
+        assert_eq!(
+            accepted.item.payload["human_review"]["target_state"],
+            json!("human_marked")
+        );
+        assert_eq!(
+            accepted.item.payload["human_review"]["kb_rebuild_required"],
+            json!(true)
+        );
+        assert_eq!(accepted.item.state_version, created.state_version + 1);
+
+        let repeated = review_knowledge_item_human(&conn, &created.item_id, input)
+            .expect("human review retry is idempotent")
+            .expect("item exists");
+        assert_eq!(repeated.item.state_version, accepted.item.state_version);
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![created.item_id],
+                |row| row.get(0),
+            )
+            .expect("history count");
+        assert_eq!(history_count, 2);
+        let events = runtime_audit_events_for_trace(&conn, &task.trace_id).expect("audit events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_type"] == "knowledge_item_human_reviewed")
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_item_human_reviewed"
+                && event["payload"]["review_note_sha256"].as_str().is_some()
+                && event["payload"]["kb_rebuild_required"] == json!(true)
+                && event["payload"].get("review_note").is_none()
+        }));
+    }
+
+    #[test]
+    fn knowledge_item_human_review_rejects_and_conflicts_are_atomic() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let stale = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::VersionNote, "human-review-conflict"),
+        )
+        .expect("create stale item");
+        let stale_task = sample_knowledge_item_review_task(&conn, &stale, "human-review-conflict");
+        let conflict = review_knowledge_item_human(
+            &conn,
+            &stale.item_id,
+            KnowledgeItemHumanReviewInput {
+                task_id: stale_task.task_id.clone(),
+                decision: KnowledgeItemHumanReviewDecision::Reject,
+                trace_id: stale_task.trace_id.clone(),
+                actor: "openwebui-admin-action".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "证据不足，暂不使用。".to_string(),
+                evidence_ref: "source://review-note/human-review-conflict".to_string(),
+                expected_state_version: stale.state_version + 1,
+                expected_task_updated_at: Some(stale_task.updated_at.clone()),
+            },
+        )
+        .expect_err("stale state version conflicts");
+        assert!(conflict.to_string().contains("conflict"));
+        let unchanged = read_knowledge_item(&conn, &stale.item_id)
+            .expect("read stale item")
+            .expect("item exists");
+        assert_eq!(unchanged.state, KnowledgeState::Candidate);
+        let unchanged_task = load_governance_task(&conn, &stale_task.task_id)
+            .expect("read stale task")
+            .expect("task exists");
+        assert_eq!(unchanged_task.status, "open");
+
+        let rejected = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, "human-review-reject"),
+        )
+        .expect("create rejected item");
+        let rejected_task =
+            sample_knowledge_item_review_task(&conn, &rejected, "human-review-reject");
+        let result = review_knowledge_item_human(
+            &conn,
+            &rejected.item_id,
+            KnowledgeItemHumanReviewInput {
+                task_id: rejected_task.task_id.clone(),
+                decision: KnowledgeItemHumanReviewDecision::Reject,
+                trace_id: rejected_task.trace_id.clone(),
+                actor: "openwebui-admin-action".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "证据不足，人工否决。".to_string(),
+                evidence_ref: "source://review-note/human-review-reject".to_string(),
+                expected_state_version: rejected.state_version,
+                expected_task_updated_at: Some(rejected_task.updated_at.clone()),
+            },
+        )
+        .expect("human reject succeeds")
+        .expect("item exists");
+        assert_eq!(result.item.state, KnowledgeState::Rejected);
+        assert_eq!(result.task.status, "rejected");
+        let package = create_evidence_package(
+            &conn,
+            "trace-human-review-reject-package",
+            "请说明文本证据",
+            vec![runtime_policy_test_card("human-review-reject")],
+        )
+        .expect("evidence package");
+        assert_eq!(
+            package.knowledge_state_summary.rejected_or_deprecated_count,
+            1
+        );
+        assert_eq!(package.knowledge_state_summary.runtime_usable_count, 0);
+        assert!(
+            package
+                .claim_evidence_map
+                .iter()
+                .all(|claim| claim.knowledge_item_refs.is_empty())
+        );
     }
 
     #[test]
@@ -16515,20 +17049,25 @@ mod tests {
         let calibrated = read_knowledge_item(&conn, &item.item_id)
             .expect("read calibrated item")
             .expect("calibrated item exists");
-        let human_marked = update_knowledge_item_state(
+        let review_task = sample_knowledge_item_review_task(&conn, &calibrated, marker);
+        let human_marked = review_knowledge_item_human(
             &conn,
             &item.item_id,
-            KnowledgeItemStateUpdateInput {
-                new_state: KnowledgeState::HumanMarked,
-                trace_id: "trace-runtime-policy-human-marked".to_string(),
+            KnowledgeItemHumanReviewInput {
+                task_id: review_task.task_id.clone(),
+                decision: KnowledgeItemHumanReviewDecision::Accept,
+                trace_id: review_task.trace_id.clone(),
                 actor: "human-reviewer".to_string(),
-                reason: "human reviewer accepted this knowledge item".to_string(),
-                evidence_refs: vec![format!("block://wikisource/{marker}")],
+                reviewer: "reviewer-1".to_string(),
+                review_note: "human reviewer accepted this knowledge item".to_string(),
+                evidence_ref: format!("block://wikisource/{marker}"),
                 expected_state_version: calibrated.state_version,
+                expected_task_updated_at: Some(review_task.updated_at),
             },
         )
         .expect("mark item human")
-        .expect("human item exists");
+        .expect("human item exists")
+        .item;
         assert_eq!(human_marked.state, KnowledgeState::HumanMarked);
 
         let package = create_evidence_package(

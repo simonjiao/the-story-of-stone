@@ -45,6 +45,9 @@ class Action:
         {"id": "governance_task_create", "name": "Create governance task"},
         {"id": "governance_task_from_failure", "name": "Create governance task"},
         {"id": "governance_task_update", "name": "Update governance task"},
+        {"id": "knowledge_items", "name": "Knowledge items"},
+        {"id": "knowledge_item", "name": "Knowledge item"},
+        {"id": "knowledge_item_review", "name": "Review knowledge item"},
         {"id": "knowledge_patch_proposal", "name": "Create knowledge proposal"},
     ]
 
@@ -342,6 +345,80 @@ class Action:
                     result,
                     self.valves.RESPONSE_MAX_CHARS,
                 )
+            if action_id == "knowledge_items":
+                return await self._lookup_json(
+                    "Knowledge items",
+                    f"/v1/admin/knowledge/items{_knowledge_item_query(body)}",
+                    subject,
+                )
+            if action_id == "knowledge_item":
+                item_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "item_id",
+                    "Knowledge Item ID",
+                    r"\bitem[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "Knowledge item",
+                    f"/v1/admin/knowledge/items/{urllib.parse.quote(item_id, safe='')}",
+                    subject,
+                )
+            if action_id == "knowledge_item_review":
+                item_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "item_id",
+                    "Knowledge Item ID",
+                    r"\bitem[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                decision = str(_deep_get(body, "decision") or "").strip()
+                trace_id = str(_deep_get(body, "trace_id") or "").strip()
+                reviewer = str(_deep_get(body, "reviewer") or "").strip()
+                review_note = str(_deep_get(body, "review_note") or "").strip()
+                evidence_ref = str(_deep_get(body, "evidence_ref") or "").strip()
+                state_version = _deep_get(body, "if_match_state_version")
+                if not decision:
+                    raise GatewayAdminError("Knowledge item review decision is required.")
+                if not trace_id:
+                    raise GatewayAdminError("Knowledge item review trace_id is required.")
+                if not reviewer or not review_note or not evidence_ref:
+                    raise GatewayAdminError(
+                        "Knowledge item review requires reviewer, review_note, and evidence_ref."
+                    )
+                if state_version is None or str(state_version).strip() == "":
+                    raise GatewayAdminError(
+                        "Knowledge item review if_match_state_version is required."
+                    )
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/knowledge/items/{urllib.parse.quote(item_id, safe='')}/review",
+                    {
+                        "task_id": task_id,
+                        "decision": decision,
+                        "trace_id": trace_id,
+                        "reviewer": reviewer,
+                        "review_note": review_note,
+                        "evidence_ref": evidence_ref,
+                        "if_match_state_version": state_version,
+                        "if_match_task_updated_at": _deep_get(body, "if_match_task_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "Knowledge item review",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
         except GatewayAdminError as error:
             await _emit_status(__event_emitter__, "error", str(error))
             return _message(str(error))
@@ -545,6 +622,17 @@ def _governance_task_query(body: dict) -> str:
         "limit",
         "offset",
     ):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
+
+
+def _knowledge_item_query(body: dict) -> str:
+    params = {}
+    for key in ("kind", "state", "limit", "offset"):
         value = _deep_get(body, key)
         if value is not None and str(value).strip():
             params[key] = str(value).strip()

@@ -23,20 +23,21 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
-    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
-    KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, KnowledgeCalibrationRunInput,
-    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
-    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
-    KnowledgeGovernanceTaskUpdateInput, KnowledgeItemKind, KnowledgeItemListInput,
-    KnowledgePatchProposalCreateInput, KnowledgeState, RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
-    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
-    RQA_LIFECYCLE_POLICY_VERSION, RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput,
-    RetrievalFailureCreateInput, RetrievalFailureListInput, RetrievalFailureView,
-    RetrievalQualityReport, RetrievalQuerySummary, RetrievalSourceCoverageBoundary,
-    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
-    RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
-    append_rqa_lifecycle_tombstone, append_runtime_audit_event, execute_agent_runtime_plan_gate,
-    package_json,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
+    KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+    KnowledgeCalibrationRunInput, KnowledgeGovernanceTaskCreateFromFailureInput,
+    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
+    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
+    KnowledgeItemHumanReviewDecision, KnowledgeItemHumanReviewInput, KnowledgeItemKind,
+    KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
+    RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
+    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
+    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
+    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
+    execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -586,6 +587,8 @@ struct GovernanceTaskCreateRequest {
 struct GovernanceTaskManualCreateRequest {
     source_entity_type: String,
     source_entity_id: String,
+    trace_id: Option<String>,
+    package_id: Option<String>,
     task_type: Option<String>,
     priority: Option<String>,
     proposed_fix: Option<String>,
@@ -611,6 +614,19 @@ struct GovernanceTaskUpdateRequest {
     review_note: Option<String>,
     evidence_ref: Option<String>,
     if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeItemHumanReviewRequest {
+    task_id: String,
+    decision: String,
+    trace_id: String,
+    reviewer: String,
+    review_note: String,
+    evidence_ref: String,
+    if_match_state_version: i64,
+    if_match_task_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1300,6 +1316,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/knowledge/items/{item_id}",
             get(knowledge_item_endpoint),
+        )
+        .route(
+            "/v1/admin/knowledge/items/{item_id}/review",
+            post(review_knowledge_item_endpoint),
         )
         .route(
             "/v1/admin/governance/tasks/{task_id}",
@@ -5313,6 +5333,18 @@ async fn create_governance_task_endpoint(
     };
     let source_entity_type = payload.source_entity_type.trim().to_string();
     let source_entity_id = payload.source_entity_id.trim().to_string();
+    let request_trace_id = payload
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let request_package_id = payload
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let task_type = payload
         .task_type
         .filter(|value| !value.trim().is_empty())
@@ -5366,6 +5398,62 @@ async fn create_governance_task_endpoint(
             Ok(None) => Err(anyhow!("source package not found")),
             Err(error) => Err(error),
         },
+        "knowledge_item" => match state.runtime_store.read_knowledge_item(&source_entity_id) {
+            Ok(Some(_)) => {
+                let trace_id = match request_trace_id {
+                    Some(trace_id) => trace_id,
+                    None => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "governance_task_trace_required",
+                            "trace_id is required for knowledge item review tasks",
+                            None,
+                        );
+                    }
+                };
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "knowledge_item".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id,
+                        package_id: request_package_id,
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source knowledge item not found")),
+            Err(error) => Err(error),
+        },
+        "eval_miss" | "user_feedback" => {
+            let trace_id = match request_trace_id {
+                Some(trace_id) => trace_id,
+                None => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "governance_task_trace_required",
+                        "trace_id is required for this governance task source",
+                        None,
+                    );
+                }
+            };
+            state
+                .runtime_store
+                .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                    source_entity_type: source_entity_type.clone(),
+                    source_entity_id: source_entity_id.clone(),
+                    trace_id,
+                    package_id: request_package_id,
+                    source_failure_id: None,
+                    task_type,
+                    priority: payload.priority,
+                    proposed_fix: payload.proposed_fix,
+                    agent_cluster_key: payload.agent_cluster_key,
+                })
+        }
         _ => Err(anyhow!("unsupported governance task source entity")),
     };
     match create_result {
@@ -5703,6 +5791,167 @@ async fn knowledge_item_endpoint(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "knowledge_item_read_failed",
                 "knowledge item read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn review_knowledge_item_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(item_id): AxumPath<String>,
+    Json(payload): Json<KnowledgeItemHumanReviewRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_review") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let decision = match KnowledgeItemHumanReviewDecision::parse(&payload.decision) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_knowledge_item_review_decision",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let input = KnowledgeItemHumanReviewInput {
+        task_id: payload.task_id,
+        decision,
+        trace_id: payload.trace_id,
+        actor: actor.clone(),
+        reviewer: payload.reviewer,
+        review_note: payload.review_note,
+        evidence_ref: payload.evidence_ref,
+        expected_state_version: payload.if_match_state_version,
+        expected_task_updated_at: payload.if_match_task_updated_at,
+    };
+    match state
+        .runtime_store
+        .review_knowledge_item_human(&item_id, input)
+    {
+        Ok(Some(result)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &result.item.item_id,
+                    "task_id": &result.task.task_id,
+                    "decision": result.decision.as_str(),
+                    "state": result.item.state.as_str(),
+                    "state_version": result.item.state_version,
+                    "reviewer": &result.task.reviewer,
+                    "review_note_sha256": result.task.review_note.as_deref().map(hash_text),
+                    "evidence_ref_sha256": result.task.evidence_ref.as_deref().map(hash_text),
+                    "kb_rebuild_required": result.kb_rebuild_required,
+                    "eval_diff_required": result.eval_diff_required,
+                    "release_gate_required": result.release_gate_required,
+                    "result_count": 1,
+                    "result": "reviewed_or_idempotent",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_review",
+                "schema_version": KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id_sha256": hash_text(&item_id),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::NOT_FOUND,
+                "knowledge_item_not_found",
+                "knowledge item was not found",
+                None,
+            )
+        }
+        Err(error) if error.to_string().contains("conflict") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &item_id,
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "knowledge_item_review_conflict",
+                "knowledge item review conflict",
+                None,
+            )
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &item_id,
+                    "result_count": 0,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(item_id = %item_id, error = %error, "knowledge item review failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_item_review_failed",
+                safe_error_detail(&error),
                 None,
             )
         }
@@ -7286,6 +7535,8 @@ fn governance_task_list_input(
             "retrieval_failure_cluster",
             "trace",
             "package",
+            "knowledge_item",
+            "eval_miss",
             "user_feedback",
             "knowledge_patch_proposal",
         ],
@@ -9122,6 +9373,8 @@ mod tests {
             Json(GovernanceTaskManualCreateRequest {
                 source_entity_type: "trace".to_string(),
                 source_entity_id: "trace-admin-governance-task".to_string(),
+                trace_id: None,
+                package_id: None,
                 task_type: Some("expert_review".to_string()),
                 priority: Some("p0".to_string()),
                 proposed_fix: Some("request expert review".to_string()),
@@ -9380,6 +9633,238 @@ mod tests {
         assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_list"), 1);
         assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_read"), 1);
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_admin_review_requires_admin_task_and_records_boundaries() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item-review");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Alias,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-review".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-review".to_string()],
+                payload: json!({
+                    "alias": "stone",
+                    "scope": "admin review endpoint test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin review endpoint test".to_string(),
+            })
+            .expect("knowledge item creates");
+
+        let task_response = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "knowledge_item".to_string(),
+                source_entity_id: created.item_id.clone(),
+                trace_id: Some("trace-admin-knowledge-item-review".to_string()),
+                package_id: None,
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("review knowledge item before human marking".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(task_response.status(), StatusCode::OK);
+        let task_body: Value =
+            serde_json::from_str(&response_text(task_response).await).expect("task response json");
+        assert_eq!(
+            task_body["task"]["source_entity_type"],
+            json!("knowledge_item")
+        );
+        let task_id = task_body["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let task_updated_at = task_body["task"]["updated_at"]
+            .as_str()
+            .expect("task updated_at")
+            .to_string();
+
+        let ordinary = review_knowledge_item_endpoint(
+            State(state.clone()),
+            gateway_headers("user-1"),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some(task_updated_at.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(ordinary.status(), StatusCode::UNAUTHORIZED);
+
+        let review = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted for human marked boundary".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some(task_updated_at),
+            }),
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::OK);
+        let review_body: Value =
+            serde_json::from_str(&response_text(review).await).expect("review response json");
+        assert_eq!(
+            review_body["object"],
+            json!("tonglingyu.knowledge_item_admin_review")
+        );
+        assert_eq!(
+            review_body["schema_version"],
+            json!(KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            review_body["result"]["item"]["state"],
+            json!("human_marked")
+        );
+        assert_eq!(review_body["result"]["task"]["status"], json!("accepted"));
+        assert_eq!(review_body["result"]["kb_rebuild_required"], json!(true));
+        assert_eq!(review_body["result"]["eval_diff_required"], json!(true));
+        assert_eq!(review_body["result"]["release_gate_required"], json!(true));
+
+        let retry = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id,
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted for human marked boundary".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some("stale-task-updated-at".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let conn = open_db(&db_path).expect("db opens");
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![created.item_id],
+                |row| row.get(0),
+            )
+            .expect("history count");
+        assert_eq!(history_count, 2);
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_admin_review"),
+            2
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_human_reviewed"),
+            1
+        );
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_review_conflict_does_not_update_task_or_item() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item-review-conflict");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Term,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-review-conflict".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-review-conflict".to_string()],
+                payload: json!({
+                    "term": "stone",
+                    "scope": "admin review conflict test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item-review-conflict".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin review conflict test".to_string(),
+            })
+            .expect("knowledge item creates");
+        let task_response = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "knowledge_item".to_string(),
+                source_entity_id: created.item_id.clone(),
+                trace_id: Some("trace-admin-knowledge-item-review-conflict".to_string()),
+                package_id: None,
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("review knowledge item before rejection".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(task_response.status(), StatusCode::OK);
+        let task_body: Value =
+            serde_json::from_str(&response_text(task_response).await).expect("task response json");
+        let task_id = task_body["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let task_updated_at = task_body["task"]["updated_at"]
+            .as_str()
+            .expect("task updated_at")
+            .to_string();
+
+        let conflict = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "reject".to_string(),
+                trace_id: "trace-admin-knowledge-item-review-conflict".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "reject with stale item state".to_string(),
+                evidence_ref: "source://review-note/admin-review-conflict".to_string(),
+                if_match_state_version: created.state_version + 1,
+                if_match_task_updated_at: Some(task_updated_at),
+            }),
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let item = state
+            .runtime_store
+            .read_knowledge_item(&created.item_id)
+            .expect("item reads")
+            .expect("item exists");
+        assert_eq!(item.state, KnowledgeState::Candidate);
+        let task = state
+            .runtime_store
+            .read_governance_task(&task_id)
+            .expect("task reads")
+            .expect("task exists");
+        assert_eq!(task["status"], json!("open"));
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_admin_review"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_human_reviewed"),
+            0
+        );
         remove_sqlite_file_set(&db_path);
     }
 
