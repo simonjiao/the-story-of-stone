@@ -6541,6 +6541,7 @@ async fn admin_access_denial_endpoint(
 enum OpenWebUiMetadataTask {
     Title,
     Tags,
+    FollowUps,
 }
 
 impl OpenWebUiMetadataTask {
@@ -6548,6 +6549,7 @@ impl OpenWebUiMetadataTask {
         match self {
             Self::Title => "title",
             Self::Tags => "tags",
+            Self::FollowUps => "follow_ups",
         }
     }
 }
@@ -6566,6 +6568,11 @@ fn detect_openwebui_metadata_task(question: &str) -> Option<OpenWebUiMetadataTas
         && normalized.contains(r#"JSON format: { "tags""#)
     {
         return Some(OpenWebUiMetadataTask::Tags);
+    }
+    if normalized.contains("Suggest 3-5 relevant follow-up questions or prompts")
+        && normalized.contains(r#"JSON format: { "follow_ups""#)
+    {
+        return Some(OpenWebUiMetadataTask::FollowUps);
     }
     None
 }
@@ -6588,6 +6595,22 @@ fn openwebui_metadata_completion_content(task: OpenWebUiMetadataTask, question: 
                 vec!["Arts", "Literature", "Evidence Review"]
             };
             json!({ "tags": tags }).to_string()
+        }
+        OpenWebUiMetadataTask::FollowUps => {
+            let follow_ups = if use_chinese {
+                vec![
+                    "还需要哪些证据才能确认版本边界？",
+                    "当前证据包覆盖了哪些正文位置？",
+                    "哪些结论必须等待人工复核？",
+                ]
+            } else {
+                vec![
+                    "Which evidence is still needed for edition boundaries?",
+                    "Which source passages are covered by the current package?",
+                    "Which claims still require human review?",
+                ]
+            };
+            json!({ "follow_ups": follow_ups }).to_string()
         }
     }
 }
@@ -10361,6 +10384,16 @@ JSON format: { "tags": ["tag1", "tag2", "tag3"] }
 <chat_history>
 USER: 通灵玉是什么？
 </chat_history>"#;
+        let follow_ups_prompt = r#"### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a **user**, based on the chat history, to help continue or deepen the discussion.
+
+### Output:
+JSON format: { "follow_ups": ["Question 1?", "Question 2?", "Question 3?"] }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
 
         assert_eq!(
             detect_openwebui_metadata_task(title_prompt),
@@ -10369,6 +10402,10 @@ USER: 通灵玉是什么？
         assert_eq!(
             detect_openwebui_metadata_task(tags_prompt),
             Some(OpenWebUiMetadataTask::Tags)
+        );
+        assert_eq!(
+            detect_openwebui_metadata_task(follow_ups_prompt),
+            Some(OpenWebUiMetadataTask::FollowUps)
         );
         assert_eq!(detect_openwebui_metadata_task("通灵玉是什么？"), None);
     }
@@ -10449,6 +10486,82 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn openwebui_follow_ups_request_does_not_mutate_rqa_governance() {
+        let db_path = temp_gateway_db_path("tonglingyu-openwebui-follow-ups");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a **user**, based on the chat history, to help continue or deepen the discussion.
+### Guidelines:
+- Response must be a JSON object with a "follow_ups" key containing an array of strings, no extra text or formatting.
+### Output:
+JSON format: { "follow_ups": ["Question 1?", "Question 2?", "Question 3?"] }
+### Chat History:
+<chat_history>
+USER: 请简要说明第三回林黛玉初进荣国府时当前证据状态。
+ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持部分文本事实。
+</chat_history>"#;
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": metadata_prompt}],
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-follow-ups-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("metadata content");
+        let metadata_json: Value = serde_json::from_str(content).expect("metadata content is json");
+        assert!(metadata_json["follow_ups"].is_array());
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(body.get("trace_id").is_none());
+        assert!(body.get("evidence_package_id").is_none());
+        assert!(body.get("review").is_none());
+        assert!(body.get("session_id").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        assert_eq!(
+            table_count(&conn, "retrieval_failures").expect("failure count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "knowledge_governance_tasks").expect("task count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata message count"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "openwebui_metadata_request_handled"),
+            1
+        );
+
+        remove_sqlite_file_set(&db_path);
     }
 
     #[tokio::test]

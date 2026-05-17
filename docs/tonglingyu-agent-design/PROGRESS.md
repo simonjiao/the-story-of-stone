@@ -1074,14 +1074,14 @@
   `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
   visibility、streaming chat UX、admin audit visibility 和 persisted provider
   settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
-- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签后台任务也会
+- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签/追问后台任务也会
   走 `tonglingyu`，旧 gateway 会把这些非 RQA metadata prompt 当成文学问答处理，
   从而写入 open P0 retrieval failure / governance task。`tonglingyu-gateway`
-  已新增 Open WebUI metadata prompt 隔离：识别 title/tags 任务后返回确定性 JSON，
+  已新增 Open WebUI metadata prompt 隔离：识别 title/tags/follow-up 任务后返回确定性 JSON，
   记录 `openwebui_metadata_request_handled` audit event，但不创建 evidence package、
   retrieval failure 或治理任务。本地验证：
   `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-  47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
+  56 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
   tonglingyu-gateway -- -D warnings` 通过。
 - 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
   `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，

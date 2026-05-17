@@ -1236,10 +1236,10 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
   verifier 已确认 ordinary-user model visibility、streaming chat UX、admin audit
   visibility 和 persisted provider settings 四项均通过。
 - browser review 同时暴露 Open WebUI metadata prompt 污染 RQA 队列的问题。
-  `tonglingyu-gateway` 已隔离 Open WebUI title/tags 后台任务：返回确定性 JSON，
+  `tonglingyu-gateway` 已隔离 Open WebUI title/tags/follow-up 后台任务：返回确定性 JSON，
   写 `openwebui_metadata_request_handled` audit event，但不创建 evidence package、
   retrieval failure 或治理任务。本地验证已通过 `cargo test -p tonglingyu-gateway`
-  47 tests 和 `cargo clippy -p tonglingyu-gateway -- -D warnings`。修复已部署到
+  56 tests 和 `cargo clippy -p tonglingyu-gateway -- -D warnings`。修复已部署到
   `hhost`，gateway image pin 为
   `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
   远端 metadata smoke 证明 title prompt 无 evidence package，且后续 DB 复核
