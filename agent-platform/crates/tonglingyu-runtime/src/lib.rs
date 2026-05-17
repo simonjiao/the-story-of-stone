@@ -45,7 +45,20 @@ pub struct ClaimEvidenceMap {
     pub claim_index: usize,
     pub claim: String,
     pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub knowledge_item_refs: Vec<ClaimKnowledgeItemRef>,
     pub forbidden_conclusions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimKnowledgeItemRef {
+    pub item_id: String,
+    pub state: KnowledgeState,
+    pub evidence_ref: String,
+    pub policy_version: String,
+    pub policy_decision: String,
+    pub calibration_report_ref: Option<String>,
+    pub display_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +77,8 @@ pub struct EvidencePackage {
     pub cards: Vec<EvidenceCard>,
     pub claims: Vec<String>,
     pub claim_evidence_map: Vec<ClaimEvidenceMap>,
+    #[serde(default = "default_knowledge_state_summary")]
+    pub knowledge_state_summary: KnowledgeStateSummary,
     pub review: ReviewRecord,
 }
 
@@ -243,6 +258,9 @@ pub const KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION: &str =
 pub const KNOWLEDGE_CALIBRATION_PROFILE_ID: &str = "honglou-knowledge-calibrator";
 pub const KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION: &str =
     "tonglingyu-knowledge-calibration-profile-v1";
+pub const KNOWLEDGE_RUNTIME_POLICY_VERSION: &str = "tonglingyu-knowledge-runtime-policy-v1";
+pub const KNOWLEDGE_RUNTIME_POLICY_SCHEMA_VERSION: &str =
+    "tonglingyu-knowledge-runtime-policy-schema-v1";
 pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
 pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
 pub const KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE: usize = 50;
@@ -650,6 +668,53 @@ pub struct KnowledgeCalibrationJobRecord {
     pub last_error_sha256: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeStateSummary {
+    pub object: String,
+    pub policy_version: String,
+    pub selected_count: usize,
+    pub runtime_usable_count: usize,
+    pub human_marked_count: usize,
+    pub system_calibrated_rejected_count: usize,
+    pub rejected_or_deprecated_count: usize,
+    pub candidate_or_source_snapshot_count: usize,
+    pub runtime_policy_rejected_count: usize,
+    pub safe_public_label: Option<String>,
+    pub internal_governance_fields_included: bool,
+}
+
+impl Default for KnowledgeStateSummary {
+    fn default() -> Self {
+        Self {
+            object: "tonglingyu.knowledge_state_summary".to_string(),
+            policy_version: KNOWLEDGE_RUNTIME_POLICY_VERSION.to_string(),
+            selected_count: 0,
+            runtime_usable_count: 0,
+            human_marked_count: 0,
+            system_calibrated_rejected_count: 0,
+            rejected_or_deprecated_count: 0,
+            candidate_or_source_snapshot_count: 0,
+            runtime_policy_rejected_count: 0,
+            safe_public_label: None,
+            internal_governance_fields_included: false,
+        }
+    }
+}
+
+fn default_knowledge_state_summary() -> KnowledgeStateSummary {
+    KnowledgeStateSummary::default()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeRuntimePromotionInput {
+    pub trace_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub release_run_id: String,
+    pub expires_at: Option<String>,
+    pub expected_state_version: i64,
 }
 
 impl KnowledgeCalibrationLlmConfig {
@@ -1470,6 +1535,15 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Option<KnowledgeItemRecord>> {
         let conn = self.open_connection()?;
         update_knowledge_item_state(&conn, item_id, input)
+    }
+
+    pub fn promote_knowledge_item_runtime_usable(
+        &self,
+        item_id: &str,
+        input: KnowledgeRuntimePromotionInput,
+    ) -> Result<Option<KnowledgeItemRecord>> {
+        let conn = self.open_connection()?;
+        promote_knowledge_item_runtime_usable(&conn, item_id, input)
     }
 
     pub fn create_knowledge_calibration_job(
@@ -4574,6 +4648,20 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY(package_id, claim_index, evidence_id)
         );
 
+        CREATE TABLE IF NOT EXISTS evidence_claim_knowledge_links (
+            package_id TEXT NOT NULL,
+            claim_index INTEGER NOT NULL,
+            evidence_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_decision TEXT NOT NULL,
+            calibration_report_ref TEXT,
+            display_label TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(package_id, claim_index, evidence_id, item_id)
+        );
+
         CREATE TABLE IF NOT EXISTS evidence_cards (
             evidence_id TEXT PRIMARY KEY,
             package_id TEXT,
@@ -4658,6 +4746,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_evidence_cards_package ON evidence_cards(package_id);
+        CREATE INDEX IF NOT EXISTS idx_evidence_claim_knowledge_links_package
+            ON evidence_claim_knowledge_links(package_id, claim_index);
+        CREATE INDEX IF NOT EXISTS idx_evidence_claim_knowledge_links_item
+            ON evidence_claim_knowledge_links(item_id);
         CREATE INDEX IF NOT EXISTS idx_audit_events_trace ON audit_events(trace_id);
         CREATE INDEX IF NOT EXISTS idx_rqa_lifecycle_tombstones_object
             ON rqa_lifecycle_tombstones(object_type, action, created_at);
@@ -4775,6 +4867,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_RUNTIME_POLICY_SCHEMA_VERSION, now_rfc3339()],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
@@ -5156,6 +5252,7 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         KNOWLEDGE_ITEM_CALIBRATION_LINK_MIGRATION.to_string(),
         KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION.to_string(),
+        KNOWLEDGE_RUNTIME_POLICY_SCHEMA_VERSION.to_string(),
         RQA_LIFECYCLE_POLICY_VERSION.to_string(),
     ]
 }
@@ -6499,6 +6596,139 @@ fn update_knowledge_item_state_inner(
             "evidence_ref_count": record.evidence_refs.len(),
             "payload_sha256": &record.payload_sha256,
             "schema_version": &record.schema_version,
+        }),
+    )?;
+    Ok(Some(record))
+}
+
+pub fn promote_knowledge_item_runtime_usable(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeRuntimePromotionInput,
+) -> Result<Option<KnowledgeItemRecord>> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = promote_knowledge_item_runtime_usable_inner(conn, item_id, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        promote_knowledge_item_runtime_usable_inner(conn, item_id, input)
+    }
+}
+
+fn promote_knowledge_item_runtime_usable_inner(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeRuntimePromotionInput,
+) -> Result<Option<KnowledgeItemRecord>> {
+    let current = match load_knowledge_item(conn, item_id)? {
+        Some(record) => record,
+        None => return Ok(None),
+    };
+    if current.state_version != input.expected_state_version {
+        return Err(anyhow!("knowledge item runtime promotion conflict"));
+    }
+    if current.state != KnowledgeState::SystemCalibrated {
+        return Err(anyhow!(
+            "runtime promotion requires system_calibrated item, got {}",
+            current.state.as_str()
+        ));
+    }
+    if current.evidence_refs.is_empty()
+        || current.source_boundary.is_none()
+        || current.calibration_report_ref.is_none()
+        || current.confidence.unwrap_or_default() < 0.8
+    {
+        return Err(anyhow!(
+            "runtime promotion requires evidence refs, source boundary, calibration report ref and confidence"
+        ));
+    }
+    let actor = validate_knowledge_item_actor(&input.actor)?;
+    let reason = validate_knowledge_item_reason(&input.reason)?;
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let release_run_id = bounded_optional_text(&input.release_run_id, 160)
+        .ok_or_else(|| anyhow!("runtime promotion release_run_id is required"))?;
+    if let Some(expires_at) = input.expires_at.as_deref() {
+        let expires_at = bounded_optional_text(expires_at, 80)
+            .ok_or_else(|| anyhow!("runtime promotion expires_at is invalid"))?;
+        if expires_at <= now_rfc3339() {
+            return Err(anyhow!("runtime promotion expires_at is already expired"));
+        }
+    }
+    let mut payload = canonical_json_value(&current.payload);
+    let payload_object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("knowledge item payload must be an object"))?;
+    let now = now_rfc3339();
+    payload_object.insert(
+        "runtime_policy".to_string(),
+        json!({
+            "policy_version": KNOWLEDGE_RUNTIME_POLICY_VERSION,
+            "release_run_id": release_run_id,
+            "promoted_at": now,
+            "expires_at": input.expires_at,
+            "calibration_report_ref": current.calibration_report_ref,
+            "source_boundary_sha256": hash_text(&serde_json::to_string(&current.source_boundary)?),
+        }),
+    );
+    let payload = canonical_json_value(&payload);
+    let payload_json = serde_json::to_string(&payload)?;
+    let next_state_version = current.state_version + 1;
+    conn.execute(
+        r#"
+        UPDATE knowledge_items
+        SET state = ?2,
+            payload_json = ?3,
+            updated_at = ?4,
+            state_version = ?5
+        WHERE item_id = ?1 AND state_version = ?6
+        "#,
+        params![
+            item_id,
+            KnowledgeState::RuntimeUsable.as_str(),
+            payload_json,
+            &now,
+            next_state_version,
+            input.expected_state_version,
+        ],
+    )?;
+    insert_knowledge_item_state_history(
+        conn,
+        KnowledgeItemStateHistoryInsert {
+            item_id,
+            previous_state: Some(current.state),
+            new_state: KnowledgeState::RuntimeUsable,
+            actor: &actor,
+            reason: &reason,
+            evidence_refs: &current.evidence_refs,
+            state_version: next_state_version,
+            created_at: &now,
+        },
+    )?;
+    let record = load_knowledge_item(conn, item_id)?
+        .ok_or_else(|| anyhow!("knowledge item disappeared after runtime promotion"))?;
+    append_runtime_audit_event(
+        conn,
+        &trace_id,
+        "knowledge_item_runtime_policy_promoted",
+        &json!({
+            "item_id": &record.item_id,
+            "previous_state": current.state.as_str(),
+            "new_state": record.state.as_str(),
+            "policy_version": KNOWLEDGE_RUNTIME_POLICY_VERSION,
+            "release_run_id_sha256": hash_text(&release_run_id),
+            "calibration_report_ref": record.calibration_report_ref,
+            "confidence": record.confidence,
+            "actor": actor,
+            "reason_sha256": hash_text(&reason),
         }),
     )?;
     Ok(Some(record))
@@ -11554,8 +11784,11 @@ pub fn create_evidence_package(
     cards: Vec<EvidenceCard>,
 ) -> Result<EvidencePackage> {
     let claims = claims_from_cards(question, &cards);
-    let claim_evidence_map = claim_evidence_map(&claims, &cards);
-    let review = review(question, &cards, &claims);
+    let knowledge_policy = runtime_knowledge_policy_index(conn, &cards)?;
+    let claim_evidence_map =
+        claim_evidence_map_with_knowledge(&claims, &cards, &knowledge_policy.refs_by_evidence_id);
+    let mut review = review(question, &cards, &claims);
+    apply_knowledge_state_review(&mut review, &knowledge_policy.summary);
     let package_id = format!("pkg-{}", uuid::Uuid::now_v7().simple());
     let now = now_rfc3339();
     let evidence_ids: Vec<_> = cards.iter().map(|card| card.evidence_id.clone()).collect();
@@ -11610,6 +11843,29 @@ pub fn create_evidence_package(
                 params![package_id, item.claim_index as i64, evidence_id, "supports_scope_limited_claim"],
             )?;
         }
+        for knowledge_ref in &item.knowledge_item_refs {
+            conn.execute(
+                r#"
+                INSERT INTO evidence_claim_knowledge_links (
+                    package_id, claim_index, evidence_id, item_id, state,
+                    policy_version, policy_decision, calibration_report_ref,
+                    display_label, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    &package_id,
+                    item.claim_index as i64,
+                    &knowledge_ref.evidence_ref,
+                    &knowledge_ref.item_id,
+                    knowledge_ref.state.as_str(),
+                    &knowledge_ref.policy_version,
+                    &knowledge_ref.policy_decision,
+                    &knowledge_ref.calibration_report_ref,
+                    &knowledge_ref.display_label,
+                    &now,
+                ],
+            )?;
+        }
     }
     append_runtime_audit_event(
         conn,
@@ -11621,6 +11877,7 @@ pub fn create_evidence_package(
             "evidence_count": evidence_ids.len(),
             "evidence_ids": &evidence_ids,
             "claim_evidence_map": &claim_evidence_map,
+            "knowledge_state_summary": &knowledge_policy.summary,
         }),
     )?;
     append_runtime_audit_event(
@@ -11633,6 +11890,7 @@ pub fn create_evidence_package(
             "severity": &review.severity,
             "issues": &review.issues,
             "summary": &review.summary,
+            "knowledge_state_summary": &knowledge_policy.summary,
         }),
     )?;
     Ok(EvidencePackage {
@@ -11642,6 +11900,7 @@ pub fn create_evidence_package(
         cards,
         claims,
         claim_evidence_map,
+        knowledge_state_summary: knowledge_policy.summary,
         review,
     })
 }
@@ -11712,6 +11971,53 @@ pub fn load_evidence_package_from_conn(
             .or_default()
             .push(evidence_id);
     }
+    let mut claim_knowledge_refs: BTreeMap<usize, Vec<ClaimKnowledgeItemRef>> = BTreeMap::new();
+    if sqlite_table_exists(conn, "evidence_claim_knowledge_links")? {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT claim_index, evidence_id, item_id, state, policy_version,
+                   policy_decision, calibration_report_ref, display_label
+            FROM evidence_claim_knowledge_links
+            WHERE package_id = ?1
+            ORDER BY claim_index, evidence_id, item_id
+            "#,
+        )?;
+        for row in stmt.query_map(params![&package_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as usize,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })? {
+            let (
+                claim_index,
+                evidence_ref,
+                item_id,
+                state,
+                policy_version,
+                policy_decision,
+                calibration_report_ref,
+                display_label,
+            ) = row?;
+            claim_knowledge_refs
+                .entry(claim_index)
+                .or_default()
+                .push(ClaimKnowledgeItemRef {
+                    item_id,
+                    state: KnowledgeState::parse(&state)?,
+                    evidence_ref,
+                    policy_version,
+                    policy_decision,
+                    calibration_report_ref,
+                    display_label,
+                });
+        }
+    }
     let claim_evidence_map = if claim_evidence_ids.is_empty() {
         claim_evidence_map(&claims, &cards)
     } else {
@@ -11722,6 +12028,9 @@ pub fn load_evidence_package_from_conn(
                 claim_index,
                 claim: claim.clone(),
                 evidence_ids: claim_evidence_ids.remove(&claim_index).unwrap_or_default(),
+                knowledge_item_refs: claim_knowledge_refs
+                    .remove(&claim_index)
+                    .unwrap_or_default(),
                 forbidden_conclusions: cards
                     .iter()
                     .map(|card| card.unsupported_scope.clone())
@@ -11731,6 +12040,7 @@ pub fn load_evidence_package_from_conn(
             })
             .collect()
     };
+    let knowledge_state_summary = knowledge_state_summary_from_claim_maps(&claim_evidence_map);
     Ok(Some(EvidencePackage {
         package_id,
         trace_id,
@@ -11738,6 +12048,7 @@ pub fn load_evidence_package_from_conn(
         cards,
         claims,
         claim_evidence_map,
+        knowledge_state_summary,
         review: serde_json::from_str(&review_json)?,
     }))
 }
@@ -12358,10 +12669,67 @@ pub fn package_json(package: &EvidencePackage) -> Value {
         "trace_id": &package.trace_id,
         "question": &package.question,
         "claims": &package.claims,
-        "claim_evidence_map": &package.claim_evidence_map,
+        "claim_evidence_map": public_claim_evidence_map(&package.claim_evidence_map),
+        "knowledge_state_summary": public_knowledge_state_summary(&package.knowledge_state_summary),
         "evidence_ids": evidence_ids,
         "cards": &package.cards,
-        "review": &package.review,
+        "review": public_review_record(&package.review),
+    })
+}
+
+fn public_claim_evidence_map(claim_evidence_map: &[ClaimEvidenceMap]) -> Vec<Value> {
+    claim_evidence_map
+        .iter()
+        .map(|claim| {
+            let knowledge_state_labels = claim
+                .knowledge_item_refs
+                .iter()
+                .filter_map(|item| item.display_label.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            json!({
+                "claim_index": claim.claim_index,
+                "claim": &claim.claim,
+                "evidence_ids": &claim.evidence_ids,
+                "knowledge_state_labels": knowledge_state_labels,
+                "forbidden_conclusions": &claim.forbidden_conclusions,
+            })
+        })
+        .collect()
+}
+
+fn public_knowledge_state_summary(summary: &KnowledgeStateSummary) -> Value {
+    json!({
+        "object": &summary.object,
+        "selected_count": summary.selected_count,
+        "registered_count": summary.runtime_usable_count,
+        "human_reviewed_count": summary.human_marked_count,
+        "safe_public_label": &summary.safe_public_label,
+        "internal_governance_fields_included": false,
+    })
+}
+
+fn public_review_record(review: &ReviewRecord) -> Value {
+    let issues = review
+        .issues
+        .iter()
+        .map(|issue| {
+            if issue.contains("runtime_usable")
+                || issue.contains("system_calibrated")
+                || issue.contains("human_marked")
+            {
+                "部分知识条目尚未满足运行证据要求，已降级处理。".to_string()
+            } else {
+                issue.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": &review.status,
+        "severity": &review.severity,
+        "issues": issues,
+        "summary": &review.summary,
     })
 }
 
@@ -12510,7 +12878,13 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         return answer;
     }
     let mut answer = String::new();
-    answer.push_str("根据目前可检索到的文本，可以这样回答：\n\n");
+    if package.knowledge_state_summary.human_marked_count > 0 {
+        answer.push_str("人工标记资料显示，可以这样回答：\n\n");
+    } else if package.knowledge_state_summary.runtime_usable_count > 0 {
+        answer.push_str("基于当前已登记资料，可以这样回答：\n\n");
+    } else {
+        answer.push_str("根据目前可检索到的文本，可以这样回答：\n\n");
+    }
     if question.contains("通灵玉") || question.contains("通靈玉") || question.contains("莫失莫忘")
     {
         answer.push_str("通灵玉相关文本需要回到具体原文来读。若问铭文，当前命中的文本显示“莫失莫忘，仙寿恒昌”等字样；不同版本的字形和图式细节可能有差异，不能把这当作完整校勘结论。\n\n");
@@ -12635,7 +13009,209 @@ pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
     )
 }
 
+struct RuntimeKnowledgePolicyIndex {
+    summary: KnowledgeStateSummary,
+    refs_by_evidence_id: BTreeMap<String, Vec<ClaimKnowledgeItemRef>>,
+}
+
+fn runtime_knowledge_policy_index(
+    conn: &Connection,
+    cards: &[EvidenceCard],
+) -> Result<RuntimeKnowledgePolicyIndex> {
+    let mut refs_by_evidence_id = BTreeMap::<String, Vec<ClaimKnowledgeItemRef>>::new();
+    let mut summary = KnowledgeStateSummary::default();
+    if cards.is_empty() || !sqlite_table_exists(conn, "knowledge_items")? {
+        return Ok(RuntimeKnowledgePolicyIndex {
+            summary,
+            refs_by_evidence_id,
+        });
+    }
+    let card_refs = cards
+        .iter()
+        .map(|card| (card.evidence_id.clone(), card_knowledge_ref_set(card)))
+        .collect::<Vec<_>>();
+    let records = query_knowledge_item_records(
+        conn,
+        &format!(
+            "{} ORDER BY updated_at DESC, item_id DESC",
+            knowledge_item_select_sql()
+        ),
+        &[],
+    )?;
+    for record in records {
+        let matched_evidence_ids = card_refs
+            .iter()
+            .filter(|(_, refs)| {
+                record
+                    .evidence_refs
+                    .iter()
+                    .any(|item_ref| refs.contains(item_ref))
+            })
+            .map(|(evidence_id, _)| evidence_id.clone())
+            .collect::<Vec<_>>();
+        if matched_evidence_ids.is_empty() {
+            continue;
+        }
+        match record.state {
+            KnowledgeState::RuntimeUsable | KnowledgeState::HumanMarked => {
+                if let Some(policy_ref) = runtime_policy_ref_for_item(&record)? {
+                    summary.selected_count += 1;
+                    if record.state == KnowledgeState::RuntimeUsable {
+                        summary.runtime_usable_count += 1;
+                    } else {
+                        summary.human_marked_count += 1;
+                    }
+                    for evidence_id in matched_evidence_ids {
+                        let mut policy_ref = policy_ref.clone();
+                        policy_ref.evidence_ref = evidence_id.clone();
+                        refs_by_evidence_id
+                            .entry(evidence_id)
+                            .or_default()
+                            .push(policy_ref);
+                    }
+                } else {
+                    summary.runtime_policy_rejected_count += 1;
+                }
+            }
+            KnowledgeState::SystemCalibrated => {
+                summary.system_calibrated_rejected_count += 1;
+                summary.runtime_policy_rejected_count += 1;
+            }
+            KnowledgeState::Rejected | KnowledgeState::Deprecated => {
+                summary.rejected_or_deprecated_count += 1;
+            }
+            KnowledgeState::Candidate | KnowledgeState::SourceSnapshot => {
+                summary.candidate_or_source_snapshot_count += 1;
+                summary.runtime_policy_rejected_count += 1;
+            }
+        }
+    }
+    summary.safe_public_label = if summary.human_marked_count > 0 {
+        Some("人工标记".to_string())
+    } else if summary.runtime_usable_count > 0 {
+        Some("基于当前已登记资料".to_string())
+    } else {
+        None
+    };
+    Ok(RuntimeKnowledgePolicyIndex {
+        summary,
+        refs_by_evidence_id,
+    })
+}
+
+fn runtime_policy_ref_for_item(
+    item: &KnowledgeItemRecord,
+) -> Result<Option<ClaimKnowledgeItemRef>> {
+    if item.evidence_refs.is_empty() || item.source_boundary.is_none() {
+        return Ok(None);
+    }
+    if item.state == KnowledgeState::RuntimeUsable {
+        if item.calibration_report_ref.is_none() || item.confidence.unwrap_or_default() < 0.8 {
+            return Ok(None);
+        }
+        let Some(policy) = item.payload.get("runtime_policy") else {
+            return Ok(None);
+        };
+        if policy.get("policy_version").and_then(Value::as_str)
+            != Some(KNOWLEDGE_RUNTIME_POLICY_VERSION)
+        {
+            return Ok(None);
+        }
+        if policy
+            .get("release_run_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Ok(None);
+        }
+        if let Some(expires_at) = policy.get("expires_at").and_then(Value::as_str)
+            && expires_at <= now_rfc3339().as_str()
+        {
+            return Ok(None);
+        }
+    }
+    let display_label = if item.state == KnowledgeState::HumanMarked {
+        Some("人工标记".to_string())
+    } else {
+        Some("基于当前已登记资料".to_string())
+    };
+    Ok(Some(ClaimKnowledgeItemRef {
+        item_id: item.item_id.clone(),
+        state: item.state,
+        evidence_ref: String::new(),
+        policy_version: KNOWLEDGE_RUNTIME_POLICY_VERSION.to_string(),
+        policy_decision: "selected".to_string(),
+        calibration_report_ref: item.calibration_report_ref.clone(),
+        display_label,
+    }))
+}
+
+fn card_knowledge_ref_set(card: &EvidenceCard) -> BTreeSet<String> {
+    [
+        card.evidence_id.clone(),
+        card.block_id.clone(),
+        format!("block://{}", card.block_id),
+        card.source_id.clone(),
+        format!("source://{}", card.source_id),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn apply_knowledge_state_review(review: &mut ReviewRecord, summary: &KnowledgeStateSummary) {
+    if summary.runtime_policy_rejected_count == 0 && summary.rejected_or_deprecated_count == 0 {
+        return;
+    }
+    review
+        .issues
+        .push("存在未进入 runtime_usable 的知识条目，不能作为运行证据使用。".to_string());
+    review.status = "needs_revision".to_string();
+    if review.severity == "none" {
+        review.severity = "medium".to_string();
+    }
+    review.summary = format!("reviewer 要求谨慎降级：{} 个问题。", review.issues.len());
+}
+
+fn knowledge_state_summary_from_claim_maps(
+    claim_maps: &[ClaimEvidenceMap],
+) -> KnowledgeStateSummary {
+    let mut summary = KnowledgeStateSummary::default();
+    let mut seen = BTreeSet::new();
+    for item in claim_maps
+        .iter()
+        .flat_map(|claim| claim.knowledge_item_refs.iter())
+    {
+        if !seen.insert(item.item_id.clone()) {
+            continue;
+        }
+        summary.selected_count += 1;
+        match item.state {
+            KnowledgeState::RuntimeUsable => summary.runtime_usable_count += 1,
+            KnowledgeState::HumanMarked => summary.human_marked_count += 1,
+            _ => summary.runtime_policy_rejected_count += 1,
+        }
+    }
+    summary.safe_public_label = if summary.human_marked_count > 0 {
+        Some("人工标记".to_string())
+    } else if summary.runtime_usable_count > 0 {
+        Some("基于当前已登记资料".to_string())
+    } else {
+        None
+    };
+    summary
+}
+
 fn claim_evidence_map(claims: &[String], cards: &[EvidenceCard]) -> Vec<ClaimEvidenceMap> {
+    claim_evidence_map_with_knowledge(claims, cards, &BTreeMap::new())
+}
+
+fn claim_evidence_map_with_knowledge(
+    claims: &[String],
+    cards: &[EvidenceCard],
+    knowledge_refs_by_evidence_id: &BTreeMap<String, Vec<ClaimKnowledgeItemRef>>,
+) -> Vec<ClaimEvidenceMap> {
     claims
         .iter()
         .enumerate()
@@ -12653,6 +13229,18 @@ fn claim_evidence_map(claims: &[String], cards: &[EvidenceCard]) -> Vec<ClaimEvi
                 })
                 .map(|card| card.evidence_id.clone())
                 .collect::<Vec<_>>();
+            let knowledge_item_refs = evidence_ids
+                .iter()
+                .flat_map(|evidence_id| {
+                    knowledge_refs_by_evidence_id
+                        .get(evidence_id)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                })
+                .map(|item| (format!("{}:{}", item.item_id, item.evidence_ref), item))
+                .collect::<BTreeMap<_, _>>();
+            let knowledge_item_refs = knowledge_item_refs.into_values().collect::<Vec<_>>();
             let forbidden_conclusions = if cards.is_empty() {
                 vec!["不能给出确定结论。".to_string()]
             } else {
@@ -12667,6 +13255,7 @@ fn claim_evidence_map(claims: &[String], cards: &[EvidenceCard]) -> Vec<ClaimEvi
                 claim_index,
                 claim: claim.clone(),
                 evidence_ids,
+                knowledge_item_refs,
                 forbidden_conclusions,
             }
         })
@@ -14176,6 +14765,19 @@ mod tests {
         }
     }
 
+    fn runtime_policy_test_card(marker: &str) -> EvidenceCard {
+        let mut card = sample_card("base_text");
+        card.evidence_id = format!("ev-runtime-policy-{marker}");
+        card.source_id = format!("wikisource/chapter/{marker}");
+        card.source_title = format!("Wikisource chapter {marker}");
+        card.block_id = format!("wikisource/{marker}");
+        card.text = format!("sample knowledge item {marker}");
+        card.evidence_level = "正文直接".to_string();
+        card.confidence = "high".to_string();
+        card.verification_status = "source_snapshot".to_string();
+        card
+    }
+
     fn yousanjie_test_cards() -> Vec<EvidenceCard> {
         let mut vow = sample_card("base_text");
         vow.evidence_id = "ev-yousanjie-vow".to_string();
@@ -14203,6 +14805,7 @@ mod tests {
                 &["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
                 &cards,
             ),
+            knowledge_state_summary: KnowledgeStateSummary::default(),
             cards,
             review: ReviewRecord {
                 status: "passed".to_string(),
@@ -15690,6 +16293,282 @@ mod tests {
             alias_count_after, alias_count_before,
             "calibration must not mutate fact-layer aliases"
         );
+    }
+
+    #[test]
+    fn system_calibrated_and_rejected_items_are_not_runtime_evidence() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let marker = "runtime-policy-blocked";
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, marker),
+        )
+        .expect("create candidate item");
+        let report = run_knowledge_calibration_offline(
+            &conn,
+            calibration_run_input(&item, KnowledgeCalibrationMethod::Rule),
+        )
+        .expect("rule calibration");
+        assert_eq!(
+            report.decision,
+            KnowledgeCalibrationDecision::SystemCalibrated
+        );
+
+        let mut rejected_input =
+            sample_knowledge_item_input(KnowledgeItemKind::VersionNote, "runtime-policy-blocked-2");
+        rejected_input.evidence_refs = vec![format!("block://wikisource/{marker}")];
+        let rejected_item =
+            create_knowledge_item(&conn, rejected_input).expect("create rejected candidate item");
+        update_knowledge_item_state(
+            &conn,
+            &rejected_item.item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::Rejected,
+                trace_id: "trace-runtime-policy-blocked-item".to_string(),
+                actor: "runtime-policy-test".to_string(),
+                reason: "blocked item must not enter runtime evidence".to_string(),
+                evidence_refs: vec![format!("block://wikisource/{marker}")],
+                expected_state_version: rejected_item.state_version,
+            },
+        )
+        .expect("reject item")
+        .expect("rejected item exists");
+
+        let package = create_evidence_package(
+            &conn,
+            "trace-runtime-policy-blocked",
+            "请说明文本证据",
+            vec![runtime_policy_test_card(marker)],
+        )
+        .expect("evidence package");
+
+        assert_eq!(
+            package
+                .knowledge_state_summary
+                .system_calibrated_rejected_count,
+            1
+        );
+        assert_eq!(
+            package.knowledge_state_summary.rejected_or_deprecated_count,
+            1
+        );
+        assert_eq!(package.knowledge_state_summary.runtime_usable_count, 0);
+        assert_eq!(package.knowledge_state_summary.human_marked_count, 0);
+        assert!(
+            package
+                .claim_evidence_map
+                .iter()
+                .all(|claim| claim.knowledge_item_refs.is_empty())
+        );
+        assert_eq!(package.review.status, "needs_revision");
+        assert!(
+            package
+                .review
+                .issues
+                .iter()
+                .any(|issue| issue.contains("runtime_usable"))
+        );
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM evidence_claim_knowledge_links WHERE package_id = ?1",
+                params![&package.package_id],
+                |row| row.get(0),
+            )
+            .expect("knowledge link count");
+        assert_eq!(link_count, 0);
+
+        let answer = local_answer("请说明文本证据", &package);
+        assert!(!answer.contains("人工标记"));
+        assert!(!answer.contains("基于当前已登记资料"));
+        let rendered_public =
+            serde_json::to_string(&package_json(&package)).expect("package json serializes");
+        assert!(!rendered_public.contains(&item.item_id));
+        assert!(!rendered_public.contains(&rejected_item.item_id));
+        assert!(!rendered_public.contains(&report.report_ref));
+        assert!(!rendered_public.contains("knowledge_item_refs"));
+        assert!(!rendered_public.contains("system_calibrated"));
+        assert!(!rendered_public.contains("runtime_usable"));
+        assert!(!rendered_public.contains("rejected"));
+    }
+
+    #[test]
+    fn runtime_usable_requires_explicit_promotion_and_records_claim_links() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let marker = "runtime-policy-promoted";
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, marker),
+        )
+        .expect("create candidate item");
+        let report = run_knowledge_calibration_offline(
+            &conn,
+            calibration_run_input(&item, KnowledgeCalibrationMethod::Rule),
+        )
+        .expect("rule calibration");
+        let calibrated = read_knowledge_item(&conn, &item.item_id)
+            .expect("read calibrated item")
+            .expect("calibrated item exists");
+        assert_eq!(calibrated.state, KnowledgeState::SystemCalibrated);
+
+        let promoted = promote_knowledge_item_runtime_usable(
+            &conn,
+            &item.item_id,
+            KnowledgeRuntimePromotionInput {
+                trace_id: "trace-runtime-policy-promoted".to_string(),
+                actor: "release-manager".to_string(),
+                reason: "release gate accepted calibrated evidence".to_string(),
+                release_run_id: "release-runtime-policy-promoted".to_string(),
+                expires_at: Some("2999-01-01T00:00:00Z".to_string()),
+                expected_state_version: calibrated.state_version,
+            },
+        )
+        .expect("promote runtime usable")
+        .expect("promoted item exists");
+        assert_eq!(promoted.state, KnowledgeState::RuntimeUsable);
+        assert_eq!(
+            promoted.payload["runtime_policy"]["policy_version"],
+            json!(KNOWLEDGE_RUNTIME_POLICY_VERSION)
+        );
+
+        let package = create_evidence_package(
+            &conn,
+            "trace-runtime-policy-promoted",
+            "请说明文本证据",
+            vec![runtime_policy_test_card(marker)],
+        )
+        .expect("evidence package");
+
+        assert_eq!(package.review.status, "passed");
+        assert_eq!(package.knowledge_state_summary.selected_count, 1);
+        assert_eq!(package.knowledge_state_summary.runtime_usable_count, 1);
+        assert_eq!(package.knowledge_state_summary.human_marked_count, 0);
+        assert_eq!(
+            package.knowledge_state_summary.safe_public_label.as_deref(),
+            Some("基于当前已登记资料")
+        );
+        let knowledge_ref = package
+            .claim_evidence_map
+            .iter()
+            .flat_map(|claim| claim.knowledge_item_refs.iter())
+            .next()
+            .expect("claim knowledge ref");
+        assert_eq!(knowledge_ref.item_id, item.item_id);
+        assert_eq!(knowledge_ref.state, KnowledgeState::RuntimeUsable);
+        assert_eq!(
+            knowledge_ref.evidence_ref,
+            format!("ev-runtime-policy-{marker}")
+        );
+        assert_eq!(
+            knowledge_ref.policy_version,
+            KNOWLEDGE_RUNTIME_POLICY_VERSION
+        );
+        assert_eq!(
+            knowledge_ref.calibration_report_ref.as_deref(),
+            Some(report.report_ref.as_str())
+        );
+        let stored = load_evidence_package_from_conn(&conn, &package.package_id)
+            .expect("load package")
+            .expect("package exists");
+        assert_eq!(stored.knowledge_state_summary.runtime_usable_count, 1);
+        let link_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM evidence_claim_knowledge_links WHERE package_id = ?1",
+                params![&package.package_id],
+                |row| row.get(0),
+            )
+            .expect("knowledge link count");
+        assert_eq!(link_count, 1);
+
+        let answer = local_answer("请说明文本证据", &package);
+        assert!(answer.contains("基于当前已登记资料"));
+        assert!(!answer.contains("人工标记"));
+        let rendered_public =
+            serde_json::to_string(&package_json(&package)).expect("package json serializes");
+        assert!(rendered_public.contains("基于当前已登记资料"));
+        assert!(!rendered_public.contains(&item.item_id));
+        assert!(!rendered_public.contains(&report.report_ref));
+        assert!(!rendered_public.contains("knowledge_item_refs"));
+        assert!(!rendered_public.contains("runtime_usable"));
+        assert!(!rendered_public.contains("system_calibrated"));
+    }
+
+    #[test]
+    fn human_marked_is_the_only_state_that_gets_human_label() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let marker = "runtime-policy-human-marked";
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, marker),
+        )
+        .expect("create candidate item");
+        let report = run_knowledge_calibration_offline(
+            &conn,
+            calibration_run_input(&item, KnowledgeCalibrationMethod::Rule),
+        )
+        .expect("rule calibration");
+        let calibrated = read_knowledge_item(&conn, &item.item_id)
+            .expect("read calibrated item")
+            .expect("calibrated item exists");
+        let human_marked = update_knowledge_item_state(
+            &conn,
+            &item.item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::HumanMarked,
+                trace_id: "trace-runtime-policy-human-marked".to_string(),
+                actor: "human-reviewer".to_string(),
+                reason: "human reviewer accepted this knowledge item".to_string(),
+                evidence_refs: vec![format!("block://wikisource/{marker}")],
+                expected_state_version: calibrated.state_version,
+            },
+        )
+        .expect("mark item human")
+        .expect("human item exists");
+        assert_eq!(human_marked.state, KnowledgeState::HumanMarked);
+
+        let package = create_evidence_package(
+            &conn,
+            "trace-runtime-policy-human-marked",
+            "请说明文本证据",
+            vec![runtime_policy_test_card(marker)],
+        )
+        .expect("evidence package");
+
+        assert_eq!(package.review.status, "passed");
+        assert_eq!(package.knowledge_state_summary.selected_count, 1);
+        assert_eq!(package.knowledge_state_summary.runtime_usable_count, 0);
+        assert_eq!(package.knowledge_state_summary.human_marked_count, 1);
+        assert_eq!(
+            package.knowledge_state_summary.safe_public_label.as_deref(),
+            Some("人工标记")
+        );
+        let knowledge_ref = package
+            .claim_evidence_map
+            .iter()
+            .flat_map(|claim| claim.knowledge_item_refs.iter())
+            .next()
+            .expect("claim knowledge ref");
+        assert_eq!(knowledge_ref.state, KnowledgeState::HumanMarked);
+        assert_eq!(knowledge_ref.display_label.as_deref(), Some("人工标记"));
+        assert_eq!(
+            knowledge_ref.calibration_report_ref.as_deref(),
+            Some(report.report_ref.as_str())
+        );
+
+        let answer = local_answer("请说明文本证据", &package);
+        assert!(answer.contains("人工标记资料显示"));
+        let rendered_public =
+            serde_json::to_string(&package_json(&package)).expect("package json serializes");
+        assert!(rendered_public.contains("人工标记"));
+        assert!(!rendered_public.contains(&item.item_id));
+        assert!(!rendered_public.contains(&report.report_ref));
+        assert!(!rendered_public.contains("human_marked"));
+        assert!(!rendered_public.contains("system_calibrated"));
     }
 
     #[test]
@@ -17202,6 +18081,7 @@ mod tests {
             cards: vec![],
             claims: vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()],
             claim_evidence_map: vec![],
+            knowledge_state_summary: KnowledgeStateSummary::default(),
             review: review("量子计算机是什么？", &[], &[]),
         };
         let answer = replay_answer(&package);
@@ -17709,6 +18589,7 @@ mod tests {
             cards,
             claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
             claim_evidence_map: vec![],
+            knowledge_state_summary: KnowledgeStateSummary::default(),
             review,
         };
         RuntimeWorkflowOutput {

@@ -1178,3 +1178,12 @@
     clippy。Milestone B 完成只表示 candidate 可以被系统校准为
     `system_calibrated`；Milestone C-E 仍未完成，`system_calibrated` 仍不能进入普通
     selected evidence、不能自动提升为 `runtime_usable`，也不能显示“人工标记”。
+12. 2026-05-17 已完成 Knowledge State Milestone C：`tonglingyu-runtime` 新增
+    runtime knowledge policy、`evidence_claim_knowledge_links`、显式
+    `runtime_usable` promotion API、知识状态摘要、claim-to-evidence 的 knowledge item
+    内部追踪，以及公开 package/replay/local answer 的安全摘要；`system_calibrated`、
+    `candidate`、`source_snapshot`、`rejected` 和 `deprecated` 不进入 selected
+    evidence，只有 `runtime_usable` / `human_marked` 可被运行使用。`tonglingyu-gateway`
+    的非流式/流式公开输出和 strict Gateway gate 已增加知识状态标签泄露检查。已通过
+    runtime/gateway 单包测试和 clippy。Milestone C 完成不表示人工复核入口或
+    release gate 闭合；Milestone D/E 仍未完成，不能声明运行中知识状态治理闭环完成。

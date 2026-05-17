@@ -259,35 +259,72 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 ## Milestone C：Runtime / Gateway 使用规则
 
-状态：未开始。
+状态：已完成，2026-05-17；提交见本节点提交。
 
 目标：`system_calibrated` 只能作为运行策略候选；被 runtime policy 显式提升为
 `runtime_usable` 后才能运行使用，且不能冒充人工确认。
 
-- [ ] Runtime 工具读取 knowledge item 时默认排除 `rejected` 和 `deprecated`。
-- [ ] Runtime 只能使用 `runtime_usable` 和 `human_marked` 条目；`system_calibrated`
+- [x] Runtime 工具读取 knowledge item 时默认排除 `rejected` 和 `deprecated`。
+- [x] Runtime 只能使用 `runtime_usable` 和 `human_marked` 条目；`system_calibrated`
   必须先被 runtime policy 显式提升或物化为 `runtime_usable`。
-- [ ] reviewer 能看到知识状态摘要，并在缺证据、低置信或状态不匹配时降级。
-- [ ] claim-to-evidence link 必须记录使用的 knowledge item id、state 和 evidence ref。
-- [ ] 普通回答可显示安全摘要，例如“基于当前已登记资料”或“人工标记”，但不能泄露
+- [x] reviewer 能看到知识状态摘要，并在缺证据、低置信或状态不匹配时降级。
+- [x] claim-to-evidence link 必须记录使用的 knowledge item id、state 和 evidence ref。
+- [x] 普通回答可显示安全摘要，例如“基于当前已登记资料”或“人工标记”，但不能泄露
   governance task / RQA failure 内部字段。
-- [ ] 只有 `human_marked` 条目能展示“人工标记”字样。
-- [ ] `system_calibrated` 条目不得展示为“人工确认”“专家确认”或等价文案。
-- [ ] Gateway 不直接查询或修改 knowledge item；所有领域读取和状态逻辑通过 Runtime
+- [x] 只有 `human_marked` 条目能展示“人工标记”字样。
+- [x] `system_calibrated` 条目不得展示为“人工确认”“专家确认”或等价文案。
+- [x] Gateway 不直接查询或修改 knowledge item；所有领域读取和状态逻辑通过 Runtime
   store/API。
-- [ ] streaming 和 non-streaming 响应边界一致，均不得泄露内部治理字段。
-- [ ] strict Gateway gate 增加知识状态泄露和错误标记检查。
-- [ ] 普通 chat、streaming chat 和 package replay 路径不得同步调用校准 LLM；缺证据时
+- [x] streaming 和 non-streaming 响应边界一致，均不得泄露内部治理字段。
+- [x] strict Gateway gate 增加知识状态泄露和错误标记检查。
+- [x] 普通 chat、streaming chat 和 package replay 路径不得同步调用校准 LLM；缺证据时
   只能降级回答并生成异步治理任务。
-- [ ] Runtime policy 拒绝、过期、缺 release run、缺 evidence ref 或缺 source boundary
+- [x] Runtime policy 拒绝、过期、缺 release run、缺 evidence ref 或缺 source boundary
   的 `system_calibrated` 条目不得进入 selected evidence。
 
 完成口径：
 
-- [ ] 普通 chat、streaming chat、admin trace 和 package replay 都能稳定处理知识状态。
-- [ ] 由 `system_calibrated` 提升为 `runtime_usable` 的回答不会越界声称人工确认。
-- [ ] `human_marked` 的显示路径可复核且有 audit。
-- [ ] selected evidence 中每个知识条目都能追溯到 `runtime_usable` 策略决策。
+- [x] 普通 chat、streaming chat、admin trace 和 package replay 都能稳定处理知识状态。
+- [x] 由 `system_calibrated` 提升为 `runtime_usable` 的回答不会越界声称人工确认。
+- [x] `human_marked` 的显示路径可复核且有 audit。
+- [x] selected evidence 中每个知识条目都能追溯到 `runtime_usable` 策略决策。
+
+节点总结：
+
+- Runtime 新增 `KNOWLEDGE_RUNTIME_POLICY_VERSION` 和 additive
+  `evidence_claim_knowledge_links` schema；证据包内的 claim-to-evidence link 会在
+  内部记录 item id、state、evidence ref、policy decision 和 calibration report ref。
+- `system_calibrated` 只计入候选和 reviewer 降级摘要；未经过显式
+  `promote_knowledge_item_runtime_usable`、release run、source boundary、evidence ref、
+  calibration report ref、confidence 和 expiry 校验的条目不会进入 selected evidence。
+- `runtime_usable` 和 `human_marked` 是运行期唯二可引用状态；`rejected`、
+  `deprecated`、`candidate` 和 `source_snapshot` 默认被 Runtime policy 排除。
+- 公开 `package_json`、package replay、本地回答、普通 completion 和 streaming delta
+  只输出安全标签或中性计数；公开路径不输出 `item_id`、状态名、
+  `calibration_report_ref`、`runtime_policy`、`policy_version` 或 release run。
+- 只有 `human_marked` 会公开出现“人工标记”；`runtime_usable` 只显示
+  “基于当前已登记资料”，`system_calibrated` 不会显示为人工或专家确认。
+- Gateway 保持薄边界：普通路径和 admin/package 读取仍经 `TonglingyuRuntimeStore`；
+  strict Gateway live gate 已加入知识状态标签和错误字段泄露检查。
+
+验证：
+
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime
+  --all-targets -- -D warnings`
+- `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
+  --all-targets -- -D warnings`
+- `bash -n deploy/scripts/verify-tonglingyu-strict-gateway.sh`
+
+边界：
+
+- Milestone C 完成只表示 Runtime/Gateway 使用规则闭合；不表示运行中人工复核入口
+  已完成，也不表示 KB diff、eval 和 release gate 已能复核所有知识状态变化。
+- `human_marked` 的完整人工复核写入口、reviewer metadata 强约束和 Open WebUI admin
+  Action 操作面仍属于 Milestone D。
+- release report、saved report validator 和 per-kind 状态变化 release gate 仍属于
+  Milestone E。
 
 ## Milestone D：运行中人工复核入口
 

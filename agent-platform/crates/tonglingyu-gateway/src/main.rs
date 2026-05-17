@@ -69,6 +69,18 @@ const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
 const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
 const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
 const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
+const PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS: &[&str] = &[
+    "system_calibrated",
+    "runtime_usable",
+    "human_marked",
+    "knowledge_item_ref",
+    "knowledge_item_refs",
+    "calibration_report_ref",
+    "runtime_policy",
+    "policy_version",
+    "state_version",
+    "release_run_id",
+];
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -6707,7 +6719,29 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("review");
         map.remove("session_id");
     }
+    if let Some(content) = public
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(public_answer_content)
+    {
+        public["choices"][0]["message"]["content"] = json!(content);
+    }
     public
+}
+
+fn public_answer_content(content: &str) -> String {
+    if contains_public_forbidden_knowledge_state_term(content) {
+        "当前回答未通过公开输出检查，不能直接返回。请基于可追溯证据重新提问。".to_string()
+    } else {
+        content.to_string()
+    }
+}
+
+fn contains_public_forbidden_knowledge_state_term(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS
+        .iter()
+        .any(|term| lower.contains(term))
 }
 
 fn cached_runtime_stream_events(value: &Value) -> Option<Vec<RuntimeWorkflowStreamEvent>> {
@@ -6727,10 +6761,12 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_MODEL_ID);
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let content = public_answer_content(
+        value
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
     let mut chunks = Vec::new();
     chunks.push(format!(
@@ -6746,7 +6782,7 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
             }]
         })
     ));
-    for piece in text_stream_chunks(content, 96) {
+    for piece in text_stream_chunks(&content, 96) {
         chunks.push(format!(
             "data: {}\n\n",
             json!({
@@ -6801,6 +6837,14 @@ fn streaming_response_from_runtime_events(
     value: &Value,
     events: &[RuntimeWorkflowStreamEvent],
 ) -> Response {
+    let streamed_content = events
+        .iter()
+        .filter(|event| event.event_type == "content_delta")
+        .filter_map(|event| event.content_delta.as_deref())
+        .collect::<String>();
+    if contains_public_forbidden_knowledge_state_term(&streamed_content) {
+        return streaming_response_from_completion_value(&public_completion_value(value));
+    }
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
     let mut chunks = Vec::new();
     chunks.push(format!(
@@ -8111,6 +8155,7 @@ mod tests {
             cards: Vec::new(),
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -8564,6 +8609,7 @@ mod tests {
             cards: Vec::new(),
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -9674,6 +9720,7 @@ USER: 介绍尤三姐
             cards: vec![eval_test_card("block-public-rqa-test")],
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
@@ -9700,6 +9747,31 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("session-public-rqa-test"));
     }
 
+    #[test]
+    fn public_completion_blocks_knowledge_state_labels_in_answer_content() {
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "internal state: system_calibrated runtime_usable human_marked knowledge_item_refs"
+                .to_string(),
+            None,
+            Some("session-public-knowledge-state-test"),
+        );
+
+        let rendered =
+            serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
+
+        for forbidden in [
+            "system_calibrated",
+            "runtime_usable",
+            "human_marked",
+            "knowledge_item_refs",
+            "session-public-knowledge-state-test",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+        assert!(rendered.contains("公开输出检查"));
+    }
+
     #[tokio::test]
     async fn streaming_completion_does_not_expose_rqa_internal_fields() {
         let package = EvidencePackage {
@@ -9709,6 +9781,7 @@ USER: 介绍尤三姐
             cards: vec![eval_test_card("block-public-rqa-stream-test")],
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
@@ -9732,6 +9805,44 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("pkg-public-rqa-stream-test"));
         assert!(!rendered.contains("reviewer"));
         assert!(!rendered.contains("session-public-rqa-stream-test"));
+    }
+
+    #[tokio::test]
+    async fn streaming_completion_blocks_knowledge_state_labels_in_deltas() {
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "fallback contains no internal label".to_string(),
+            None,
+            Some("session-public-knowledge-state-stream-test"),
+        );
+        let response = streaming_response_from_runtime_events(
+            DEFAULT_MODEL_ID,
+            &value,
+            &[RuntimeWorkflowStreamEvent {
+                sequence: 1,
+                event_type: "content_delta".to_string(),
+                profile: "honglou-main".to_string(),
+                trace_id: "trace-public-knowledge-state-stream-test".to_string(),
+                content_delta: Some("leaked runtime_usable knowledge_item_refs".to_string()),
+                output_ref: None,
+                package_id: None,
+                metadata: json!({"state": "system_calibrated"}),
+            }],
+        );
+
+        let rendered = response_text(response).await;
+
+        for forbidden in [
+            "system_calibrated",
+            "runtime_usable",
+            "human_marked",
+            "knowledge_item_refs",
+            "trace-public-knowledge-state-stream-test",
+            "session-public-knowledge-state-stream-test",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+        assert!(rendered.contains("fallback contains no internal label"));
     }
 
     #[test]
