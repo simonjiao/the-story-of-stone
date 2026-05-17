@@ -40,6 +40,8 @@ RELEASE_REPORT_PATH="${TONGLINGYU_RELEASE_REPORT_PATH:-${ARTIFACT_DIR}/release-r
 VALIDATION_REPORT_PATH="${TONGLINGYU_RQA_RELEASE_VALIDATION_REPORT_PATH:-${ARTIFACT_DIR}/release-readiness-validation.json}"
 CONTRACT_STDOUT="${WORK_DIR}/contract-smoke.stdout"
 CONTRACT_STDERR="${WORK_DIR}/contract-smoke.stderr"
+SCHEMA_MIGRATION_STDOUT="${WORK_DIR}/runtime-schema-migrate.stdout"
+SCHEMA_MIGRATION_STDERR="${WORK_DIR}/runtime-schema-migrate.stderr"
 LIVE_CAPACITY_STDOUT="${WORK_DIR}/live-capacity-load-smoke.stdout"
 LIVE_CAPACITY_STDERR="${WORK_DIR}/live-capacity-load-smoke.stderr"
 READINESS_STDOUT="${WORK_DIR}/release-readiness.stdout"
@@ -57,6 +59,15 @@ contract_status="failed"
 if "${SCRIPT_DIR}/test-tonglingyu-release-readiness-contract.sh" \
   >"${CONTRACT_STDOUT}" 2>"${CONTRACT_STDERR}"; then
   contract_status="passed"
+fi
+
+schema_migration_status="failed"
+schema_migration_gateway_bin="${TONGLINGYU_RQA_SCHEMA_MIGRATION_GATEWAY_BIN:-${TONGLINGYU_RQA_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}}"
+schema_migration_db_path="${TONGLINGYU_RQA_SCHEMA_MIGRATION_DB_PATH:-${TONGLINGYU_RQA_DB_PATH:-${REPO_DIR}/data/tonglingyu/tonglingyu.db}}"
+if "${schema_migration_gateway_bin}" runtime-schema-migrate \
+  --db "${schema_migration_db_path}" \
+  >"${SCHEMA_MIGRATION_STDOUT}" 2>"${SCHEMA_MIGRATION_STDERR}"; then
+  schema_migration_status="passed"
 fi
 
 live_capacity_status="not_run"
@@ -125,10 +136,12 @@ fi
 
 python3 - "${REPORT_PATH}" "${ARTIFACT_DIR}" "${WORK_DIR}" \
   "${RUN_ID}" "${GIT_COMMIT}" \
-  "${contract_status}" "${live_capacity_status}" "${readiness_status}" \
+  "${contract_status}" "${schema_migration_status}" \
+  "${live_capacity_status}" "${readiness_status}" \
   "${post_release_ops_status}" "${validator_status}" \
   "${RELEASE_REPORT_PATH}" "${VALIDATION_REPORT_PATH}" \
   "${CONTRACT_STDOUT}" "${CONTRACT_STDERR}" \
+  "${SCHEMA_MIGRATION_STDOUT}" "${SCHEMA_MIGRATION_STDERR}" \
   "${LIVE_CAPACITY_STDOUT}" "${LIVE_CAPACITY_STDERR}" "${live_capacity_report_path}" \
   "${READINESS_STDOUT}" "${READINESS_STDERR}" \
   "${POST_RELEASE_OPS_STDOUT}" "${POST_RELEASE_OPS_STDERR}" "${post_release_ops_env_path}" \
@@ -146,6 +159,7 @@ from pathlib import Path
     run_id,
     git_commit,
     contract_status,
+    schema_migration_status,
     live_capacity_status,
     readiness_status,
     post_release_ops_status,
@@ -154,6 +168,8 @@ from pathlib import Path
     validation_report_path_raw,
     contract_stdout_raw,
     contract_stderr_raw,
+    schema_migration_stdout_raw,
+    schema_migration_stderr_raw,
     live_capacity_stdout_raw,
     live_capacity_stderr_raw,
     live_capacity_report_path_raw,
@@ -164,7 +180,7 @@ from pathlib import Path
     post_release_ops_env_path_raw,
     validator_stdout_raw,
     validator_stderr_raw,
-) = sys.argv[1:25]
+) = sys.argv[1:28]
 
 
 def tail(path_raw, limit=20):
@@ -257,6 +273,7 @@ automation_report_persistent = target_is_outside_work_dir(report_path_raw)
 
 production_ready = (
     contract_status == "passed"
+    and schema_migration_status == "passed"
     and live_capacity_status != "failed"
     and readiness_status == "passed"
     and validator_status == "passed"
@@ -273,6 +290,8 @@ production_ready = (
 errors = []
 if contract_status != "passed":
     errors.append("contract_smoke_failed")
+if schema_migration_status != "passed":
+    errors.append("runtime_schema_migration_failed")
 if readiness_status != "passed":
     errors.append("release_readiness_failed")
 if post_release_ops_status == "failed":
@@ -312,6 +331,7 @@ payload = {
     "artifact_dir": str(Path(artifact_dir_raw)),
     "checks": {
         "contract_smoke": contract_status,
+        "runtime_schema_migration": schema_migration_status,
         "live_capacity_load_smoke": live_capacity_status,
         "post_release_ops_evidence": post_release_ops_status,
         "release_readiness": readiness_status,
@@ -348,6 +368,9 @@ payload = {
         ),
         "validator_stdout_sha256": file_sha256(validator_stdout_raw),
         "contract_stdout_sha256": file_sha256(contract_stdout_raw),
+        "runtime_schema_migration_stdout_sha256": file_sha256(
+            schema_migration_stdout_raw
+        ),
         "live_capacity_stdout_sha256": file_sha256(live_capacity_stdout_raw),
         "live_capacity_report_path": str(Path(live_capacity_report_path_raw)),
         "live_capacity_report_sha256": file_sha256(live_capacity_report_path_raw),
@@ -382,6 +405,7 @@ payload = {
     },
     "tails": {
         "contract_stderr": tail(contract_stderr_raw),
+        "runtime_schema_migration_stderr": tail(schema_migration_stderr_raw),
         "live_capacity_stderr": tail(live_capacity_stderr_raw),
         "post_release_ops_stderr": tail(post_release_ops_stderr_raw),
         "readiness_stderr": tail(readiness_stderr_raw),

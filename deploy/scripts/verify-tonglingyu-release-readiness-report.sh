@@ -3319,6 +3319,9 @@ def validate_openwebui_admin_action_contract_gate_stdout():
         "governance_task_create",
         "governance_task_from_failure",
         "governance_task_update",
+        "knowledge_items",
+        "knowledge_item",
+        "knowledge_item_review",
         "knowledge_patch_proposal",
     }
     if not isinstance(action, dict):
@@ -3403,6 +3406,9 @@ def validate_openwebui_admin_action_live_gate_stdout():
         "governance_task_create",
         "governance_task_from_failure",
         "governance_task_update",
+        "knowledge_items",
+        "knowledge_item",
+        "knowledge_item_review",
         "knowledge_patch_proposal",
     }
     required_api_paths = {
@@ -3413,6 +3419,7 @@ def validate_openwebui_admin_action_live_gate_stdout():
         "/v1/admin/retrieval-failures",
         "/v1/admin/governance/tasks",
         "/v1/admin/governance/proposals",
+        "/v1/admin/knowledge/items",
     }
     required_checks = (
         "active_global_action",

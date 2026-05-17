@@ -89,6 +89,7 @@ chmod 755 agent-platform/target/debug/tonglingyu-gateway
 cat > .tonglingyu-release-tool-env <<EOF
 export TONGLINGYU_DEPLOY_ENV_FILE='${project_dir}/.env'
 export TONGLINGYU_RQA_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
+export TONGLINGYU_RQA_SCHEMA_MIGRATION_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_QUALITY_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_MIGRATION_PREFLIGHT_GATEWAY_BIN='${project_dir}/agent-platform/target/debug/tonglingyu-gateway'
 export TONGLINGYU_RQA_MIGRATION_PREFLIGHT_SKIP_BUILD=true

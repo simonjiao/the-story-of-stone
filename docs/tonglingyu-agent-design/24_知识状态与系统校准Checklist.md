@@ -233,7 +233,8 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
   matrix、config digest 和隐私标记；admin trace 通过 audit event 引用 report，RQA
   校准 report 可保留 RQA report refs，KB summary/diff 可带出 calibration report refs。
 - 校准通过只把 `candidate` 升为 `system_calibrated`；`runtime_usable` 自动提升明确为
-  false，覆盖矩阵保留 runtime policy 拒绝原因，后续仍需 Milestone C/E 接管真正运行使用。
+  false，覆盖矩阵保留 runtime policy 拒绝原因；真正运行使用由 Milestone C/E 的
+  runtime policy、KB diff、eval 和 release gate 接管。
 - Gateway 新增可执行离线入口：
 
   ```bash
@@ -255,7 +256,9 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 - Milestone B 完成不表示普通回答已经使用 knowledge item；`system_calibrated` 仍不能进入
   selected evidence 或展示为“人工标记”。
-- Milestone C-E 仍未完成，不能声明运行中知识状态治理闭环完成。
+- Milestone B 单独完成不表示知识状态治理闭环完成；最终声明仍必须同时验证
+  Milestone C-E 的 Runtime/Gateway 使用规则、运行中人工复核入口、KB diff、eval 和
+  release gate。
 
 ## Milestone C：Runtime / Gateway 使用规则
 
@@ -319,12 +322,12 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 边界：
 
-- Milestone C 完成只表示 Runtime/Gateway 使用规则闭合；不表示运行中人工复核入口
-  已完成，也不表示 KB diff、eval 和 release gate 已能复核所有知识状态变化。
+- Milestone C 单独完成只表示 Runtime/Gateway 使用规则闭合；不能替代运行中人工复核
+  入口、KB diff、eval 和 release gate。
 - `human_marked` 的完整人工复核写入口、reviewer metadata 强约束和 Open WebUI admin
-  Action 操作面仍属于 Milestone D。
+  Action 操作面由 Milestone D 验收。
 - release report、saved report validator 和 per-kind 状态变化 release gate 仍属于
-  Milestone E。
+  Milestone E，并且必须进入最终验收矩阵。
 
 ## Milestone D：运行中人工复核入口
 
@@ -386,8 +389,8 @@ bash deploy/scripts/test-openwebui-gateway-admin-action-contract.sh
 
 未提前声明：
 
-- Milestone D 完成只表示运行中人工复核入口闭合；KB diff、eval impact、saved report
-  validator 和 release gate 仍属于 Milestone E，不能声明完整知识状态治理闭环完成。
+- Milestone D 单独完成只表示运行中人工复核入口闭合；不能替代 Milestone E 的
+  KB diff、eval impact、saved report validator 和 release gate。
 
 ## Milestone E：KB diff、eval 和 release gate
 
@@ -507,24 +510,29 @@ saved report validator 和 Open WebUI/Gateway 证据后，才允许声明：
 4. `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
    `--all-targets -- -D warnings`
 5. `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
-6. `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh`
-7. `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
-8. `deploy/scripts/verify-tonglingyu-release-readiness.sh`
-9. `deploy/scripts/verify-tonglingyu-release-readiness-report.sh`
-10. `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
+6. `agent-platform/scripts/tonglingyu-knowledge-calibration-run.sh`
+7. `agent-platform/scripts/tonglingyu-calibration-job-smoke.sh`
+8. `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh`
+9. `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
+10. `deploy/scripts/verify-tonglingyu-knowledge-state-release.sh`
+11. `deploy/scripts/verify-tonglingyu-release-readiness.sh`
+12. `deploy/scripts/verify-tonglingyu-release-readiness-report.sh`
+13. `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
-计划新增并在实现后纳入验收的命令或证据：
+知识状态专用验收入口已落地并纳入验收：
 
-1. `agent-platform/scripts/tonglingyu-knowledge-calibration-run.sh`：离线 calibration
-   runner 执行记录和 report artifact，待 Milestone B 实现。
-2. `agent-platform/scripts/tonglingyu-calibration-job-smoke.sh`：异步 calibration job
-   的 fail-closed / retry / lease smoke，待 Milestone B 实现。
-3. `deploy/scripts/verify-tonglingyu-knowledge-state-release.sh`：release readiness
-   validator 对 calibration run id、artifact digest、runtime policy promotion 和同次请求
-   临时结果的拒绝证据，待 Milestone E 实现。
+1. `agent-platform/scripts/tonglingyu-knowledge-calibration-run.sh`：实际执行离线
+   `knowledge-calibrate`，保存 input、SQLite DB、calibration report 和 smoke summary，
+   并验证 `system_calibrated` 不会自动变成 `runtime_usable`。
+2. `agent-platform/scripts/tonglingyu-calibration-job-smoke.sh`：固定运行
+   calibration job 的 idempotency、lease、heartbeat、retry、audit 和 LLM 配置
+   fail-closed 覆盖。
+3. `deploy/scripts/verify-tonglingyu-knowledge-state-release.sh`：串联 release readiness
+   与 saved report validator，并单独校验 knowledge state manifest、artifact registry、
+   calibration job summary、KB diff digest 和 eval impact digest。
 
-以上 3 项在命令名、artifact 路径、退出码和 validator 规则落地前，只能作为缺口清单，
-不能作为任何 milestone 完成证据。
+以上 3 项不再是缺口清单。后续如果替换命令，必须同步更新命令名、artifact 路径、
+退出码、summary schema 和 validator 规则；不能回到“命令名待定”状态。
 
 如果目标 live 环境参与声明，还必须重新生成当次 live release readiness report 和 saved
 report validator 输出；旧 artifact 只能作为历史证据，不能证明当前状态。

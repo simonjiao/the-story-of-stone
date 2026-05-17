@@ -102,6 +102,7 @@ enum Command {
     Eval(EvalArgs),
     KnowledgeCalibrate(KnowledgeCalibrateArgs),
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
+    RuntimeSchemaMigrate(RuntimeSchemaMigrateArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
     RqaRestoreCanary(RqaRestoreCanaryArgs),
@@ -221,6 +222,16 @@ struct KnowledgeCalibrateArgs {
 
 #[derive(Debug, Parser, Clone)]
 struct RuntimeSchemaPreflightArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeSchemaMigrateArgs {
     #[arg(
         long,
         env = "TONGLINGYU_DB_PATH",
@@ -1140,6 +1151,15 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
+        Command::RuntimeSchemaMigrate(args) => {
+            let report = runtime_schema_migrate_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("runtime schema migration did not complete"))
+            }
+        }
         Command::KbSourceMetadataBackfill(args) => {
             let conn = open_db(&args.db)?;
             let report = tonglingyu_runtime::backfill_source_metadata_from_snapshots(
@@ -1450,6 +1470,41 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
         args.output.display()
     );
     Ok(())
+}
+
+fn runtime_schema_migrate_command(args: &RuntimeSchemaMigrateArgs) -> Result<Value> {
+    let store = TonglingyuRuntimeStore::new(args.db.clone());
+    let before = store.runtime_schema_migration_preflight()?;
+    if let Some(parent) = args.db.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let conn = open_db(&args.db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    let after = store.runtime_schema_migration_preflight()?;
+    let before_pending = before
+        .get("pending_migrations")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let after_pending = after
+        .get("pending_migrations")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    Ok(json!({
+        "object": "tonglingyu.runtime_schema_migration_apply",
+        "schema_version": 1,
+        "status": if after_pending == 0 { "ok" } else { "failed" },
+        "db_path_sha256": hash_text(&args.db.display().to_string()),
+        "before": before,
+        "after": after,
+        "pending_before": before_pending,
+        "pending_after": after_pending,
+        "applied_count": before_pending.saturating_sub(after_pending),
+        "will_rebuild_knowledge_base": false,
+        "will_delete_runtime_data": false,
+        "secret_values_printed": false,
+    }))
 }
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
@@ -8557,6 +8612,32 @@ mod tests {
 
     fn temp_gateway_db_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("{label}-{}.db", new_trace_id()))
+    }
+
+    #[test]
+    fn runtime_schema_migrate_command_applies_additive_migrations() {
+        let db_path = temp_gateway_db_path("tonglingyu-runtime-schema-migrate");
+        remove_sqlite_file_set(&db_path);
+        let report = runtime_schema_migrate_command(&RuntimeSchemaMigrateArgs {
+            db: db_path.clone(),
+        })
+        .expect("runtime schema migrate");
+
+        assert_eq!(
+            report["object"],
+            json!("tonglingyu.runtime_schema_migration_apply")
+        );
+        assert_eq!(report["status"], json!("ok"));
+        assert_eq!(report["pending_after"], json!(0));
+        assert_eq!(report["will_rebuild_knowledge_base"], json!(false));
+        assert_eq!(report["will_delete_runtime_data"], json!(false));
+        assert_eq!(report["secret_values_printed"], json!(false));
+        assert!(
+            report["pending_before"].as_u64().unwrap_or_default() > 0,
+            "{report}"
+        );
+        assert_eq!(report["after"]["pending_migrations"], json!([]), "{report}");
+        remove_sqlite_file_set(&db_path);
     }
 
     fn test_app_state(db_path: PathBuf) -> AppState {
