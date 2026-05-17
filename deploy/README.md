@@ -520,9 +520,8 @@ api_key: none
 
 ## Open WebUI Model Connections
 
-Global Router is intentionally not part of this production deploy path. It is
-still tracked as a standalone design, but the current implementation is not
-production-grade enough to sit between Open WebUI and the model endpoints.
+Global Router is intentionally not part of this production deploy path and no
+longer ships in the Tonglingyu workspace.
 
 Open WebUI is configured with one direct OpenAI-compatible connection:
 
@@ -534,10 +533,9 @@ The expected visible models are:
 
 - `tonglingyu`: 通灵玉 evidence and reviewer gateway.
 
-This direct setup removes both the old Orchestrator provider and the Global
-Router MVP from the production request path. Global Router remains a standalone
-design topic, but the Tonglingyu deployment path is Open WebUI -> Gateway ->
-Hermes runtime.
+This direct setup removes both the old Orchestrator provider and the old Global
+Router MVP from the production request path. The Tonglingyu deployment path is
+Open WebUI -> Gateway -> Hermes runtime.
 
 Operational constraints:
 

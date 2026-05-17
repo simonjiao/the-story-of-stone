@@ -1,15 +1,15 @@
-# 跨项目进展索引
+# 通灵玉进展索引
 
-本文件只作为进展入口索引。具体项目进展放在对应项目目录中，避免把不同
-项目的状态混写到根目录。
+本文件只作为通灵玉进展入口索引。当前现实状态以
+`docs/tonglingyu-agent-design/PROGRESS.md` 和
+`docs/tonglingyu-agent-design/23_hhost重建Checklist.md` 为准。
 
-## 项目进展
+## 入口
 
 - 通灵玉：`docs/tonglingyu-agent-design/PROGRESS.md`
-- Global Router：`docs/global-router-design/PROGRESS.md`
-- Agent Platform：`docs/agent-platform-design/PROGRESS.md`
+- hhost 重建：`docs/tonglingyu-agent-design/23_hhost重建Checklist.md`
 
 ## 相关验证记录
 
-- Open WebUI / Hermes 部署测试：`docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md`
-- Agent Platform P0/P1/P2 细项：`docs/agent-platform-design/*_IMPLEMENTATION_CHECKLIST.md`
+- RQA 生产实现：`docs/tonglingyu-agent-design/22_RQA生产实现Checklist.md`
+- 部署运行手册：`deploy/README.md`

@@ -18,7 +18,7 @@ struct Args {
     #[arg(
         long,
         env = "AGENT_RUNTIME_PROFILE",
-        default_value = "agent-platform-minimal"
+        default_value = "tonglingyu-minimal"
     )]
     profile: String,
 

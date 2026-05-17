@@ -941,7 +941,7 @@ impl AgentInstance {
             .map(str::trim)
             .filter(|profile| !profile.is_empty())
             .map(ToString::to_string)
-            .unwrap_or_else(|| format!("{agent_type}:agent-platform-minimal"));
+            .unwrap_or_else(|| format!("{agent_type}:tonglingyu-minimal"));
         Self {
             id: new_id("agent"),
             hermes_profile,

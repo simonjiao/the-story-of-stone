@@ -8,6 +8,14 @@
   source snapshot，并保留 `rare_char_annotations`。
 - `resources/styles/buhongjushi/` 风格转录保留，不作为主证据库。
 - Rust 主线入口为 `agent-platform/crates/tonglingyu-gateway/`。
+- 2026-05-17 仓库边界已收敛为通灵玉 Agent 系统：Rust workspace 只保留
+  `agent-core`、`agent-runtime`、`tonglingyu-runtime` 和
+  `tonglingyu-gateway`；旧 Agent Platform 控制面、Global Router、Postgres
+  store、worker、agentctl、旧 Dockerfile 和旧设计文档已退出仓库主线。
+- 2026-05-17 `deploy/docker-compose.yml` 已收敛为 Tonglingyu-only stack：
+  `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`；所有固定容器名
+  使用 `tonglingyu-` 前缀，Open WebUI 只连接
+  `http://tonglingyu-gateway:8090/v1`。
 
 ## 已确认
 
@@ -51,14 +59,11 @@
   healthcheck 为 healthy。
 - `tonglingyu-gateway` 已拆为独立镜像，使用
   `agent-platform/crates/tonglingyu-gateway/Dockerfile` 构建，并通过
-  BuildKit cache mount 缓存 Cargo registry、git 源和 `target/`；通用
-  `hermes-agent-platform` 镜像不再包含 gateway 二进制。
+  BuildKit cache mount 缓存 Cargo registry、git 源和 `target/`。
 - 远端已验证第二次 `docker compose build tonglingyu-gateway` 全部命中
-  Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制，
-  `hermes-agent-platform:formal` 不含 gateway 二进制。
-- Open WebUI 当前通过独立 Rust `global-router` 作为单入口；它是 MVP
-  路由层，不是完整生产级 router。设计和进展独立记录在
-  `docs/global-router-design/`。
+  Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制。
+- 旧 Global Router 不再进入当前生产路径；Open WebUI 的目标生产入口是
+  `tonglingyu-gateway`。
 - 远端 KB 由 `tonglingyu-gateway` 容器启动时从 source snapshot 构建，
   当前 `/healthz` 返回 5 个来源、10419 个 blocks；Open WebUI 容器内
   `DEFAULT_MODELS=tonglingyu`。
@@ -463,10 +468,10 @@
 - 远端 `hhost` 当前 model upstream gate 通过；`chatgpt.com` 仍可能解析到
   198.18.0.0/15 fake-IP，但 TLS/HTTP 可观测，因此该 gate 会作为网络层早期
   诊断，而不是替代 strict Gateway 的端到端契约。
-- `agent-platform/Dockerfile` 和 `agent-platform/crates/tonglingyu-gateway/Dockerfile`
-  的 BuildKit frontend 已从浮动 `docker/dockerfile:1.7` pin 到
-  `docker/dockerfile:1.7.0`；远程 `hhost` build 已验证 `1.7.0` 可解析并完成
-  `tonglingyu-gateway:formal` 构建。
+- `agent-platform/crates/tonglingyu-gateway/Dockerfile` 的 BuildKit frontend 已从
+  浮动 `docker/dockerfile:1.7` pin 到 `docker/dockerfile:1.7.0`；远程
+  `hhost` build 已验证 `1.7.0` 可解析并完成 `tonglingyu-gateway:formal`
+  构建。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
@@ -920,15 +925,12 @@
   已重建并重启到包含该 CLI 的 `tonglingyu-gateway:formal`
   (`sha256:f1e27233696cd2282f269d3d1a68085fefa5e972588a042960ffd89139c70b55`)。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
-  `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
-  `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
-  `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
-  deploy env 后解析 image refs 并检查 mutable tag / digest missing。2026-05-16
-  已将 Agent Platform JWT provider 从 RustCrypto RSA 链路切到 `aws_lc_rs`，并把
-  `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
-  lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
-  扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
-  fixture image scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
+  `TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、`OPEN_WEBUI_IMAGE_REF` 和
+  `CLOUDFLARED_IMAGE_REF` 绑定 immutable digest；security gate 会读取 deploy env
+  后解析 image refs 并检查 mutable tag / digest missing。2026-05-17 仓库已删除
+  旧 Agent Platform Postgres/store/JWT 链路；真实 `cargo-audit` 扫描应只覆盖当前
+  Tonglingyu workspace。当前 security gate 已用真实 dependency scan、fixture image
+  scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
   JSON 持久化到 `data/tonglingyu/security-image-scans/<run_id>/` 或显式
   `TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR`，并解析每个 image
   report 的 HIGH/CRITICAL vulnerability。image scan artifact 已绑定当前
@@ -936,24 +938,21 @@
   path hash 和 raw report artifact dir；saved report validator 会重算 raw
   report path/content digest，并拒绝 scan refs 与 release refs 不一致、raw
   report 缺失或 raw report 不可读取的 production-ready 报告。
-- 2026-05-16 已把 `agent-platform` 与 `tonglingyu-gateway` runtime image 切到
-  Chainguard `glibc-dynamic` 基线，并在 first-party 容器内改用内置
-  `healthcheck` 子命令，移除对 runtime `curl`/apt 包的依赖。远端当前 first-party
-  image refs 已更新为
-  `AGENT_PLATFORM_IMAGE_REF=sha256:c559d34b96a430bb53650906ce8a23f64948904c4f2af7028c6e588a8f537a77`
-  和
+- 2026-05-16 已把 `tonglingyu-gateway` runtime image 切到 Chainguard
+  `glibc-dynamic` 基线，并在 first-party 容器内改用内置 `healthcheck` 子命令，
+  移除对 runtime `curl`/apt 包的依赖。远端当时 first-party image refs 已更新为
   `TONGLINGYU_GATEWAY_IMAGE_REF=sha256:084aa51d528359e6f86b3b574ebb59f4f7ddd72e4dda1adae0323190e6546bcb`；
-  这两个 first-party image 的 Trivy raw report 为 0 critical / 0 high。
+  该 first-party image 的 Trivy raw report 为 0 critical / 0 high。
 - 2026-05-16 已新增
   `deploy/scripts/prepare-tonglingyu-remote-security-evidence.sh`，完整远端 release
   automation 会先生成并同步真实 `cargo audit` dependency scan、当前 compose
-  image inventory 和 6 个 per-image Trivy raw reports。最新 security evidence
+  image inventory 和 per-image Trivy raw reports。最新 security evidence
   artifact 为
   `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-security-evidence.json`：
   dependency scan 0 critical / 0 high，image refs 均 immutable 且 raw reports
   可读取，但 aggregate image scan 仍 fail-closed：`critical_count=63`、
   `high_count=714`，来源为第三方 `hermes-agent`、`open-webui`、`cloudflared`
-  和 `postgres` 镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
+  镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
   production-ready artifact。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
@@ -964,8 +963,8 @@
   release report。
 - 目标环境 live `existing_refs` 恢复演练已在 release automation 中执行并保留
   持久备份 artifact；后续 RQA production-ready 仍必须保证自有镜像
-  (`AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical
-  findings，并在干净 release commit 上复跑 dependency/image scan 且绑定报告 hash。
+  (`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical findings，并在干净 release
+  commit 上复跑 dependency/image scan 且绑定报告 hash。
   第三方镜像 high/critical findings 不作为 production-ready blocker，但必须保留
   Trivy raw reports、ownership 分类和 nonblocking 风险摘要。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
@@ -1084,8 +1083,7 @@
   `rqa_incident_capacity`、`release_ops_readiness`、`openwebui_browser_review` 均
   `passed`，open P0 retrieval failures / governance tasks 均为 0；当时
   `required_failures=["security_scan"]`，`production_release_ready=false`。
-- 2026-05-16 已在提交 `8aea6545aa9917b850701c3239c2f018eb01bd35` 中调整
-  release security policy：镜像扫描按所有权分类，`AGENT_PLATFORM_IMAGE_REF` 和
+- 2026-05-17 已调整 release security policy：镜像扫描按所有权分类，
   `TONGLINGYU_GATEWAY_IMAGE_REF` 的 high/critical findings 仍 fail-closed，第三方
   镜像 findings 进入 `nonblocking_errors` 和 ownership summary，不再阻塞
   production-ready。contract smoke 已覆盖“自有镜像 high 仍失败”和“仅第三方镜像

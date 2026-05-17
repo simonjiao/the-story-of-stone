@@ -5,7 +5,7 @@
 本文定义“通灵玉”接入 Agent Runtime 的目标架构、职责边界和实施 checklist。
 它属于通灵玉领域设计，不属于 Agent Runtime 本体设计。
 
-本文引用并整合以下现有文档：
+本文引用并整合以下通灵玉文档：
 
 1. `05_总体架构.md`：Open WebUI 单入口、Gateway、四 Agent 和 RAG 分层。
 2. `06_四个Agent设计.md`：`honglou-main`、`honglou-text`、
@@ -16,7 +16,6 @@
 6. `11_权限审计与安全治理.md`：内部 profile 不暴露、reviewer 不可关闭。
 7. `12_验证方案与验收标准.md`：证据、审校、Gateway 和上线验证。
 8. `18_第一版实施细化计划.md`：第一版工程阶段和本地/目标环境验证顺序。
-9. `../agent-platform-design/09-agent-runtime-design.md`：通用 Runtime 能力基线。
 
 ## 目标
 
@@ -74,7 +73,7 @@ Gateway 不负责：
 2. 不构建证据卡片或证据包。
 3. 不执行 reviewer 或本地审校规则。
 4. 不维护证据包 replay 的领域逻辑。
-5. 不把通灵玉领域数据写入 Agent Platform core contract。
+5. 不把通灵玉领域数据写入 Gateway 外的通用 Runtime core contract。
 6. 不把内部 profile、prompt、tool payload 或 admin 字段暴露给普通用户。
 
 ## Runtime Agent 边界
@@ -93,8 +92,7 @@ Runtime Agent 不负责：
 
 1. 不决定普通用户是否有权访问通灵玉入口。
 2. 不暴露内部 profile 为 Open WebUI 可见模型。
-3. 不执行写入类外部动作；写工具仍只能走 Agent Platform Manager 的
-   external-action apply/compensate。
+3. 不执行写入类外部动作；当前通灵玉生产路径只允许 read-only tools。
 4. 不绕过 Gateway 的单入口、模型隐藏、reviewer 强制和审计要求。
 
 ## 领域 Read-only Tools

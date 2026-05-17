@@ -1,8 +1,9 @@
 # Rust Coding Rules
 
-These rules apply to Rust code under `agent-platform/`, including Agent Platform,
-Global Router, and Tonglingyu gateway crates. Prefer the existing crate and module
-boundaries before adding new abstraction.
+These rules apply to Rust code under `agent-platform/`, which now contains the
+Tonglingyu gateway/runtime crates and the minimal runtime support crates they
+depend on. Prefer the existing crate and module boundaries before adding new
+abstraction.
 
 ## Template Requirements
 
@@ -50,12 +51,12 @@ boundaries before adding new abstraction.
 
 - `agent-core` owns shared models, typed IDs, policy, errors, and public API
   contracts.
-- `agent-store` owns persistence, migrations, SQL mapping, queue claiming, locks,
-  heartbeats, and data-store traits.
-- `agent-manager` owns control-plane HTTP behavior, request fulfillment, approval,
-  lifecycle, admin, observer, and external-action services.
-- `agent-orchestrator`, `agent-worker`, `agent-runtime`, gateways, and CLIs should
-  depend on those contracts rather than duplicating them.
+- `agent-runtime` owns reusable Runtime client behavior and minimal/Hermes Runtime
+  adapters used by Tonglingyu.
+- `tonglingyu-runtime` owns source snapshot ingestion, SQLite/FTS, evidence,
+  reviewer, RQA, and Tonglingyu Runtime workflow behavior.
+- `tonglingyu-gateway` owns OpenAI-compatible HTTP, auth, model hiding, rate
+  limits, admin surfaces, and request/stream response wrapping.
 - Do not let web framework, database, queue, telemetry, or deployment concerns
   define core model semantics.
 
@@ -145,7 +146,7 @@ boundaries before adding new abstraction.
 - For Rust-only changes, start with the smallest crate-level `cargo fmt`,
   `cargo clippy`, and `cargo test` command that covers the touched crate.
 - Broaden to the full `agent-platform` workspace when shared models, traits,
-  store behavior, lifecycle behavior, or public API contracts change.
+  runtime behavior, lifecycle behavior, or public API contracts change.
 - State and concurrency changes must include tests or smoke evidence for lease
   ownership, heartbeat expiry, idempotency, lock behavior, retry timing, and error
   propagation.

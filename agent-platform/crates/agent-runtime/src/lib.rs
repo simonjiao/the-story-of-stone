@@ -200,7 +200,7 @@ impl MinimalRuntimeClient {
 
 impl Default for MinimalRuntimeClient {
     fn default() -> Self {
-        Self::new("agent-platform-minimal")
+        Self::new("tonglingyu-minimal")
     }
 }
 
@@ -1103,7 +1103,7 @@ impl HermesRuntimeClient {
 impl RuntimeClient for HermesRuntimeClient {
     async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
         self.ensure_read_only_runtime(input.run.external_action_mode)?;
-        let runtime_profile = runtime_profile_for_run(&input, "agent-platform-hermes");
+        let runtime_profile = runtime_profile_for_run(&input, "tonglingyu-hermes");
         let contract = input
             .profile_contract
             .clone()
@@ -1261,7 +1261,7 @@ impl RuntimeClient for HermesRuntimeClient {
     }
 
     async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
-        let runtime_profile = runtime_profile_for_run(&input, "agent-platform-hermes");
+        let runtime_profile = runtime_profile_for_run(&input, "tonglingyu-hermes");
         let trace_id = input.trace_id.clone();
         let run_id = input.run.id.clone();
         let error_schema_version = schema_version_for_contract_or_registry(
@@ -1993,7 +1993,7 @@ impl ActionGatewayConfig {
         Self {
             target_log_path: std::env::var("AGENT_ACTION_GATEWAY_TARGET_LOG")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/tmp/agent-platform-actions.jsonl")),
+                .unwrap_or_else(|_| PathBuf::from("/tmp/tonglingyu-actions.jsonl")),
             api_key: std::env::var("AGENT_ACTION_GATEWAY_API_KEY")
                 .ok()
                 .filter(|value| !value.is_empty()),
@@ -3334,7 +3334,7 @@ fn run_messages(input: &RuntimeRunInput, runtime_profile: &str) -> Vec<HermesCha
     let mut messages = vec![HermesChatMessage::new(
         "system",
         format!(
-            "You are executing an Agent Platform P1 read-only run. Runtime profile: {runtime_profile}. Never perform external writes or request write credentials."
+            "You are executing an Tonglingyu runtime read-only run. Runtime profile: {runtime_profile}. Never perform external writes or request write credentials."
         ),
     )];
     if let Some(context) = &input.context {
@@ -3378,7 +3378,7 @@ fn session_messages(input: &RuntimeSessionInput, runtime_profile: &str) -> Vec<H
     let mut messages = vec![HermesChatMessage::new(
         "system",
         format!(
-            "You are in an Agent Platform P1 read-only session. Runtime profile: {runtime_profile}. Do not request or use write credentials."
+            "You are in an Tonglingyu runtime read-only session. Runtime profile: {runtime_profile}. Do not request or use write credentials."
         ),
     )];
     if let Some(summary) = &input.context.context_summary {
@@ -6326,7 +6326,7 @@ mod tests {
 
     #[tokio::test]
     async fn hermes_runtime_stream_registry_contract_errors_preserve_schema_version() {
-        let mut run_contract = ProfileContract::new("agent-platform-hermes", "registry-v2");
+        let mut run_contract = ProfileContract::new("tonglingyu-hermes", "registry-v2");
         run_contract.max_runtime_seconds = Some(0);
         let mut session_contract = ProfileContract::new("agent-1", "registry-v2");
         session_contract.max_runtime_seconds = Some(0);
@@ -7063,7 +7063,7 @@ mod tests {
     #[tokio::test]
     async fn action_gateway_executes_idempotently_and_compensates() {
         let target_log = std::env::temp_dir().join(format!(
-            "agent-platform-action-gateway-{}.jsonl",
+            "tonglingyu-action-gateway-{}.jsonl",
             new_trace_id()
         ));
         let app = action_gateway_router(ActionGatewayConfig {
@@ -7071,7 +7071,7 @@ mod tests {
             api_key: Some("secret-token".to_string()),
             lease_ttl_seconds: 60,
             connector: "action-journal".to_string(),
-            allowed_credential_scopes: vec!["agent-platform:action-gateway-smoke".to_string()],
+            allowed_credential_scopes: vec!["tonglingyu:action-gateway-smoke".to_string()],
         })
         .unwrap();
         let base_url = spawn_server(app).await;
@@ -7101,7 +7101,7 @@ mod tests {
         let lease = provider
             .active_lease(CredentialLeaseRequest {
                 external_action_plan_id: plan.id.clone(),
-                credential_scope: "agent-platform:action-gateway-smoke".to_string(),
+                credential_scope: "tonglingyu:action-gateway-smoke".to_string(),
                 trace_id: trace_id.clone(),
             })
             .await

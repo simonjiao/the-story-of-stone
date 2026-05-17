@@ -111,7 +111,7 @@ impl DefaultPolicy {
 
         if matches!(ctx.risk_level, RiskLevel::Critical) {
             return PolicyDecision::Denied {
-                reason: "critical risk action is denied by Agent Platform policy".to_string(),
+                reason: "critical risk action is denied by Tonglingyu policy".to_string(),
             };
         }
 
@@ -123,9 +123,8 @@ impl DefaultPolicy {
 
         if matches!(ctx.external_action_mode, ExternalActionMode::Authorized) {
             return PolicyDecision::Denied {
-                reason:
-                    "Agent Platform read-only policy does not allow authorized external actions"
-                        .to_string(),
+                reason: "Tonglingyu read-only policy does not allow authorized external actions"
+                    .to_string(),
             };
         }
 
