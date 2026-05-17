@@ -631,6 +631,7 @@ If the available Open WebUI account is not an admin and the Function API returns
 
 ```bash
 ./scripts/install-openwebui-gateway-admin-action-db.sh
+./scripts/install-openwebui-gateway-feedback-action-db.sh
 ./scripts/verify-openwebui-gateway-admin-action.sh
 ```
 
