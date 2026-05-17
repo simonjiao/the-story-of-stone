@@ -53,12 +53,14 @@ Cloudflare Tunnel
 ## 新目录规划
 
 - [x] 新部署目录使用 `$HOME/tonglingyu-home-deploy`
-- [x] 新运行时目录使用 `$HOME/tonglingyu-home-runtime`
+- [x] 前置层运行时目录使用 `$HOME/huixiangdou-home-runtime`
+- [x] 通灵玉运行时目录使用 `$HOME/tonglingyu-home-runtime`
 - [x] 旧目录 `$HOME/hermes-home-deploy` 只作为回滚参考，不作为新系统继续打补丁
-- [x] 旧运行时目录 `$HOME/huixiangdou-home-runtime` 只作为回滚参考或一次性迁移来源
+- [x] `$HOME/huixiangdou-home-runtime` 继续承载 Open WebUI 前置层状态；其中旧
+  Tonglingyu 数据只作为一次性迁移来源或回滚参考
 - [x] 新部署目录只保存 compose、scripts、Open WebUI Functions、Rust build
   context 和 source snapshots
-- [x] 新运行时目录保存 Open WebUI、Hermes、Tonglingyu SQLite、证据、报告和备份
+- [x] 通灵玉运行时目录保存 Hermes、Tonglingyu SQLite、证据、报告和备份
 
 建议目录：
 
@@ -71,8 +73,10 @@ $HOME/tonglingyu-home-deploy/
   agent-platform/
   resources/sources/wiki/
 
-$HOME/tonglingyu-home-runtime/
+$HOME/huixiangdou-home-runtime/
   data/open-webui/
+
+$HOME/tonglingyu-home-runtime/
   data/tonglingyu/
   data/hermes/
   evidence/
@@ -129,9 +133,11 @@ $HOME/tonglingyu-home-runtime/
 
 ## 新系统启动顺序
 
-- [x] 备份旧 `$HOME/hermes-home-deploy` 和 `$HOME/huixiangdou-home-runtime`
+- [x] 备份旧 `$HOME/hermes-home-deploy` 和旧 `$HOME/huixiangdou-home-runtime`
+  中的 Tonglingyu 相关数据
 - [x] 停止旧 `hermes-home` compose stack
 - [x] 创建 `$HOME/tonglingyu-home-deploy`
+- [x] 确认 `$HOME/huixiangdou-home-runtime` 用作前置层运行时目录
 - [x] 创建 `$HOME/tonglingyu-home-runtime`
 - [x] 同步新的 compose、scripts、Functions、source snapshots 和 Rust build context
 - [x] 生成新的 `.env`，只写 Tonglingyu 所需配置
@@ -191,6 +197,11 @@ $HOME/tonglingyu-home-runtime/
 - [x] 新运行容器：`tonglingyu-hermes-agent`、`tonglingyu-gateway`、
   `home-open-webui`、`home-cloudflared`
 - [x] 新内部网络：`tonglingyu-internal`
+- [x] 前置层 runtime dir：Open WebUI 使用
+  `$HOME/huixiangdou-home-runtime/data/open-webui`；Cloudflared 无本地 runtime
+  data dir
+- [x] Tonglingyu runtime dir：Hermes 和 Tonglingyu Gateway/KB/RQA 使用
+  `$HOME/tonglingyu-home-runtime`
 - [x] 远端备份目录：
   `$HOME/tonglingyu-home-rebuild-backups/20260517T064057Z`
 - [x] `verify-tonglingyu-runtime-config.sh` 通过，config mode 为

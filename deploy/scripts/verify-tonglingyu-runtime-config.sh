@@ -131,6 +131,7 @@ fi
 
 python3 - "${CONFIG_JSON}" <<'PY'
 import json
+import os
 import sys
 
 config_path = sys.argv[1]
@@ -143,6 +144,38 @@ config_blob = json.dumps(config, ensure_ascii=True).lower()
 for forbidden_spelling in ["tonglignyu"]:
     if forbidden_spelling in config_blob:
         errors.append(f"spelling_forbidden={forbidden_spelling}")
+
+for forbidden_prefix in [
+    "AGENT_PLATFORM_",
+    "AGENT_MANAGER_",
+    "AGENT_ORCHESTRATOR_",
+    "AGENT_WORKER_",
+    "AGENT_OBSERVER_",
+    "GLOBAL_ROUTER_",
+]:
+    for key, raw_value in os.environ.items():
+        if key.startswith(forbidden_prefix) and str(raw_value).strip():
+            errors.append(f"deploy_env_forbidden={key}")
+
+for forbidden_key in [
+    "AGENT_ACTION_GATEWAY_DATA_DIR",
+    "AGENT_JWT_SECRET",
+]:
+    if str(os.environ.get(forbidden_key, "")).strip():
+        errors.append(f"deploy_env_forbidden={forbidden_key}")
+
+path_policy = {
+    "HERMES_DATA_DIR": "tonglingyu-home-runtime",
+    "TONGLINGYU_DATA_DIR": "tonglingyu-home-runtime",
+    "OPEN_WEBUI_DATA_DIR": "huixiangdou-home-runtime",
+}
+for key, required_segment in path_policy.items():
+    actual = str(os.environ.get(key, "")).strip()
+    if actual and required_segment not in actual:
+        errors.append(f"{key} must use {required_segment}")
+
+if str(os.environ.get("CLOUDFLARED_DATA_DIR", "")).strip():
+    errors.append("CLOUDFLARED_DATA_DIR is not used; keep cloudflared stateless")
 
 
 def env_map(service_name):
@@ -340,6 +373,8 @@ print(json.dumps(
             "DEFAULT_MODELS",
             "OPENAI_API_BASE_URLS",
             "forbidden_spellings",
+            "forbidden_legacy_deploy_env",
+            "runtime_directory_split",
             "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY",
             "TONGLINGYU_AGENT_RUNTIME_MODE",
             "TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS",

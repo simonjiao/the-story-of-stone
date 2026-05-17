@@ -63,6 +63,12 @@ Required changes:
 - `TONGLINGYU_SOURCE_ROOT`: host path for the checked-in Wikisource source
   snapshots. The local default is `../resources/sources/wiki` when running from
   this `deploy/` directory.
+- `HERMES_DATA_DIR`: persistent data directory for the Tonglingyu-owned Hermes
+  upstream container. On the remote node it should live under
+  `$HOME/tonglingyu-home-runtime/data/hermes`.
+- `OPEN_WEBUI_DATA_DIR`: persistent data directory for the front-layer Open
+  WebUI service. On the remote node it should live under
+  `$HOME/huixiangdou-home-runtime/data/open-webui`.
 - `TONGLINGYU_DATA_DIR`: persistent data directory for the generated SQLite/FTS
   knowledge base. On the remote node it should live under
   `$HOME/tonglingyu-home-runtime/data/tonglingyu`.
@@ -124,7 +130,12 @@ records current state only; the rebuild checklist is tracked in
 
 - Hostname: `DESKTOP-1C5QUGQ`.
 - Current deploy directory: `$HOME/tonglingyu-home-deploy`.
-- Current runtime directory: `$HOME/tonglingyu-home-runtime`.
+- Current front-layer runtime directory: `$HOME/huixiangdou-home-runtime` for
+  Open WebUI. Cloudflared remains stateless and does not use a local runtime
+  data directory.
+- Current Tonglingyu runtime directory: `$HOME/tonglingyu-home-runtime` for
+  Tonglingyu Gateway, Tonglingyu KB/RQA state, and the Tonglingyu-owned Hermes
+  upstream container.
 - Current rebuild backup directory:
   `$HOME/tonglingyu-home-rebuild-backups/20260517T064057Z`.
 - Current compose files:
@@ -144,9 +155,10 @@ records current state only; the rebuild checklist is tracked in
 - Public endpoint `https://chat.huixiangdou.top/` returned HTTP 200.
 
 Runtime data is separate from deploy files. The current remote node keeps
-runtime state under `$HOME/tonglingyu-home-runtime/data` and deploy files under
-`$HOME/tonglingyu-home-deploy`; keep the old `$HOME/hermes-home-deploy` and
-`$HOME/huixiangdou-home-runtime` paths only as rollback references after backup.
+front-layer Open WebUI state under `$HOME/huixiangdou-home-runtime/data`, keeps
+Tonglingyu-owned runtime state under `$HOME/tonglingyu-home-runtime/data`, and
+keeps deploy files under `$HOME/tonglingyu-home-deploy`; keep the old
+`$HOME/hermes-home-deploy` path only as a rollback reference after backup.
 
 The 2026-05-17 live gates passed for rendered runtime config,
 `agent_identity_bridge`, `tonglingyu_gateway_admin`, model-upstream probing, and
@@ -165,8 +177,9 @@ Create persistent directories:
 
 ```bash
 mkdir -p \
+  "$HOME/huixiangdou-home-runtime/data/open-webui" \
+  "$HOME/huixiangdou-home-runtime/backups" \
   "$HOME/tonglingyu-home-runtime/data/hermes" \
-  "$HOME/tonglingyu-home-runtime/data/open-webui" \
   "$HOME/tonglingyu-home-runtime/data/tonglingyu" \
   "$HOME/tonglingyu-home-runtime/backups"
 ```
@@ -206,9 +219,10 @@ This gate checks the compose-rendered service environment for strict
 Tonglingyu/Hermes runtime wiring, `DEFAULT_MODELS=tonglingyu`, Gateway/admin key
 set isolation, Open WebUI provider keys that do not contain admin credentials,
 Tonglingyu backend container names, and neutral front-layer container names. It
-also rejects old Agent Platform/Global Router services and the known
-`tonglignyu` spelling error in rendered compose config. It prints variable names
-and gate status only; it must not print secret values.
+also rejects old Agent Platform/Global Router services, old Agent Platform env
+residue, runtime directory drift, and the known `tonglignyu` spelling error in
+rendered compose config. It prints variable names and gate status only; it must
+not print secret values.
 
 After the stack is running, verify the live Gateway surface from inside the
 formal Docker network:
