@@ -197,6 +197,8 @@ pub struct RuntimeStoreStats {
     pub retrieval_failures: i64,
     pub governance_tasks: i64,
     pub knowledge_patch_proposals: i64,
+    pub knowledge_items: i64,
+    pub knowledge_item_state_history: i64,
     pub audit_events: i64,
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
@@ -205,6 +207,8 @@ pub struct RuntimeStoreStats {
     pub governance_task_status: BTreeMap<String, i64>,
     pub governance_task_type: BTreeMap<String, i64>,
     pub governance_task_priority: BTreeMap<String, i64>,
+    pub knowledge_item_state: BTreeMap<String, i64>,
+    pub knowledge_item_kind: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
 }
 
@@ -223,8 +227,151 @@ pub const KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION: &str =
 pub const KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION: &str =
     "tonglingyu-knowledge-governance-tasks-backfill-v1";
 pub const KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION: &str = "tonglingyu-knowledge-patch-proposals-v1";
+pub const KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION: &str = "tonglingyu-knowledge-item-states-v1";
 pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
 pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
+pub const KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE: usize = 50;
+pub const KNOWLEDGE_ITEM_MAX_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeState {
+    SourceSnapshot,
+    Candidate,
+    SystemCalibrated,
+    RuntimeUsable,
+    HumanMarked,
+    Rejected,
+    Deprecated,
+}
+
+impl KnowledgeState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeState::SourceSnapshot => "source_snapshot",
+            KnowledgeState::Candidate => "candidate",
+            KnowledgeState::SystemCalibrated => "system_calibrated",
+            KnowledgeState::RuntimeUsable => "runtime_usable",
+            KnowledgeState::HumanMarked => "human_marked",
+            KnowledgeState::Rejected => "rejected",
+            KnowledgeState::Deprecated => "deprecated",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "source_snapshot" => Ok(Self::SourceSnapshot),
+            "candidate" => Ok(Self::Candidate),
+            "system_calibrated" => Ok(Self::SystemCalibrated),
+            "runtime_usable" => Ok(Self::RuntimeUsable),
+            "human_marked" => Ok(Self::HumanMarked),
+            "rejected" => Ok(Self::Rejected),
+            "deprecated" => Ok(Self::Deprecated),
+            _ => Err(anyhow!("invalid knowledge item state {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeItemKind {
+    Alias,
+    Term,
+    CommentaryLink,
+    VersionNote,
+    Person,
+    Relationship,
+    Event,
+    Poem,
+    EvaluationCase,
+}
+
+impl KnowledgeItemKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeItemKind::Alias => "alias",
+            KnowledgeItemKind::Term => "term",
+            KnowledgeItemKind::CommentaryLink => "commentary_link",
+            KnowledgeItemKind::VersionNote => "version_note",
+            KnowledgeItemKind::Person => "person",
+            KnowledgeItemKind::Relationship => "relationship",
+            KnowledgeItemKind::Event => "event",
+            KnowledgeItemKind::Poem => "poem",
+            KnowledgeItemKind::EvaluationCase => "evaluation_case",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "alias" => Ok(Self::Alias),
+            "term" => Ok(Self::Term),
+            "commentary_link" => Ok(Self::CommentaryLink),
+            "version_note" => Ok(Self::VersionNote),
+            "person" => Ok(Self::Person),
+            "relationship" => Ok(Self::Relationship),
+            "event" => Ok(Self::Event),
+            "poem" => Ok(Self::Poem),
+            "evaluation_case" => Ok(Self::EvaluationCase),
+            _ => Err(anyhow!("invalid knowledge item kind {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeItemRecord {
+    pub item_id: String,
+    pub kind: KnowledgeItemKind,
+    pub state: KnowledgeState,
+    pub source_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub payload: Value,
+    pub payload_sha256: String,
+    pub schema_version: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub state_version: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeItemCreateInput {
+    pub kind: KnowledgeItemKind,
+    pub initial_state: KnowledgeState,
+    pub source_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub payload: Value,
+    pub schema_version: Option<String>,
+    pub trace_id: String,
+    pub actor: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeItemListInput {
+    pub kind: Option<KnowledgeItemKind>,
+    pub state: Option<KnowledgeState>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeItemListResult {
+    pub object: String,
+    pub schema_version: String,
+    pub limit: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub items: Vec<KnowledgeItemRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KnowledgeItemStateUpdateInput {
+    pub new_state: KnowledgeState,
+    pub trace_id: String,
+    pub actor: String,
+    pub reason: String,
+    pub evidence_refs: Vec<String>,
+    pub expected_state_version: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalFailureRecord {
@@ -885,6 +1032,36 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Option<KnowledgeGovernanceTaskRecord>> {
         let conn = self.open_connection()?;
         update_governance_task(&conn, task_id, input)
+    }
+
+    pub fn create_knowledge_item(
+        &self,
+        input: KnowledgeItemCreateInput,
+    ) -> Result<KnowledgeItemRecord> {
+        let conn = self.open_connection()?;
+        create_knowledge_item(&conn, input)
+    }
+
+    pub fn read_knowledge_item(&self, item_id: &str) -> Result<Option<KnowledgeItemRecord>> {
+        let conn = self.open_connection()?;
+        read_knowledge_item(&conn, item_id)
+    }
+
+    pub fn list_knowledge_items(
+        &self,
+        input: KnowledgeItemListInput,
+    ) -> Result<KnowledgeItemListResult> {
+        let conn = self.open_connection()?;
+        list_knowledge_items(&conn, input)
+    }
+
+    pub fn update_knowledge_item_state(
+        &self,
+        item_id: &str,
+        input: KnowledgeItemStateUpdateInput,
+    ) -> Result<Option<KnowledgeItemRecord>> {
+        let conn = self.open_connection()?;
+        update_knowledge_item_state(&conn, item_id, input)
     }
 
     pub fn create_knowledge_patch_proposal(
@@ -3966,6 +4143,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     migrate_knowledge_governance_task_source_entity_schema(conn)?;
     conn.execute_batch(knowledge_governance_task_indexes_sql())?;
     conn.execute_batch(knowledge_patch_proposal_schema_sql())?;
+    conn.execute_batch(knowledge_item_state_schema_sql())?;
     let backfilled_governance_tasks = conn.execute(
         r#"
         INSERT OR IGNORE INTO knowledge_governance_tasks (
@@ -4048,6 +4226,10 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![RQA_LIFECYCLE_POLICY_VERSION, now_rfc3339()],
     )?;
     Ok(())
@@ -4127,6 +4309,47 @@ fn knowledge_patch_proposal_schema_sql() -> &'static str {
         ON knowledge_patch_proposals(task_id);
     CREATE INDEX IF NOT EXISTS idx_knowledge_patch_proposals_updated
         ON knowledge_patch_proposals(updated_at);
+    "#
+}
+
+fn knowledge_item_state_schema_sql() -> &'static str {
+    r#"
+    CREATE TABLE IF NOT EXISTS knowledge_items (
+        item_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        payload_sha256 TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        state_version INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_item_state_history (
+        history_id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES knowledge_items(item_id),
+        previous_state TEXT,
+        new_state TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        reason_sha256 TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        state_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_kind
+        ON knowledge_items(kind);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_state
+        ON knowledge_items(state);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_items_updated
+        ON knowledge_items(updated_at, item_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_items_identity
+        ON knowledge_items(kind, payload_sha256, source_refs_json);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_item_state_history_item
+        ON knowledge_item_state_history(item_id, state_version);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_item_state_history_created
+        ON knowledge_item_state_history(created_at);
     "#
 }
 
@@ -4283,6 +4506,7 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         RETRIEVAL_FAILURE_PRIVACY_MIGRATION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION.to_string(),
+        KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION.to_string(),
         RQA_LIFECYCLE_POLICY_VERSION.to_string(),
     ]
 }
@@ -4326,6 +4550,8 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         retrieval_failures: table_count(conn, "retrieval_failures")?,
         governance_tasks: table_count(conn, "knowledge_governance_tasks")?,
         knowledge_patch_proposals: table_count(conn, "knowledge_patch_proposals")?,
+        knowledge_items: table_count(conn, "knowledge_items")?,
+        knowledge_item_state_history: table_count(conn, "knowledge_item_state_history")?,
         audit_events: table_count(conn, "audit_events")?,
         review_status: grouped_count_map(
             conn,
@@ -4354,6 +4580,14 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         governance_task_priority: grouped_count_map(
             conn,
             "SELECT priority, COUNT(*) FROM knowledge_governance_tasks GROUP BY priority",
+        )?,
+        knowledge_item_state: grouped_count_map(
+            conn,
+            "SELECT state, COUNT(*) FROM knowledge_items GROUP BY state",
+        )?,
+        knowledge_item_kind: grouped_count_map(
+            conn,
+            "SELECT kind, COUNT(*) FROM knowledge_items GROUP BY kind",
         )?,
         audit_event_types: grouped_count_map(
             conn,
@@ -5326,6 +5560,281 @@ pub fn update_governance_task(
             },
             "accepted_at": &record.accepted_at,
             "closed_at": &record.closed_at,
+        }),
+    )?;
+    Ok(Some(record))
+}
+
+pub fn create_knowledge_item(
+    conn: &Connection,
+    input: KnowledgeItemCreateInput,
+) -> Result<KnowledgeItemRecord> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = create_knowledge_item_inner(conn, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        create_knowledge_item_inner(conn, input)
+    }
+}
+
+fn create_knowledge_item_inner(
+    conn: &Connection,
+    input: KnowledgeItemCreateInput,
+) -> Result<KnowledgeItemRecord> {
+    let source_refs = normalize_knowledge_refs("source_refs", input.source_refs)?;
+    let evidence_refs = normalize_knowledge_refs("evidence_refs", input.evidence_refs)?;
+    let actor = validate_knowledge_item_actor(&input.actor)?;
+    let reason = validate_knowledge_item_reason(&input.reason)?;
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let schema_version = input
+        .schema_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION.to_string());
+    let payload = canonical_json_value(&input.payload);
+    if !payload.is_object() {
+        return Err(anyhow!("knowledge item payload must be a JSON object"));
+    }
+    let payload_json = serde_json::to_string(&payload)?;
+    if payload_json.len() > 16_384 {
+        return Err(anyhow!("knowledge item payload exceeds 16384 byte limit"));
+    }
+    let source_refs_json = serde_json::to_string(&source_refs)?;
+    let evidence_refs_json = serde_json::to_string(&evidence_refs)?;
+    let payload_sha256 = hash_text(&payload_json);
+    let item_id = stable_knowledge_item_id(input.kind, &source_refs_json, &payload_sha256);
+    if let Some(existing) = load_knowledge_item(conn, &item_id)? {
+        return Ok(existing);
+    }
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_items (
+            item_id, kind, state, source_refs_json, evidence_refs_json,
+            payload_json, payload_sha256, schema_version, created_at, updated_at,
+            state_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1)
+        "#,
+        params![
+            item_id,
+            input.kind.as_str(),
+            input.initial_state.as_str(),
+            source_refs_json,
+            evidence_refs_json,
+            payload_json,
+            payload_sha256,
+            schema_version,
+            now,
+        ],
+    )?;
+    insert_knowledge_item_state_history(
+        conn,
+        KnowledgeItemStateHistoryInsert {
+            item_id: &item_id,
+            previous_state: None,
+            new_state: input.initial_state,
+            actor: &actor,
+            reason: &reason,
+            evidence_refs: &evidence_refs,
+            state_version: 1,
+            created_at: &now,
+        },
+    )?;
+    let record = load_knowledge_item(conn, &item_id)?
+        .ok_or_else(|| anyhow!("knowledge item was not readable after insert"))?;
+    append_runtime_audit_event(
+        conn,
+        &trace_id,
+        "knowledge_item_created",
+        &json!({
+            "item_id": &record.item_id,
+            "kind": record.kind.as_str(),
+            "state": record.state.as_str(),
+            "state_version": record.state_version,
+            "actor": actor,
+            "reason_sha256": hash_text(&reason),
+            "source_ref_count": record.source_refs.len(),
+            "evidence_ref_count": record.evidence_refs.len(),
+            "payload_sha256": &record.payload_sha256,
+            "schema_version": &record.schema_version,
+        }),
+    )?;
+    Ok(record)
+}
+
+pub fn read_knowledge_item(
+    conn: &Connection,
+    item_id: &str,
+) -> Result<Option<KnowledgeItemRecord>> {
+    load_knowledge_item(conn, item_id)
+}
+
+pub fn list_knowledge_items(
+    conn: &Connection,
+    input: KnowledgeItemListInput,
+) -> Result<KnowledgeItemListResult> {
+    let limit = knowledge_item_page_limit(input.limit);
+    let offset = input.offset;
+    let limit_i64 = limit as i64;
+    let offset_i64 = offset as i64;
+    let base_sql = knowledge_item_select_sql();
+    let records = match (input.kind, input.state) {
+        (Some(kind), Some(state)) => query_knowledge_item_records(
+            conn,
+            &format!(
+                "{base_sql} WHERE kind = ?1 AND state = ?2 ORDER BY updated_at DESC, item_id DESC LIMIT ?3 OFFSET ?4"
+            ),
+            &[
+                &kind.as_str() as &dyn ToSql,
+                &state.as_str(),
+                &limit_i64,
+                &offset_i64,
+            ],
+        )?,
+        (Some(kind), None) => query_knowledge_item_records(
+            conn,
+            &format!(
+                "{base_sql} WHERE kind = ?1 ORDER BY updated_at DESC, item_id DESC LIMIT ?2 OFFSET ?3"
+            ),
+            &[&kind.as_str() as &dyn ToSql, &limit_i64, &offset_i64],
+        )?,
+        (None, Some(state)) => query_knowledge_item_records(
+            conn,
+            &format!(
+                "{base_sql} WHERE state = ?1 ORDER BY updated_at DESC, item_id DESC LIMIT ?2 OFFSET ?3"
+            ),
+            &[&state.as_str() as &dyn ToSql, &limit_i64, &offset_i64],
+        )?,
+        (None, None) => query_knowledge_item_records(
+            conn,
+            &format!("{base_sql} ORDER BY updated_at DESC, item_id DESC LIMIT ?1 OFFSET ?2"),
+            &[&limit_i64 as &dyn ToSql, &offset_i64],
+        )?,
+    };
+    let next_offset = if records.len() == limit {
+        Some(offset + limit)
+    } else {
+        None
+    };
+    Ok(KnowledgeItemListResult {
+        object: "tonglingyu.knowledge_item_list".to_string(),
+        schema_version: KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION.to_string(),
+        limit,
+        offset,
+        next_offset,
+        items: records,
+    })
+}
+
+pub fn update_knowledge_item_state(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeItemStateUpdateInput,
+) -> Result<Option<KnowledgeItemRecord>> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = update_knowledge_item_state_inner(conn, item_id, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        update_knowledge_item_state_inner(conn, item_id, input)
+    }
+}
+
+fn update_knowledge_item_state_inner(
+    conn: &Connection,
+    item_id: &str,
+    input: KnowledgeItemStateUpdateInput,
+) -> Result<Option<KnowledgeItemRecord>> {
+    let current = match load_knowledge_item(conn, item_id)? {
+        Some(record) => record,
+        None => return Ok(None),
+    };
+    if current.state_version != input.expected_state_version {
+        return Err(anyhow!("knowledge item state update conflict"));
+    }
+    let actor = validate_knowledge_item_actor(&input.actor)?;
+    let reason = validate_knowledge_item_reason(&input.reason)?;
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let evidence_refs = normalize_knowledge_refs("evidence_refs", input.evidence_refs)?;
+    if current.state == input.new_state {
+        return Ok(Some(current));
+    }
+    let evidence_refs_json = serde_json::to_string(&evidence_refs)?;
+    let next_state_version = current.state_version + 1;
+    let now = now_rfc3339();
+    let updated = conn.execute(
+        r#"
+        UPDATE knowledge_items
+        SET state = ?2,
+            evidence_refs_json = ?3,
+            updated_at = ?4,
+            state_version = ?5
+        WHERE item_id = ?1 AND state_version = ?6
+        "#,
+        params![
+            item_id,
+            input.new_state.as_str(),
+            evidence_refs_json,
+            now,
+            next_state_version,
+            input.expected_state_version,
+        ],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!("knowledge item state update conflict"));
+    }
+    insert_knowledge_item_state_history(
+        conn,
+        KnowledgeItemStateHistoryInsert {
+            item_id,
+            previous_state: Some(current.state),
+            new_state: input.new_state,
+            actor: &actor,
+            reason: &reason,
+            evidence_refs: &evidence_refs,
+            state_version: next_state_version,
+            created_at: &now,
+        },
+    )?;
+    let record = load_knowledge_item(conn, item_id)?
+        .ok_or_else(|| anyhow!("knowledge item disappeared after state update"))?;
+    append_runtime_audit_event(
+        conn,
+        &trace_id,
+        "knowledge_item_state_updated",
+        &json!({
+            "item_id": &record.item_id,
+            "kind": record.kind.as_str(),
+            "previous_state": current.state.as_str(),
+            "new_state": record.state.as_str(),
+            "state_version": record.state_version,
+            "actor": actor,
+            "reason_sha256": hash_text(&reason),
+            "source_ref_count": record.source_refs.len(),
+            "evidence_ref_count": record.evidence_refs.len(),
+            "payload_sha256": &record.payload_sha256,
+            "schema_version": &record.schema_version,
         }),
     )?;
     Ok(Some(record))
@@ -6527,6 +7036,171 @@ fn canonical_json_value(value: &Value) -> Value {
         }
         other => other.clone(),
     }
+}
+
+fn knowledge_item_page_limit(requested: usize) -> usize {
+    if requested == 0 {
+        KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE
+    } else {
+        requested.min(KNOWLEDGE_ITEM_MAX_PAGE_SIZE)
+    }
+}
+
+fn normalize_knowledge_refs(name: &str, refs: Vec<String>) -> Result<Vec<String>> {
+    let normalized = refs
+        .into_iter()
+        .filter_map(|value| bounded_optional_text(&value, 240))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return Err(anyhow!("knowledge item {name} must not be empty"));
+    }
+    if normalized.len() > 64 {
+        return Err(anyhow!("knowledge item {name} exceeds 64 entries"));
+    }
+    Ok(normalized)
+}
+
+fn validate_knowledge_item_actor(actor: &str) -> Result<String> {
+    bounded_optional_text(actor, 80).ok_or_else(|| anyhow!("knowledge item actor is required"))
+}
+
+fn validate_knowledge_item_reason(reason: &str) -> Result<String> {
+    bounded_optional_text(reason, 480).ok_or_else(|| anyhow!("knowledge item reason is required"))
+}
+
+fn validate_knowledge_item_trace_id(trace_id: &str) -> Result<String> {
+    bounded_optional_text(trace_id, 160)
+        .ok_or_else(|| anyhow!("knowledge item trace_id is required"))
+}
+
+fn stable_knowledge_item_id(
+    kind: KnowledgeItemKind,
+    source_refs_json: &str,
+    payload_sha256: &str,
+) -> String {
+    let identity = format!(
+        "kind={};source_refs={};payload_sha256={}",
+        kind.as_str(),
+        source_refs_json,
+        payload_sha256
+    );
+    let digest = hash_text(&identity);
+    format!("ki-{}-{}", kind.as_str().replace('_', "-"), &digest[..24])
+}
+
+struct KnowledgeItemStateHistoryInsert<'a> {
+    item_id: &'a str,
+    previous_state: Option<KnowledgeState>,
+    new_state: KnowledgeState,
+    actor: &'a str,
+    reason: &'a str,
+    evidence_refs: &'a [String],
+    state_version: i64,
+    created_at: &'a str,
+}
+
+fn insert_knowledge_item_state_history(
+    conn: &Connection,
+    input: KnowledgeItemStateHistoryInsert<'_>,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_item_state_history (
+            history_id, item_id, previous_state, new_state, actor, reason_sha256,
+            evidence_refs_json, state_version, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "#,
+        params![
+            format!("kish-{}", uuid::Uuid::now_v7().simple()),
+            input.item_id,
+            input.previous_state.map(KnowledgeState::as_str),
+            input.new_state.as_str(),
+            input.actor,
+            hash_text(input.reason),
+            serde_json::to_string(input.evidence_refs)?,
+            input.state_version,
+            input.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn knowledge_item_select_sql() -> &'static str {
+    r#"
+    SELECT
+        item_id, kind, state, source_refs_json, evidence_refs_json, payload_json,
+        payload_sha256, schema_version, created_at, updated_at, state_version
+    FROM knowledge_items
+    "#
+}
+
+fn load_knowledge_item(conn: &Connection, item_id: &str) -> Result<Option<KnowledgeItemRecord>> {
+    let sql = format!("{} WHERE item_id = ?1", knowledge_item_select_sql());
+    conn.query_row(&sql, params![item_id], knowledge_item_sql_row)
+        .optional()?
+        .map(knowledge_item_record_from_sql_row)
+        .transpose()
+}
+
+fn query_knowledge_item_records(
+    conn: &Connection,
+    sql: &str,
+    params: &[&dyn ToSql],
+) -> Result<Vec<KnowledgeItemRecord>> {
+    let mut stmt = conn.prepare(sql)?;
+    stmt.query_map(params, knowledge_item_sql_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(knowledge_item_record_from_sql_row)
+        .collect()
+}
+
+struct KnowledgeItemSqlRow {
+    item_id: String,
+    kind: String,
+    state: String,
+    source_refs_json: String,
+    evidence_refs_json: String,
+    payload_json: String,
+    payload_sha256: String,
+    schema_version: String,
+    created_at: String,
+    updated_at: String,
+    state_version: i64,
+}
+
+fn knowledge_item_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeItemSqlRow> {
+    Ok(KnowledgeItemSqlRow {
+        item_id: row.get(0)?,
+        kind: row.get(1)?,
+        state: row.get(2)?,
+        source_refs_json: row.get(3)?,
+        evidence_refs_json: row.get(4)?,
+        payload_json: row.get(5)?,
+        payload_sha256: row.get(6)?,
+        schema_version: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        state_version: row.get(10)?,
+    })
+}
+
+fn knowledge_item_record_from_sql_row(row: KnowledgeItemSqlRow) -> Result<KnowledgeItemRecord> {
+    Ok(KnowledgeItemRecord {
+        item_id: row.item_id,
+        kind: KnowledgeItemKind::parse(&row.kind)?,
+        state: KnowledgeState::parse(&row.state)?,
+        source_refs: serde_json::from_str(&row.source_refs_json)?,
+        evidence_refs: serde_json::from_str(&row.evidence_refs_json)?,
+        payload: serde_json::from_str(&row.payload_json)?,
+        payload_sha256: row.payload_sha256,
+        schema_version: row.schema_version,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        state_version: row.state_version,
+    })
 }
 
 fn knowledge_patch_proposal_select_sql() -> &'static str {
@@ -12111,6 +12785,288 @@ mod tests {
         assert!(error.to_string().contains("retrieval_failures"));
         assert!(!sqlite_table_exists(&conn, "schema_migrations").expect("table check"));
         assert!(!sqlite_table_exists(&conn, "audit_events").expect("table check"));
+    }
+
+    fn sample_knowledge_item_input(
+        kind: KnowledgeItemKind,
+        marker: &str,
+    ) -> KnowledgeItemCreateInput {
+        KnowledgeItemCreateInput {
+            kind,
+            initial_state: KnowledgeState::Candidate,
+            source_refs: vec![format!("source://wikisource/chapter/{marker}")],
+            evidence_refs: vec![format!("block://wikisource/{marker}")],
+            payload: json!({
+                "marker": marker,
+                "claim": format!("sample knowledge item {marker}"),
+            }),
+            schema_version: None,
+            trace_id: format!("trace-knowledge-item-{marker}"),
+            actor: "system-calibration-test".to_string(),
+            reason: "create candidate knowledge item".to_string(),
+        }
+    }
+
+    #[test]
+    fn knowledge_item_schema_migration_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        let before = runtime_schema_migration_preflight(&conn).expect("preflight before schema");
+        assert!(
+            before["pending_migrations"]
+                .as_array()
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.as_str() == Some(KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION)))
+        );
+
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_runtime_schema(&conn).expect("runtime schema idempotent");
+
+        let after = runtime_schema_migration_preflight(&conn).expect("preflight after schema");
+        assert_eq!(after["pending_migrations"], json!([]));
+        let migration_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE migration_id = ?1",
+                params![KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION],
+                |row| row.get(0),
+            )
+            .expect("knowledge item migration count");
+        assert_eq!(migration_count, 1);
+        assert!(sqlite_table_exists(&conn, "knowledge_items").expect("knowledge items table"));
+        assert!(
+            sqlite_table_exists(&conn, "knowledge_item_state_history")
+                .expect("knowledge item history table")
+        );
+        let columns = sqlite_table_columns(&conn, "knowledge_items").expect("columns");
+        for column in [
+            "item_id",
+            "kind",
+            "state",
+            "source_refs_json",
+            "evidence_refs_json",
+            "payload_sha256",
+            "schema_version",
+            "state_version",
+        ] {
+            assert!(columns.contains(column), "missing column {column}");
+        }
+    }
+
+    #[test]
+    fn knowledge_item_store_state_flow_records_history_and_audit() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let created = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Alias, "alias-flow"),
+        )
+        .expect("create knowledge item");
+        assert!(created.item_id.starts_with("ki-alias-"));
+        assert_eq!(created.kind, KnowledgeItemKind::Alias);
+        assert_eq!(created.state, KnowledgeState::Candidate);
+        assert_eq!(created.state_version, 1);
+        assert_eq!(created.schema_version, KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION);
+        assert!(!created.source_refs.is_empty());
+        assert!(!created.evidence_refs.is_empty());
+
+        let duplicate = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Alias, "alias-flow"),
+        )
+        .expect("duplicate create is idempotent");
+        assert_eq!(duplicate.item_id, created.item_id);
+        let updated = update_knowledge_item_state(
+            &conn,
+            &created.item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::SystemCalibrated,
+                trace_id: "trace-knowledge-item-alias-flow".to_string(),
+                actor: "runtime-policy".to_string(),
+                reason: "rule and evidence judge passed".to_string(),
+                evidence_refs: vec!["block://wikisource/alias-flow".to_string()],
+                expected_state_version: created.state_version,
+            },
+        )
+        .expect("state update")
+        .expect("knowledge item exists");
+        assert_eq!(updated.state, KnowledgeState::SystemCalibrated);
+        assert_eq!(updated.state_version, 2);
+
+        let listed = list_knowledge_items(
+            &conn,
+            KnowledgeItemListInput {
+                kind: Some(KnowledgeItemKind::Alias),
+                state: Some(KnowledgeState::SystemCalibrated),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list knowledge items");
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].item_id, created.item_id);
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![created.item_id],
+                |row| row.get(0),
+            )
+            .expect("history count");
+        assert_eq!(history_count, 2);
+        let events = runtime_audit_events_for_trace(&conn, "trace-knowledge-item-alias-flow")
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_item_created"
+                && event["payload"]["state"] == json!("candidate")
+        }));
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_item_state_updated"
+                && event["payload"]["previous_state"] == json!("candidate")
+                && event["payload"]["new_state"] == json!("system_calibrated")
+                && event["payload"]["reason_sha256"].as_str().is_some()
+        }));
+        let stats = runtime_store_stats(&conn).expect("stats");
+        assert_eq!(stats.knowledge_items, 1);
+        assert_eq!(stats.knowledge_item_state_history, 2);
+        assert_eq!(
+            stats.knowledge_item_state.get("system_calibrated"),
+            Some(&1_i64)
+        );
+        assert_eq!(stats.knowledge_item_kind.get("alias"), Some(&1_i64));
+    }
+
+    #[test]
+    fn knowledge_item_state_update_conflict_preserves_existing_state() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let created = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, "term-conflict"),
+        )
+        .expect("create knowledge item");
+
+        let error = update_knowledge_item_state(
+            &conn,
+            &created.item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::SystemCalibrated,
+                trace_id: "trace-knowledge-item-term-conflict".to_string(),
+                actor: "runtime-policy".to_string(),
+                reason: "stale state version".to_string(),
+                evidence_refs: vec!["block://wikisource/term-conflict".to_string()],
+                expected_state_version: created.state_version + 1,
+            },
+        )
+        .expect_err("stale update must fail");
+        assert!(error.to_string().contains("conflict"));
+        let current = read_knowledge_item(&conn, &created.item_id)
+            .expect("read knowledge item")
+            .expect("knowledge item exists");
+        assert_eq!(current.state, KnowledgeState::Candidate);
+        assert_eq!(current.state_version, 1);
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![created.item_id],
+                |row| row.get(0),
+            )
+            .expect("history count");
+        assert_eq!(history_count, 1);
+    }
+
+    #[test]
+    fn knowledge_item_list_paginates_all_kinds_and_keeps_rejected_history() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let kinds = [
+            KnowledgeItemKind::Alias,
+            KnowledgeItemKind::Term,
+            KnowledgeItemKind::CommentaryLink,
+            KnowledgeItemKind::VersionNote,
+            KnowledgeItemKind::Person,
+            KnowledgeItemKind::Relationship,
+            KnowledgeItemKind::Event,
+            KnowledgeItemKind::Poem,
+            KnowledgeItemKind::EvaluationCase,
+        ];
+        let mut first_item_id = None;
+        for index in 0..105 {
+            let kind = kinds[index % kinds.len()];
+            let item = create_knowledge_item(
+                &conn,
+                sample_knowledge_item_input(kind, &format!("item-{index:03}")),
+            )
+            .expect("create knowledge item");
+            if index == 0 {
+                first_item_id = Some(item.item_id);
+            }
+        }
+
+        let first_page = list_knowledge_items(
+            &conn,
+            KnowledgeItemListInput {
+                kind: None,
+                state: Some(KnowledgeState::Candidate),
+                limit: 0,
+                offset: 0,
+            },
+        )
+        .expect("list first page");
+        assert_eq!(first_page.limit, KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE);
+        assert_eq!(first_page.items.len(), KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE);
+        assert_eq!(
+            first_page.next_offset,
+            Some(KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE)
+        );
+        let capped_page = list_knowledge_items(
+            &conn,
+            KnowledgeItemListInput {
+                kind: None,
+                state: Some(KnowledgeState::Candidate),
+                limit: 500,
+                offset: 0,
+            },
+        )
+        .expect("list capped page");
+        assert_eq!(capped_page.limit, KNOWLEDGE_ITEM_MAX_PAGE_SIZE);
+        assert_eq!(capped_page.items.len(), KNOWLEDGE_ITEM_MAX_PAGE_SIZE);
+
+        let first_item_id = first_item_id.expect("first item id");
+        let rejected = update_knowledge_item_state(
+            &conn,
+            &first_item_id,
+            KnowledgeItemStateUpdateInput {
+                new_state: KnowledgeState::Rejected,
+                trace_id: "trace-knowledge-item-item-000".to_string(),
+                actor: "reviewer".to_string(),
+                reason: "source boundary unclear".to_string(),
+                evidence_refs: vec!["block://wikisource/item-000".to_string()],
+                expected_state_version: 1,
+            },
+        )
+        .expect("reject item")
+        .expect("item exists");
+        assert_eq!(rejected.state, KnowledgeState::Rejected);
+        let rejected_list = list_knowledge_items(
+            &conn,
+            KnowledgeItemListInput {
+                kind: None,
+                state: Some(KnowledgeState::Rejected),
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list rejected");
+        assert_eq!(rejected_list.items.len(), 1);
+        assert_eq!(rejected_list.items[0].item_id, first_item_id);
+        let rejected_history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![first_item_id],
+                |row| row.get(0),
+            )
+            .expect("rejected history count");
+        assert_eq!(rejected_history_count, 2);
     }
 
     #[test]

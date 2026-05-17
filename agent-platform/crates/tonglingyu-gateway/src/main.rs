@@ -23,10 +23,11 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
-    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
-    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
-    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
-    KnowledgeGovernanceTaskUpdateInput, KnowledgePatchProposalCreateInput,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
+    KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
+    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
+    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput, KnowledgeItemKind,
+    KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
     RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
@@ -1258,6 +1259,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/governance/proposals",
             post(create_knowledge_patch_proposal_endpoint),
+        )
+        .route("/v1/admin/knowledge/items", get(knowledge_items_endpoint))
+        .route(
+            "/v1/admin/knowledge/items/{item_id}",
+            get(knowledge_item_endpoint),
         )
         .route(
             "/v1/admin/governance/tasks/{task_id}",
@@ -5526,6 +5532,147 @@ async fn create_knowledge_patch_proposal_endpoint(
     }
 }
 
+async fn knowledge_items_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match knowledge_item_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_knowledge_item_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_knowledge_items(input) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": knowledge_item_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_list",
+                "schema_version": KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge item list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "knowledge_item_list_failed",
+                "knowledge item list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn knowledge_item_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(item_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state.runtime_store.read_knowledge_item(&item_id) {
+        Ok(Some(item)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "item_id": item_id,
+                    "kind": item.kind.as_str(),
+                    "state": item.state.as_str(),
+                    "result_count": 1,
+                    "result": "found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_read",
+                "schema_version": KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
+                "item": item,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "item_id_sha256": hash_text(&item_id),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::NOT_FOUND,
+                "knowledge_item_not_found",
+                "knowledge item was not found",
+                None,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(item_id = %item_id, error = %error, "knowledge item read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "knowledge_item_read_failed",
+                "knowledge item read failed",
+                None,
+            )
+        }
+    }
+}
+
 async fn create_governance_task_from_failure_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7119,6 +7266,43 @@ fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
     })
 }
 
+fn knowledge_item_list_input(params: &BTreeMap<String, String>) -> Result<KnowledgeItemListInput> {
+    for key in params.keys() {
+        if !matches!(key.as_str(), "kind" | "state" | "limit" | "offset") {
+            return Err(anyhow!("unsupported knowledge item filter {key}"));
+        }
+    }
+    let kind = params
+        .get("kind")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(KnowledgeItemKind::parse)
+        .transpose()?;
+    let state = params
+        .get("state")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(KnowledgeState::parse)
+        .transpose()?;
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(KnowledgeItemListInput {
+        kind,
+        state,
+        limit,
+        offset,
+    })
+}
+
+fn knowledge_item_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "kind": params.get("kind"),
+        "state": params.get("state"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
 fn append_admin_audit_event(
     db: &Path,
     event_type: &str,
@@ -7679,7 +7863,10 @@ fn new_trace_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tonglingyu_runtime::{RetrievalFailureListInput, RetrievalFailureView, ReviewRecord};
+    use tonglingyu_runtime::{
+        KnowledgeItemCreateInput, KnowledgeItemStateUpdateInput, RetrievalFailureListInput,
+        RetrievalFailureView, ReviewRecord,
+    };
 
     #[test]
     fn public_completion_strips_cached_runtime_stream_events() {
@@ -9033,6 +9220,97 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_admin_endpoints_list_read_and_audit_state_boundary() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Alias,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-item".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-item".to_string()],
+                payload: json!({
+                    "alias": "stone",
+                    "person_id": "p-baoyu",
+                    "scope": "admin endpoint test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin endpoint test".to_string(),
+            })
+            .expect("knowledge item creates");
+        let updated = state
+            .runtime_store
+            .update_knowledge_item_state(
+                &created.item_id,
+                KnowledgeItemStateUpdateInput {
+                    new_state: KnowledgeState::SystemCalibrated,
+                    trace_id: "trace-admin-knowledge-item".to_string(),
+                    actor: "calibration-runner".to_string(),
+                    reason: "evidence judge passed for admin endpoint test".to_string(),
+                    evidence_refs: vec!["block://wikisource/admin-item".to_string()],
+                    expected_state_version: created.state_version,
+                },
+            )
+            .expect("knowledge item state updates")
+            .expect("knowledge item exists");
+
+        let mut params = BTreeMap::new();
+        params.insert("kind".to_string(), "alias".to_string());
+        params.insert("state".to_string(), "system_calibrated".to_string());
+        let list_response =
+            knowledge_items_endpoint(State(state.clone()), admin_headers(), Query(params)).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value =
+            serde_json::from_str(&response_text(list_response).await).expect("list response json");
+        assert_eq!(
+            list_body["object"],
+            json!("tonglingyu.knowledge_item_admin_list")
+        );
+        assert_eq!(
+            list_body["schema_version"],
+            json!(KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            list_body["list"]["items"][0]["item_id"],
+            json!(updated.item_id)
+        );
+        assert_eq!(list_body["list"]["items"][0]["kind"], json!("alias"));
+        assert_eq!(
+            list_body["list"]["items"][0]["state"],
+            json!("system_calibrated")
+        );
+        assert_eq!(list_body["list"]["items"][0]["state_version"], json!(2));
+
+        let read_response = knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(updated.item_id.clone()),
+        )
+        .await;
+        assert_eq!(read_response.status(), StatusCode::OK);
+        let read_body: Value =
+            serde_json::from_str(&response_text(read_response).await).expect("read response json");
+        assert_eq!(
+            read_body["object"],
+            json!("tonglingyu.knowledge_item_admin_read")
+        );
+        assert_eq!(read_body["item"]["state"], json!("system_calibrated"));
+        assert_eq!(read_body["item"]["payload"]["alias"], json!("stone"));
+
+        let mut invalid_params = BTreeMap::new();
+        invalid_params.insert("state".to_string(), "accepted".to_string());
+        let invalid_response =
+            knowledge_items_endpoint(State(state), admin_headers(), Query(invalid_params)).await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_list"), 1);
+        assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_read"), 1);
+        remove_sqlite_file_set(&db_path);
     }
 
     #[tokio::test]

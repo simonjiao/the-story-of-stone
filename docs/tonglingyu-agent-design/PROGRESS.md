@@ -1163,3 +1163,9 @@
 9. `system_calibrated` 与 `runtime_usable` 必须分离：没有 runtime policy version、
    promotion summary、per-kind coverage matrix、release run 和 saved report validator
    证据时，不能把系统校准条目放入 selected evidence，也不能声明知识状态治理闭环完成。
+10. 2026-05-17 已完成 Knowledge State Milestone A：`tonglingyu-runtime` 新增
+    `KnowledgeState`、`KnowledgeItemKind`、`knowledge_items`、
+    `knowledge_item_state_history`、状态历史、CAS 更新、Runtime store API 和 Gateway
+    只读 admin API。已通过 `cargo test -p tonglingyu-runtime` 和
+    `cargo test -p tonglingyu-gateway`。这只证明知识状态模型完成；Milestone B-E 仍未开始，
+    不能声明系统校准入口、运行中人工复核或完整知识状态治理闭环完成。

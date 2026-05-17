@@ -122,32 +122,47 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 ## Milestone A：知识状态模型
 
-状态：未开始。
+状态：已完成，2026-05-17；提交见本节点提交。
 
 目标：把知识条目的状态层级固化为生产 schema 和 Rust contract。
 
-- [ ] 定义 `KnowledgeState` Rust enum：
+- [x] 定义 `KnowledgeState` Rust enum：
   `source_snapshot`、`candidate`、`system_calibrated`、`runtime_usable`、
   `human_marked`、`rejected`、`deprecated`。
-- [ ] 定义 `KnowledgeItemKind`：alias、term、commentary_link、version_note、
+- [x] 定义 `KnowledgeItemKind`：alias、term、commentary_link、version_note、
   person、relationship、event、poem、evaluation_case。
-- [ ] 为每类 knowledge item 定义稳定 id、source refs、evidence refs、payload hash、
+- [x] 为每类 knowledge item 定义稳定 id、source refs、evidence refs、payload hash、
   schema version 和 created/updated metadata。
-- [ ] 新增 additive migration，不重建 KB，不删除既有 package、audit、session 或 RQA
+- [x] 新增 additive migration，不重建 KB，不删除既有 package、audit、session 或 RQA
   数据。
-- [ ] Store API 支持 create/read/list/update state，并有分页、排序稳定和 max page
+- [x] Store API 支持 create/read/list/update state，并有分页、排序稳定和 max page
   size。
-- [ ] 状态转换必须有 compare-and-set 或版本条件，避免并发覆盖。
-- [ ] 每次状态转换写 audit event，记录 actor、previous state、new state、reason hash
+- [x] 状态转换必须有 compare-and-set 或版本条件，避免并发覆盖。
+- [x] 每次状态转换写 audit event，记录 actor、previous state、new state、reason hash
   和 evidence ref。
-- [ ] rejected/deprecated 条目必须保留 tombstone 或状态历史，不能硬删除后失去复盘能力。
-- [ ] 单测覆盖 migration 幂等、状态转换、并发冲突、分页和 audit。
+- [x] rejected/deprecated 条目必须保留 tombstone 或状态历史，不能硬删除后失去复盘能力。
+- [x] 单测覆盖 migration 幂等、状态转换、并发冲突、分页和 audit。
 
 完成口径：
 
-- [ ] 生产 DB 可以在不重建 KB 的情况下升级 schema。
-- [ ] Runtime store 能稳定读写知识状态。
-- [ ] admin/API 输出能区分系统状态，但普通响应不泄露内部治理字段。
+- [x] 生产 DB 可以在不重建 KB 的情况下升级 schema。
+- [x] Runtime store 能稳定读写知识状态。
+- [x] admin/API 输出能区分系统状态，但普通响应不泄露内部治理字段。
+
+节点总结：
+
+- Runtime 新增 additive `knowledge_items` 和 `knowledge_item_state_history` schema，
+  并纳入 schema migration preflight。
+- Runtime store 新增 create/read/list/update state API；item id 基于 kind、source refs
+  和 payload hash 稳定生成，状态更新使用 `state_version` CAS。
+- Gateway 新增只读 admin API：`/v1/admin/knowledge/items` 和
+  `/v1/admin/knowledge/items/{item_id}`，只暴露状态边界，不提供人工复核写入口。
+- `rejected` / `deprecated` 通过状态历史保留复盘链路，不硬删除。
+
+验证：
+
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
 
 ## Milestone B：系统校准入口
 
