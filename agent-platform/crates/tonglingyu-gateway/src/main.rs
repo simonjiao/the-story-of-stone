@@ -24,18 +24,19 @@ use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
-    KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, KnowledgeGovernanceTaskCreateFromFailureInput,
-    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
-    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput, KnowledgeItemKind,
-    KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
-    RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
-    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
-    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
-    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
-    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
-    execute_agent_runtime_plan_gate, package_json,
+    KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION, KnowledgeCalibrationRunInput,
+    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
+    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
+    KnowledgeGovernanceTaskUpdateInput, KnowledgeItemKind, KnowledgeItemListInput,
+    KnowledgePatchProposalCreateInput, KnowledgeState, RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
+    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
+    RQA_LIFECYCLE_POLICY_VERSION, RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput,
+    RetrievalFailureCreateInput, RetrievalFailureListInput, RetrievalFailureView,
+    RetrievalQualityReport, RetrievalQuerySummary, RetrievalSourceCoverageBoundary,
+    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
+    append_rqa_lifecycle_tombstone, append_runtime_audit_event, execute_agent_runtime_plan_gate,
+    package_json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -86,6 +87,7 @@ enum Command {
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
+    KnowledgeCalibrate(KnowledgeCalibrateArgs),
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
@@ -190,6 +192,18 @@ struct EvalArgs {
         default_value_t = false
     )]
     allow_db_mutation: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct KnowledgeCalibrateArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    input: PathBuf,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1081,6 +1095,16 @@ async fn main() -> Result<()> {
             } else {
                 Err(anyhow!("tonglingyu eval failed"))
             }
+        }
+        Command::KnowledgeCalibrate(args) => {
+            let data = fs::read_to_string(&args.input)
+                .with_context(|| format!("read {}", args.input.display()))?;
+            let input: KnowledgeCalibrationRunInput = serde_json::from_str(&data)
+                .with_context(|| format!("parse {}", args.input.display()))?;
+            let report = TonglingyuRuntimeStore::new(args.db.clone())
+                .run_knowledge_calibration_offline(input)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
         }
         Command::RuntimeSchemaPreflight(args) => {
             let report = TonglingyuRuntimeStore::new(args.db.clone())

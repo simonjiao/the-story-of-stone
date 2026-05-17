@@ -1167,5 +1167,14 @@
     `KnowledgeState`、`KnowledgeItemKind`、`knowledge_items`、
     `knowledge_item_state_history`、状态历史、CAS 更新、Runtime store API 和 Gateway
     只读 admin API。已通过 `cargo test -p tonglingyu-runtime` 和
-    `cargo test -p tonglingyu-gateway`。这只证明知识状态模型完成；Milestone B-E 仍未开始，
-    不能声明系统校准入口、运行中人工复核或完整知识状态治理闭环完成。
+    `cargo test -p tonglingyu-gateway`。这只证明知识状态模型完成，不能声明运行中
+    人工复核或完整知识状态治理闭环完成。
+11. 2026-05-17 已完成 Knowledge State Milestone B：`tonglingyu-runtime` 新增
+    `KnowledgeCalibrationReport`、内部 `honglou-knowledge-calibrator` profile
+    contract、配置化 LLM 校准配置、离线 calibration runner、异步 calibration job
+    模型、规则/eval/RQA/LLM evidence judge 校准路径、coverage matrix、report hash、
+    admin audit 引用和 KB summary/diff report refs；`tonglingyu-gateway` 新增
+    `knowledge-calibrate --input <json>` 离线命令。已通过 runtime/gateway 单包测试和
+    clippy。Milestone B 完成只表示 candidate 可以被系统校准为
+    `system_calibrated`；Milestone C-E 仍未完成，`system_calibrated` 仍不能进入普通
+    selected evidence、不能自动提升为 `runtime_usable`，也不能显示“人工标记”。

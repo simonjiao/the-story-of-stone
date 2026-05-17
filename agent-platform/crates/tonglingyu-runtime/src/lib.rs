@@ -199,6 +199,9 @@ pub struct RuntimeStoreStats {
     pub knowledge_patch_proposals: i64,
     pub knowledge_items: i64,
     pub knowledge_item_state_history: i64,
+    pub knowledge_calibration_reports: i64,
+    pub knowledge_calibration_jobs: i64,
+    pub knowledge_calibration_job_history: i64,
     pub audit_events: i64,
     pub review_status: BTreeMap<String, i64>,
     pub evidence_types: BTreeMap<String, i64>,
@@ -209,6 +212,9 @@ pub struct RuntimeStoreStats {
     pub governance_task_priority: BTreeMap<String, i64>,
     pub knowledge_item_state: BTreeMap<String, i64>,
     pub knowledge_item_kind: BTreeMap<String, i64>,
+    pub knowledge_calibration_report_method: BTreeMap<String, i64>,
+    pub knowledge_calibration_report_decision: BTreeMap<String, i64>,
+    pub knowledge_calibration_job_status: BTreeMap<String, i64>,
     pub audit_event_types: BTreeMap<String, i64>,
 }
 
@@ -228,10 +234,20 @@ pub const KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION: &str =
     "tonglingyu-knowledge-governance-tasks-backfill-v1";
 pub const KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION: &str = "tonglingyu-knowledge-patch-proposals-v1";
 pub const KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION: &str = "tonglingyu-knowledge-item-states-v1";
+pub const KNOWLEDGE_ITEM_CALIBRATION_LINK_MIGRATION: &str =
+    "tonglingyu-knowledge-item-calibration-links-v1";
+pub const KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION: &str =
+    "tonglingyu-knowledge-calibration-report-v1";
+pub const KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION: &str =
+    "tonglingyu-knowledge-calibration-jobs-v1";
+pub const KNOWLEDGE_CALIBRATION_PROFILE_ID: &str = "honglou-knowledge-calibrator";
+pub const KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION: &str =
+    "tonglingyu-knowledge-calibration-profile-v1";
 pub const GOVERNANCE_TASK_DEFAULT_PAGE_SIZE: usize = 50;
 pub const GOVERNANCE_TASK_MAX_PAGE_SIZE: usize = 100;
 pub const KNOWLEDGE_ITEM_DEFAULT_PAGE_SIZE: usize = 50;
 pub const KNOWLEDGE_ITEM_MAX_PAGE_SIZE: usize = 100;
+pub const KNOWLEDGE_CALIBRATION_DEFAULT_LEASE_SECONDS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -327,6 +343,9 @@ pub struct KnowledgeItemRecord {
     pub payload: Value,
     pub payload_sha256: String,
     pub schema_version: String,
+    pub source_boundary: Option<Value>,
+    pub calibration_report_ref: Option<String>,
+    pub confidence: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
     pub state_version: i64,
@@ -371,6 +390,395 @@ pub struct KnowledgeItemStateUpdateInput {
     pub reason: String,
     pub evidence_refs: Vec<String>,
     pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeCalibrationMethod {
+    Rule,
+    Eval,
+    Rqa,
+    LlmEvidenceJudge,
+}
+
+impl KnowledgeCalibrationMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeCalibrationMethod::Rule => "rule",
+            KnowledgeCalibrationMethod::Eval => "eval",
+            KnowledgeCalibrationMethod::Rqa => "rqa",
+            KnowledgeCalibrationMethod::LlmEvidenceJudge => "llm_evidence_judge",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "rule" => Ok(Self::Rule),
+            "eval" => Ok(Self::Eval),
+            "rqa" => Ok(Self::Rqa),
+            "llm_evidence_judge" => Ok(Self::LlmEvidenceJudge),
+            _ => Err(anyhow!("invalid knowledge calibration method {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeCalibrationDecision {
+    SystemCalibrated,
+    Rejected,
+    KeepCandidate,
+}
+
+impl KnowledgeCalibrationDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeCalibrationDecision::SystemCalibrated => "system_calibrated",
+            KnowledgeCalibrationDecision::Rejected => "rejected",
+            KnowledgeCalibrationDecision::KeepCandidate => "keep_candidate",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "system_calibrated" => Ok(Self::SystemCalibrated),
+            "rejected" => Ok(Self::Rejected),
+            "keep_candidate" => Ok(Self::KeepCandidate),
+            _ => Err(anyhow!("invalid knowledge calibration decision {value}")),
+        }
+    }
+
+    fn target_state(self) -> Option<KnowledgeState> {
+        match self {
+            KnowledgeCalibrationDecision::SystemCalibrated => {
+                Some(KnowledgeState::SystemCalibrated)
+            }
+            KnowledgeCalibrationDecision::Rejected => Some(KnowledgeState::Rejected),
+            KnowledgeCalibrationDecision::KeepCandidate => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeCalibrationInputKind {
+    SourceSnapshot,
+    GovernanceTask,
+    EvalMiss,
+    RetrievalFailure,
+}
+
+impl KnowledgeCalibrationInputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeCalibrationInputKind::SourceSnapshot => "source_snapshot",
+            KnowledgeCalibrationInputKind::GovernanceTask => "governance_task",
+            KnowledgeCalibrationInputKind::EvalMiss => "eval_miss",
+            KnowledgeCalibrationInputKind::RetrievalFailure => "retrieval_failure",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "source_snapshot" => Ok(Self::SourceSnapshot),
+            "governance_task" => Ok(Self::GovernanceTask),
+            "eval_miss" => Ok(Self::EvalMiss),
+            "retrieval_failure" => Ok(Self::RetrievalFailure),
+            _ => Err(anyhow!("invalid knowledge calibration input kind {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeCalibrationJobStatus {
+    Queued,
+    Running,
+    Succeeded,
+    RetryWaiting,
+    Failed,
+    Cancelled,
+}
+
+impl KnowledgeCalibrationJobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KnowledgeCalibrationJobStatus::Queued => "queued",
+            KnowledgeCalibrationJobStatus::Running => "running",
+            KnowledgeCalibrationJobStatus::Succeeded => "succeeded",
+            KnowledgeCalibrationJobStatus::RetryWaiting => "retry_waiting",
+            KnowledgeCalibrationJobStatus::Failed => "failed",
+            KnowledgeCalibrationJobStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "retry_waiting" => Ok(Self::RetryWaiting),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(anyhow!("invalid knowledge calibration job status {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationLlmConfig {
+    pub profile_id: String,
+    pub model_id: String,
+    pub upstream_id: String,
+    pub prompt_digest: String,
+    pub tool_policy_digest: String,
+    pub decoding: Value,
+    pub timeout_secs: u64,
+    pub retry_limit: u32,
+    pub model_capability: String,
+    pub reasoning_effort: String,
+    pub profile_contract_version: String,
+    pub config_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationRuleContext {
+    pub source_id: String,
+    pub block_id: String,
+    pub required_evidence_type: String,
+    pub exact_terms: Vec<String>,
+    pub version_boundary: String,
+    pub usage_boundary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationEvalContext {
+    pub expected_evidence_hit: bool,
+    pub forbidden_conclusion_hit: bool,
+    pub reviewer_status: String,
+    pub source_boundary_confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationRqaContext {
+    pub retrieval_quality_issues: Vec<String>,
+    pub blocking_quality_issues: Vec<String>,
+    pub failure_cluster_refs: Vec<String>,
+    pub governance_task_refs: Vec<String>,
+    pub proposed_fix_refs: Vec<String>,
+    pub rqa_report_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationLlmJudgeOutput {
+    pub decision: KnowledgeCalibrationDecision,
+    pub confidence: f64,
+    pub evidence_refs: Vec<String>,
+    pub source_boundary: Value,
+    pub quality_issues: Vec<String>,
+    pub forbidden_conclusion_detected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationRunInput {
+    pub item_id: String,
+    pub input_kind: KnowledgeCalibrationInputKind,
+    pub input_ref: String,
+    pub method: KnowledgeCalibrationMethod,
+    pub trace_id: String,
+    pub actor: String,
+    pub llm_config: Option<KnowledgeCalibrationLlmConfig>,
+    pub llm_judgement: Option<KnowledgeCalibrationLlmJudgeOutput>,
+    pub rule_context: Option<KnowledgeCalibrationRuleContext>,
+    pub eval_context: Option<KnowledgeCalibrationEvalContext>,
+    pub rqa_context: Option<KnowledgeCalibrationRqaContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationReportRecord {
+    pub report_id: String,
+    pub report_ref: String,
+    pub item_id: String,
+    pub kind: KnowledgeItemKind,
+    pub method: KnowledgeCalibrationMethod,
+    pub decision: KnowledgeCalibrationDecision,
+    pub confidence: f64,
+    pub quality_issues: Vec<String>,
+    pub source_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub source_boundary: Value,
+    pub coverage_matrix: Value,
+    pub config_summary: Option<Value>,
+    pub report_hash: String,
+    pub schema_version: String,
+    pub created_at: String,
+    pub report: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationJobCreateInput {
+    pub input_kind: KnowledgeCalibrationInputKind,
+    pub input_ref: String,
+    pub item_id: String,
+    pub method: KnowledgeCalibrationMethod,
+    pub trace_id: String,
+    pub idempotency_key: String,
+    pub config_digest: Option<String>,
+    pub retry_limit: u32,
+    pub concurrency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeCalibrationJobRecord {
+    pub job_id: String,
+    pub status: KnowledgeCalibrationJobStatus,
+    pub input_kind: KnowledgeCalibrationInputKind,
+    pub input_ref: String,
+    pub item_id: String,
+    pub input_digest: String,
+    pub idempotency_key: String,
+    pub trace_id: String,
+    pub method: KnowledgeCalibrationMethod,
+    pub config_digest: Option<String>,
+    pub retry_limit: u32,
+    pub attempt_count: u32,
+    pub concurrency_key: String,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub heartbeat_at: Option<String>,
+    pub report_id: Option<String>,
+    pub last_error_sha256: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl KnowledgeCalibrationLlmConfig {
+    pub fn from_env() -> Result<Self> {
+        let vars = knowledge_calibration_env_vars()
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| (name.to_string(), value))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Self::from_env_map(&vars)
+    }
+
+    pub fn from_env_map(vars: &BTreeMap<String, String>) -> Result<Self> {
+        let profile_id =
+            required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE")?;
+        if profile_id != KNOWLEDGE_CALIBRATION_PROFILE_ID {
+            return Err(anyhow!(
+                "knowledge calibration profile must be {KNOWLEDGE_CALIBRATION_PROFILE_ID}, got {profile_id}"
+            ));
+        }
+        let profile_contract_version = required_calibration_env(
+            vars,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION",
+        )?;
+        if profile_contract_version != KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION {
+            return Err(anyhow!(
+                "knowledge calibration profile contract version must be {KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION}, got {profile_contract_version}"
+            ));
+        }
+        let model_id = required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL")?;
+        let upstream_id =
+            required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_UPSTREAM_ID")?;
+        let prompt_digest = validate_calibration_digest(&required_calibration_env(
+            vars,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROMPT_DIGEST",
+        )?)?;
+        let tool_policy_digest = validate_calibration_digest(&required_calibration_env(
+            vars,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_TOOL_POLICY_DIGEST",
+        )?)?;
+        let decoding_raw =
+            required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_DECODING")?;
+        let decoding = serde_json::from_str::<Value>(&decoding_raw)
+            .with_context(|| "TONGLINGYU_KNOWLEDGE_CALIBRATION_DECODING must be JSON")?;
+        if !decoding.is_object() {
+            return Err(anyhow!(
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_DECODING must be a JSON object"
+            ));
+        }
+        let timeout_secs = parse_positive_u64_env(
+            &required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_TIMEOUT_SECS")?,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_TIMEOUT_SECS",
+        )?;
+        let retry_limit = parse_bounded_u32_env(
+            &required_calibration_env(vars, "TONGLINGYU_KNOWLEDGE_CALIBRATION_RETRY_LIMIT")?,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_RETRY_LIMIT",
+            1,
+            8,
+        )?;
+        let model_capability = validate_calibration_model_capability(&required_calibration_env(
+            vars,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL_CAPABILITY",
+        )?)?;
+        let reasoning_effort = validate_calibration_reasoning_effort(&required_calibration_env(
+            vars,
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_REASONING_EFFORT",
+        )?)?;
+        let mut config = Self {
+            profile_id,
+            model_id,
+            upstream_id,
+            prompt_digest,
+            tool_policy_digest,
+            decoding,
+            timeout_secs,
+            retry_limit,
+            model_capability,
+            reasoning_effort,
+            profile_contract_version,
+            config_digest: String::new(),
+        };
+        config.config_digest = hash_text(&serde_json::to_string(&canonical_json_value(
+            &config.safe_summary_without_digest(),
+        ))?);
+        Ok(config)
+    }
+
+    pub fn safe_summary(&self) -> Value {
+        let mut summary = self.safe_summary_without_digest();
+        if let Some(object) = summary.as_object_mut() {
+            object.insert("config_digest".to_string(), json!(&self.config_digest));
+        }
+        summary
+    }
+
+    fn safe_summary_without_digest(&self) -> Value {
+        json!({
+            "object": "tonglingyu.knowledge_calibration_llm_config_summary",
+            "profile_id": self.profile_id,
+            "model_id": self.model_id,
+            "upstream_id": self.upstream_id,
+            "prompt_digest": self.prompt_digest,
+            "tool_policy_digest": self.tool_policy_digest,
+            "decoding": self.decoding,
+            "decoding_digest": hash_text(&serde_json::to_string(&canonical_json_value(&self.decoding)).unwrap_or_default()),
+            "timeout_secs": self.timeout_secs,
+            "retry_limit": self.retry_limit,
+            "model_capability": self.model_capability,
+            "reasoning_effort": self.reasoning_effort,
+            "profile_contract_version": self.profile_contract_version,
+            "env_var_names": knowledge_calibration_env_vars(),
+            "contains_secret_values": false
+        })
+    }
+}
+
+pub fn knowledge_calibration_release_report(config: &KnowledgeCalibrationLlmConfig) -> Value {
+    json!({
+        "object": "tonglingyu.knowledge_calibration_release_report",
+        "schema_version": KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION,
+        "profile_id": KNOWLEDGE_CALIBRATION_PROFILE_ID,
+        "profile_contract_version": KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION,
+        "llm_config": config.safe_summary(),
+        "contains_secret_values": false,
+        "runtime_usable_auto_promotion": false
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1062,6 +1470,70 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Option<KnowledgeItemRecord>> {
         let conn = self.open_connection()?;
         update_knowledge_item_state(&conn, item_id, input)
+    }
+
+    pub fn create_knowledge_calibration_job(
+        &self,
+        input: KnowledgeCalibrationJobCreateInput,
+    ) -> Result<KnowledgeCalibrationJobRecord> {
+        let conn = self.open_connection()?;
+        create_knowledge_calibration_job(&conn, input)
+    }
+
+    pub fn lease_knowledge_calibration_job(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+        lease_seconds: u64,
+    ) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+        let conn = self.open_connection()?;
+        lease_knowledge_calibration_job(&conn, job_id, lease_owner, lease_seconds)
+    }
+
+    pub fn heartbeat_knowledge_calibration_job(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+    ) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+        let conn = self.open_connection()?;
+        heartbeat_knowledge_calibration_job(&conn, job_id, lease_owner)
+    }
+
+    pub fn complete_knowledge_calibration_job(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+        report_id: &str,
+    ) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+        let conn = self.open_connection()?;
+        complete_knowledge_calibration_job(&conn, job_id, lease_owner, report_id)
+    }
+
+    pub fn fail_knowledge_calibration_job(
+        &self,
+        job_id: &str,
+        lease_owner: &str,
+        error: &str,
+        retryable: bool,
+    ) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+        let conn = self.open_connection()?;
+        fail_knowledge_calibration_job(&conn, job_id, lease_owner, error, retryable)
+    }
+
+    pub fn run_knowledge_calibration_offline(
+        &self,
+        input: KnowledgeCalibrationRunInput,
+    ) -> Result<KnowledgeCalibrationReportRecord> {
+        let conn = self.open_connection()?;
+        run_knowledge_calibration_offline(&conn, input)
+    }
+
+    pub fn read_knowledge_calibration_report(
+        &self,
+        report_id: &str,
+    ) -> Result<Option<KnowledgeCalibrationReportRecord>> {
+        let conn = self.open_connection()?;
+        read_knowledge_calibration_report(&conn, report_id)
     }
 
     pub fn create_knowledge_patch_proposal(
@@ -1780,6 +2252,68 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
             }),
         },
     ]
+}
+
+pub fn knowledge_calibration_profile_descriptor() -> ProfileDescriptor {
+    ProfileDescriptor {
+        profile: KNOWLEDGE_CALIBRATION_PROFILE_ID.to_string(),
+        version: KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION.to_string(),
+        role: "内部知识治理校准 profile，仅作 evidence judge，不对普通用户暴露。".to_string(),
+        allowed_tools: Vec::new(),
+        input_contract: json!({
+            "required": [
+                "item_id",
+                "kind",
+                "source_refs",
+                "evidence_refs",
+                "payload_sha256",
+                "calibration_method",
+                "config_digest"
+            ],
+            "forbidden": [
+                "system_prompt",
+                "profile_override",
+                "write_tools",
+                "secret",
+                "api_key",
+                "raw_question",
+                "unredacted_query"
+            ]
+        }),
+        output_contract: json!({
+            "required": [
+                "decision",
+                "confidence",
+                "evidence_refs",
+                "source_boundary",
+                "quality_issues"
+            ],
+            "decision": ["system_calibrated", "rejected", "keep_candidate"],
+            "cannot_write_fact_layer": true,
+            "cannot_promote_runtime_usable": true,
+            "must_not_include": ["raw_question", "unredacted_query", "secret", "api_key", "full_prompt"]
+        }),
+        safety_contract: json!({
+            "internal_governance_only": true,
+            "hidden_from_openwebui_model_list": true,
+            "no_final_answer": true,
+            "no_secret_access": true,
+            "no_write_tools": true,
+            "evidence_judge_only": true
+        }),
+    }
+}
+
+pub fn knowledge_calibration_profile_contract() -> AgentProfileContract {
+    let descriptor = knowledge_calibration_profile_descriptor();
+    let mut contract = AgentProfileContract::new(descriptor.profile, descriptor.version);
+    contract.input_schema = descriptor.input_contract;
+    contract.output_schema = descriptor.output_contract;
+    contract.tool_policy = agent_runtime_tool_policy(Vec::new());
+    contract.max_context_messages = Some(24);
+    contract.max_runtime_seconds = Some(agent_runtime_profile_max_runtime_seconds());
+    contract.safety_policy = descriptor.safety_contract;
+    contract
 }
 
 pub fn agent_runtime_profile_contracts(
@@ -4144,6 +4678,8 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(knowledge_governance_task_indexes_sql())?;
     conn.execute_batch(knowledge_patch_proposal_schema_sql())?;
     conn.execute_batch(knowledge_item_state_schema_sql())?;
+    migrate_knowledge_item_calibration_columns(conn)?;
+    conn.execute_batch(knowledge_calibration_schema_sql())?;
     let backfilled_governance_tasks = conn.execute(
         r#"
         INSERT OR IGNORE INTO knowledge_governance_tasks (
@@ -4227,6 +4763,18 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_ITEM_CALIBRATION_LINK_MIGRATION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION, now_rfc3339()],
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
@@ -4323,6 +4871,9 @@ fn knowledge_item_state_schema_sql() -> &'static str {
         payload_json TEXT NOT NULL,
         payload_sha256 TEXT NOT NULL,
         schema_version TEXT NOT NULL,
+        source_boundary_json TEXT,
+        calibration_report_ref TEXT,
+        confidence REAL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         state_version INTEGER NOT NULL
@@ -4350,6 +4901,100 @@ fn knowledge_item_state_schema_sql() -> &'static str {
         ON knowledge_item_state_history(item_id, state_version);
     CREATE INDEX IF NOT EXISTS idx_knowledge_item_state_history_created
         ON knowledge_item_state_history(created_at);
+    "#
+}
+
+fn migrate_knowledge_item_calibration_columns(conn: &Connection) -> Result<()> {
+    if !sqlite_table_exists(conn, "knowledge_items")? {
+        return Ok(());
+    }
+    let columns = sqlite_table_columns(conn, "knowledge_items")?;
+    for (column, definition) in [
+        ("source_boundary_json", "TEXT"),
+        ("calibration_report_ref", "TEXT"),
+        ("confidence", "REAL"),
+    ] {
+        if !columns.contains(column) {
+            conn.execute(
+                &format!("ALTER TABLE knowledge_items ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn knowledge_calibration_schema_sql() -> &'static str {
+    r#"
+    CREATE TABLE IF NOT EXISTS knowledge_calibration_reports (
+        report_id TEXT PRIMARY KEY,
+        report_ref TEXT NOT NULL UNIQUE,
+        item_id TEXT NOT NULL REFERENCES knowledge_items(item_id),
+        kind TEXT NOT NULL,
+        method TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        quality_issues_json TEXT NOT NULL,
+        source_refs_json TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        source_boundary_json TEXT NOT NULL,
+        coverage_matrix_json TEXT NOT NULL,
+        config_summary_json TEXT,
+        report_json TEXT NOT NULL,
+        report_hash TEXT NOT NULL,
+        schema_version TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_calibration_jobs (
+        job_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        input_kind TEXT NOT NULL,
+        input_ref TEXT NOT NULL,
+        item_id TEXT NOT NULL REFERENCES knowledge_items(item_id),
+        input_digest TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        trace_id TEXT NOT NULL,
+        method TEXT NOT NULL,
+        config_digest TEXT,
+        retry_limit INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL,
+        concurrency_key TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        report_id TEXT REFERENCES knowledge_calibration_reports(report_id),
+        last_error_sha256 TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS knowledge_calibration_job_history (
+        history_id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES knowledge_calibration_jobs(job_id),
+        previous_status TEXT,
+        new_status TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        reason_sha256 TEXT NOT NULL,
+        lease_owner TEXT,
+        report_id TEXT,
+        attempt_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_reports_item
+        ON knowledge_calibration_reports(item_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_reports_method
+        ON knowledge_calibration_reports(method);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_reports_decision
+        ON knowledge_calibration_reports(decision);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_jobs_status
+        ON knowledge_calibration_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_jobs_item
+        ON knowledge_calibration_jobs(item_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_jobs_concurrency
+        ON knowledge_calibration_jobs(concurrency_key, status);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_jobs_trace
+        ON knowledge_calibration_jobs(trace_id);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_calibration_job_history_job
+        ON knowledge_calibration_job_history(job_id, created_at);
     "#
 }
 
@@ -4506,7 +5151,11 @@ fn runtime_schema_required_migrations() -> Vec<String> {
         RETRIEVAL_FAILURE_PRIVACY_MIGRATION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_GOVERNANCE_TASK_BACKFILL_MIGRATION.to_string(),
+        KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION.to_string(),
         KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION.to_string(),
+        KNOWLEDGE_ITEM_CALIBRATION_LINK_MIGRATION.to_string(),
+        KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION.to_string(),
+        KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION.to_string(),
         RQA_LIFECYCLE_POLICY_VERSION.to_string(),
     ]
 }
@@ -4552,6 +5201,9 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         knowledge_patch_proposals: table_count(conn, "knowledge_patch_proposals")?,
         knowledge_items: table_count(conn, "knowledge_items")?,
         knowledge_item_state_history: table_count(conn, "knowledge_item_state_history")?,
+        knowledge_calibration_reports: table_count(conn, "knowledge_calibration_reports")?,
+        knowledge_calibration_jobs: table_count(conn, "knowledge_calibration_jobs")?,
+        knowledge_calibration_job_history: table_count(conn, "knowledge_calibration_job_history")?,
         audit_events: table_count(conn, "audit_events")?,
         review_status: grouped_count_map(
             conn,
@@ -4588,6 +5240,18 @@ pub fn runtime_store_stats(conn: &Connection) -> Result<RuntimeStoreStats> {
         knowledge_item_kind: grouped_count_map(
             conn,
             "SELECT kind, COUNT(*) FROM knowledge_items GROUP BY kind",
+        )?,
+        knowledge_calibration_report_method: grouped_count_map(
+            conn,
+            "SELECT method, COUNT(*) FROM knowledge_calibration_reports GROUP BY method",
+        )?,
+        knowledge_calibration_report_decision: grouped_count_map(
+            conn,
+            "SELECT decision, COUNT(*) FROM knowledge_calibration_reports GROUP BY decision",
+        )?,
+        knowledge_calibration_job_status: grouped_count_map(
+            conn,
+            "SELECT status, COUNT(*) FROM knowledge_calibration_jobs GROUP BY status",
         )?,
         audit_event_types: grouped_count_map(
             conn,
@@ -5840,6 +6504,1467 @@ fn update_knowledge_item_state_inner(
     Ok(Some(record))
 }
 
+pub async fn execute_knowledge_calibration_llm_evidence_judge(
+    runtime: Arc<dyn RuntimeClient>,
+    item: &KnowledgeItemRecord,
+    config: &KnowledgeCalibrationLlmConfig,
+    trace_id: &str,
+) -> Result<KnowledgeCalibrationLlmJudgeOutput> {
+    if config.profile_id != KNOWLEDGE_CALIBRATION_PROFILE_ID {
+        return Err(anyhow!(
+            "knowledge calibration LLM config profile must be {KNOWLEDGE_CALIBRATION_PROFILE_ID}"
+        ));
+    }
+    let contract = knowledge_calibration_profile_contract();
+    let output = runtime
+        .execute_profile_step(RuntimeProfileInput {
+            profile_id: KNOWLEDGE_CALIBRATION_PROFILE_ID.to_string(),
+            messages: vec![RuntimeProfileMessage::new(
+                "user",
+                serde_json::to_string(&json!({
+                    "object": "tonglingyu.knowledge_calibration_llm_input",
+                    "item_id": item.item_id,
+                    "kind": item.kind.as_str(),
+                    "state": item.state.as_str(),
+                    "source_refs": item.source_refs,
+                    "evidence_refs": item.evidence_refs,
+                    "payload_sha256": item.payload_sha256,
+                    "payload": item.payload,
+                    "calibration_method": KnowledgeCalibrationMethod::LlmEvidenceJudge.as_str(),
+                    "config_digest": config.config_digest,
+                    "profile_contract_version": KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION,
+                    "instruction": "judge only whether the candidate is supported by the supplied evidence refs; return decision/confidence/evidence_refs/source_boundary/quality_issues JSON; do not write facts",
+                }))?,
+            )],
+            metadata: json!({
+                "runtime": "tonglingyu",
+                "operation": "knowledge_calibration_llm_evidence_judge",
+                "llm_config": config.safe_summary(),
+                "contains_secret_values": false,
+            }),
+            profile_contract: Some(contract),
+            runtime_step: None,
+            requested_tools: Vec::new(),
+            trace_id: trace_id.to_string(),
+        })
+        .await
+        .map_err(|error| anyhow!("knowledge calibration LLM evidence judge failed: {error}"))?;
+    parse_knowledge_calibration_llm_judge_output(&output.result_summary)
+}
+
+pub fn parse_knowledge_calibration_llm_judge_output(
+    result_summary: &str,
+) -> Result<KnowledgeCalibrationLlmJudgeOutput> {
+    let trimmed = result_summary.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("knowledge calibration LLM judge output is empty"));
+    }
+    let value = parse_agent_runtime_summary_value(trimmed)
+        .ok_or_else(|| anyhow!("knowledge calibration LLM judge output must be JSON"))?;
+    validate_calibration_privacy(&value)?;
+    let object = object_or_named_child(&value, "llm_evidence_judge")
+        .ok_or_else(|| anyhow!("knowledge calibration LLM judge output must be an object"))?;
+    let decision = KnowledgeCalibrationDecision::parse(
+        object
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("knowledge calibration LLM judge decision missing"))?,
+    )?;
+    let confidence = object
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| anyhow!("knowledge calibration LLM judge confidence missing"))?;
+    let evidence_refs = object
+        .get("evidence_refs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("knowledge calibration LLM judge evidence_refs missing"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(|text| bounded_optional_text(text, 240))
+                .ok_or_else(|| {
+                    anyhow!("knowledge calibration LLM judge evidence_refs must be strings")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let source_boundary = object
+        .get("source_boundary")
+        .cloned()
+        .ok_or_else(|| anyhow!("knowledge calibration LLM judge source_boundary missing"))?;
+    let quality_issues = object
+        .get("quality_issues")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .and_then(|text| bounded_optional_text(text, 240))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "knowledge calibration LLM judge quality_issues must be strings"
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let forbidden_conclusion_detected = object
+        .get("forbidden_conclusion_detected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(KnowledgeCalibrationLlmJudgeOutput {
+        decision,
+        confidence,
+        evidence_refs,
+        source_boundary,
+        quality_issues,
+        forbidden_conclusion_detected,
+    })
+}
+
+pub fn run_knowledge_calibration_offline(
+    conn: &Connection,
+    input: KnowledgeCalibrationRunInput,
+) -> Result<KnowledgeCalibrationReportRecord> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = run_knowledge_calibration_offline_inner(conn, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        run_knowledge_calibration_offline_inner(conn, input)
+    }
+}
+
+fn run_knowledge_calibration_offline_inner(
+    conn: &Connection,
+    input: KnowledgeCalibrationRunInput,
+) -> Result<KnowledgeCalibrationReportRecord> {
+    let item_id = bounded_optional_text(&input.item_id, 160)
+        .ok_or_else(|| anyhow!("knowledge calibration item_id is required"))?;
+    let input_ref = bounded_optional_text(&input.input_ref, 240)
+        .ok_or_else(|| anyhow!("knowledge calibration input_ref is required"))?;
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let actor = validate_knowledge_item_actor(&input.actor)?;
+    let item = load_knowledge_item(conn, &item_id)?
+        .ok_or_else(|| anyhow!("knowledge calibration item not found: {item_id}"))?;
+    if item.state != KnowledgeState::Candidate {
+        return Err(anyhow!(
+            "knowledge calibration requires candidate item, got {}",
+            item.state.as_str()
+        ));
+    }
+    let outcome = evaluate_knowledge_calibration(&item, &input)?;
+    let report = insert_knowledge_calibration_report(
+        conn,
+        &item,
+        input.input_kind,
+        &input_ref,
+        input.method,
+        &outcome,
+        &trace_id,
+        &actor,
+    )?;
+    if let Some(target_state) = report.decision.target_state() {
+        update_knowledge_item_state_from_calibration(
+            conn,
+            &item,
+            target_state,
+            &report,
+            &trace_id,
+            &actor,
+        )?;
+    } else {
+        append_runtime_audit_event(
+            conn,
+            &trace_id,
+            "knowledge_calibration_candidate_kept",
+            &json!({
+                "item_id": &item.item_id,
+                "report_id": &report.report_id,
+                "report_ref": &report.report_ref,
+                "method": report.method.as_str(),
+                "decision": report.decision.as_str(),
+                "quality_issue_count": report.quality_issues.len(),
+                "actor": actor,
+            }),
+        )?;
+    }
+    Ok(report)
+}
+
+struct KnowledgeCalibrationOutcome {
+    decision: KnowledgeCalibrationDecision,
+    confidence: f64,
+    evidence_refs: Vec<String>,
+    source_boundary: Value,
+    quality_issues: Vec<String>,
+    coverage_matrix: Value,
+    config_summary: Option<Value>,
+    method_detail: Value,
+}
+
+fn evaluate_knowledge_calibration(
+    item: &KnowledgeItemRecord,
+    input: &KnowledgeCalibrationRunInput,
+) -> Result<KnowledgeCalibrationOutcome> {
+    let mut quality_issues = Vec::new();
+    let mut evidence_refs = item.evidence_refs.clone();
+    let source_boundary;
+    let confidence;
+    let mut decision;
+    let mut forbidden_conclusion = false;
+    let mut reviewer_downgrade = false;
+    let mut llm_config_missing = false;
+    let method_detail;
+    let mut config_summary = None;
+
+    match input.method {
+        KnowledgeCalibrationMethod::Rule => {
+            let context = input
+                .rule_context
+                .as_ref()
+                .ok_or_else(|| anyhow!("rule calibration requires rule_context"))?;
+            source_boundary = json!({
+                "source_id": bounded_optional_text(&context.source_id, 160),
+                "block_id": bounded_optional_text(&context.block_id, 200),
+                "required_evidence_type": bounded_optional_text(&context.required_evidence_type, 80),
+                "version_boundary": bounded_optional_text(&context.version_boundary, 240),
+                "usage_boundary": bounded_optional_text(&context.usage_boundary, 240),
+            });
+            if bounded_optional_text(&context.source_id, 160).is_none() {
+                quality_issues.push("source_id_missing".to_string());
+            }
+            if bounded_optional_text(&context.block_id, 200).is_none() {
+                quality_issues.push("block_id_missing".to_string());
+            }
+            if bounded_optional_text(&context.required_evidence_type, 80).is_none() {
+                quality_issues.push("required_evidence_type_missing".to_string());
+            }
+            if bounded_optional_text(&context.version_boundary, 240).is_none() {
+                quality_issues.push("version_boundary_missing".to_string());
+            }
+            if bounded_optional_text(&context.usage_boundary, 240).is_none() {
+                quality_issues.push("usage_boundary_missing".to_string());
+            }
+            let payload_text = item.payload.to_string();
+            for term in &context.exact_terms {
+                let Some(term) = bounded_optional_text(term, 120) else {
+                    quality_issues.push("exact_term_missing".to_string());
+                    continue;
+                };
+                if !payload_text.contains(&term) {
+                    quality_issues.push(format!("exact_term_not_in_payload:{}", hash_text(&term)));
+                }
+            }
+            if !context.block_id.trim().is_empty() {
+                evidence_refs.push(format!("block://{}", context.block_id.trim()));
+            }
+            decision = if quality_issues.is_empty() {
+                KnowledgeCalibrationDecision::SystemCalibrated
+            } else {
+                KnowledgeCalibrationDecision::KeepCandidate
+            };
+            confidence = if quality_issues.is_empty() {
+                0.91
+            } else {
+                0.35
+            };
+            method_detail = json!({
+                "rule_context": {
+                    "source_id": context.source_id,
+                    "block_id": context.block_id,
+                    "required_evidence_type": context.required_evidence_type,
+                    "exact_term_count": context.exact_terms.len(),
+                    "version_boundary_present": !context.version_boundary.trim().is_empty(),
+                    "usage_boundary_present": !context.usage_boundary.trim().is_empty(),
+                }
+            });
+        }
+        KnowledgeCalibrationMethod::Eval => {
+            let context = input
+                .eval_context
+                .as_ref()
+                .ok_or_else(|| anyhow!("eval calibration requires eval_context"))?;
+            if !context.expected_evidence_hit {
+                quality_issues.push("expected_evidence_miss".to_string());
+            }
+            if context.forbidden_conclusion_hit {
+                quality_issues.push("forbidden_conclusion_hit".to_string());
+                forbidden_conclusion = true;
+            }
+            if context.reviewer_status != "passed" {
+                quality_issues.push("reviewer_status_not_passed".to_string());
+                reviewer_downgrade = true;
+            }
+            if !context.source_boundary_confirmed {
+                quality_issues.push("source_boundary_not_confirmed".to_string());
+            }
+            source_boundary = json!({
+                "eval_expected_evidence_hit": context.expected_evidence_hit,
+                "source_boundary_confirmed": context.source_boundary_confirmed,
+                "reviewer_status": context.reviewer_status,
+            });
+            decision = if context.forbidden_conclusion_hit || context.reviewer_status != "passed" {
+                KnowledgeCalibrationDecision::Rejected
+            } else if quality_issues.is_empty() {
+                KnowledgeCalibrationDecision::SystemCalibrated
+            } else {
+                KnowledgeCalibrationDecision::KeepCandidate
+            };
+            confidence = if quality_issues.is_empty() {
+                0.88
+            } else {
+                0.42
+            };
+            method_detail = json!({
+                "eval_context": {
+                    "expected_evidence_hit": context.expected_evidence_hit,
+                    "forbidden_conclusion_hit": context.forbidden_conclusion_hit,
+                    "reviewer_status": context.reviewer_status,
+                    "source_boundary_confirmed": context.source_boundary_confirmed,
+                }
+            });
+        }
+        KnowledgeCalibrationMethod::Rqa => {
+            let context = input
+                .rqa_context
+                .as_ref()
+                .ok_or_else(|| anyhow!("RQA calibration requires rqa_context"))?;
+            quality_issues.extend(
+                context
+                    .blocking_quality_issues
+                    .iter()
+                    .filter_map(|issue| bounded_optional_text(issue, 160)),
+            );
+            if context.failure_cluster_refs.is_empty() {
+                quality_issues.push("failure_cluster_ref_missing".to_string());
+            }
+            if context.governance_task_refs.is_empty() {
+                quality_issues.push("governance_task_ref_missing".to_string());
+            }
+            if context.proposed_fix_refs.is_empty() {
+                quality_issues.push("proposed_fix_ref_missing".to_string());
+            }
+            source_boundary = json!({
+                "rqa_report_refs": context.rqa_report_refs,
+                "failure_cluster_refs": context.failure_cluster_refs,
+                "governance_task_refs": context.governance_task_refs,
+                "proposed_fix_refs": context.proposed_fix_refs,
+                "retrieval_quality_issue_count": context.retrieval_quality_issues.len(),
+            });
+            evidence_refs.extend(context.rqa_report_refs.iter().cloned());
+            decision = if quality_issues.is_empty() {
+                KnowledgeCalibrationDecision::SystemCalibrated
+            } else {
+                KnowledgeCalibrationDecision::KeepCandidate
+            };
+            confidence = if quality_issues.is_empty() { 0.83 } else { 0.4 };
+            method_detail = json!({
+                "rqa_context": {
+                    "retrieval_quality_issues": context.retrieval_quality_issues,
+                    "blocking_quality_issue_count": context.blocking_quality_issues.len(),
+                    "failure_cluster_refs": context.failure_cluster_refs,
+                    "governance_task_refs": context.governance_task_refs,
+                    "proposed_fix_refs": context.proposed_fix_refs,
+                    "rqa_report_refs": context.rqa_report_refs,
+                }
+            });
+        }
+        KnowledgeCalibrationMethod::LlmEvidenceJudge => {
+            let config = input.llm_config.as_ref().ok_or_else(|| {
+                llm_config_missing = true;
+                anyhow!("LLM evidence judge calibration requires configured LLM")
+            })?;
+            let judgement = input
+                .llm_judgement
+                .as_ref()
+                .ok_or_else(|| anyhow!("LLM evidence judge calibration requires judge output"))?;
+            config_summary = Some(config.safe_summary());
+            decision = judgement.decision;
+            confidence = judgement.confidence;
+            evidence_refs.extend(judgement.evidence_refs.clone());
+            source_boundary = judgement.source_boundary.clone();
+            quality_issues.extend(judgement.quality_issues.clone());
+            forbidden_conclusion = judgement.forbidden_conclusion_detected;
+            if judgement.forbidden_conclusion_detected {
+                decision = KnowledgeCalibrationDecision::Rejected;
+                quality_issues.push("llm_forbidden_conclusion_detected".to_string());
+            }
+            method_detail = json!({
+                "llm_evidence_judge": {
+                    "profile_id": config.profile_id,
+                    "profile_contract_version": config.profile_contract_version,
+                    "config_digest": config.config_digest,
+                    "model_capability": config.model_capability,
+                    "reasoning_effort": config.reasoning_effort,
+                    "raw_output_stored": false,
+                }
+            });
+        }
+    }
+
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(anyhow!(
+            "knowledge calibration confidence must be between 0 and 1"
+        ));
+    }
+    let evidence_refs = normalize_knowledge_refs("calibration evidence_refs", evidence_refs)?;
+    if decision == KnowledgeCalibrationDecision::SystemCalibrated {
+        if confidence < 0.8 {
+            quality_issues.push("confidence_below_system_calibrated_threshold".to_string());
+            decision = KnowledgeCalibrationDecision::KeepCandidate;
+        }
+        if !source_boundary_is_nonempty(&source_boundary) {
+            quality_issues.push("source_boundary_missing".to_string());
+            decision = KnowledgeCalibrationDecision::KeepCandidate;
+        }
+        if evidence_refs.is_empty() {
+            quality_issues.push("evidence_ref_missing".to_string());
+            decision = KnowledgeCalibrationDecision::KeepCandidate;
+        }
+    }
+    let coverage_matrix = knowledge_calibration_coverage_matrix(
+        item.kind,
+        input.method,
+        decision,
+        confidence,
+        source_boundary_is_nonempty(&source_boundary),
+        !evidence_refs.is_empty(),
+        forbidden_conclusion,
+        reviewer_downgrade,
+        llm_config_missing,
+    );
+    Ok(KnowledgeCalibrationOutcome {
+        decision,
+        confidence,
+        evidence_refs,
+        source_boundary: canonical_json_value(&source_boundary),
+        quality_issues: normalized_calibration_issues(quality_issues)?,
+        coverage_matrix,
+        config_summary,
+        method_detail,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knowledge_calibration_coverage_matrix(
+    kind: KnowledgeItemKind,
+    method: KnowledgeCalibrationMethod,
+    decision: KnowledgeCalibrationDecision,
+    confidence: f64,
+    source_boundary_present: bool,
+    evidence_ref_present: bool,
+    forbidden_conclusion: bool,
+    reviewer_downgrade: bool,
+    llm_config_missing: bool,
+) -> Value {
+    json!({
+        "object": "tonglingyu.knowledge_calibration_coverage_matrix",
+        "schema_version": KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION,
+        "kind": kind.as_str(),
+        "method": method.as_str(),
+        "decision": decision.as_str(),
+        "source_boundary_present": source_boundary_present,
+        "evidence_ref_present": evidence_ref_present,
+        "low_confidence": confidence < 0.8,
+        "forbidden_conclusion": forbidden_conclusion,
+        "reviewer_downgrade": reviewer_downgrade,
+        "llm_config_missing": llm_config_missing,
+        "runtime_policy_rejected": decision == KnowledgeCalibrationDecision::SystemCalibrated,
+        "runtime_policy_reason": "system_calibrated_requires_explicit_runtime_policy_release_run",
+        "runtime_usable_auto_promotion": false,
+        "groups": [
+            kind.as_str(),
+            if source_boundary_present { "source_boundary_present" } else { "source_boundary_missing" },
+            if confidence < 0.8 { "low_confidence" } else { "confidence_ok" },
+            if forbidden_conclusion { "forbidden_conclusion" } else { "no_forbidden_conclusion" },
+            if reviewer_downgrade { "reviewer_downgrade" } else { "reviewer_ok_or_not_applicable" },
+            if llm_config_missing { "llm_config_missing" } else { "llm_config_bound_or_not_applicable" },
+            "runtime_policy_rejected_until_release"
+        ]
+    })
+}
+
+fn normalized_calibration_issues(issues: Vec<String>) -> Result<Vec<String>> {
+    let issues = issues
+        .into_iter()
+        .filter_map(|issue| bounded_optional_text(&issue, 240))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if issues.len() > 64 {
+        return Err(anyhow!(
+            "knowledge calibration quality issues exceed 64 entries"
+        ));
+    }
+    Ok(issues)
+}
+
+fn source_boundary_is_nonempty(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| !object.is_empty())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_knowledge_calibration_report(
+    conn: &Connection,
+    item: &KnowledgeItemRecord,
+    input_kind: KnowledgeCalibrationInputKind,
+    input_ref: &str,
+    method: KnowledgeCalibrationMethod,
+    outcome: &KnowledgeCalibrationOutcome,
+    trace_id: &str,
+    actor: &str,
+) -> Result<KnowledgeCalibrationReportRecord> {
+    if outcome.decision == KnowledgeCalibrationDecision::SystemCalibrated {
+        if outcome.evidence_refs.is_empty() {
+            return Err(anyhow!(
+                "system_calibrated knowledge calibration requires evidence refs"
+            ));
+        }
+        if !source_boundary_is_nonempty(&outcome.source_boundary) {
+            return Err(anyhow!(
+                "system_calibrated knowledge calibration requires source boundary"
+            ));
+        }
+    }
+    let report_id = format!("kcr-{}", uuid::Uuid::now_v7().simple());
+    let report_ref = format!("runtime://tonglingyu/knowledge/calibration_reports/{report_id}");
+    let created_at = now_rfc3339();
+    let config_summary = outcome.config_summary.clone();
+    if let Some(summary) = &config_summary {
+        validate_calibration_privacy(summary)?;
+    }
+    let report = canonical_json_value(&json!({
+        "object": "tonglingyu.knowledge_calibration_report",
+        "schema_version": KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION,
+        "report_id": &report_id,
+        "report_ref": &report_ref,
+        "item_id": &item.item_id,
+        "kind": item.kind.as_str(),
+        "method": method.as_str(),
+        "decision": outcome.decision.as_str(),
+        "confidence": outcome.confidence,
+        "quality_issues": outcome.quality_issues,
+        "source_refs": item.source_refs,
+        "evidence_refs": outcome.evidence_refs,
+        "source_boundary": outcome.source_boundary,
+        "input_kind": input_kind.as_str(),
+        "input_ref_sha256": hash_text(input_ref),
+        "payload_sha256": item.payload_sha256,
+        "calibration_method_detail": outcome.method_detail,
+        "coverage_matrix": outcome.coverage_matrix,
+        "config_summary": config_summary,
+        "raw_question_stored": false,
+        "unredacted_query_stored": false,
+        "secret_values_stored": false,
+        "full_prompt_stored": false,
+        "fact_layer_mutated": false,
+        "runtime_usable_auto_promotion": false,
+        "created_at": &created_at,
+    }));
+    validate_calibration_privacy(&report)?;
+    let report_hash = hash_text(&serde_json::to_string(&report)?);
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_calibration_reports (
+            report_id, report_ref, item_id, kind, method, decision, confidence,
+            quality_issues_json, source_refs_json, evidence_refs_json,
+            source_boundary_json, coverage_matrix_json, config_summary_json,
+            report_json, report_hash, schema_version, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        "#,
+        params![
+            &report_id,
+            &report_ref,
+            &item.item_id,
+            item.kind.as_str(),
+            method.as_str(),
+            outcome.decision.as_str(),
+            outcome.confidence,
+            serde_json::to_string(&outcome.quality_issues)?,
+            serde_json::to_string(&item.source_refs)?,
+            serde_json::to_string(&outcome.evidence_refs)?,
+            serde_json::to_string(&outcome.source_boundary)?,
+            serde_json::to_string(&outcome.coverage_matrix)?,
+            optional_json_string(config_summary.as_ref())?,
+            serde_json::to_string(&report)?,
+            &report_hash,
+            KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION,
+            &created_at,
+        ],
+    )?;
+    append_runtime_audit_event(
+        conn,
+        trace_id,
+        "knowledge_calibration_report_created",
+        &json!({
+            "report_id": &report_id,
+            "report_ref": &report_ref,
+            "item_id": &item.item_id,
+            "kind": item.kind.as_str(),
+            "method": method.as_str(),
+            "decision": outcome.decision.as_str(),
+            "confidence": outcome.confidence,
+            "quality_issue_count": outcome.quality_issues.len(),
+            "report_hash": &report_hash,
+            "config_digest": config_summary.as_ref().and_then(|value| value.get("config_digest")).and_then(Value::as_str),
+            "contains_secret_values": false,
+            "actor": actor,
+        }),
+    )?;
+    read_knowledge_calibration_report(conn, &report_id)?
+        .ok_or_else(|| anyhow!("knowledge calibration report was not readable after insert"))
+}
+
+fn update_knowledge_item_state_from_calibration(
+    conn: &Connection,
+    item: &KnowledgeItemRecord,
+    target_state: KnowledgeState,
+    report: &KnowledgeCalibrationReportRecord,
+    trace_id: &str,
+    actor: &str,
+) -> Result<Option<KnowledgeItemRecord>> {
+    if target_state == KnowledgeState::SystemCalibrated && report.report_ref.trim().is_empty() {
+        return Err(anyhow!(
+            "system_calibrated knowledge item requires calibration report ref"
+        ));
+    }
+    let now = now_rfc3339();
+    let next_state_version = item.state_version + 1;
+    let updated = conn.execute(
+        r#"
+        UPDATE knowledge_items
+        SET state = ?2,
+            evidence_refs_json = ?3,
+            source_boundary_json = ?4,
+            calibration_report_ref = ?5,
+            confidence = ?6,
+            updated_at = ?7,
+            state_version = ?8
+        WHERE item_id = ?1 AND state_version = ?9
+        "#,
+        params![
+            &item.item_id,
+            target_state.as_str(),
+            serde_json::to_string(&report.evidence_refs)?,
+            serde_json::to_string(&report.source_boundary)?,
+            &report.report_ref,
+            report.confidence,
+            &now,
+            next_state_version,
+            item.state_version,
+        ],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!("knowledge calibration state update conflict"));
+    }
+    let reason = format!(
+        "knowledge calibration {} via {} report {}",
+        report.decision.as_str(),
+        report.method.as_str(),
+        report.report_ref
+    );
+    insert_knowledge_item_state_history(
+        conn,
+        KnowledgeItemStateHistoryInsert {
+            item_id: &item.item_id,
+            previous_state: Some(item.state),
+            new_state: target_state,
+            actor,
+            reason: &reason,
+            evidence_refs: &report.evidence_refs,
+            state_version: next_state_version,
+            created_at: &now,
+        },
+    )?;
+    let record = load_knowledge_item(conn, &item.item_id)?
+        .ok_or_else(|| anyhow!("knowledge item disappeared after calibration state update"))?;
+    append_runtime_audit_event(
+        conn,
+        trace_id,
+        "knowledge_item_state_updated",
+        &json!({
+            "item_id": &record.item_id,
+            "kind": record.kind.as_str(),
+            "previous_state": item.state.as_str(),
+            "new_state": record.state.as_str(),
+            "state_version": record.state_version,
+            "actor": actor,
+            "reason_sha256": hash_text(&reason),
+            "evidence_ref_count": record.evidence_refs.len(),
+            "source_boundary_present": record.source_boundary.is_some(),
+            "calibration_report_ref": record.calibration_report_ref,
+            "confidence": record.confidence,
+            "runtime_usable_auto_promotion": false,
+        }),
+    )?;
+    Ok(Some(record))
+}
+
+pub fn read_knowledge_calibration_report(
+    conn: &Connection,
+    report_id: &str,
+) -> Result<Option<KnowledgeCalibrationReportRecord>> {
+    conn.query_row(
+        r#"
+        SELECT
+            report_id, report_ref, item_id, kind, method, decision, confidence,
+            quality_issues_json, source_refs_json, evidence_refs_json,
+            source_boundary_json, coverage_matrix_json, config_summary_json,
+            report_json, report_hash, schema_version, created_at
+        FROM knowledge_calibration_reports
+        WHERE report_id = ?1
+        "#,
+        params![report_id],
+        knowledge_calibration_report_sql_row,
+    )
+    .optional()?
+    .map(knowledge_calibration_report_from_sql_row)
+    .transpose()
+}
+
+struct KnowledgeCalibrationReportSqlRow {
+    report_id: String,
+    report_ref: String,
+    item_id: String,
+    kind: String,
+    method: String,
+    decision: String,
+    confidence: f64,
+    quality_issues_json: String,
+    source_refs_json: String,
+    evidence_refs_json: String,
+    source_boundary_json: String,
+    coverage_matrix_json: String,
+    config_summary_json: Option<String>,
+    report_json: String,
+    report_hash: String,
+    schema_version: String,
+    created_at: String,
+}
+
+fn knowledge_calibration_report_sql_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<KnowledgeCalibrationReportSqlRow> {
+    Ok(KnowledgeCalibrationReportSqlRow {
+        report_id: row.get(0)?,
+        report_ref: row.get(1)?,
+        item_id: row.get(2)?,
+        kind: row.get(3)?,
+        method: row.get(4)?,
+        decision: row.get(5)?,
+        confidence: row.get(6)?,
+        quality_issues_json: row.get(7)?,
+        source_refs_json: row.get(8)?,
+        evidence_refs_json: row.get(9)?,
+        source_boundary_json: row.get(10)?,
+        coverage_matrix_json: row.get(11)?,
+        config_summary_json: row.get(12)?,
+        report_json: row.get(13)?,
+        report_hash: row.get(14)?,
+        schema_version: row.get(15)?,
+        created_at: row.get(16)?,
+    })
+}
+
+fn knowledge_calibration_report_from_sql_row(
+    row: KnowledgeCalibrationReportSqlRow,
+) -> Result<KnowledgeCalibrationReportRecord> {
+    Ok(KnowledgeCalibrationReportRecord {
+        report_id: row.report_id,
+        report_ref: row.report_ref,
+        item_id: row.item_id,
+        kind: KnowledgeItemKind::parse(&row.kind)?,
+        method: KnowledgeCalibrationMethod::parse(&row.method)?,
+        decision: KnowledgeCalibrationDecision::parse(&row.decision)?,
+        confidence: row.confidence,
+        quality_issues: serde_json::from_str(&row.quality_issues_json)?,
+        source_refs: serde_json::from_str(&row.source_refs_json)?,
+        evidence_refs: serde_json::from_str(&row.evidence_refs_json)?,
+        source_boundary: serde_json::from_str(&row.source_boundary_json)?,
+        coverage_matrix: serde_json::from_str(&row.coverage_matrix_json)?,
+        config_summary: row
+            .config_summary_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        report_hash: row.report_hash,
+        schema_version: row.schema_version,
+        created_at: row.created_at,
+        report: serde_json::from_str(&row.report_json)?,
+    })
+}
+
+fn validate_calibration_privacy(value: &Value) -> Result<()> {
+    validate_calibration_privacy_inner(value, "")
+}
+
+fn validate_calibration_privacy_inner(value: &Value, path: &str) -> Result<()> {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                let lower = key.to_ascii_lowercase();
+                if key != "contains_secret_values"
+                    && matches!(
+                        lower.as_str(),
+                        "api_key"
+                            | "password"
+                            | "token"
+                            | "secret"
+                            | "raw_question"
+                            | "unredacted_query"
+                            | "full_prompt"
+                            | "system_prompt"
+                    )
+                {
+                    return Err(anyhow!(
+                        "knowledge calibration report contains forbidden private field {path}.{key}"
+                    ));
+                }
+                validate_calibration_privacy_inner(child, key)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                validate_calibration_privacy_inner(item, path)?;
+            }
+        }
+        Value::String(text) if text.contains("sk-") || text.contains("-----BEGIN") => {
+            return Err(anyhow!(
+                "knowledge calibration report contains secret-looking string at {path}"
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub fn create_knowledge_calibration_job(
+    conn: &Connection,
+    input: KnowledgeCalibrationJobCreateInput,
+) -> Result<KnowledgeCalibrationJobRecord> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = create_knowledge_calibration_job_inner(conn, input);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        create_knowledge_calibration_job_inner(conn, input)
+    }
+}
+
+fn create_knowledge_calibration_job_inner(
+    conn: &Connection,
+    input: KnowledgeCalibrationJobCreateInput,
+) -> Result<KnowledgeCalibrationJobRecord> {
+    let item = load_knowledge_item(conn, &input.item_id)?.ok_or_else(|| {
+        anyhow!(
+            "knowledge calibration job item not found: {}",
+            input.item_id
+        )
+    })?;
+    if item.state != KnowledgeState::Candidate {
+        return Err(anyhow!(
+            "knowledge calibration job requires candidate item, got {}",
+            item.state.as_str()
+        ));
+    }
+    let input_ref = bounded_optional_text(&input.input_ref, 240)
+        .ok_or_else(|| anyhow!("knowledge calibration job input_ref is required"))?;
+    let idempotency_key = bounded_optional_text(&input.idempotency_key, 180)
+        .ok_or_else(|| anyhow!("knowledge calibration job idempotency_key is required"))?;
+    if let Some(existing) = load_knowledge_calibration_job_by_idempotency(conn, &idempotency_key)? {
+        return Ok(existing);
+    }
+    let trace_id = validate_knowledge_item_trace_id(&input.trace_id)?;
+    let concurrency_key = bounded_optional_text(&input.concurrency_key, 180)
+        .ok_or_else(|| anyhow!("knowledge calibration job concurrency_key is required"))?;
+    let retry_limit = input.retry_limit.clamp(1, 8);
+    let input_digest = hash_text(&serde_json::to_string(&canonical_json_value(&json!({
+        "input_kind": input.input_kind.as_str(),
+        "input_ref": input_ref,
+        "item_id": item.item_id,
+        "method": input.method.as_str(),
+        "payload_sha256": item.payload_sha256,
+        "config_digest": input.config_digest,
+    })))?);
+    let job_id = format!("kcj-{}", uuid::Uuid::now_v7().simple());
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_calibration_jobs (
+            job_id, status, input_kind, input_ref, item_id, input_digest,
+            idempotency_key, trace_id, method, config_digest, retry_limit,
+            attempt_count, concurrency_key, lease_owner, lease_expires_at,
+            heartbeat_at, report_id, last_error_sha256, created_at, updated_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12,
+            NULL, NULL, NULL, NULL, NULL, ?13, ?13
+        )
+        "#,
+        params![
+            &job_id,
+            KnowledgeCalibrationJobStatus::Queued.as_str(),
+            input.input_kind.as_str(),
+            &input_ref,
+            &item.item_id,
+            &input_digest,
+            &idempotency_key,
+            &trace_id,
+            input.method.as_str(),
+            &input.config_digest,
+            retry_limit,
+            &concurrency_key,
+            &now,
+        ],
+    )?;
+    insert_knowledge_calibration_job_history(
+        conn,
+        &job_id,
+        None,
+        KnowledgeCalibrationJobStatus::Queued,
+        "system",
+        "knowledge calibration job created",
+        None,
+        None,
+        0,
+        &now,
+    )?;
+    append_runtime_audit_event(
+        conn,
+        &trace_id,
+        "knowledge_calibration_job_created",
+        &json!({
+            "job_id": &job_id,
+            "item_id": &item.item_id,
+            "input_kind": input.input_kind.as_str(),
+            "input_ref_sha256": hash_text(&input_ref),
+            "input_digest": &input_digest,
+            "idempotency_key_sha256": hash_text(&idempotency_key),
+            "method": input.method.as_str(),
+            "config_digest": input.config_digest,
+            "retry_limit": retry_limit,
+            "concurrency_key_sha256": hash_text(&concurrency_key),
+        }),
+    )?;
+    load_knowledge_calibration_job(conn, &job_id)?
+        .ok_or_else(|| anyhow!("knowledge calibration job was not readable after insert"))
+}
+
+pub fn lease_knowledge_calibration_job(
+    conn: &Connection,
+    job_id: &str,
+    lease_owner: &str,
+    lease_seconds: u64,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    if conn.is_autocommit() {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result =
+            lease_knowledge_calibration_job_inner(conn, job_id, lease_owner, lease_seconds);
+        match result {
+            Ok(record) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    } else {
+        lease_knowledge_calibration_job_inner(conn, job_id, lease_owner, lease_seconds)
+    }
+}
+
+fn lease_knowledge_calibration_job_inner(
+    conn: &Connection,
+    job_id: &str,
+    lease_owner: &str,
+    lease_seconds: u64,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    let Some(job) = load_knowledge_calibration_job(conn, job_id)? else {
+        return Ok(None);
+    };
+    let owner = bounded_optional_text(lease_owner, 120)
+        .ok_or_else(|| anyhow!("knowledge calibration lease_owner is required"))?;
+    let now = now_rfc3339();
+    if !matches!(
+        job.status,
+        KnowledgeCalibrationJobStatus::Queued
+            | KnowledgeCalibrationJobStatus::RetryWaiting
+            | KnowledgeCalibrationJobStatus::Running
+    ) {
+        return Err(anyhow!(
+            "knowledge calibration job {} is not leasable from status {}",
+            job.job_id,
+            job.status.as_str()
+        ));
+    }
+    if job.status == KnowledgeCalibrationJobStatus::Running
+        && job
+            .lease_expires_at
+            .as_deref()
+            .is_some_and(|expires_at| expires_at > now.as_str())
+        && job.lease_owner.as_deref() != Some(owner.as_str())
+    {
+        return Err(anyhow!("knowledge calibration job lease is still active"));
+    }
+    ensure_no_active_calibration_job_for_concurrency_key(
+        conn,
+        &job.concurrency_key,
+        &job.job_id,
+        &now,
+    )?;
+    let lease_seconds = lease_seconds.max(1);
+    let lease_expires_at = rfc3339_after_seconds(lease_seconds)?;
+    let attempt_count = if job.status == KnowledgeCalibrationJobStatus::Running {
+        job.attempt_count
+    } else {
+        job.attempt_count + 1
+    };
+    conn.execute(
+        r#"
+        UPDATE knowledge_calibration_jobs
+        SET status = ?2,
+            lease_owner = ?3,
+            lease_expires_at = ?4,
+            heartbeat_at = ?5,
+            attempt_count = ?6,
+            updated_at = ?5
+        WHERE job_id = ?1
+        "#,
+        params![
+            &job.job_id,
+            KnowledgeCalibrationJobStatus::Running.as_str(),
+            &owner,
+            &lease_expires_at,
+            &now,
+            attempt_count,
+        ],
+    )?;
+    insert_knowledge_calibration_job_history(
+        conn,
+        &job.job_id,
+        Some(job.status),
+        KnowledgeCalibrationJobStatus::Running,
+        &owner,
+        "knowledge calibration job leased",
+        Some(&owner),
+        job.report_id.as_deref(),
+        attempt_count,
+        &now,
+    )?;
+    append_runtime_audit_event(
+        conn,
+        &job.trace_id,
+        "knowledge_calibration_job_leased",
+        &json!({
+            "job_id": &job.job_id,
+            "item_id": &job.item_id,
+            "previous_status": job.status.as_str(),
+            "new_status": KnowledgeCalibrationJobStatus::Running.as_str(),
+            "lease_owner_sha256": hash_text(&owner),
+            "lease_expires_at": lease_expires_at,
+            "attempt_count": attempt_count,
+            "concurrency_key_sha256": hash_text(&job.concurrency_key),
+        }),
+    )?;
+    load_knowledge_calibration_job(conn, &job.job_id)
+}
+
+pub fn heartbeat_knowledge_calibration_job(
+    conn: &Connection,
+    job_id: &str,
+    lease_owner: &str,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    let Some(job) = load_knowledge_calibration_job(conn, job_id)? else {
+        return Ok(None);
+    };
+    let owner = bounded_optional_text(lease_owner, 120)
+        .ok_or_else(|| anyhow!("knowledge calibration lease_owner is required"))?;
+    ensure_calibration_job_lease_owner(&job, &owner)?;
+    let now = now_rfc3339();
+    let lease_expires_at = rfc3339_after_seconds(KNOWLEDGE_CALIBRATION_DEFAULT_LEASE_SECONDS)?;
+    conn.execute(
+        r#"
+        UPDATE knowledge_calibration_jobs
+        SET heartbeat_at = ?2,
+            lease_expires_at = ?3,
+            updated_at = ?2
+        WHERE job_id = ?1
+        "#,
+        params![&job.job_id, &now, &lease_expires_at],
+    )?;
+    append_runtime_audit_event(
+        conn,
+        &job.trace_id,
+        "knowledge_calibration_job_heartbeat",
+        &json!({
+            "job_id": &job.job_id,
+            "lease_owner_sha256": hash_text(&owner),
+            "lease_expires_at": lease_expires_at,
+        }),
+    )?;
+    load_knowledge_calibration_job(conn, &job.job_id)
+}
+
+pub fn complete_knowledge_calibration_job(
+    conn: &Connection,
+    job_id: &str,
+    lease_owner: &str,
+    report_id: &str,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    let Some(job) = load_knowledge_calibration_job(conn, job_id)? else {
+        return Ok(None);
+    };
+    let owner = bounded_optional_text(lease_owner, 120)
+        .ok_or_else(|| anyhow!("knowledge calibration lease_owner is required"))?;
+    ensure_calibration_job_lease_owner(&job, &owner)?;
+    let report = read_knowledge_calibration_report(conn, report_id)?
+        .ok_or_else(|| anyhow!("knowledge calibration report not found: {report_id}"))?;
+    if report.item_id != job.item_id {
+        return Err(anyhow!("knowledge calibration job report item mismatch"));
+    }
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE knowledge_calibration_jobs
+        SET status = ?2,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = ?3,
+            report_id = ?4,
+            updated_at = ?3
+        WHERE job_id = ?1
+        "#,
+        params![
+            &job.job_id,
+            KnowledgeCalibrationJobStatus::Succeeded.as_str(),
+            &now,
+            &report.report_id,
+        ],
+    )?;
+    insert_knowledge_calibration_job_history(
+        conn,
+        &job.job_id,
+        Some(job.status),
+        KnowledgeCalibrationJobStatus::Succeeded,
+        &owner,
+        "knowledge calibration job completed",
+        Some(&owner),
+        Some(&report.report_id),
+        job.attempt_count,
+        &now,
+    )?;
+    append_runtime_audit_event(
+        conn,
+        &job.trace_id,
+        "knowledge_calibration_job_completed",
+        &json!({
+            "job_id": &job.job_id,
+            "item_id": &job.item_id,
+            "report_id": &report.report_id,
+            "report_ref": &report.report_ref,
+            "lease_owner_sha256": hash_text(&owner),
+            "attempt_count": job.attempt_count,
+        }),
+    )?;
+    load_knowledge_calibration_job(conn, &job.job_id)
+}
+
+pub fn fail_knowledge_calibration_job(
+    conn: &Connection,
+    job_id: &str,
+    lease_owner: &str,
+    error: &str,
+    retryable: bool,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    let Some(job) = load_knowledge_calibration_job(conn, job_id)? else {
+        return Ok(None);
+    };
+    let owner = bounded_optional_text(lease_owner, 120)
+        .ok_or_else(|| anyhow!("knowledge calibration lease_owner is required"))?;
+    ensure_calibration_job_lease_owner(&job, &owner)?;
+    let error_text = bounded_optional_text(error, 480)
+        .ok_or_else(|| anyhow!("knowledge calibration failure error is required"))?;
+    let next_status = if retryable && job.attempt_count < job.retry_limit {
+        KnowledgeCalibrationJobStatus::RetryWaiting
+    } else {
+        KnowledgeCalibrationJobStatus::Failed
+    };
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE knowledge_calibration_jobs
+        SET status = ?2,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            heartbeat_at = ?3,
+            last_error_sha256 = ?4,
+            updated_at = ?3
+        WHERE job_id = ?1
+        "#,
+        params![
+            &job.job_id,
+            next_status.as_str(),
+            &now,
+            hash_text(&error_text)
+        ],
+    )?;
+    insert_knowledge_calibration_job_history(
+        conn,
+        &job.job_id,
+        Some(job.status),
+        next_status,
+        &owner,
+        &error_text,
+        Some(&owner),
+        job.report_id.as_deref(),
+        job.attempt_count,
+        &now,
+    )?;
+    append_runtime_audit_event(
+        conn,
+        &job.trace_id,
+        "knowledge_calibration_job_failed",
+        &json!({
+            "job_id": &job.job_id,
+            "item_id": &job.item_id,
+            "new_status": next_status.as_str(),
+            "retryable": retryable,
+            "attempt_count": job.attempt_count,
+            "retry_limit": job.retry_limit,
+            "error_sha256": hash_text(&error_text),
+            "lease_owner_sha256": hash_text(&owner),
+        }),
+    )?;
+    load_knowledge_calibration_job(conn, &job.job_id)
+}
+
+fn ensure_calibration_job_lease_owner(
+    job: &KnowledgeCalibrationJobRecord,
+    owner: &str,
+) -> Result<()> {
+    if job.status != KnowledgeCalibrationJobStatus::Running {
+        return Err(anyhow!("knowledge calibration job is not running"));
+    }
+    if job.lease_owner.as_deref() != Some(owner) {
+        return Err(anyhow!("knowledge calibration job lease owner mismatch"));
+    }
+    Ok(())
+}
+
+fn ensure_no_active_calibration_job_for_concurrency_key(
+    conn: &Connection,
+    concurrency_key: &str,
+    job_id: &str,
+    now: &str,
+) -> Result<()> {
+    let active_count: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM knowledge_calibration_jobs
+        WHERE concurrency_key = ?1
+          AND job_id <> ?2
+          AND status = 'running'
+          AND lease_expires_at > ?3
+        "#,
+        params![concurrency_key, job_id, now],
+        |row| row.get(0),
+    )?;
+    if active_count > 0 {
+        return Err(anyhow!(
+            "knowledge calibration concurrency limit reached for key"
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_knowledge_calibration_job_history(
+    conn: &Connection,
+    job_id: &str,
+    previous_status: Option<KnowledgeCalibrationJobStatus>,
+    new_status: KnowledgeCalibrationJobStatus,
+    actor: &str,
+    reason: &str,
+    lease_owner: Option<&str>,
+    report_id: Option<&str>,
+    attempt_count: u32,
+    created_at: &str,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO knowledge_calibration_job_history (
+            history_id, job_id, previous_status, new_status, actor, reason_sha256,
+            lease_owner, report_id, attempt_count, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "#,
+        params![
+            format!("kcjh-{}", uuid::Uuid::now_v7().simple()),
+            job_id,
+            previous_status.map(KnowledgeCalibrationJobStatus::as_str),
+            new_status.as_str(),
+            actor,
+            hash_text(reason),
+            lease_owner,
+            report_id,
+            attempt_count,
+            created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_knowledge_calibration_job_by_idempotency(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    conn.query_row(
+        &format!(
+            "{} WHERE idempotency_key = ?1",
+            knowledge_calibration_job_select_sql()
+        ),
+        params![idempotency_key],
+        knowledge_calibration_job_sql_row,
+    )
+    .optional()?
+    .map(knowledge_calibration_job_from_sql_row)
+    .transpose()
+}
+
+fn load_knowledge_calibration_job(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<Option<KnowledgeCalibrationJobRecord>> {
+    conn.query_row(
+        &format!(
+            "{} WHERE job_id = ?1",
+            knowledge_calibration_job_select_sql()
+        ),
+        params![job_id],
+        knowledge_calibration_job_sql_row,
+    )
+    .optional()?
+    .map(knowledge_calibration_job_from_sql_row)
+    .transpose()
+}
+
+fn knowledge_calibration_job_select_sql() -> &'static str {
+    r#"
+    SELECT
+        job_id, status, input_kind, input_ref, item_id, input_digest,
+        idempotency_key, trace_id, method, config_digest, retry_limit,
+        attempt_count, concurrency_key, lease_owner, lease_expires_at,
+        heartbeat_at, report_id, last_error_sha256, created_at, updated_at
+    FROM knowledge_calibration_jobs
+    "#
+}
+
+struct KnowledgeCalibrationJobSqlRow {
+    job_id: String,
+    status: String,
+    input_kind: String,
+    input_ref: String,
+    item_id: String,
+    input_digest: String,
+    idempotency_key: String,
+    trace_id: String,
+    method: String,
+    config_digest: Option<String>,
+    retry_limit: u32,
+    attempt_count: u32,
+    concurrency_key: String,
+    lease_owner: Option<String>,
+    lease_expires_at: Option<String>,
+    heartbeat_at: Option<String>,
+    report_id: Option<String>,
+    last_error_sha256: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+fn knowledge_calibration_job_sql_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<KnowledgeCalibrationJobSqlRow> {
+    Ok(KnowledgeCalibrationJobSqlRow {
+        job_id: row.get(0)?,
+        status: row.get(1)?,
+        input_kind: row.get(2)?,
+        input_ref: row.get(3)?,
+        item_id: row.get(4)?,
+        input_digest: row.get(5)?,
+        idempotency_key: row.get(6)?,
+        trace_id: row.get(7)?,
+        method: row.get(8)?,
+        config_digest: row.get(9)?,
+        retry_limit: row.get(10)?,
+        attempt_count: row.get(11)?,
+        concurrency_key: row.get(12)?,
+        lease_owner: row.get(13)?,
+        lease_expires_at: row.get(14)?,
+        heartbeat_at: row.get(15)?,
+        report_id: row.get(16)?,
+        last_error_sha256: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
+    })
+}
+
+fn knowledge_calibration_job_from_sql_row(
+    row: KnowledgeCalibrationJobSqlRow,
+) -> Result<KnowledgeCalibrationJobRecord> {
+    Ok(KnowledgeCalibrationJobRecord {
+        job_id: row.job_id,
+        status: KnowledgeCalibrationJobStatus::parse(&row.status)?,
+        input_kind: KnowledgeCalibrationInputKind::parse(&row.input_kind)?,
+        input_ref: row.input_ref,
+        item_id: row.item_id,
+        input_digest: row.input_digest,
+        idempotency_key: row.idempotency_key,
+        trace_id: row.trace_id,
+        method: KnowledgeCalibrationMethod::parse(&row.method)?,
+        config_digest: row.config_digest,
+        retry_limit: row.retry_limit,
+        attempt_count: row.attempt_count,
+        concurrency_key: row.concurrency_key,
+        lease_owner: row.lease_owner,
+        lease_expires_at: row.lease_expires_at,
+        heartbeat_at: row.heartbeat_at,
+        report_id: row.report_id,
+        last_error_sha256: row.last_error_sha256,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn rfc3339_after_seconds(seconds: u64) -> Result<String> {
+    let duration = time::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX));
+    Ok((OffsetDateTime::now_utc() + duration)
+        .format(&time::format_description::well_known::Rfc3339)?)
+}
+
 pub fn create_knowledge_patch_proposal(
     conn: &Connection,
     input: KnowledgePatchProposalCreateInput,
@@ -7062,6 +9187,84 @@ fn normalize_knowledge_refs(name: &str, refs: Vec<String>) -> Result<Vec<String>
     Ok(normalized)
 }
 
+fn knowledge_calibration_env_vars() -> Vec<&'static str> {
+    vec![
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_UPSTREAM_ID",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROMPT_DIGEST",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_TOOL_POLICY_DIGEST",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_DECODING",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_TIMEOUT_SECS",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_RETRY_LIMIT",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL_CAPABILITY",
+        "TONGLINGYU_KNOWLEDGE_CALIBRATION_REASONING_EFFORT",
+    ]
+}
+
+fn required_calibration_env(vars: &BTreeMap<String, String>, name: &str) -> Result<String> {
+    vars.get(name)
+        .and_then(|value| bounded_optional_text(value, 512))
+        .ok_or_else(|| anyhow!("missing required knowledge calibration config {name}"))
+}
+
+fn parse_positive_u64_env(value: &str, name: &str) -> Result<u64> {
+    let parsed = value
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be a positive integer"))?;
+    if parsed == 0 {
+        return Err(anyhow!("{name} must be positive"));
+    }
+    Ok(parsed)
+}
+
+fn parse_bounded_u32_env(value: &str, name: &str, min: u32, max: u32) -> Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .with_context(|| format!("{name} must be an integer"))?;
+    if parsed < min || parsed > max {
+        return Err(anyhow!("{name} must be between {min} and {max}"));
+    }
+    Ok(parsed)
+}
+
+fn validate_calibration_digest(value: &str) -> Result<String> {
+    let digest = value.trim();
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "knowledge calibration digest must be a sha256 hex digest"
+        ));
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+fn validate_calibration_model_capability(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "complex" | "advanced" | "frontier" | "high_reasoning"
+    ) {
+        Ok(normalized)
+    } else {
+        Err(anyhow!(
+            "knowledge calibration requires complex model capability"
+        ))
+    }
+}
+
+fn validate_calibration_reasoning_effort(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "high" | "xhigh") {
+        Ok(normalized)
+    } else {
+        Err(anyhow!(
+            "knowledge calibration requires high or xhigh reasoning effort"
+        ))
+    }
+}
+
 fn validate_knowledge_item_actor(actor: &str) -> Result<String> {
     bounded_optional_text(actor, 80).ok_or_else(|| anyhow!("knowledge item actor is required"))
 }
@@ -7131,7 +9334,8 @@ fn knowledge_item_select_sql() -> &'static str {
     r#"
     SELECT
         item_id, kind, state, source_refs_json, evidence_refs_json, payload_json,
-        payload_sha256, schema_version, created_at, updated_at, state_version
+        payload_sha256, schema_version, source_boundary_json, calibration_report_ref,
+        confidence, created_at, updated_at, state_version
     FROM knowledge_items
     "#
 }
@@ -7166,6 +9370,9 @@ struct KnowledgeItemSqlRow {
     payload_json: String,
     payload_sha256: String,
     schema_version: String,
+    source_boundary_json: Option<String>,
+    calibration_report_ref: Option<String>,
+    confidence: Option<f64>,
     created_at: String,
     updated_at: String,
     state_version: i64,
@@ -7181,13 +9388,21 @@ fn knowledge_item_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Knowledge
         payload_json: row.get(5)?,
         payload_sha256: row.get(6)?,
         schema_version: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        state_version: row.get(10)?,
+        source_boundary_json: row.get(8)?,
+        calibration_report_ref: row.get(9)?,
+        confidence: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        state_version: row.get(13)?,
     })
 }
 
 fn knowledge_item_record_from_sql_row(row: KnowledgeItemSqlRow) -> Result<KnowledgeItemRecord> {
+    let source_boundary = row
+        .source_boundary_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?;
     Ok(KnowledgeItemRecord {
         item_id: row.item_id,
         kind: KnowledgeItemKind::parse(&row.kind)?,
@@ -7197,6 +9412,9 @@ fn knowledge_item_record_from_sql_row(row: KnowledgeItemSqlRow) -> Result<Knowle
         payload: serde_json::from_str(&row.payload_json)?,
         payload_sha256: row.payload_sha256,
         schema_version: row.schema_version,
+        source_boundary,
+        calibration_report_ref: row.calibration_report_ref,
+        confidence: row.confidence,
         created_at: row.created_at,
         updated_at: row.updated_at,
         state_version: row.state_version,
@@ -8713,6 +10931,7 @@ fn knowledge_base_summary(conn: &Connection) -> Result<Option<Value>> {
         return Ok(None);
     };
     let source_hashes = source_hash_refs(conn)?;
+    let knowledge_calibration_report_refs = knowledge_calibration_report_refs(conn)?;
     let source_snapshot_digest = hash_text(&serde_json::to_string(&source_hashes)?);
     let counts = json!({
         "sources": table_count_if_exists(conn, "sources")?,
@@ -8723,6 +10942,8 @@ fn knowledge_base_summary(conn: &Connection) -> Result<Option<Value>> {
         "terms": table_count_if_exists(conn, "terms")?,
         "commentary_links": table_count_if_exists(conn, "commentary_links")?,
         "knowledge_patch_applications": table_count_if_exists(conn, "knowledge_patch_applications")?,
+        "knowledge_calibration_reports": table_count_if_exists(conn, "knowledge_calibration_reports")?,
+        "knowledge_calibration_jobs": table_count_if_exists(conn, "knowledge_calibration_jobs")?,
         "rare_char_annotations": table_count_if_exists(conn, "rare_char_annotations")?,
     });
     let kb_build_hash = hash_text(&serde_json::to_string(&canonical_json_value(&json!({
@@ -8736,6 +10957,7 @@ fn knowledge_base_summary(conn: &Connection) -> Result<Option<Value>> {
         "kb_version": latest_kb_version_json(conn)?.expect("kb_version checked"),
         "counts": counts,
         "source_hashes": source_hashes,
+        "knowledge_calibration_report_refs": knowledge_calibration_report_refs,
         "source_snapshot_digest": source_snapshot_digest,
         "kb_build_hash": kb_build_hash,
     })))
@@ -8783,6 +11005,34 @@ fn source_hash_refs(conn: &Connection) -> Result<Vec<Value>> {
         Ok(json!({
             "source_id": row.get::<_, String>(0)?,
             "source_hash": row.get::<_, String>(1)?,
+        }))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn knowledge_calibration_report_refs(conn: &Connection) -> Result<Vec<Value>> {
+    if !sqlite_table_exists(conn, "knowledge_calibration_reports")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT report_id, report_ref, item_id, kind, method, decision, report_hash, created_at
+        FROM knowledge_calibration_reports
+        ORDER BY created_at DESC, report_id DESC
+        LIMIT 50
+        "#,
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(json!({
+            "report_id": row.get::<_, String>(0)?,
+            "report_ref": row.get::<_, String>(1)?,
+            "item_id": row.get::<_, String>(2)?,
+            "kind": row.get::<_, String>(3)?,
+            "method": row.get::<_, String>(4)?,
+            "decision": row.get::<_, String>(5)?,
+            "report_hash": row.get::<_, String>(6)?,
+            "created_at": row.get::<_, String>(7)?,
         }))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -11215,6 +13465,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct FailingProfileRuntimeClient;
 
+    #[derive(Debug, Default)]
+    struct CalibrationJudgeRuntimeClient;
+
     #[derive(Debug)]
     struct SlowDraftRuntimeClient {
         active: Arc<std::sync::atomic::AtomicUsize>,
@@ -11227,6 +13480,76 @@ mod tests {
             max_active: Arc<std::sync::atomic::AtomicUsize>,
         ) -> Self {
             Self { active, max_active }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for CalibrationJudgeRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "calibration judge runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "calibration judge runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            if input.profile_id != KNOWLEDGE_CALIBRATION_PROFILE_ID {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "unexpected calibration profile",
+                ));
+            }
+            if !input.requested_tools.is_empty() {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "calibration profile must not request tools",
+                ));
+            }
+            let config_digest = input
+                .metadata
+                .get("llm_config")
+                .and_then(|value| value.get("config_digest"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(RuntimeOutput {
+                result_summary: serde_json::to_string(&json!({
+                    "llm_evidence_judge": {
+                        "decision": "system_calibrated",
+                        "confidence": 0.93,
+                        "evidence_refs": ["block://wikisource/llm-judge"],
+                        "source_boundary": {
+                            "source_id": "wikisource",
+                            "usage_boundary": "source snapshot evidence only",
+                            "config_digest": config_digest,
+                        },
+                        "quality_issues": [],
+                        "forbidden_conclusion_detected": false
+                    }
+                }))
+                .expect("calibration output serializes"),
+                result_ref: Some("result://calibration-judge".to_string()),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "tool_results": [],
+                    "tool_audit_events": [],
+                }),
+            })
         }
     }
 
@@ -12807,6 +15130,244 @@ mod tests {
         }
     }
 
+    fn all_knowledge_item_kinds() -> Vec<KnowledgeItemKind> {
+        vec![
+            KnowledgeItemKind::Alias,
+            KnowledgeItemKind::Term,
+            KnowledgeItemKind::CommentaryLink,
+            KnowledgeItemKind::VersionNote,
+            KnowledgeItemKind::Person,
+            KnowledgeItemKind::Relationship,
+            KnowledgeItemKind::Event,
+            KnowledgeItemKind::Poem,
+            KnowledgeItemKind::EvaluationCase,
+        ]
+    }
+
+    fn sample_rule_context(marker: &str) -> KnowledgeCalibrationRuleContext {
+        KnowledgeCalibrationRuleContext {
+            source_id: "wikisource".to_string(),
+            block_id: format!("wikisource/{marker}"),
+            required_evidence_type: "base_text".to_string(),
+            exact_terms: vec![marker.to_string()],
+            version_boundary: "Wikisource source snapshot only".to_string(),
+            usage_boundary: "runtime candidate, not human marked".to_string(),
+        }
+    }
+
+    fn calibration_run_input(
+        item: &KnowledgeItemRecord,
+        method: KnowledgeCalibrationMethod,
+    ) -> KnowledgeCalibrationRunInput {
+        let marker = item
+            .payload
+            .get("marker")
+            .and_then(Value::as_str)
+            .unwrap_or("calibration");
+        KnowledgeCalibrationRunInput {
+            item_id: item.item_id.clone(),
+            input_kind: KnowledgeCalibrationInputKind::SourceSnapshot,
+            input_ref: format!("source://wikisource/chapter/{marker}"),
+            method,
+            trace_id: format!("trace-calibration-{marker}"),
+            actor: "runtime-calibrator-test".to_string(),
+            llm_config: None,
+            llm_judgement: None,
+            rule_context: (method == KnowledgeCalibrationMethod::Rule)
+                .then(|| sample_rule_context(marker)),
+            eval_context: None,
+            rqa_context: None,
+        }
+    }
+
+    fn valid_calibration_env() -> BTreeMap<String, String> {
+        let digest_a = "a".repeat(64);
+        let digest_b = "b".repeat(64);
+        BTreeMap::from([
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE".to_string(),
+                KNOWLEDGE_CALIBRATION_PROFILE_ID.to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION".to_string(),
+                KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION.to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL".to_string(),
+                "hermes-calibration-frontier".to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_UPSTREAM_ID".to_string(),
+                "runtime-hermes-internal".to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROMPT_DIGEST".to_string(),
+                digest_a,
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_TOOL_POLICY_DIGEST".to_string(),
+                digest_b,
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_DECODING".to_string(),
+                r#"{"temperature":0.0,"top_p":0.1}"#.to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_TIMEOUT_SECS".to_string(),
+                "60".to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_RETRY_LIMIT".to_string(),
+                "3".to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL_CAPABILITY".to_string(),
+                "frontier".to_string(),
+            ),
+            (
+                "TONGLINGYU_KNOWLEDGE_CALIBRATION_REASONING_EFFORT".to_string(),
+                "high".to_string(),
+            ),
+        ])
+    }
+
+    fn valid_llm_config() -> KnowledgeCalibrationLlmConfig {
+        KnowledgeCalibrationLlmConfig::from_env_map(&valid_calibration_env())
+            .expect("valid calibration config")
+    }
+
+    #[test]
+    fn knowledge_calibration_schema_and_profile_are_internal() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        let before = runtime_schema_migration_preflight(&conn).expect("preflight before schema");
+        for migration in [
+            KNOWLEDGE_CALIBRATION_REPORT_SCHEMA_VERSION,
+            KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION,
+            KNOWLEDGE_ITEM_CALIBRATION_LINK_MIGRATION,
+        ] {
+            assert!(
+                before["pending_migrations"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(migration))),
+                "missing pending migration {migration}"
+            );
+        }
+
+        init_runtime_schema(&conn).expect("runtime schema");
+        assert!(
+            sqlite_table_exists(&conn, "knowledge_calibration_reports")
+                .expect("calibration reports table")
+        );
+        assert!(
+            sqlite_table_exists(&conn, "knowledge_calibration_jobs")
+                .expect("calibration jobs table")
+        );
+        assert!(
+            sqlite_table_exists(&conn, "knowledge_calibration_job_history")
+                .expect("calibration job history table")
+        );
+        let columns =
+            sqlite_table_columns(&conn, "knowledge_items").expect("knowledge item columns");
+        for column in [
+            "source_boundary_json",
+            "calibration_report_ref",
+            "confidence",
+        ] {
+            assert!(columns.contains(column), "missing column {column}");
+        }
+
+        assert!(
+            profile_catalog()
+                .iter()
+                .all(|profile| profile.profile != KNOWLEDGE_CALIBRATION_PROFILE_ID)
+        );
+        let descriptor = knowledge_calibration_profile_descriptor();
+        assert_eq!(descriptor.profile, KNOWLEDGE_CALIBRATION_PROFILE_ID);
+        assert!(descriptor.allowed_tools.is_empty());
+        assert_eq!(
+            descriptor.safety_contract["hidden_from_openwebui_model_list"],
+            json!(true)
+        );
+        let contract = knowledge_calibration_profile_contract();
+        assert_eq!(contract.profile_id, KNOWLEDGE_CALIBRATION_PROFILE_ID);
+        assert!(contract.tool_policy.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn knowledge_calibration_llm_config_is_bound_and_fail_closed() {
+        let env = valid_calibration_env();
+        let config =
+            KnowledgeCalibrationLlmConfig::from_env_map(&env).expect("valid calibration config");
+        assert_eq!(config.profile_id, KNOWLEDGE_CALIBRATION_PROFILE_ID);
+        assert_eq!(config.reasoning_effort, "high");
+        assert_eq!(config.model_capability, "frontier");
+        assert_eq!(config.config_digest.len(), 64);
+        let release_report = knowledge_calibration_release_report(&config);
+        assert_eq!(release_report["contains_secret_values"], json!(false));
+        assert_eq!(
+            release_report["runtime_usable_auto_promotion"],
+            json!(false)
+        );
+
+        let mut missing_prompt = env.clone();
+        missing_prompt.remove("TONGLINGYU_KNOWLEDGE_CALIBRATION_PROMPT_DIGEST");
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&missing_prompt)
+                .expect_err("missing prompt digest fails closed")
+                .to_string()
+                .contains("PROMPT_DIGEST")
+        );
+        let mut missing_model = env.clone();
+        missing_model.remove("TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL");
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&missing_model)
+                .expect_err("missing model fails closed")
+                .to_string()
+                .contains("MODEL")
+        );
+        let mut missing_upstream = env.clone();
+        missing_upstream.remove("TONGLINGYU_KNOWLEDGE_CALIBRATION_UPSTREAM_ID");
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&missing_upstream)
+                .expect_err("missing upstream fails closed")
+                .to_string()
+                .contains("UPSTREAM_ID")
+        );
+        let mut unknown_profile = env.clone();
+        unknown_profile.insert(
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROFILE".to_string(),
+            "honglou-main".to_string(),
+        );
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&unknown_profile)
+                .expect_err("unknown profile fails closed")
+                .to_string()
+                .contains(KNOWLEDGE_CALIBRATION_PROFILE_ID)
+        );
+        let mut low_reasoning = env.clone();
+        low_reasoning.insert(
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_REASONING_EFFORT".to_string(),
+            "medium".to_string(),
+        );
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&low_reasoning)
+                .expect_err("low reasoning fails closed")
+                .to_string()
+                .contains("high")
+        );
+        let mut simple_model = env;
+        simple_model.insert(
+            "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL_CAPABILITY".to_string(),
+            "small".to_string(),
+        );
+        assert!(
+            KnowledgeCalibrationLlmConfig::from_env_map(&simple_model)
+                .expect_err("simple model capability fails closed")
+                .to_string()
+                .contains("complex")
+        );
+    }
+
     #[test]
     fn knowledge_item_schema_migration_is_idempotent() {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
@@ -13067,6 +15628,393 @@ mod tests {
             )
             .expect("rejected history count");
         assert_eq!(rejected_history_count, 2);
+    }
+
+    #[test]
+    fn knowledge_calibration_rule_path_covers_all_kinds_without_runtime_promotion() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let alias_count_before = table_count(&conn, "aliases").expect("alias count before");
+
+        for (index, kind) in all_knowledge_item_kinds().into_iter().enumerate() {
+            let marker = format!("rule-kind-{index:02}");
+            let item = create_knowledge_item(&conn, sample_knowledge_item_input(kind, &marker))
+                .expect("create candidate item");
+            let report = run_knowledge_calibration_offline(
+                &conn,
+                calibration_run_input(&item, KnowledgeCalibrationMethod::Rule),
+            )
+            .expect("rule calibration runs");
+            assert_eq!(report.kind, kind);
+            assert_eq!(report.method, KnowledgeCalibrationMethod::Rule);
+            assert_eq!(
+                report.decision,
+                KnowledgeCalibrationDecision::SystemCalibrated
+            );
+            assert!(report.report_ref.contains(&report.report_id));
+            assert!(report.source_boundary.is_object());
+            assert!(!report.evidence_refs.is_empty());
+            assert_eq!(
+                report.coverage_matrix["runtime_usable_auto_promotion"],
+                json!(false)
+            );
+            assert_eq!(
+                report.coverage_matrix["runtime_policy_rejected"],
+                json!(true)
+            );
+            let updated = read_knowledge_item(&conn, &item.item_id)
+                .expect("read item")
+                .expect("item exists");
+            assert_eq!(updated.state, KnowledgeState::SystemCalibrated);
+            assert_ne!(updated.state, KnowledgeState::RuntimeUsable);
+            assert_eq!(updated.calibration_report_ref, Some(report.report_ref));
+            assert!(updated.source_boundary.is_some());
+            assert!(updated.confidence.is_some_and(|value| value >= 0.8));
+        }
+
+        let stats = runtime_store_stats(&conn).expect("stats");
+        assert_eq!(stats.knowledge_calibration_reports, 9);
+        assert_eq!(
+            stats
+                .knowledge_calibration_report_decision
+                .get("system_calibrated"),
+            Some(&9)
+        );
+        assert_eq!(
+            stats.knowledge_calibration_report_method.get("rule"),
+            Some(&9)
+        );
+        let alias_count_after = table_count(&conn, "aliases").expect("alias count after");
+        assert_eq!(
+            alias_count_after, alias_count_before,
+            "calibration must not mutate fact-layer aliases"
+        );
+    }
+
+    #[test]
+    fn knowledge_calibration_rule_failure_keeps_candidate_and_records_issue() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Term, "rule-fail"),
+        )
+        .expect("create candidate");
+        let mut input = calibration_run_input(&item, KnowledgeCalibrationMethod::Rule);
+        input.rule_context = Some(KnowledgeCalibrationRuleContext {
+            exact_terms: vec!["missing-term".to_string()],
+            ..sample_rule_context("rule-fail")
+        });
+        let report = run_knowledge_calibration_offline(&conn, input).expect("rule calibration");
+        assert_eq!(report.decision, KnowledgeCalibrationDecision::KeepCandidate);
+        assert!(
+            report
+                .quality_issues
+                .iter()
+                .any(|issue| issue.starts_with("exact_term_not_in_payload:"))
+        );
+        let current = read_knowledge_item(&conn, &item.item_id)
+            .expect("read item")
+            .expect("item exists");
+        assert_eq!(current.state, KnowledgeState::Candidate);
+        assert!(current.calibration_report_ref.is_none());
+        let events = runtime_audit_events_for_trace(&conn, "trace-calibration-rule-fail")
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "knowledge_calibration_candidate_kept"
+                && event["payload"]["decision"] == json!("keep_candidate")
+        }));
+    }
+
+    #[test]
+    fn knowledge_calibration_eval_and_rqa_failures_do_not_pollute_runtime_usable() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        let eval_item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::EvaluationCase, "eval-forbidden"),
+        )
+        .expect("create eval item");
+        let mut eval_input = calibration_run_input(&eval_item, KnowledgeCalibrationMethod::Eval);
+        eval_input.input_kind = KnowledgeCalibrationInputKind::EvalMiss;
+        eval_input.input_ref = "eval://forbidden-conclusion".to_string();
+        eval_input.eval_context = Some(KnowledgeCalibrationEvalContext {
+            expected_evidence_hit: true,
+            forbidden_conclusion_hit: true,
+            reviewer_status: "needs_revision".to_string(),
+            source_boundary_confirmed: true,
+        });
+        let eval_report =
+            run_knowledge_calibration_offline(&conn, eval_input).expect("eval calibration");
+        assert_eq!(eval_report.decision, KnowledgeCalibrationDecision::Rejected);
+        let eval_current = read_knowledge_item(&conn, &eval_item.item_id)
+            .expect("read eval item")
+            .expect("eval item exists");
+        assert_eq!(eval_current.state, KnowledgeState::Rejected);
+
+        let rqa_item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::CommentaryLink, "rqa-blocking"),
+        )
+        .expect("create rqa item");
+        let mut rqa_input = calibration_run_input(&rqa_item, KnowledgeCalibrationMethod::Rqa);
+        rqa_input.input_kind = KnowledgeCalibrationInputKind::RetrievalFailure;
+        rqa_input.input_ref = "retrieval-failure://rf-1".to_string();
+        rqa_input.rqa_context = Some(KnowledgeCalibrationRqaContext {
+            retrieval_quality_issues: vec!["missing_required_evidence_type:commentary".to_string()],
+            blocking_quality_issues: vec!["missing_required_evidence_type:commentary".to_string()],
+            failure_cluster_refs: vec!["rqa-cluster://commentary-miss".to_string()],
+            governance_task_refs: vec!["governance-task://kgt-1".to_string()],
+            proposed_fix_refs: vec!["proposal://commentary-link-fix".to_string()],
+            rqa_report_refs: vec!["rqa-report://trace-1".to_string()],
+        });
+        let rqa_report =
+            run_knowledge_calibration_offline(&conn, rqa_input).expect("rqa calibration");
+        assert_eq!(
+            rqa_report.decision,
+            KnowledgeCalibrationDecision::KeepCandidate
+        );
+        assert_eq!(rqa_report.report["input_kind"], json!("retrieval_failure"));
+        assert_eq!(
+            rqa_report.report["source_boundary"]["rqa_report_refs"],
+            json!(["rqa-report://trace-1"])
+        );
+        let rqa_current = read_knowledge_item(&conn, &rqa_item.item_id)
+            .expect("read rqa item")
+            .expect("rqa item exists");
+        assert_eq!(rqa_current.state, KnowledgeState::Candidate);
+        assert_ne!(rqa_current.state, KnowledgeState::RuntimeUsable);
+    }
+
+    #[tokio::test]
+    async fn knowledge_calibration_llm_fake_output_is_report_only_and_privacy_checked() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let config = valid_llm_config();
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Alias, "llm-judge"),
+        )
+        .expect("create candidate");
+        let judgement = execute_knowledge_calibration_llm_evidence_judge(
+            Arc::new(CalibrationJudgeRuntimeClient),
+            &item,
+            &config,
+            "trace-calibration-llm-judge",
+        )
+        .await
+        .expect("LLM judge runs through runtime client");
+        assert_eq!(
+            judgement.decision,
+            KnowledgeCalibrationDecision::SystemCalibrated
+        );
+        let mut input = calibration_run_input(&item, KnowledgeCalibrationMethod::LlmEvidenceJudge);
+        input.llm_config = Some(config.clone());
+        input.llm_judgement = Some(judgement);
+        let aliases_before = table_count(&conn, "aliases").expect("aliases before");
+        let report = run_knowledge_calibration_offline(&conn, input).expect("LLM calibration");
+        assert_eq!(
+            report.decision,
+            KnowledgeCalibrationDecision::SystemCalibrated
+        );
+        assert_eq!(
+            report
+                .config_summary
+                .as_ref()
+                .and_then(|value| value.get("config_digest"))
+                .and_then(Value::as_str),
+            Some(config.config_digest.as_str())
+        );
+        assert_eq!(report.report["secret_values_stored"], json!(false));
+        assert_eq!(
+            report.report["fact_layer_mutated"],
+            json!(false),
+            "LLM judge cannot write fact layer"
+        );
+        let aliases_after = table_count(&conn, "aliases").expect("aliases after");
+        assert_eq!(aliases_after, aliases_before);
+
+        let private_output = serde_json::to_string(&json!({
+            "llm_evidence_judge": {
+                "decision": "system_calibrated",
+                "confidence": 0.9,
+                "evidence_refs": ["block://private"],
+                "source_boundary": {"source_id": "wikisource"},
+                "quality_issues": [],
+                "raw_question": "不要保存的问题原文"
+            }
+        }))
+        .expect("private output serializes");
+        assert!(
+            parse_knowledge_calibration_llm_judge_output(&private_output)
+                .expect_err("raw question must be rejected")
+                .to_string()
+                .contains("raw_question")
+        );
+
+        let missing_config_item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Alias, "llm-missing-config"),
+        )
+        .expect("create missing config candidate");
+        let missing_config_input = calibration_run_input(
+            &missing_config_item,
+            KnowledgeCalibrationMethod::LlmEvidenceJudge,
+        );
+        assert!(
+            run_knowledge_calibration_offline(&conn, missing_config_input)
+                .expect_err("missing LLM config fails closed")
+                .to_string()
+                .contains("configured LLM")
+        );
+        let missing_config_current = read_knowledge_item(&conn, &missing_config_item.item_id)
+            .expect("read missing config item")
+            .expect("missing config item exists");
+        assert_eq!(missing_config_current.state, KnowledgeState::Candidate);
+    }
+
+    #[test]
+    fn knowledge_calibration_job_model_is_idempotent_leased_and_audited() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        let item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::VersionNote, "job-flow"),
+        )
+        .expect("create candidate");
+        let job_input = KnowledgeCalibrationJobCreateInput {
+            input_kind: KnowledgeCalibrationInputKind::GovernanceTask,
+            input_ref: "governance-task://job-flow".to_string(),
+            item_id: item.item_id.clone(),
+            method: KnowledgeCalibrationMethod::Rule,
+            trace_id: "trace-calibration-job-flow".to_string(),
+            idempotency_key: "job-flow-idempotency".to_string(),
+            config_digest: Some("c".repeat(64)),
+            retry_limit: 2,
+            concurrency_key: "version-note:job-flow".to_string(),
+        };
+        let job = create_knowledge_calibration_job(&conn, job_input.clone()).expect("create job");
+        let duplicate =
+            create_knowledge_calibration_job(&conn, job_input).expect("duplicate job idempotent");
+        assert_eq!(duplicate.job_id, job.job_id);
+        assert_eq!(job.status, KnowledgeCalibrationJobStatus::Queued);
+        assert_eq!(job.attempt_count, 0);
+
+        let leased = lease_knowledge_calibration_job(&conn, &job.job_id, "worker-1", 60)
+            .expect("lease job")
+            .expect("job exists");
+        assert_eq!(leased.status, KnowledgeCalibrationJobStatus::Running);
+        assert_eq!(leased.attempt_count, 1);
+        assert!(leased.lease_expires_at.is_some());
+
+        let second_item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::VersionNote, "job-conflict"),
+        )
+        .expect("create second candidate");
+        let second_job = create_knowledge_calibration_job(
+            &conn,
+            KnowledgeCalibrationJobCreateInput {
+                input_kind: KnowledgeCalibrationInputKind::GovernanceTask,
+                input_ref: "governance-task://job-conflict".to_string(),
+                item_id: second_item.item_id,
+                method: KnowledgeCalibrationMethod::Rule,
+                trace_id: "trace-calibration-job-conflict".to_string(),
+                idempotency_key: "job-conflict-idempotency".to_string(),
+                config_digest: None,
+                retry_limit: 2,
+                concurrency_key: "version-note:job-flow".to_string(),
+            },
+        )
+        .expect("create conflicting job");
+        assert!(
+            lease_knowledge_calibration_job(&conn, &second_job.job_id, "worker-2", 60)
+                .expect_err("concurrency limit rejects second lease")
+                .to_string()
+                .contains("concurrency limit")
+        );
+
+        let heartbeat = heartbeat_knowledge_calibration_job(&conn, &job.job_id, "worker-1")
+            .expect("heartbeat")
+            .expect("job exists");
+        assert!(heartbeat.heartbeat_at.is_some());
+
+        let report = run_knowledge_calibration_offline(
+            &conn,
+            calibration_run_input(&item, KnowledgeCalibrationMethod::Rule),
+        )
+        .expect("calibration report");
+        let completed =
+            complete_knowledge_calibration_job(&conn, &job.job_id, "worker-1", &report.report_id)
+                .expect("complete job")
+                .expect("job exists");
+        assert_eq!(completed.status, KnowledgeCalibrationJobStatus::Succeeded);
+        assert_eq!(completed.report_id, Some(report.report_id));
+
+        let retry_item = create_knowledge_item(
+            &conn,
+            sample_knowledge_item_input(KnowledgeItemKind::Poem, "job-retry"),
+        )
+        .expect("create retry candidate");
+        let retry_job = create_knowledge_calibration_job(
+            &conn,
+            KnowledgeCalibrationJobCreateInput {
+                input_kind: KnowledgeCalibrationInputKind::RetrievalFailure,
+                input_ref: "retrieval-failure://job-retry".to_string(),
+                item_id: retry_item.item_id,
+                method: KnowledgeCalibrationMethod::Rqa,
+                trace_id: "trace-calibration-job-retry".to_string(),
+                idempotency_key: "job-retry-idempotency".to_string(),
+                config_digest: None,
+                retry_limit: 2,
+                concurrency_key: "poem:job-retry".to_string(),
+            },
+        )
+        .expect("retry job");
+        let retry_leased =
+            lease_knowledge_calibration_job(&conn, &retry_job.job_id, "worker-3", 60)
+                .expect("lease retry job")
+                .expect("retry job exists");
+        let retry_waiting = fail_knowledge_calibration_job(
+            &conn,
+            &retry_leased.job_id,
+            "worker-3",
+            "temporary RQA dependency unavailable",
+            true,
+        )
+        .expect("fail retry job")
+        .expect("retry job exists");
+        assert_eq!(
+            retry_waiting.status,
+            KnowledgeCalibrationJobStatus::RetryWaiting
+        );
+
+        let stats = runtime_store_stats(&conn).expect("stats");
+        assert_eq!(stats.knowledge_calibration_jobs, 3);
+        assert!(stats.knowledge_calibration_job_history >= 7);
+        assert_eq!(
+            stats.knowledge_calibration_job_status.get("succeeded"),
+            Some(&1)
+        );
+        assert_eq!(
+            stats.knowledge_calibration_job_status.get("retry_waiting"),
+            Some(&1)
+        );
+        let events = runtime_audit_events_for_trace(&conn, "trace-calibration-job-flow")
+            .expect("job audit events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event_type"] == "knowledge_calibration_job_created")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event_type"] == "knowledge_calibration_job_completed")
+        );
     }
 
     #[test]

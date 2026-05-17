@@ -166,57 +166,96 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
 
 ## Milestone B：系统校准入口
 
-状态：未开始。
+状态：已完成。
 
 目标：配置化 LLM、规则、eval 和 RQA report 可以把全部知识类型的候选知识校准为
 `system_calibrated`，并在证据边界内进入运行候选。
 
-- [ ] 定义 `KnowledgeCalibrationReport`，包含 source refs、evidence refs、
+- [x] 定义 `KnowledgeCalibrationReport`，包含 source refs、evidence refs、
   calibration method、confidence、quality issues、source boundary 和 report hash。
-- [ ] 定义 `honglou-knowledge-calibrator` 或等价内部治理 profile contract；该 profile
+- [x] 定义 `honglou-knowledge-calibrator` 或等价内部治理 profile contract；该 profile
   不能对普通用户可见，不能进入 Open WebUI model list。
-- [ ] 支持配置化 LLM 校准；LLM 输出只能生成 candidate/report，不能直接改事实层。
-- [ ] LLM 校准配置必须绑定 model/upstream id、prompt digest、tool policy digest、
+- [x] 支持配置化 LLM 校准；LLM 输出只能生成 candidate/report，不能直接改事实层。
+- [x] LLM 校准配置必须绑定 model/upstream id、prompt digest、tool policy digest、
   decoding 参数、timeout、retry、模型能力档位、reasoning effort 和 profile contract
   version。
-- [ ] release report、calibration report 和 admin trace 记录 LLM 校准配置摘要和 digest，
+- [x] release report、calibration report 和 admin trace 记录 LLM 校准配置摘要和 digest，
   不记录 secret 值。
-- [ ] 实现离线校准 runner：输入 source snapshot / governance task / eval miss /
+- [x] 实现离线校准 runner：输入 source snapshot / governance task / eval miss /
   retrieval failure，输出 calibration report artifact，不直接写事实层。
-- [ ] 实现异步 calibration job 模型：durable job id、input digest、幂等键、状态历史、
+- [x] 实现异步 calibration job 模型：durable job id、input digest、幂等键、状态历史、
   lease/heartbeat、retry limit、concurrency limit 和 audit event。
-- [ ] 运行中触发只创建治理任务或 calibration job；任务未完成、未通过 gate 或未发布前，
+- [x] 运行中触发只创建治理任务或 calibration job；任务未完成、未通过 gate 或未发布前，
   不能影响普通用户同次回答。
-- [ ] 支持规则校准：source id、block id、required evidence type、exact term、version
+- [x] 支持规则校准：source id、block id、required evidence type、exact term、version
   boundary、usage boundary。
-- [ ] 支持 eval 校准：expected evidence hit、forbidden conclusion、reviewer status、
+- [x] 支持 eval 校准：expected evidence hit、forbidden conclusion、reviewer status、
   source boundary confirmation。
-- [ ] 支持 RQA 校准：retrieval quality issue、failure cluster、governance task 和
+- [x] 支持 RQA 校准：retrieval quality issue、failure cluster、governance task 和
   proposed fix 关联。
-- [ ] 校准通过后，条目从 `candidate` 进入 `system_calibrated`；未通过进入
+- [x] 校准通过后，条目从 `candidate` 进入 `system_calibrated`；未通过进入
   `rejected` 或保持 candidate 并写 issue。
-- [ ] `system_calibrated` 不能自动进入普通回答；必须由 runtime policy 依据 kind、
+- [x] `system_calibrated` 不能自动进入普通回答；必须由 runtime policy 依据 kind、
   confidence、source boundary、evidence type、expiry 和 release run 显式提升为
   `runtime_usable`。
-- [ ] 每个 `system_calibrated` 条目必须有非空 evidence ref、source boundary 和
+- [x] 每个 `system_calibrated` 条目必须有非空 evidence ref、source boundary 和
   calibration report ref。
-- [ ] 校准报告不得保存完整用户问题、未脱敏 query、secret 或无界 LLM prompt。
-- [ ] 单测覆盖 LLM fake output、规则校准失败、eval miss、RQA failure 触发和隐私边界。
-- [ ] 集成测试覆盖真实配置解析；缺 LLM 配置、未知 profile、prompt digest 缺失或
+- [x] 校准报告不得保存完整用户问题、未脱敏 query、secret 或无界 LLM prompt。
+- [x] 单测覆盖 LLM fake output、规则校准失败、eval miss、RQA failure 触发和隐私边界。
+- [x] 集成测试覆盖真实配置解析；缺 LLM 配置、未知 profile、prompt digest 缺失或
   model/upstream 未绑定时 fail-closed。
-- [ ] 覆盖矩阵按 KnowledgeItemKind、source boundary、低置信、forbidden conclusion、
+- [x] 覆盖矩阵按 KnowledgeItemKind、source boundary、低置信、forbidden conclusion、
   reviewer downgrade、LLM 配置缺失和 runtime policy 拒绝分组保存。
-- [ ] 全量覆盖所有 `KnowledgeItemKind`：alias、term、commentary_link、version_note、
+- [x] 全量覆盖所有 `KnowledgeItemKind`：alias、term、commentary_link、version_note、
   person、relationship、event、poem、evaluation_case。任何类型缺校准路径都不能声明
   Milestone B 完成。
 
 完成口径：
 
-- [ ] 所有 `KnowledgeItemKind` 都能至少走通 candidate -> system_calibrated。
-- [ ] 校准失败不会污染 runtime_usable 或事实层。
-- [ ] 校准 report 能被 admin trace、RQA report 和 KB diff 引用。
-- [ ] 真实 LLM 配置已进入 release/config digest；fake LLM 只作为测试证据存在。
-- [ ] `runtime_usable` 提升策略和覆盖矩阵已经进入可复核 artifact。
+- [x] 所有 `KnowledgeItemKind` 都能至少走通 candidate -> system_calibrated。
+- [x] 校准失败不会污染 runtime_usable 或事实层。
+- [x] 校准 report 能被 admin trace、RQA report 和 KB diff 引用。
+- [x] 真实 LLM 配置已进入 release/config digest；fake LLM 只作为测试证据存在。
+- [x] `runtime_usable` 提升策略和覆盖矩阵已经进入可复核 artifact。
+
+节点总结：
+
+- Runtime 新增 `KnowledgeCalibrationReport`、内部
+  `honglou-knowledge-calibrator` profile contract、配置化
+  `KnowledgeCalibrationLlmConfig`、离线校准 runner 和 calibration job 模型。
+- `honglou-knowledge-calibrator` 不进入公开 `profile_catalog()`，Gateway `/v1/models`
+  仍只暴露普通 `tonglingyu` 模型；LLM evidence judge 只能输出 judgement/report，
+  不能调用写工具或直接修改事实层。
+- LLM 配置解析 fail-closed：profile、model/upstream、prompt digest、tool policy
+  digest、decoding、timeout、retry、复杂模型能力档位、高推理强度和 profile
+  contract version 均必须绑定。
+- 校准 report 写入 report hash、source/evidence refs、source boundary、coverage
+  matrix、config digest 和隐私标记；admin trace 通过 audit event 引用 report，RQA
+  校准 report 可保留 RQA report refs，KB summary/diff 可带出 calibration report refs。
+- 校准通过只把 `candidate` 升为 `system_calibrated`；`runtime_usable` 自动提升明确为
+  false，覆盖矩阵保留 runtime policy 拒绝原因，后续仍需 Milestone C/E 接管真正运行使用。
+- Gateway 新增可执行离线入口：
+
+  ```bash
+  cargo run --manifest-path agent-platform/Cargo.toml \
+    -p tonglingyu-gateway -- knowledge-calibrate \
+    --db <db> --input <calibration-input.json>
+  ```
+
+验证：
+
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime
+  --all-targets -- -D warnings`
+- `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
+  --all-targets -- -D warnings`
+
+边界：
+
+- Milestone B 完成不表示普通回答已经使用 knowledge item；`system_calibrated` 仍不能进入
+  selected evidence 或展示为“人工标记”。
+- Milestone C-E 仍未完成，不能声明运行中知识状态治理闭环完成。
 
 ## Milestone C：Runtime / Gateway 使用规则
 
