@@ -109,7 +109,10 @@ for name, service in (raw.get("services") or {}).items():
                 resolved[key] = value
     else:
         resolved = {}
-    services[str(name)] = {"environment": resolved}
+    services[str(name)] = {
+        "container_name": interpolate(service.get("container_name", "")),
+        "environment": resolved,
+    }
 
 target_path.write_text(
     json.dumps(
@@ -136,6 +139,10 @@ with open(config_path, "r", encoding="utf-8") as handle:
 
 errors = []
 services = config.get("services") or {}
+config_blob = json.dumps(config, ensure_ascii=True).lower()
+for forbidden_spelling in ["tonglignyu"]:
+    if forbidden_spelling in config_blob:
+        errors.append(f"spelling_forbidden={forbidden_spelling}")
 
 
 def env_map(service_name):
@@ -177,10 +184,17 @@ def key_set(primary, additional):
 
 def provider_key_set(value_text):
     keys = set()
+    for item in provider_key_list(value_text):
+        keys.add(item)
+    return keys
+
+
+def provider_key_list(value_text):
+    keys = []
     for item in str(value_text or "").replace(",", ";").split(";"):
         candidate = item.strip()
         if candidate:
-            keys.add(candidate)
+            keys.append(candidate)
     return keys
 
 
@@ -204,8 +218,38 @@ def require_positive_int(env, key, service_name):
 gateway_env = env_map("tonglingyu-gateway")
 open_webui_env = env_map("open-webui")
 hermes_env = env_map("hermes")
-worker_env = env_map("agent-worker")
-orchestrator_env = env_map("agent-orchestrator")
+
+for forbidden_service in [
+    "agent-platform-postgres",
+    "agent-action-gateway",
+    "agent-manager",
+    "agent-orchestrator",
+    "agent-worker",
+    "agent-observer",
+    "global-router",
+]:
+    if forbidden_service in services:
+        errors.append(f"service_forbidden={forbidden_service}")
+
+expected_container_names = {
+    "hermes": "tonglingyu-hermes-agent",
+    "tonglingyu-gateway": "tonglingyu-gateway",
+}
+for service_name, expected_name in expected_container_names.items():
+    service = services.get(service_name) or {}
+    container_name = str(service.get("container_name") or "").strip()
+    if container_name != expected_name:
+        errors.append(f"{service_name}.container_name must be {expected_name}")
+
+front_layer_container_names = {
+    "open-webui": "home-open-webui",
+    "cloudflared": "home-cloudflared",
+}
+for service_name, expected_name in front_layer_container_names.items():
+    service = services.get(service_name) or {}
+    container_name = str(service.get("container_name") or "").strip()
+    if container_name != expected_name:
+        errors.append(f"{service_name}.container_name must be {expected_name}")
 
 gateway_api_key = value(gateway_env, "TONGLINGYU_GATEWAY_API_KEY")
 gateway_api_keys = value(gateway_env, "TONGLINGYU_GATEWAY_API_KEYS")
@@ -223,10 +267,11 @@ if gateway_key_set.intersection(admin_key_set):
 
 require_false(gateway_env, "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY", "tonglingyu-gateway")
 
-open_webui_provider_keys = provider_key_set(value(open_webui_env, "OPENAI_API_KEYS"))
-if gateway_api_key and gateway_api_key not in open_webui_provider_keys:
-    errors.append("open-webui.OPENAI_API_KEYS must include TONGLINGYU_GATEWAY_API_KEY")
-if admin_key_set.intersection(open_webui_provider_keys):
+open_webui_provider_key_list = provider_key_list(value(open_webui_env, "OPENAI_API_KEYS"))
+open_webui_provider_key_set = set(open_webui_provider_key_list)
+if gateway_api_key and open_webui_provider_key_list != [gateway_api_key]:
+    errors.append("open-webui.OPENAI_API_KEYS must contain only TONGLINGYU_GATEWAY_API_KEY")
+if admin_key_set.intersection(open_webui_provider_key_set):
     errors.append("open-webui.OPENAI_API_KEYS must not contain TONGLINGYU_ADMIN_API_KEY(S)")
 
 open_webui_admin_api_key = value(open_webui_env, "TONGLINGYU_ADMIN_API_KEY")
@@ -235,8 +280,9 @@ if open_webui_admin_api_key and open_webui_admin_api_key != admin_api_key:
 
 if value(open_webui_env, "DEFAULT_MODELS") != "tonglingyu":
     errors.append("open-webui.DEFAULT_MODELS must be tonglingyu")
-if "http://tonglingyu-gateway:8090/v1" not in value(open_webui_env, "OPENAI_API_BASE_URLS").split(";"):
-    errors.append("open-webui.OPENAI_API_BASE_URLS must include http://tonglingyu-gateway:8090/v1")
+base_urls = [item.strip() for item in value(open_webui_env, "OPENAI_API_BASE_URLS").split(";") if item.strip()]
+if base_urls != ["http://tonglingyu-gateway:8090/v1"]:
+    errors.append("open-webui.OPENAI_API_BASE_URLS must be exactly http://tonglingyu-gateway:8090/v1")
 
 hermes_api_key = value(hermes_env, "API_SERVER_KEY")
 if not hermes_api_key:
@@ -259,18 +305,6 @@ require_positive_int(
     "tonglingyu-gateway",
 )
 
-if value(worker_env, "AGENT_RUNTIME_MODE") != "hermes":
-    errors.append("agent-worker.AGENT_RUNTIME_MODE must be hermes")
-if value(worker_env, "AGENT_RUNTIME_HERMES_BASE_URL") != "http://hermes:8642/v1":
-    errors.append("agent-worker.AGENT_RUNTIME_HERMES_BASE_URL must be http://hermes:8642/v1")
-if hermes_api_key and value(worker_env, "AGENT_RUNTIME_HERMES_API_KEY") != hermes_api_key:
-    errors.append("agent-worker.AGENT_RUNTIME_HERMES_API_KEY must match hermes.API_SERVER_KEY")
-
-if value(orchestrator_env, "AGENT_ORCHESTRATOR_UPSTREAM_BASE_URL") != "http://hermes:8642/v1":
-    errors.append("agent-orchestrator.AGENT_ORCHESTRATOR_UPSTREAM_BASE_URL must be http://hermes:8642/v1")
-if hermes_api_key and value(orchestrator_env, "AGENT_ORCHESTRATOR_UPSTREAM_API_KEY") != hermes_api_key:
-    errors.append("agent-orchestrator.AGENT_ORCHESTRATOR_UPSTREAM_API_KEY must match hermes.API_SERVER_KEY")
-
 if errors:
     for error in errors:
         print(f"config_error={error}", file=sys.stderr)
@@ -284,8 +318,16 @@ print(json.dumps(
             "hermes",
             "open-webui",
             "tonglingyu-gateway",
+            "cloudflared",
+        ],
+        "forbidden_services_absent": [
+            "agent-platform-postgres",
+            "agent-action-gateway",
+            "agent-manager",
             "agent-orchestrator",
             "agent-worker",
+            "agent-observer",
+            "global-router",
         ],
         "checked_secret_fields": [
             "HERMES_API_KEY/API_SERVER_KEY",
@@ -293,15 +335,16 @@ print(json.dumps(
             "TONGLINGYU_ADMIN_API_KEY(S)",
             "OPENAI_API_KEYS",
             "tonglingyu-gateway.AGENT_RUNTIME_HERMES_API_KEY",
-            "AGENT_RUNTIME_HERMES_API_KEY",
         ],
         "checked_policy_fields": [
             "DEFAULT_MODELS",
             "OPENAI_API_BASE_URLS",
+            "forbidden_spellings",
             "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY",
             "TONGLINGYU_AGENT_RUNTIME_MODE",
             "TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS",
-            "AGENT_RUNTIME_MODE",
+            "tonglingyu_agent_container_names",
+            "front_layer_container_names",
         ],
     },
     ensure_ascii=True,

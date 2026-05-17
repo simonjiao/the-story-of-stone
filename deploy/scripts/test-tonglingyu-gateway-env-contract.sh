@@ -30,6 +30,8 @@ import sys
 
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 assert report["status"] == "needs_update", report
+assert "OPEN_WEBUI_OPENAI_API_BASE_URLS" in report["changed_keys"], report
+assert "OPEN_WEBUI_OPENAI_API_KEYS" in report["changed_keys"], report
 assert "TONGLINGYU_GATEWAY_API_KEY" in report["changed_keys"], report
 assert "TONGLINGYU_ADMIN_API_KEY" in report["changed_keys"], report
 assert report["secret_values_printed"] is False, report
@@ -57,7 +59,8 @@ provider_keys = data["OPEN_WEBUI_OPENAI_API_KEYS"].split(";")
 assert gateway, data
 assert admin, data
 assert gateway != admin, data
-assert provider_keys[0] == gateway, data
+assert data["OPEN_WEBUI_OPENAI_API_BASE_URLS"] == "http://tonglingyu-gateway:8090/v1", data
+assert provider_keys == [gateway], data
 assert admin not in provider_keys, data
 assert data["TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY"] == "false", data
 output = Path(report_path).read_text(encoding="utf-8")
@@ -101,7 +104,8 @@ for line in Path(env_path).read_text(encoding="utf-8").splitlines():
         key, value = line.split("=", 1)
         data[key] = value
 provider_keys = data["OPEN_WEBUI_OPENAI_API_KEYS"].split(";")
-assert provider_keys[0] == "tlyg_fixture_gateway", data
+assert data["OPEN_WEBUI_OPENAI_API_BASE_URLS"] == "http://tonglingyu-gateway:8090/v1", data
+assert provider_keys == ["tlyg_fixture_gateway"], data
 assert not data["OPEN_WEBUI_OPENAI_API_KEYS"].startswith('"'), data
 assert not data["OPEN_WEBUI_OPENAI_API_KEYS"].endswith('"'), data
 assert data["TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY"] == "false", data
@@ -129,7 +133,7 @@ line = next(
     line for line in Path(env_path).read_text(encoding="utf-8").splitlines()
     if line.startswith("OPEN_WEBUI_OPENAI_API_KEYS=")
 )
-assert not line.endswith('"'), line
+assert line == "OPEN_WEBUI_OPENAI_API_KEYS=tlyg_fixture_gateway", line
 PY
 
 cat >"${BAD_ENV_FILE}" <<'EOF'

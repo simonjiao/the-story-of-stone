@@ -18,19 +18,19 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
             "chat_id": "chat-1",
             "session_id": "session-1",
             "message_id": "message-1",
-            "model": "hermes-agent",
+            "model": "tonglingyu",
             "issued_at": 1778220000,
             "nonce": "nonce-1",
         }
         self.assertEqual(
             _signature("bridge-secret", context),
-            "6185debba03afb3b99ac20a9ff87d93757940034dc9b3ccef7c83247004fbb10",
+            "c2b5b51c2e432b504341b9098fc8e5103710e445ec6ff099871b5cabdcb15e03",
         )
 
     def test_inlet_injects_signed_context_for_target_model(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
-        body = {"model": "hermes-agent", "messages": []}
+        body = {"model": "tonglingyu", "messages": []}
         result = asyncio.run(
             filt.inlet(
                 body,
@@ -73,8 +73,8 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_skips_non_target_model(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
-        filt.valves.TARGET_MODEL = "hermes-agent"
-        filt.valves.TARGET_MODELS = "hermes-agent"
+        filt.valves.TARGET_MODEL = "legacy-agent"
+        filt.valves.TARGET_MODELS = "legacy-agent"
         body = {"model": "tonglingyu", "messages": []}
         result = asyncio.run(
             filt.inlet(
@@ -89,7 +89,7 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
     def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
-        body = {"model": "hermes-agent", "messages": []}
+        body = {"model": "tonglingyu", "messages": []}
         result = asyncio.run(
             filt.inlet(
                 body,
@@ -110,7 +110,7 @@ class AgentIdentityBridgeFilterTest(unittest.TestCase):
         filt = Filter()
         filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
         body = {
-            "model": "hermes-agent",
+            "model": "tonglingyu",
             "messages": [],
             "chat_id": "chat-from-body",
             "session_id": "session-from-body",

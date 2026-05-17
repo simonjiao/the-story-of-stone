@@ -18,6 +18,8 @@ METRICS_JSON="${TONGLINGYU_GATEWAY_VERIFY_METRICS_JSON:-${WORK_DIR}/metrics.json
 PROMETHEUS_TXT="${TONGLINGYU_GATEWAY_VERIFY_PROMETHEUS_TXT:-${WORK_DIR}/metrics.prom}"
 CHAT_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-${WORK_DIR}/chat.json}"
 STREAM_TXT="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-${WORK_DIR}/chat-stream.txt}"
+CHAT_REF_JSON="${TONGLINGYU_GATEWAY_VERIFY_CHAT_REF_JSON:-${WORK_DIR}/chat-ref.json}"
+STREAM_REF_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_REF_JSON:-${WORK_DIR}/stream-ref.json}"
 TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-${WORK_DIR}/trace.json}"
 STREAM_TRACE_JSON="${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-${WORK_DIR}/stream-trace.json}"
 RUNNING_IMAGES_JSON="${TONGLINGYU_GATEWAY_VERIFY_RUNNING_IMAGES_JSON:-${WORK_DIR}/running-images.json}"
@@ -31,7 +33,7 @@ if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_HEALTH_JSON:-}" ]]; then
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_MODELS_JSON:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS -H "Authorization: Bearer ${key}" http://tonglingyu-gateway:8090/v1/models
@@ -53,7 +55,7 @@ curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" http://tonglingyu-gateway:
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_CHAT_JSON:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS \
@@ -68,7 +70,7 @@ curl -fsS \
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_TXT:-}" ]]; then
-  docker compose exec -T open-webui sh -lc '
+  docker compose exec -T -e VERIFY_RUN_ID="${VERIFY_RUN_ID}" open-webui sh -lc '
 key="${OPENAI_API_KEYS%%;*}"
 test -n "${key}"
 curl -fsS \
@@ -82,15 +84,83 @@ curl -fsS \
 ' >"${STREAM_TXT}"
 fi
 
+resolve_gateway_message_ref() {
+  local external_message_id="$1"
+  python3 - "${DEPLOY_DIR}" "${external_message_id}" <<'PY'
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+deploy_dir = Path(sys.argv[1])
+external_message_id = sys.argv[2]
+container_db_path = os.environ.get("TONGLINGYU_DB_PATH", "/data/tonglingyu.db").strip() or "/data/tonglingyu.db"
+data_dir = Path(os.environ.get("TONGLINGYU_DATA_DIR", "./data/tonglingyu"))
+if not data_dir.is_absolute():
+    data_dir = deploy_dir / data_dir
+
+candidates = []
+if container_db_path.startswith("/data/"):
+    candidates.append(data_dir / container_db_path.removeprefix("/data/"))
+else:
+    raw = Path(container_db_path)
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        candidates.append(deploy_dir / raw)
+candidates.append(deploy_dir / "data" / "tonglingyu" / "tonglingyu.db")
+
+seen = set()
+for candidate in candidates:
+    candidate = candidate.resolve()
+    if candidate in seen:
+        continue
+    seen.add(candidate)
+    if not candidate.exists():
+        continue
+    conn = sqlite3.connect(f"file:{candidate}?mode=ro", uri=True)
+    row = conn.execute(
+        """
+        SELECT trace_id, package_id
+        FROM gateway_messages
+        WHERE external_message_id = ?
+        ORDER BY created_at DESC, message_id DESC
+        LIMIT 1
+        """,
+        (external_message_id,),
+    ).fetchone()
+    conn.close()
+    if row:
+        print(json.dumps({
+            "trace_id": row[0],
+            "package_id": row[1],
+            "external_message_id": external_message_id,
+            "source": "gateway_messages",
+        }, ensure_ascii=True, sort_keys=True))
+        raise SystemExit(0)
+
+raise SystemExit(f"gateway message not found for external_message_id={external_message_id}")
+PY
+}
+
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_CHAT_REF_JSON:-}" ]]; then
+  resolve_gateway_message_ref "strict-gateway-runtime-tool-smoke-${VERIFY_RUN_ID}" >"${CHAT_REF_JSON}"
+fi
+
+if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_REF_JSON:-}" ]]; then
+  resolve_gateway_message_ref "strict-gateway-runtime-stream-smoke-${VERIFY_RUN_ID}" >"${STREAM_REF_JSON}"
+fi
+
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_TRACE_JSON:-}" ]]; then
-  TRACE_ID="$(python3 - "${CHAT_JSON}" <<'PY'
+  TRACE_ID="$(python3 - "${CHAT_REF_JSON}" <<'PY'
 import json
 import sys
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     value = json.load(handle)
 trace_id = value.get("trace_id")
 if not trace_id:
-    raise SystemExit("chat response missing trace_id")
+    raise SystemExit("chat trace ref missing trace_id")
 print(trace_id)
 PY
 )"
@@ -101,23 +171,15 @@ curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway
 fi
 
 if [[ -z "${TONGLINGYU_GATEWAY_VERIFY_STREAM_TRACE_JSON:-}" ]]; then
-  STREAM_TRACE_ID="$(python3 - "${STREAM_TXT}" <<'PY'
+  STREAM_TRACE_ID="$(python3 - "${STREAM_REF_JSON}" <<'PY'
 import json
 import sys
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    for raw_line in handle:
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        value = json.loads(payload)
-        trace_id = value.get("trace_id")
-        if trace_id:
-            print(trace_id)
-            raise SystemExit(0)
-raise SystemExit("stream response missing trace_id")
+    value = json.load(handle)
+trace_id = value.get("trace_id")
+if not trace_id:
+    raise SystemExit("stream trace ref missing trace_id")
+print(trace_id)
 PY
 )"
   docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY}" open-webui sh -lc '
@@ -206,7 +268,7 @@ fi
 
 python3 - "${HEALTH_JSON}" "${MODELS_JSON}" "${METRICS_JSON}" "${PROMETHEUS_TXT}" \
   "${CHAT_JSON}" "${STREAM_TXT}" "${TRACE_JSON}" "${STREAM_TRACE_JSON}" \
-  "${RUNNING_IMAGES_JSON}" "${REPO_DIR}" <<'PY'
+  "${RUNNING_IMAGES_JSON}" "${CHAT_REF_JSON}" "${STREAM_REF_JSON}" "${REPO_DIR}" <<'PY'
 import hashlib
 import json
 import os
@@ -223,8 +285,10 @@ from pathlib import Path
     trace_path,
     stream_trace_path,
     running_images_path,
+    chat_ref_path,
+    stream_ref_path,
     repo_dir_raw,
-) = sys.argv[1:11]
+) = sys.argv[1:13]
 repo_dir = Path(repo_dir_raw)
 with open(health_path, "r", encoding="utf-8") as handle:
     health = json.load(handle)
@@ -244,6 +308,10 @@ with open(stream_trace_path, "r", encoding="utf-8") as handle:
     stream_trace = json.load(handle)
 with open(running_images_path, "r", encoding="utf-8") as handle:
     running_images = json.load(handle)
+with open(chat_ref_path, "r", encoding="utf-8") as handle:
+    chat_ref = json.load(handle)
+with open(stream_ref_path, "r", encoding="utf-8") as handle:
+    stream_ref = json.load(handle)
 
 errors = []
 forbidden_public_chat_keys = {
@@ -253,9 +321,15 @@ forbidden_public_chat_keys = {
     "agent_runtime_plan_gate",
     "agent_runtime_summary",
     "audit_events",
+    "evidence_package_id",
     "internal_trace",
+    "review",
+    "runtime_event",
     "runtime_step_outputs",
     "runtime_step_plan",
+    "session_id",
+    "stream_source",
+    "trace_id",
     "workflow_states",
 }
 
@@ -670,12 +744,12 @@ if 'agent_runtime_mode="minimal"' in prometheus:
 if "tonglingyu_retrieval_failures_total" not in prometheus:
     errors.append("prometheus must expose bounded retrieval failure totals")
 
-chat_trace_id = chat.get("trace_id")
-chat_package_id = chat.get("evidence_package_id")
+chat_trace_id = chat.get("trace_id") or chat_ref.get("trace_id")
+chat_package_id = chat.get("evidence_package_id") or chat_ref.get("package_id")
 if not chat_trace_id:
-    errors.append("chat response must include trace_id")
+    errors.append("chat trace ref must include trace_id")
 if not chat_package_id:
-    errors.append("chat response must include evidence_package_id")
+    errors.append("chat trace ref must include package_id")
 for forbidden_chat_path in forbidden_public_chat_paths(chat):
     errors.append(f"chat response must not expose {forbidden_chat_path}")
 stream_events, stream_done_seen = parse_stream_events(stream)
@@ -686,33 +760,23 @@ if not stream_events:
 stream_trace_ids = unique_event_values(stream_events, "trace_id")
 stream_package_ids = unique_event_values(stream_events, "evidence_package_id")
 stream_session_ids = unique_event_values(stream_events, "session_id")
-stream_trace_id = next(iter(stream_trace_ids), None)
-stream_package_id = next(iter(stream_package_ids), None)
-if len(stream_trace_ids) != 1:
-    errors.append("stream response must carry exactly one trace_id across chunks")
-if len(stream_package_ids) != 1:
-    errors.append("stream response must carry exactly one evidence_package_id across chunks")
-if len(stream_session_ids) > 1:
-    errors.append("stream response must not mix session_id values across chunks")
-if not any(
-    isinstance(event, dict) and event.get("evidence_package_id")
-    for event in stream_events
-):
-    errors.append("stream response must include evidence_package_id")
-if not any(
-    isinstance(event, dict)
-    and (
-        event.get("runtime_workflow")
-        or event.get("stream_source") == "runtime_workflow"
-    )
-    for event in stream_events
-):
-    errors.append("stream response must identify runtime_workflow source")
+stream_trace_id = next(iter(stream_trace_ids), None) or stream_ref.get("trace_id")
+stream_package_id = next(iter(stream_package_ids), None) or stream_ref.get("package_id")
+if stream_trace_ids:
+    errors.append("stream response must not expose trace_id")
+if stream_package_ids:
+    errors.append("stream response must not expose evidence_package_id")
+if stream_session_ids:
+    errors.append("stream response must not expose session_id")
+if not stream_trace_id:
+    errors.append("stream trace ref must include trace_id")
+if not stream_package_id:
+    errors.append("stream trace ref must include package_id")
 content_delta_events = [
     event
     for event in stream_events
     if isinstance(event, dict)
-    and (event.get("runtime_event") or {}).get("event_type") == "content_delta"
+    and stream_event_has_content_delta(event)
 ]
 if not content_delta_events:
     errors.append("stream response must include runtime content_delta chunks")

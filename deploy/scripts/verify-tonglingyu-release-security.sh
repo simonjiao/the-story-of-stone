@@ -407,7 +407,6 @@ def scan_release_scripts():
             "deploy/scripts",
             "deploy/open-webui/functions",
             "deploy/docker-compose.yml",
-            "agent-platform/Dockerfile",
             "agent-platform/crates/tonglingyu-gateway/Dockerfile",
         ]
     )
@@ -505,14 +504,13 @@ def compose_image_policy():
 
 def classify_image_owner(raw_ref, resolved_ref):
     owned_env_vars = {
-        "AGENT_PLATFORM_IMAGE_REF",
         "TONGLINGYU_GATEWAY_IMAGE_REF",
     }
     raw = str(raw_ref or "")
     resolved = str(resolved_ref or "")
     if any(name in raw for name in owned_env_vars):
         return "owned"
-    if re.search(r"(^|/)(hermes-agent-platform|tonglingyu-gateway)(:|@|$)", resolved):
+    if re.search(r"(^|/)(tonglingyu-gateway)(:|@|$)", resolved):
         return "owned"
     return "third_party"
 

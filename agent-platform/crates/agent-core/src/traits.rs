@@ -247,7 +247,7 @@ pub trait RuntimeClient: Send + Sync {
                     .as_ref()
                     .map(|agent| agent.hermes_profile.clone())
             })
-            .unwrap_or_else(|| "agent-platform-runtime".to_string());
+            .unwrap_or_else(|| "tonglingyu-runtime".to_string());
         let trace_id = input.trace_id.clone();
         let run_id = input.run.id.clone();
         let schema_version = input

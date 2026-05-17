@@ -2,10 +2,13 @@
 
 ## 项目边界
 
-- 本仓库包含多个相关但边界独立的项目：通灵玉、Global Router、Agent Platform 和 `deploy/`。
-- 通灵玉第一版主线是资料 source snapshot、知识库、证据卡片、证据包、reviewer 审校和 Open WebUI 入口。
-- Global Router 是独立 OpenAI-compatible 路由层，不从属于通灵玉或 Agent Platform。
-- Agent Platform 的控制面、运行面和审计链路以 `docs/agent-platform-design/` 为准。
+- 本仓库当前收敛为通灵玉 Agent 系统和 `deploy/`。
+- 通灵玉第一版主线是资料 source snapshot、知识库、证据卡片、证据包、
+  reviewer 审校、Open WebUI 入口、Gateway 和 Hermes runtime 上游。
+- Rust workspace 只保留 `agent-core`、`agent-runtime`、
+  `tonglingyu-runtime` 和 `tonglingyu-gateway`；前两者是通灵玉 Runtime 所需
+  的支撑库。
+- Global Router 和旧 Agent Platform 控制面不属于当前生产路径，不再新增相关代码、脚本或文档。
 - `resources/styles/` 是风格资料边界；除非任务明确要求，不改写风格转录和元数据。
 
 ## 编码规则
@@ -22,9 +25,8 @@
 ## 文档规则
 
 - 通灵玉产品和架构以 `docs/tonglingyu-agent-design/` 为准。
-- Global Router 设计和进展以 `docs/global-router-design/` 为准。
-- Agent Platform 设计和进展以 `docs/agent-platform-design/` 为准。
-- 根 `docs/PROGRESS.md` 只是跨项目进展索引；当前现实状态以对应项目目录下的 `PROGRESS.md` 为准。
+- 根 `docs/PROGRESS.md` 只是通灵玉文档入口索引；当前现实状态以
+  `docs/tonglingyu-agent-design/PROGRESS.md` 和 hhost 重建 checklist 为准。
 - 运行命令只写当前可执行命令；计划中的命令必须明确标记为尚未实现。
 
 ## 部署规则

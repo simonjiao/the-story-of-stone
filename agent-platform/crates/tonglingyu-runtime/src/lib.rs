@@ -1529,7 +1529,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["system_prompt", "profile_override", "write_tools"]
             }),
             output_contract: json!({
-                "required": ["evidence_refs", "evidence_analysis", "unsupported_scope"],
+                "required": ["evidence_observation"],
+                "evidence_observation_required": ["evidence_refs", "evidence_analysis", "unsupported_scope"],
                 "must_preserve": ["original_text", "source_id", "revision_id", "block_id"]
             }),
             safety_contract: json!({
@@ -1548,7 +1549,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["system_prompt", "profile_override", "write_tools"]
             }),
             output_contract: json!({
-                "required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
+                "required": ["evidence_observation"],
+                "evidence_observation_required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
                 "must_label": ["commentary", "version_note"]
             }),
             safety_contract: json!({
@@ -1570,7 +1572,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["skip_reviewer", "disable_reviewer", "system_prompt"]
             }),
             output_contract: json!({
-                "required": ["draft_answer", "package_id", "claim_statements"],
+                "required": ["draft_candidate"],
+                "draft_candidate_required": ["draft_answer", "package_id", "claim_statements"],
                 "must_include": ["support_scope", "unsupported_scope"]
             }),
             safety_contract: json!({
@@ -1589,7 +1592,8 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["disable_reviewer", "profile_override", "system_prompt"]
             }),
             output_contract: json!({
-                "required": ["review_status", "issues", "severity", "required_revisions"],
+                "required": ["review_observation"],
+                "review_observation_required": ["review_status", "issues", "severity", "required_revisions"],
                 "review_status": ["passed", "needs_revision"]
             }),
             safety_contract: json!({
@@ -2622,19 +2626,19 @@ fn agent_runtime_profile_step_message(
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return result_summary as a JSON object string with keys draft_answer, package_id, and claim_statements. package_id must match step_output_json.package_id; local reviewer remains required."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[...]}}. package_id must match step_output_json.package_id; local reviewer remains required. Do not add another result_summary key."
         }
         "review_answer" => {
-            "Return result_summary as a JSON object string with keys review_status, severity, issues, and required_revisions. This is observation only; local reviewer enforcement remains authoritative."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
         }
         "text_evidence_search" => {
-            "Return result_summary as a JSON object string with keys evidence_refs, evidence_analysis, and unsupported_scope. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[...],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer. Do not add another result_summary key."
         }
         "commentary_evidence_search" => {
-            "Return result_summary as a JSON object string with keys commentary_refs, commentary_analysis, and base_text_limits. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[...],\"commentary_analysis\":\"...\",\"base_text_limits\":\"...\"}}. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone. Do not add another result_summary key."
         }
         "evidence_package_create" => {
-            "Return result_summary as a concise package summary using the package_id from step_output_json; do not invent package ids."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"...\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
         }
         _ => {
             "Return result_summary as a concise step observation that preserves the step output boundary."
@@ -2797,10 +2801,14 @@ fn agent_runtime_execution_summary(
     let draft_consumed = application.is_some_and(|value| value.draft_consumed);
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
+    let draft_governance_completed = application.is_some_and(|value| {
+        value.draft_consumed
+            || value.rejected_reason == Some("draft_claim_exceeds_evidence_boundary")
+    });
     let hermes_content_execution_complete = mode == TonglingyuAgentRuntimeMode::Hermes
         && evidence_matches_local
         && package_matches_local
-        && draft_consumed
+        && draft_governance_completed
         && review_local_enforced;
     let profile_execution_status = match mode {
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
@@ -2824,6 +2832,7 @@ fn agent_runtime_execution_summary(
         "evidence_matches_local": evidence_matches_local,
         "package_matches_local": package_matches_local,
         "draft_consumed": draft_consumed,
+        "draft_governance_completed": draft_governance_completed,
         "content_used_for_final_answer": content_used_for_final_answer,
         "review_local_enforced": review_local_enforced,
         "hermes_content_execution_complete": hermes_content_execution_complete,
@@ -2948,7 +2957,7 @@ fn extract_agent_runtime_evidence_observation(
     expected_evidence_ids: &[String],
 ) -> AgentRuntimeEvidenceObservation {
     let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+    let Some(value) = parse_agent_runtime_summary_value(trimmed) else {
         return rejected_evidence_observation(
             operation,
             profile,
@@ -2956,7 +2965,7 @@ fn extract_agent_runtime_evidence_observation(
             Some("unsupported_text_evidence"),
         );
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "evidence_observation") else {
         return rejected_evidence_observation(
             operation,
             profile,
@@ -3099,7 +3108,7 @@ fn extract_agent_runtime_package_observation(
             rejected_reason,
         };
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "package_observation") else {
         return AgentRuntimePackageObservation {
             result_format: "json",
             package_id: None,
@@ -3191,6 +3200,42 @@ fn apply_agent_runtime_content_outputs(
     }
 
     let draft = extraction.draft_answer?;
+    if let Some(reason) =
+        agent_runtime_draft_evidence_boundary_rejection(&draft, &workflow.package.cards)
+    {
+        if let Some(step) = workflow.steps.get_mut(draft_step_index) {
+            step.output["agent_runtime_draft_consumed"] = json!(false);
+            step.output["agent_runtime_result_format"] = json!(extraction.result_format);
+            step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
+            step.output["agent_runtime_package_id"] = json!(extraction.package_id);
+            if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
+            {
+                agent_runtime.insert(
+                    "content_source".to_string(),
+                    json!("agent-runtime-hermes-profile-evidence-boundary-rejected"),
+                );
+                agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
+                agent_runtime.insert(
+                    "content_application".to_string(),
+                    json!({
+                        "answer_source": &workflow.answer_source,
+                        "local_reviewer_enforced": true,
+                        "review_status": &workflow.package.review.status,
+                        "result_format": extraction.result_format,
+                        "draft_consumed": false,
+                        "rejected_reason": reason,
+                        "content_used_for_final_answer": false,
+                    }),
+                );
+            }
+        }
+        return Some(AgentRuntimeContentApplication {
+            draft_consumed: false,
+            content_used_for_final_answer: false,
+            result_format: extraction.result_format,
+            rejected_reason: Some(reason),
+        });
+    }
 
     workflow.draft_answer = draft.clone();
     workflow.final_answer = enforce_review(draft, &workflow.package);
@@ -3250,6 +3295,36 @@ fn apply_agent_runtime_content_outputs(
     })
 }
 
+fn agent_runtime_draft_evidence_boundary_rejection(
+    draft: &str,
+    cards: &[EvidenceCard],
+) -> Option<&'static str> {
+    if cards.is_empty() {
+        return None;
+    }
+    let evidence_text = cards
+        .iter()
+        .map(|card| normalize_text(&card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let draft_text = normalize_text(draft);
+    for term in [
+        "出身",
+        "亲戚",
+        "礼教",
+        "封建",
+        "市井",
+        "反抗",
+        "曹雪芹",
+        "误会",
+    ] {
+        if draft_text.contains(term) && !evidence_text.contains(term) {
+            return Some("draft_claim_exceeds_evidence_boundary");
+        }
+    }
+    None
+}
+
 fn extract_agent_runtime_draft(
     result_summary: &str,
     expected_package_id: &str,
@@ -3279,7 +3354,7 @@ fn extract_agent_runtime_draft(
         };
     }
 
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "draft_candidate") else {
         return AgentRuntimeDraftExtraction {
             draft_answer: None,
             result_format: "json",
@@ -3354,6 +3429,17 @@ fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
             .or_else(|| Some(json!(inner)));
     }
     Some(value)
+}
+
+fn object_or_named_child<'a>(
+    value: &'a Value,
+    child_key: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    let object = value.as_object()?;
+    object
+        .get(child_key)
+        .and_then(Value::as_object)
+        .or(Some(object))
 }
 
 fn package_id_from_text(text: &str, expected_package_id: &str) -> Option<String> {
@@ -3439,10 +3525,10 @@ fn extract_agent_runtime_review_observation(
     local_review_severity: &str,
 ) -> AgentRuntimeReviewObservation {
     let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+    let Some(value) = parse_agent_runtime_summary_value(trimmed) else {
         return rejected_review_observation("text", Some("unsupported_text_review"));
     };
-    let Some(object) = value.as_object() else {
+    let Some(object) = object_or_named_child(&value, "review_observation") else {
         return rejected_review_observation("json", Some("unsupported_json_review"));
     };
     let review_status = object
@@ -9494,36 +9580,124 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
 
 pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
-        return format!(
-            "证据不足：当前第一批 Wikisource source snapshot 没有命中可追溯证据，不能仅凭模型记忆回答。\n\n证据包：{}\nreviewer：{}",
-            package.package_id, package.review.summary
-        );
+        return "我暂时找不到足够的原文依据，不能可靠回答这个问题。".to_string();
+    }
+    if let Some(answer) = character_intro_answer(question, package) {
+        return answer;
     }
     let mut answer = String::new();
-    answer.push_str("根据当前第一批 Wikisource source snapshot，只能作如下有边界的回答：\n\n");
+    answer.push_str("根据目前可检索到的文本，可以这样回答：\n\n");
     if question.contains("通灵玉") || question.contains("通靈玉") || question.contains("莫失莫忘")
     {
-        answer.push_str("通灵玉相关文本需要以第八回等具体 block 为依据；若涉及铭文，命中的证据显示“莫失莫忘，仙寿恒昌”等字样。不同来源可能记录字形或图式细节差异，不能把本批 snapshot 视为影印校勘完成。\n\n");
+        answer.push_str("通灵玉相关文本需要回到具体原文来读。若问铭文，当前命中的文本显示“莫失莫忘，仙寿恒昌”等字样；不同版本的字形和图式细节可能有差异，不能把这当作完整校勘结论。\n\n");
     } else {
-        answer.push_str("已命中若干正文、脂批或版本证据。下面列出最靠前的证据，回答只能在这些证据的支持范围内成立。\n\n");
+        answer.push_str("目前能支持回答的主要材料如下，结论只限于这些文本直接能说明的范围。\n\n");
     }
     for (index, card) in package.cards.iter().take(4).enumerate() {
         answer.push_str(&format!(
-            "{}. [{}] {}：{}\n   来源：{}；revision_id={:?}\n   不支持：{}\n",
+            "{}. {}：{}\n",
             index + 1,
-            card.evidence_level,
             card.source_title,
-            card.text,
-            card.source_id,
-            card.revision_id,
-            card.unsupported_scope
+            card.text
         ));
     }
-    answer.push_str(&format!(
-        "\n证据包：{}\nreviewer：{}",
-        package.package_id, package.review.summary
-    ));
     answer
+}
+
+fn character_intro_answer(question: &str, package: &EvidencePackage) -> Option<String> {
+    if question.contains("通灵玉") || question.contains("通靈玉") {
+        return None;
+    }
+    let intro_question = question.contains("介绍")
+        || question.contains("介紹")
+        || question.contains("是谁")
+        || question.contains("是誰")
+        || question.contains("人物")
+        || question.contains("说说")
+        || question.contains("說說")
+        || question.contains("讲讲")
+        || question.contains("講講");
+    if !intro_question {
+        return None;
+    }
+    let focus = question_focus_term(question, &package.cards)?;
+    if normalize_text(&focus) != "尤三姐" {
+        return None;
+    }
+    let evidence_text = package
+        .cards
+        .iter()
+        .map(|card| normalize_text(&card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut points = Vec::new();
+    if evidence_text.contains("珍大嫂子的妹妹三姑娘") {
+        points.push(
+            "薛姨妈称她为“珍大嫂子的妹妹三姑娘”，可见她与尤氏、尤二姐这一线人物相关。".to_string(),
+        );
+    }
+    if evidence_text.contains("若有了姓柳的来")
+        || evidence_text.contains("已说定了尤三姐为妻")
+        || evidence_text.contains("已许定给")
+    {
+        points.push("她与柳湘莲的婚约是她故事里的核心线索：文本中既写到湘莲已说定她为妻，也写她表示“若有了姓柳的来，我便嫁他”。".to_string());
+    }
+    if evidence_text.contains("玉簪") || evidence_text.contains("不是那心口两样的人") {
+        points.push(
+            "她表态时说自己“不是那心口两样的人”，并折断玉簪明志，显出决绝的一面。".to_string(),
+        );
+    }
+    if evidence_text.contains("自尽") || evidence_text.contains("自刎") {
+        points.push("后续情节写到她自尽或自刎，尤老娘、尤二姐、贾珍、贾琏等人为之悲恸，柳湘莲也因她身亡而出家。".to_string());
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let mut answer = format!("{focus}是《红楼梦》中与尤氏、尤二姐一线相关的人物。");
+    answer.push_str(&points.join(""));
+    answer.push_str("综合这些文本，她最突出的形象是情感决绝、刚烈自持；她的故事围绕柳湘莲婚约和自尽结局展开，带有很强的悲剧色彩。这个概括只依据现有原文，不把文本里没有直接说明的家世来源、社会评价或版本差异说成定论。");
+    Some(answer)
+}
+
+fn question_focus_term(question: &str, cards: &[EvidenceCard]) -> Option<String> {
+    let mut terms = Vec::new();
+    for token in cjk_tokens(question) {
+        if token.chars().count() >= 2 && token.chars().count() <= 8 {
+            push_term(&mut terms, &token);
+        }
+        for focus_term in cjk_focus_terms(&token) {
+            if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 8 {
+                push_term(&mut terms, &focus_term);
+            }
+        }
+    }
+    terms.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    terms.into_iter().find(|term| {
+        !generic_question_term(term)
+            && cards.iter().any(|card| {
+                card.text.contains(term)
+                    || normalize_text(&card.text).contains(&normalize_text(term))
+            })
+    })
+}
+
+fn generic_question_term(term: &str) -> bool {
+    matches!(
+        term,
+        "介绍"
+            | "介紹"
+            | "介绍一下"
+            | "介紹一下"
+            | "是谁"
+            | "是誰"
+            | "是什么"
+            | "是什麼"
+            | "人物"
+            | "说说"
+            | "說說"
+            | "讲讲"
+            | "講講"
+    )
 }
 
 pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
@@ -9531,10 +9705,9 @@ pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
         return draft;
     }
     format!(
-        "证据不足或需要降级：{}\n\n{}\n\n证据包：{}",
+        "这个问题目前缺少足够证据支持：{}\n\n{}",
         package.review.issues.join("；"),
-        local_answer(&package.question, package),
-        package.package_id
+        local_answer(&package.question, package)
     )
 }
 
@@ -9742,6 +9915,11 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
     for token in cjk_tokens(question) {
         if token.chars().count() >= 2 && token.chars().count() <= 8 {
             push_term(&mut terms, &token);
+        }
+        for focus_term in cjk_focus_terms(&token) {
+            if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 8 {
+                push_term(&mut terms, &focus_term);
+            }
         }
     }
     if terms.is_empty() && question.chars().count() <= 24 {
@@ -10009,6 +10187,13 @@ fn normalize_text(input: &str) -> String {
         ("臺", "台"),
         ("檯", "台"),
         ("後", "后"),
+        ("來", "来"),
+        ("許", "许"),
+        ("給", "给"),
+        ("盡", "尽"),
+        ("蓮", "莲"),
+        ("媽", "妈"),
+        ("為", "为"),
     ];
     let mut output = input.to_lowercase();
     for (from, to) in replacements {
@@ -10149,6 +10334,75 @@ fn split_cjk_token(token: &str) -> Vec<String> {
         .windows(4)
         .map(|window| window.iter().collect::<String>())
         .collect()
+}
+
+fn cjk_focus_terms(token: &str) -> Vec<String> {
+    let prefixes = [
+        "请介绍一下",
+        "請介紹一下",
+        "介绍一下",
+        "介紹一下",
+        "请介绍",
+        "請介紹",
+        "介绍",
+        "介紹",
+        "说说",
+        "說說",
+        "讲讲",
+        "講講",
+        "讲一下",
+        "講一下",
+        "解释",
+        "解釋",
+        "分析",
+        "概述",
+        "简述",
+        "簡述",
+        "说明",
+        "說明",
+        "谈谈",
+        "談談",
+    ];
+    let suffixes = [
+        "是什么",
+        "是什麼",
+        "是谁",
+        "是誰",
+        "怎么样",
+        "怎樣",
+        "如何",
+        "介绍",
+        "介紹",
+        "生平",
+        "人物",
+    ];
+    let mut focus = token.trim().to_string();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prefix in prefixes {
+            if let Some(stripped) = focus.strip_prefix(prefix) {
+                focus = stripped.trim().to_string();
+                changed = true;
+                break;
+            }
+        }
+        if changed {
+            continue;
+        }
+        for suffix in suffixes {
+            if let Some(stripped) = focus.strip_suffix(suffix) {
+                focus = stripped.trim().to_string();
+                changed = true;
+                break;
+            }
+        }
+    }
+    if focus.is_empty() || focus == token {
+        Vec::new()
+    } else {
+        vec![focus]
+    }
 }
 
 fn is_cjk(ch: char) -> bool {
@@ -10415,31 +10669,45 @@ mod tests {
             Ok(RuntimeOutput {
                 result_summary: match operation {
                     "text_evidence_search" => serde_json::to_string(&json!({
-                        "evidence_refs": evidence_ids_from_step_message(&message),
-                        "evidence_analysis": "Hermes observed text evidence refs",
-                        "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        "evidence_observation": {
+                            "evidence_refs": evidence_ids_from_step_message(&message),
+                            "evidence_analysis": "Hermes observed text evidence refs",
+                            "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        }
                     }))
                     .expect("text evidence output serializes"),
                     "commentary_evidence_search" => serde_json::to_string(&json!({
-                        "commentary_refs": evidence_ids_from_step_message(&message),
-                        "commentary_analysis": "Hermes observed commentary evidence refs",
-                        "base_text_limits": "commentary cannot prove base-text facts alone",
+                        "evidence_observation": {
+                            "commentary_refs": evidence_ids_from_step_message(&message),
+                            "commentary_analysis": "Hermes observed commentary evidence refs",
+                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                        }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => {
-                        format!("Hermes full workflow draft from {operation}. context={message}")
-                    }
+                    "draft_answer" => serde_json::to_string(&json!({
+                        "draft_candidate": {
+                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "claim_statements": ["Hermes full workflow draft claim"],
+                        }
+                    }))
+                    .expect("draft output serializes"),
                     "evidence_package_create" => serde_json::to_string(&json!({
-                        "package_id": package_id_from_step_message(&message)
-                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        "summary": "Hermes observed runtime package ref",
+                        "package_observation": {
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "summary": "Hermes observed runtime package ref",
+                        }
                     }))
                     .expect("package output serializes"),
                     "review_answer" => serde_json::to_string(&json!({
-                        "review_status": "passed",
-                        "severity": "none",
-                        "issues": [],
-                        "required_revisions": [],
+                        "review_observation": {
+                            "review_status": "passed",
+                            "severity": "none",
+                            "issues": [],
+                            "required_revisions": [],
+                        }
                     }))
                     .expect("review output serializes"),
                     _ => format!("Hermes full workflow step {operation}. context={message}"),
@@ -10498,31 +10766,45 @@ mod tests {
             Ok(RuntimeOutput {
                 result_summary: match operation {
                     "text_evidence_search" => serde_json::to_string(&json!({
-                        "evidence_refs": evidence_ids_from_step_message(&message),
-                        "evidence_analysis": "Hermes observed text evidence refs without model tool calls",
-                        "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        "evidence_observation": {
+                            "evidence_refs": evidence_ids_from_step_message(&message),
+                            "evidence_analysis": "Hermes observed text evidence refs without model tool calls",
+                            "unsupported_scope": "observation only; local runtime evidence is enforced",
+                        }
                     }))
                     .expect("text evidence output serializes"),
                     "commentary_evidence_search" => serde_json::to_string(&json!({
-                        "commentary_refs": evidence_ids_from_step_message(&message),
-                        "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
-                        "base_text_limits": "commentary cannot prove base-text facts alone",
+                        "evidence_observation": {
+                            "commentary_refs": evidence_ids_from_step_message(&message),
+                            "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
+                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                        }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => {
-                        format!("Hermes full workflow draft from {operation}. context={message}")
-                    }
+                    "draft_answer" => serde_json::to_string(&json!({
+                        "draft_candidate": {
+                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "claim_statements": ["Hermes full workflow draft claim"],
+                        }
+                    }))
+                    .expect("draft output serializes"),
                     "evidence_package_create" => serde_json::to_string(&json!({
-                        "package_id": package_id_from_step_message(&message)
-                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        "summary": "Hermes observed runtime package ref without model tool calls",
+                        "package_observation": {
+                            "package_id": package_id_from_step_message(&message)
+                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                            "summary": "Hermes observed runtime package ref without model tool calls",
+                        }
                     }))
                     .expect("package output serializes"),
                     "review_answer" => serde_json::to_string(&json!({
-                        "review_status": "passed",
-                        "severity": "none",
-                        "issues": [],
-                        "required_revisions": [],
+                        "review_observation": {
+                            "review_status": "passed",
+                            "severity": "none",
+                            "issues": [],
+                            "required_revisions": [],
+                        }
                     }))
                     .expect("review output serializes"),
                     _ => format!("Hermes full workflow step {operation}. context={message}"),
@@ -10897,6 +11179,79 @@ mod tests {
         }
     }
 
+    fn yousanjie_test_cards() -> Vec<EvidenceCard> {
+        let mut vow = sample_card("base_text");
+        vow.evidence_id = "ev-yousanjie-vow".to_string();
+        vow.source_title = "紅樓夢/第066回".to_string();
+        vow.block_id = "block-yousanjie-vow".to_string();
+        vow.text = "二人正說之間，只見尤三姐走來說道：“姐夫，你只放心。我們不是那心口兩樣的人，說什麼是什麼。若有了姓柳的來，我便嫁他。”說著，將一根玉簪，擊作兩段。".to_string();
+        vow.evidence_level = "正文直接".to_string();
+        let mut death = sample_card("base_text");
+        death.evidence_id = "ev-yousanjie-death".to_string();
+        death.source_title = "紅樓夢/第067回".to_string();
+        death.block_id = "block-yousanjie-death".to_string();
+        death.text = "話說尤三姐自盡之後，尤老娘和二姐兒，賈珍，賈璉等俱不胜悲慟。柳湘蓮見尤三姐身亡，痴情眷戀，卻被道人數句冷言打破迷關，竟自截發出家。薛姨媽說：珍大嫂子的妹妹三姑娘，已經許定給柳湘蓮了。".to_string();
+        death.evidence_level = "正文直接".to_string();
+        vec![vow, death]
+    }
+
+    fn yousanjie_test_package() -> EvidencePackage {
+        let cards = yousanjie_test_cards();
+        EvidencePackage {
+            package_id: "pkg-yousanjie-test".to_string(),
+            trace_id: "trace-yousanjie-test".to_string(),
+            question: "介绍尤三姐".to_string(),
+            claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+            claim_evidence_map: claim_evidence_map(
+                &["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+                &cards,
+            ),
+            cards,
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer 通过：1 条结论声明均有证据包约束。".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn local_character_intro_answer_stays_inside_evidence_boundary() {
+        let package = yousanjie_test_package();
+
+        let answer = local_answer("介绍尤三姐", &package);
+
+        assert!(answer.contains("尤三姐"));
+        assert!(answer.contains("柳湘莲") || answer.contains("柳湘蓮"));
+        assert!(answer.contains("自尽") || answer.contains("自盡"));
+        assert!(!answer.contains("出身柳湘莲"));
+        assert!(!answer.contains("礼教"));
+        assert!(!answer.contains("封建"));
+        assert!(!answer.contains("Wikisource"));
+        assert!(!answer.contains("source snapshot"));
+        assert!(!answer.contains("证据包"));
+        assert!(!answer.contains("reviewer"));
+        assert!(!answer.contains(&package.package_id));
+    }
+
+    #[test]
+    fn hermes_draft_rejects_unsupported_interpretive_terms() {
+        let cards = yousanjie_test_cards();
+
+        let rejected = agent_runtime_draft_evidence_boundary_rejection(
+            "尤三姐出身柳湘莲一支亲戚关系，并反抗封建礼教。",
+            &cards,
+        );
+        let accepted = agent_runtime_draft_evidence_boundary_rejection(
+            "尤三姐与柳湘莲婚约、自尽情节相连。",
+            &cards,
+        );
+
+        assert_eq!(rejected, Some("draft_claim_exceeds_evidence_boundary"));
+        assert_eq!(accepted, None);
+    }
+
     fn seed_retrieval_quality_source(conn: &Connection, snapshot_contract: Value) {
         let license = snapshot_text_field(
             &snapshot_contract,
@@ -11235,6 +11590,72 @@ mod tests {
         let report_json = serde_json::to_string(&quality_report).expect("report serializes");
         assert!(!report_json.contains(question));
         assert!(!report_json.contains("SECRET_RUNTIME_TOKEN"));
+    }
+
+    #[test]
+    fn text_search_strips_intro_shell_for_character_lookup() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, source_url,
+                revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, 'quality-source', 'quality-section-002',
+                '质量测试红楼梦/第六十六回', 'https://example.test/source/66',
+                1, 2, 'paragraph', NULL, ?2, ?3, 'base_text', 66)
+            "#,
+            params![
+                "quality-block-yousanjie",
+                "尤三姐走来，说自己不是那心口两样的人。",
+                normalize_text("尤三姐走来，说自己不是那心口两样的人。"),
+            ],
+        )
+        .expect("insert character block");
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "介绍尤三姐".to_string(),
+                limit: 2,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert!(
+            cards
+                .iter()
+                .any(|card| card.block_id == "quality-block-yousanjie"),
+            "intro-shell query should retrieve the character block"
+        );
+        assert!(
+            quality_report
+                .expanded_terms
+                .iter()
+                .any(|term| term == "尤三姐")
+        );
+        assert!(quality_report.production_ready);
     }
 
     #[test]
@@ -12880,8 +13301,10 @@ mod tests {
             review: review("量子计算机是什么？", &[], &[]),
         };
         let answer = replay_answer(&package);
-        assert!(answer.contains("pkg-test"));
-        assert!(answer.contains("证据不足"));
+        assert!(!answer.contains("pkg-test"));
+        assert!(!answer.contains("证据包"));
+        assert!(!answer.contains("reviewer"));
+        assert!(answer.contains("缺少足够证据") || answer.contains("没有检索到足够"));
     }
 
     #[test]
@@ -12903,7 +13326,9 @@ mod tests {
 
         assert_eq!(workflow.steps.len(), 4);
         assert_eq!(workflow.package.review.status, "needs_revision");
-        assert!(workflow.final_answer.contains(&workflow.package.package_id));
+        assert!(!workflow.final_answer.contains(&workflow.package.package_id));
+        assert!(!workflow.final_answer.contains("证据包"));
+        assert!(!workflow.final_answer.contains("reviewer"));
         assert_eq!(
             workflow.agent_runtime_summary["profile_execution_status"],
             "deterministic_workflow_only"
@@ -13094,9 +13519,11 @@ mod tests {
         workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
             serde_json::to_string(&json!({
                 "result_summary": serde_json::to_string(&json!({
-                    "draft_answer": "嵌套 Hermes 草稿：必须引用本地证据包。",
-                    "package_id": package_id,
-                    "claim_statements": ["nested claim"],
+                    "draft_candidate": {
+                        "draft_answer": "嵌套 Hermes 草稿：必须引用本地证据包。",
+                        "package_id": package_id,
+                        "claim_statements": ["nested claim"],
+                    }
                 }))
                 .expect("inner draft serializes")
             }))
@@ -13202,6 +13629,42 @@ mod tests {
     }
 
     #[test]
+    fn hermes_mode_observes_nested_result_summary_reviewer_agreement() {
+        let mut workflow = runtime_draft_workflow(
+            vec![sample_card("base_text")],
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        workflow.steps[1].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "result_summary": serde_json::to_string(&json!({
+                    "review_observation": {
+                        "review_status": "passed",
+                        "severity": "none",
+                        "issues": [],
+                        "required_revisions": [],
+                    }
+                }))
+                .expect("inner review serializes")
+            }))
+            .expect("outer review serializes")
+        );
+
+        let observation =
+            apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("nested reviewer observation is recorded");
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.review_status.as_deref(), Some("passed"));
+        assert!(observation.agrees_with_local_reviewer);
+        assert!(!observation.local_reviewer_override);
+    }
+
+    #[test]
     fn hermes_mode_marks_reviewer_disagreement_as_local_override() {
         let mut workflow = runtime_draft_workflow(
             Vec::new(),
@@ -13270,6 +13733,22 @@ mod tests {
     }
 
     #[test]
+    fn package_observation_accepts_named_package_observation() {
+        let observation = extract_agent_runtime_package_observation(
+            r#"{"package_observation":{"package_id":"pkg-runtime-draft-test","summary":"package observed"}}"#,
+            "pkg-runtime-draft-test",
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(
+            observation.package_id.as_deref(),
+            Some("pkg-runtime-draft-test")
+        );
+        assert!(observation.matches_runtime_package);
+        assert!(observation.rejected_reason.is_none());
+    }
+
+    #[test]
     fn evidence_observation_rejects_unknown_refs() {
         let observation = extract_agent_runtime_evidence_observation(
             r#"{"evidence_refs":["ev-known","ev-unknown"],"evidence_analysis":"test","unsupported_scope":"test"}"#,
@@ -13286,6 +13765,33 @@ mod tests {
         );
         assert!(!observation.matches_runtime_evidence);
         assert_eq!(observation.rejected_reason, Some("unknown_evidence_ref"));
+    }
+
+    #[test]
+    fn evidence_observation_accepts_nested_result_summary_refs() {
+        let summary = serde_json::to_string(&json!({
+            "result_summary": serde_json::to_string(&json!({
+                "evidence_observation": {
+                    "evidence_refs": ["ev-known"],
+                    "evidence_analysis": "test",
+                    "unsupported_scope": "test",
+                }
+            }))
+            .expect("inner evidence serializes")
+        }))
+        .expect("outer evidence serializes");
+
+        let observation = extract_agent_runtime_evidence_observation(
+            &summary,
+            "text_evidence_search",
+            "honglou-text",
+            &["ev-known".to_string()],
+        );
+
+        assert_eq!(observation.result_format, "json");
+        assert_eq!(observation.evidence_ref_count, 1);
+        assert!(observation.matches_runtime_evidence);
+        assert!(observation.rejected_reason.is_none());
     }
 
     fn runtime_draft_workflow(

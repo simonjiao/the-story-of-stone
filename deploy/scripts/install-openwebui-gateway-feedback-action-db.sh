@@ -9,24 +9,27 @@ else
 fi
 
 COMPOSE_SERVICE="${OPEN_WEBUI_COMPOSE_SERVICE:-open-webui}"
-CONTAINER_PATH="/tmp/agent_identity_bridge_filter.py"
-FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
+CONTAINER_PATH="/tmp/tonglingyu_gateway_feedback_action.py"
+FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/tonglingyu_gateway_feedback_action.py}"
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
 load_deploy_env_file_or_local
 
-if [[ -z "${AGENT_BRIDGE_SECRET:-}" ]]; then
-  echo "AGENT_BRIDGE_SECRET is required" >&2
+if [[ -z "${TONGLINGYU_GATEWAY_API_KEY:-}" ]]; then
+  echo "TONGLINGYU_GATEWAY_API_KEY is required" >&2
   exit 1
 fi
 
 docker compose cp "${FUNCTION_FILE}" "${COMPOSE_SERVICE}:${CONTAINER_PATH}" >/dev/null
 docker compose exec -T \
-  -e AGENT_BRIDGE_SECRET \
-  -e AGENT_BRIDGE_ISSUER \
-  -e AGENT_BRIDGE_TARGET_MODEL \
-  -e AGENT_BRIDGE_TARGET_MODELS \
+  -e TONGLINGYU_GATEWAY_API_KEY \
+  -e TONGLINGYU_GATEWAY_ADMIN_BASE_URL \
+  -e TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TARGET_MODEL \
+  -e TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TARGET_MODELS \
+  -e TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TIMEOUT \
+  -e TONGLINGYU_GATEWAY_FEEDBACK_ACTION_MAX_CHARS \
+  -e TONGLINGYU_MODEL_ID \
   "${COMPOSE_SERVICE}" \
   python3 - <<'PY'
 from pathlib import Path
@@ -35,7 +38,7 @@ import os
 import sqlite3
 import time
 
-content = Path("/tmp/agent_identity_bridge_filter.py").read_text()
+content = Path("/tmp/tonglingyu_gateway_feedback_action.py").read_text()
 conn = sqlite3.connect("/app/backend/data/webui.db")
 cur = conn.cursor()
 admin = cur.execute(
@@ -45,19 +48,33 @@ admin = cur.execute(
 if not admin:
     raise SystemExit("no admin user found")
 
+target_model = os.environ.get(
+    "TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TARGET_MODEL",
+    os.environ.get("TONGLINGYU_MODEL_ID", "tonglingyu"),
+)
+target_models = os.environ.get(
+    "TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TARGET_MODELS",
+    target_model,
+)
 now = int(time.time())
 meta = json.dumps(
-    {"description": "Injects signed Open WebUI identity context for Tonglingyu Agent requests."},
+    {"description": "Queues Tonglingyu Gateway feedback from Open WebUI."},
     ensure_ascii=False,
 )
 valves = json.dumps(
     {
-        "AGENT_BRIDGE_SECRET": os.environ["AGENT_BRIDGE_SECRET"],
-        "AGENT_BRIDGE_ISSUER": os.environ.get("AGENT_BRIDGE_ISSUER", "open-webui"),
-        "TARGET_MODEL": os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "tonglingyu"),
-        "TARGET_MODELS": os.environ.get(
-            "AGENT_BRIDGE_TARGET_MODELS",
-            os.environ.get("AGENT_BRIDGE_TARGET_MODEL", "tonglingyu"),
+        "GATEWAY_BASE_URL": os.environ.get(
+            "TONGLINGYU_GATEWAY_ADMIN_BASE_URL",
+            "http://tonglingyu-gateway:8090",
+        ),
+        "GATEWAY_API_KEY": os.environ["TONGLINGYU_GATEWAY_API_KEY"],
+        "TARGET_MODEL": target_model,
+        "TARGET_MODELS": target_models,
+        "REQUEST_TIMEOUT_SECONDS": int(
+            os.environ.get("TONGLINGYU_GATEWAY_FEEDBACK_ACTION_TIMEOUT", "15")
+        ),
+        "RESPONSE_MAX_CHARS": int(
+            os.environ.get("TONGLINGYU_GATEWAY_FEEDBACK_ACTION_MAX_CHARS", "3000")
         ),
     },
     ensure_ascii=False,
@@ -78,10 +95,10 @@ cur.execute(
       is_global=excluded.is_global
     """,
     (
-        "agent_identity_bridge",
+        "tonglingyu_gateway_feedback",
         admin[0],
-        "Agent Identity Bridge",
-        "filter",
+        "Tonglingyu Feedback",
+        "action",
         content,
         meta,
         now,
@@ -92,7 +109,7 @@ cur.execute(
     ),
 )
 conn.commit()
-print("function_upserted=agent_identity_bridge")
+print("function_upserted=tonglingyu_gateway_feedback")
 PY
 
 docker compose restart "${COMPOSE_SERVICE}" >/dev/null

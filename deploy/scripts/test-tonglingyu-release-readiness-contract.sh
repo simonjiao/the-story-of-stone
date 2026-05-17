@@ -270,12 +270,10 @@ common_env=(
   "TONGLINGYU_RELEASE_OPENWEBUI_ADMIN_ACTION_CMD=${PASS_CMD}"
 )
 security_digest_env=(
-  "AGENT_PLATFORM_IMAGE_REF=registry.invalid/hermes-agent-platform@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   "TONGLINGYU_GATEWAY_IMAGE_REF=registry.invalid/tonglingyu-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   "HERMES_IMAGE_REF=registry.invalid/hermes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   "OPEN_WEBUI_IMAGE_REF=registry.invalid/open-webui@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
   "CLOUDFLARED_IMAGE_REF=registry.invalid/cloudflared@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-  "AGENT_PLATFORM_POSTGRES_IMAGE_REF=registry.invalid/postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 )
 
 trivy_high_stdout="${WORK_DIR}/trivy-high-security.stdout"
@@ -298,7 +296,7 @@ assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_reports_persiste
 assert_report "${trivy_high_stdout}" 'report["image_scan"]["raw_report_artifact_dir"].endswith("trivy-high-raw-reports")'
 assert_report "${trivy_high_stdout}" 'len(report["image_scan"]["raw_report_paths"]) == report["image_scan"]["image_count"]'
 assert_report "${trivy_high_stdout}" '"image_high_findings_present" in report["errors"]'
-assert_report "${trivy_high_stdout}" 'report["image_scan"]["owned_high_count"] == 2'
+assert_report "${trivy_high_stdout}" 'report["image_scan"]["owned_high_count"] == 1'
 
 third_party_high_artifact_dir="${WORK_DIR}/third-party-high-raw-reports"
 third_party_high_scan_json="${WORK_DIR}/third-party-high-image-scan.json"
@@ -312,12 +310,10 @@ target = Path(sys.argv[1])
 artifact_dir = Path(sys.argv[2]).resolve()
 artifact_dir.mkdir(parents=True, exist_ok=True)
 image_refs = [
-    "registry.invalid/hermes-agent-platform@sha256:" + "a" * 64,
     "registry.invalid/tonglingyu-gateway@sha256:" + "b" * 64,
     "registry.invalid/hermes@sha256:" + "c" * 64,
     "registry.invalid/open-webui@sha256:" + "d" * 64,
     "registry.invalid/cloudflared@sha256:" + "e" * 64,
-    "registry.invalid/postgres@sha256:" + "f" * 64,
 ]
 raw_report_paths = []
 report_digests = []
@@ -326,7 +322,7 @@ for index, image_ref in enumerate(image_refs):
         "trivy-" + hashlib.sha256(image_ref.encode("utf-8")).hexdigest() + ".json"
     )
     vulnerabilities = []
-    if index >= 2:
+    if index >= 1:
         vulnerabilities = [
             {"Severity": "HIGH", "VulnerabilityID": f"CVE-THIRD-PARTY-{index}"}
         ]
@@ -353,7 +349,7 @@ target.write_text(
         {
             "critical_count": 0,
             "failed_image_count": 0,
-            "high_count": 4,
+            "high_count": 3,
             "object": "tonglingyu.security_scan_result",
             "raw_report_artifact_dir": str(artifact_dir),
             "raw_report_paths": raw_report_paths,
@@ -392,7 +388,7 @@ assert_report "${third_party_high_stdout}" 'report["status"] == "ok"'
 assert_report "${third_party_high_stdout}" 'report["security_scan_passed"] is True'
 assert_report "${third_party_high_stdout}" 'report["image_scan"]["status"] == "passed"'
 assert_report "${third_party_high_stdout}" 'report["image_scan"]["owned_high_count"] == 0'
-assert_report "${third_party_high_stdout}" 'report["image_scan"]["third_party_high_count"] == 4'
+assert_report "${third_party_high_stdout}" 'report["image_scan"]["third_party_high_count"] == 3'
 assert_report "${third_party_high_stdout}" '"third_party_image_high_findings_present" in report["nonblocking_errors"]'
 assert_report "${third_party_high_stdout}" '"image_high_findings_present" not in report["errors"]'
 

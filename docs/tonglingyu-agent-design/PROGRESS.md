@@ -8,6 +8,27 @@
   source snapshot，并保留 `rare_char_annotations`。
 - `resources/styles/buhongjushi/` 风格转录保留，不作为主证据库。
 - Rust 主线入口为 `agent-platform/crates/tonglingyu-gateway/`。
+- 2026-05-17 仓库边界已收敛为通灵玉 Agent 系统：Rust workspace 只保留
+  `agent-core`、`agent-runtime`、`tonglingyu-runtime` 和
+  `tonglingyu-gateway`；旧 Agent Platform 控制面、Global Router、Postgres
+  store、worker、agentctl、旧 Dockerfile 和旧设计文档已退出仓库主线。
+- 2026-05-17 `deploy/docker-compose.yml` 已收敛为 Tonglingyu-only stack：
+  `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`；Tonglingyu
+  后端容器使用 `tonglingyu-hermes-agent` 和 `tonglingyu-gateway`，Open
+  WebUI/Cloudflared 作为前置入口层使用 `home-open-webui` 和
+  `home-cloudflared`，Open WebUI 只连接
+  `http://tonglingyu-gateway:8090/v1`。
+- 2026-05-17 已在 `hhost` 完成 Tonglingyu-only 重建：当前部署目录为
+  `$HOME/tonglingyu-home-deploy`，运行时目录为
+  `$HOME/tonglingyu-home-runtime`，运行容器为 `tonglingyu-hermes-agent`、
+  `tonglingyu-gateway`、`home-open-webui` 和 `home-cloudflared`。
+- `hhost` 重建后 runtime config、`agent_identity_bridge`、
+  `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
+  chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
+- 本次重建不等于 production-ready 发布：aggregate release readiness 当前仍是
+  summary-only，`production_release_ready=false`，还缺 browser-side review、
+  security scan/digest-pinned image、RQA migration/restore/performance/API/user
+  lifecycle、release ops 和监控证据。
 
 ## 已确认
 
@@ -20,7 +41,9 @@
 - `不红居士` 是风格名，不替换转录文本中的 `不红君`。
 - `官中`、`宫中`、`公中` 等高风险同音词必须回到已登记证据确认。
 - 第一批资料从维基文库获取；允许联网下载公开资料；第一版只使用 SQLite/FTS，不接外部向量库。
-- 远程部署复用一个现有 Open WebUI，Gateway 单独部署。
+- 早期远程部署曾复用现有 Open WebUI，Gateway 单独部署；2026-05-17
+  重建后改为 Tonglingyu-only stack，Open WebUI、Gateway、Hermes 和
+  Cloudflare Tunnel 均在新的 `tonglingyu-home` compose 项目内运行。
 - 已下载第一批 source snapshot：`hongloumeng-wikisource-120`、`hongloumeng-wikisource-chengjia`、`hongloumeng-wikisource-chengyi`、`shitouji-wikisource-zhiyanzhai`、`shitouji-wikisource-jiaxu`。
 - `hongloumeng-wikisource-chengjia` 已通过 ProofreadPage Page namespace 展开补齐正文。
 - 第一批 Wikisource snapshot 已补 source snapshot ready 口径和 19 个跨版本
@@ -46,19 +69,16 @@
   和 `/v1/chat/completions`。
 - `deploy/docker-compose.yml` 已加入真实 `tonglingyu-gateway` 服务，Open WebUI
   默认连接该 Rust Gateway，Gateway 再按配置调用 Hermes 上游生成层。
-- 2026-05-09 已在远程 `hhost:/home/simon/hermes-home-deploy` 真实部署：
+- 2026-05-09 已在远程 `hhost:~/hermes-home-deploy` 真实部署：
   启动 `tonglingyu-gateway` 和现有 `hermes-open-webui`，远端 gateway
   healthcheck 为 healthy。
 - `tonglingyu-gateway` 已拆为独立镜像，使用
   `agent-platform/crates/tonglingyu-gateway/Dockerfile` 构建，并通过
-  BuildKit cache mount 缓存 Cargo registry、git 源和 `target/`；通用
-  `hermes-agent-platform` 镜像不再包含 gateway 二进制。
+  BuildKit cache mount 缓存 Cargo registry、git 源和 `target/`。
 - 远端已验证第二次 `docker compose build tonglingyu-gateway` 全部命中
-  Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制，
-  `hermes-agent-platform:formal` 不含 gateway 二进制。
-- Open WebUI 当前通过独立 Rust `global-router` 作为单入口；它是 MVP
-  路由层，不是完整生产级 router。设计和进展独立记录在
-  `docs/global-router-design/`。
+  Docker/BuildKit 缓存；`tonglingyu-gateway:formal` 含 gateway 二进制。
+- 旧 Global Router 不再进入当前生产路径；Open WebUI 的目标生产入口是
+  `tonglingyu-gateway`。
 - 远端 KB 由 `tonglingyu-gateway` 容器启动时从 source snapshot 构建，
   当前 `/healthz` 返回 5 个来源、10419 个 blocks；Open WebUI 容器内
   `DEFAULT_MODELS=tonglingyu`。
@@ -425,7 +445,7 @@
   credential、关闭 Gateway key admin fallback，并收敛 Open WebUI provider key；
   helper 输出未打印 secret value。
 - 2026-05-11 已改用远程 `hhost` Docker 做 live gate：同步当前 compose、部署脚本
-  和 `agent-platform` 源码到 `/home/simon/hermes-home-deploy`，不覆盖远端
+  和 `agent-platform` 源码到 `$HOME/hermes-home-deploy`，不覆盖远端
   `.env`；远端 env guard `--check` 通过，`verify-tonglingyu-runtime-config.sh`
   通过，`tonglingyu-gateway` 重建后 `/healthz` 和 metrics 均显示
   `agent_runtime.mode=hermes`。
@@ -463,10 +483,10 @@
 - 远端 `hhost` 当前 model upstream gate 通过；`chatgpt.com` 仍可能解析到
   198.18.0.0/15 fake-IP，但 TLS/HTTP 可观测，因此该 gate 会作为网络层早期
   诊断，而不是替代 strict Gateway 的端到端契约。
-- `agent-platform/Dockerfile` 和 `agent-platform/crates/tonglingyu-gateway/Dockerfile`
-  的 BuildKit frontend 已从浮动 `docker/dockerfile:1.7` pin 到
-  `docker/dockerfile:1.7.0`；远程 `hhost` build 已验证 `1.7.0` 可解析并完成
-  `tonglingyu-gateway:formal` 构建。
+- `agent-platform/crates/tonglingyu-gateway/Dockerfile` 的 BuildKit frontend 已从
+  浮动 `docker/dockerfile:1.7` pin 到 `docker/dockerfile:1.7.0`；远程
+  `hhost` build 已验证 `1.7.0` 可解析并完成 `tonglingyu-gateway:formal`
+  构建。
 - Open WebUI Function gate 已要求 Bridge secret、issuer 和 target model
   valves 非空，并补齐 `TARGET_MODELS` 安装/校验，避免 Function active/global
   但实际不注入 signed context 仍被 release gate 误判为通过。
@@ -481,9 +501,9 @@
   summary/audit gate fail-closed；目标 `hhost` runtime config、model upstream
   network、strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
   Open WebUI browser-side 单入口复测均已通过。最终 production report 为
-  `/home/simon/hermes-home-deploy/tonglingyu-release-readiness-production.json`，
+  `$HOME/hermes-home-deploy/tonglingyu-release-readiness-production.json`，
   browser review evidence 为
-  `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
+  `$HOME/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
   事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
 - RQA Milestone A 已完成代码切片：
   `tonglingyu-runtime` 的 text/commentary search 输出已携带
@@ -904,7 +924,7 @@
   `deploy/scripts/prepare-tonglingyu-rqa-restore-canary.sh` 会先备份 live DB，host
   权限不足时通过 `docker compose exec tonglingyu-gateway` 在容器内执行。`hhost`
   canary artifact 为
-  `/home/simon/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
+  `$HOME/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
   restore drill 本身也已支持容器内备份并 `docker compose cp` 回 gate artifact，
   避免 root-owned live DB 使 host tool 误判失败。
 - 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
@@ -913,22 +933,19 @@
   `tonglingyu-gateway kb-source-metadata-backfill` 和
   `deploy/scripts/remediate-tonglingyu-kb-source-metadata.sh`，并在 `hhost` 容器内
   执行 additive backfill；备份保存在
-  `hhost:/home/simon/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
+  `hhost:~/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
   backfill 报告显示 6 个 metadata 列补齐、5 个 source 更新、缺失值为 0。随后
   目标 live RQA quality gate 通过，`expected_evidence_hit@8=5/5`、
   `quality_report_coverage=103/103`、open P0 failure/task 为 0。远端 gateway
   已重建并重启到包含该 CLI 的 `tonglingyu-gateway:formal`
   (`sha256:f1e27233696cd2282f269d3d1a68085fefa5e972588a042960ffd89139c70b55`)。
 - Security gate 已支持生产 digest-pinned image refs：compose 可通过
-  `AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、
-  `OPEN_WEBUI_IMAGE_REF`、`CLOUDFLARED_IMAGE_REF` 和
-  `AGENT_PLATFORM_POSTGRES_IMAGE_REF` 绑定 immutable digest；security gate 会读取
-  deploy env 后解析 image refs 并检查 mutable tag / digest missing。2026-05-16
-  已将 Agent Platform JWT provider 从 RustCrypto RSA 链路切到 `aws_lc_rs`，并把
-  `agent-store` 从 `sqlx` umbrella crate 收窄到 `sqlx-core` / `sqlx-postgres`，
-  lockfile 不再包含 `rsa`、`sqlx-mysql` 或 `sqlx-macros`；真实 `cargo-audit`
-  扫描 0 vulnerabilities。当前 security gate 已用真实 dependency scan、
-  fixture image scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
+  `TONGLINGYU_GATEWAY_IMAGE_REF`、`HERMES_IMAGE_REF`、`OPEN_WEBUI_IMAGE_REF` 和
+  `CLOUDFLARED_IMAGE_REF` 绑定 immutable digest；security gate 会读取 deploy env
+  后解析 image refs 并检查 mutable tag / digest missing。2026-05-17 仓库已删除
+  旧 Agent Platform Postgres/store/JWT 链路；真实 `cargo-audit` 扫描应只覆盖当前
+  Tonglingyu workspace。当前 security gate 已用真实 dependency scan、fixture image
+  scan 和 digest refs 通过；真实 Trivy 路径会把 per-image raw
   JSON 持久化到 `data/tonglingyu/security-image-scans/<run_id>/` 或显式
   `TONGLINGYU_RELEASE_SECURITY_IMAGE_SCAN_ARTIFACT_DIR`，并解析每个 image
   report 的 HIGH/CRITICAL vulnerability。image scan artifact 已绑定当前
@@ -936,24 +953,21 @@
   path hash 和 raw report artifact dir；saved report validator 会重算 raw
   report path/content digest，并拒绝 scan refs 与 release refs 不一致、raw
   report 缺失或 raw report 不可读取的 production-ready 报告。
-- 2026-05-16 已把 `agent-platform` 与 `tonglingyu-gateway` runtime image 切到
-  Chainguard `glibc-dynamic` 基线，并在 first-party 容器内改用内置
-  `healthcheck` 子命令，移除对 runtime `curl`/apt 包的依赖。远端当前 first-party
-  image refs 已更新为
-  `AGENT_PLATFORM_IMAGE_REF=sha256:c559d34b96a430bb53650906ce8a23f64948904c4f2af7028c6e588a8f537a77`
-  和
+- 2026-05-16 已把 `tonglingyu-gateway` runtime image 切到 Chainguard
+  `glibc-dynamic` 基线，并在 first-party 容器内改用内置 `healthcheck` 子命令，
+  移除对 runtime `curl`/apt 包的依赖。远端当时 first-party image refs 已更新为
   `TONGLINGYU_GATEWAY_IMAGE_REF=sha256:084aa51d528359e6f86b3b574ebb59f4f7ddd72e4dda1adae0323190e6546bcb`；
-  这两个 first-party image 的 Trivy raw report 为 0 critical / 0 high。
+  该 first-party image 的 Trivy raw report 为 0 critical / 0 high。
 - 2026-05-16 已新增
   `deploy/scripts/prepare-tonglingyu-remote-security-evidence.sh`，完整远端 release
   automation 会先生成并同步真实 `cargo audit` dependency scan、当前 compose
-  image inventory 和 6 个 per-image Trivy raw reports。最新 security evidence
+  image inventory 和 per-image Trivy raw reports。最新 security evidence
   artifact 为
   `data/tonglingyu/remote-release-automation/remote-release-20260516T050324Z-37074/remote-security-evidence.json`：
   dependency scan 0 critical / 0 high，image refs 均 immutable 且 raw reports
   可读取，但 aggregate image scan 仍 fail-closed：`critical_count=63`、
   `high_count=714`，来源为第三方 `hermes-agent`、`open-webui`、`cloudflared`
-  和 `postgres` 镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
+  镜像。未审批这些 high/critical 风险或替换镜像前，不能生成
   production-ready artifact。
 - `runtime_config` gate 已支持非 live preflight 的静态 compose/env 解析；live
   release 仍要求 Docker Compose config，不允许用静态解析替代。2026-05-16 以
@@ -964,8 +978,8 @@
   release report。
 - 目标环境 live `existing_refs` 恢复演练已在 release automation 中执行并保留
   持久备份 artifact；后续 RQA production-ready 仍必须保证自有镜像
-  (`AGENT_PLATFORM_IMAGE_REF`、`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical
-  findings，并在干净 release commit 上复跑 dependency/image scan 且绑定报告 hash。
+  (`TONGLINGYU_GATEWAY_IMAGE_REF`) 无 high/critical findings，并在干净 release
+  commit 上复跑 dependency/image scan 且绑定报告 hash。
   第三方镜像 high/critical findings 不作为 production-ready blocker，但必须保留
   Trivy raw reports、ownership 分类和 nonblocking 风险摘要。
 - 后续 RQA production-ready 还必须提供 live/load 性能证据；本地 performance
@@ -988,7 +1002,7 @@
   validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。2026-05-16
   目标环境 run `remote-release-20260516T074522Z-71051` 已执行 60 分钟
   post-release monitor，生成 13 条样本，artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
   `post-release-monitor-evidence.json` 为 `status=ok`，live gates、admin
   Action/API evidence、operator/environment 和 report path 校验均通过。该 evidence
   已绑定进同一 artifact 目录的 `release_ops_readiness` 复核；Milestone L 的值守证据
@@ -1015,7 +1029,7 @@
   创建 RQA failure / governance task，再通过 live admin API 查询、翻页、metrics、
   状态关闭和 live DB quality gate 生成 capacity/load、incident/audit 和
   `rqa_incident_capacity` evidence。短窗口远端 smoke 已证明脚本可生成完整失败报告：
-  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
+  `$HOME/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
   的 `tonglingyu.rqa_live_capacity_load_smoke` 显示 live gateway 请求、admin 查询、
   incident audit 和 quality gate 均可执行，但 `rqa_write_p95_ms=11567`，超过当前
   10s production 预算，因此 capacity/load evidence 和 `rqa_incident_capacity`
@@ -1031,9 +1045,9 @@
   `cargo fmt --check` 和 `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
   2026-05-16 已将提交 `4f514d0` 同步到 `hhost`，重建并重启
   `tonglingyu-gateway`；远端 `.env` 先备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
   后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
   并 pin 回新 image id
   `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
   完整远端 release automation
@@ -1041,7 +1055,7 @@
   窗口下通过 `rqa_incident_capacity`：`rqa_write_p95_ms=7816`、
   `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
   artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
   因此 RQA incident/capacity 性能 blocker 已关闭；该 run 当时仍失败，剩余
   required failures 为 `security_scan`、`release_ops_readiness` 和
   `openwebui_browser_review`，后续记录已继续收敛这些 blocker。
@@ -1052,9 +1066,9 @@
   `has_tonglingyu=true`。
 - 同日已完成 Open WebUI browser-side review evidence，并绑定进远端 `.env`
   （更新前已备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
   evidence ref 为 `browser-review-20260516T063114Z`，远端 evidence JSON 为
-  `/home/simon/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
+  `$HOME/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
   `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
   visibility、streaming chat UX、admin audit visibility 和 persisted provider
   settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
@@ -1068,7 +1082,7 @@
   47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
   tonglingyu-gateway -- -D warnings` 通过。
 - 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
   `tonglingyu-gateway` 已重建并 pin 到 image id
   `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
   远端 metadata smoke 证明 title prompt 返回 JSON、没有
@@ -1084,8 +1098,7 @@
   `rqa_incident_capacity`、`release_ops_readiness`、`openwebui_browser_review` 均
   `passed`，open P0 retrieval failures / governance tasks 均为 0；当时
   `required_failures=["security_scan"]`，`production_release_ready=false`。
-- 2026-05-16 已在提交 `8aea6545aa9917b850701c3239c2f018eb01bd35` 中调整
-  release security policy：镜像扫描按所有权分类，`AGENT_PLATFORM_IMAGE_REF` 和
+- 2026-05-17 已调整 release security policy：镜像扫描按所有权分类，
   `TONGLINGYU_GATEWAY_IMAGE_REF` 的 high/critical findings 仍 fail-closed，第三方
   镜像 findings 进入 `nonblocking_errors` 和 ownership summary，不再阻塞
   production-ready。contract smoke 已覆盖“自有镜像 high 仍失败”和“仅第三方镜像
@@ -1094,11 +1107,11 @@
   gate 在新策略下通过。
 - 最终 live release readiness 已在提交
   `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上复核通过：远端报告
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
   显示 `status=passed`、`production_release_ready=true`、
   `release_conditions_met=true`、`required_failures=[]`、`release_blockers=[]`，
   并绑定 `git.tracked_dirty=false`。saved report validator 输出
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
   为 `status=ok`、`errors=[]`。因此通灵玉 RQA production-ready release gate
   已闭合。
 - Incident drill / audit-history 已有可复核 evidence 机制：

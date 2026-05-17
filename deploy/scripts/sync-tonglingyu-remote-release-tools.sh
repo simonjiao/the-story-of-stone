@@ -38,7 +38,7 @@ project_dir_arg="$1"
 if [ "${project_dir_arg}" != "__DEFAULT_REMOTE_PROJECT_DIR__" ]; then
   project_dir="${project_dir_arg}"
 else
-  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/hermes-home-deploy}"
+  project_dir="${DEPLOY_NODE_PROJECT_DIR:-$HOME/tonglingyu-home-deploy}"
 fi
 mkdir -p "${project_dir}/scripts" "${project_dir}/runbooks" \
   "${project_dir}/agent-platform" "${project_dir}/resources"

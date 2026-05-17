@@ -750,7 +750,8 @@ fn audit_subject_ref(subject: &str) -> String {
 }
 
 fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
-    let mut value = json!({
+    let _ = trace_id;
+    let value = json!({
         "error": {
             "code": "gateway_rate_limited",
             "message": "gateway rate limit exceeded",
@@ -759,9 +760,6 @@ fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> 
             "retry_after_secs": decision.retry_after_secs,
         }
     });
-    if let Some(trace_id) = trace_id {
-        value["trace_id"] = json!(trace_id);
-    }
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(header::RETRY_AFTER, decision.retry_after_secs.to_string())],
@@ -1013,15 +1011,13 @@ fn error_response(
     message: &str,
     trace_id: Option<&str>,
 ) -> Response {
-    let mut value = json!({
+    let _ = trace_id;
+    let value = json!({
         "error": {
             "code": code,
             "message": message,
         }
     });
-    if let Some(trace_id) = trace_id {
-        value["trace_id"] = json!(trace_id);
-    }
     (status, Json(value)).into_response()
 }
 
@@ -3016,8 +3012,8 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                 case.required_issue_any.join(", ")
             ));
         }
-        if !replay.contains(&package.package_id) {
-            failures.push("replay answer does not include evidence package id".to_string());
+        if replay.contains(&package.package_id) {
+            failures.push("public replay answer exposes evidence package id".to_string());
         }
         if !package.cards.is_empty() && package.claim_evidence_map.is_empty() {
             failures.push("non-empty evidence package is missing claim_evidence_map".to_string());
@@ -6011,26 +6007,8 @@ async fn chat_completions(
             );
         }
     };
-    if request.messages.len() > state.max_messages {
-        let _ = record_workflow_state(
-            &conn,
-            &trace_id,
-            None,
-            None,
-            "Failed with Controlled Response",
-            "request_too_large",
-            &json!({
-                "message_count": request.messages.len(),
-                "max_messages": state.max_messages,
-            }),
-        );
-        return error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "request_too_large",
-            "request contains too many messages",
-            Some(&trace_id),
-        );
-    }
+    let message_count = request.messages.len();
+    let history_over_limit = message_count > state.max_messages;
     let requested_model = request.model.as_deref().unwrap_or(&state.model_id);
     if requested_model != state.model_id {
         let _ = record_workflow_state(
@@ -6096,9 +6074,29 @@ async fn chat_completions(
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
             "external_message_id_provided": context.external_message_id_provided,
+            "message_count": message_count,
+            "max_messages": state.max_messages,
+            "history_over_limit": history_over_limit,
             "question_chars": question_chars,
         }),
     );
+    if history_over_limit {
+        let detail = json!({
+            "message_count": message_count,
+            "max_messages": state.max_messages,
+            "behavior": "processed_last_user_message_only",
+        });
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&session_id),
+            None,
+            "Message History Truncated",
+            "ok",
+            &detail,
+        );
+        let _ = insert_audit_event(&conn, &trace_id, "message_history_truncated", &detail);
+    }
     let _ = insert_audit_event(
         &conn,
         &trace_id,
@@ -6108,7 +6106,8 @@ async fn chat_completions(
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
-            "message_count": request.messages.len(),
+            "message_count": message_count,
+            "history_over_limit": history_over_limit,
             "question_chars": question_chars,
         }),
     );
@@ -6151,7 +6150,7 @@ async fn chat_completions(
             None,
             Some(&session_id),
         );
-        return Json(value).into_response();
+        return Json(public_completion_value(&value)).into_response();
     }
 
     if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
@@ -6216,7 +6215,7 @@ async fn chat_completions(
         return if request.stream.unwrap_or(false) {
             streaming_response_from_completion_value(&value)
         } else {
-            Json(value).into_response()
+            Json(public_completion_value(&value)).into_response()
         };
     }
 
@@ -6487,7 +6486,7 @@ async fn chat_completions(
     if request.stream.unwrap_or(false) {
         streaming_response_from_runtime_events(&state.model_id, &value, &workflow.stream_events)
     } else {
-        Json(value).into_response()
+        Json(public_completion_value(&value)).into_response()
     }
 }
 
@@ -6532,6 +6531,10 @@ fn public_completion_value(value: &Value) -> Value {
     if let Value::Object(map) = &mut public {
         map.remove("_runtime_stream_events");
         map.remove("_stream_source");
+        map.remove("trace_id");
+        map.remove("evidence_package_id");
+        map.remove("review");
+        map.remove("session_id");
     }
     public
 }
@@ -6565,10 +6568,6 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
             "id": &completion_id,
             "object": "chat.completion.chunk",
             "model": model,
-            "trace_id": value.get("trace_id"),
-            "evidence_package_id": value.get("evidence_package_id"),
-            "session_id": value.get("session_id"),
-            "review": value.get("review"),
             "choices": [{
                 "index": 0,
                 "delta": {"role": "assistant"},
@@ -6580,16 +6579,12 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
         chunks.push(format!(
             "data: {}\n\n",
             json!({
-                "id": &completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "trace_id": value.get("trace_id"),
-                "evidence_package_id": value.get("evidence_package_id"),
-                "session_id": value.get("session_id"),
-                "review": value.get("review"),
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": piece},
+            "id": &completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": piece},
                     "finish_reason": null
                 }]
             })
@@ -6601,10 +6596,6 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
             "id": &completion_id,
             "object": "chat.completion.chunk",
             "model": model,
-            "trace_id": value.get("trace_id"),
-            "evidence_package_id": value.get("evidence_package_id"),
-            "session_id": value.get("session_id"),
-            "review": value.get("review"),
             "choices": [{
                 "index": 0,
                 "delta": {},
@@ -6647,11 +6638,6 @@ fn streaming_response_from_runtime_events(
             "id": &completion_id,
             "object": "chat.completion.chunk",
             "model": model,
-            "trace_id": value.get("trace_id"),
-            "evidence_package_id": value.get("evidence_package_id"),
-            "session_id": value.get("session_id"),
-            "review": value.get("review"),
-            "stream_source": "runtime_workflow",
             "choices": [{
                 "index": 0,
                 "delta": {"role": "assistant"},
@@ -6674,16 +6660,6 @@ fn streaming_response_from_runtime_events(
                 "id": &completion_id,
                 "object": "chat.completion.chunk",
                 "model": model,
-                "trace_id": value.get("trace_id"),
-                "evidence_package_id": value.get("evidence_package_id"),
-                "session_id": value.get("session_id"),
-                "review": value.get("review"),
-                "runtime_event": {
-                    "sequence": event.sequence,
-                    "event_type": &event.event_type,
-                    "profile": &event.profile,
-                    "output_ref": &event.output_ref,
-                },
                 "choices": [{
                     "index": 0,
                     "delta": {"content": piece},
@@ -6701,11 +6677,6 @@ fn streaming_response_from_runtime_events(
             "id": &completion_id,
             "object": "chat.completion.chunk",
             "model": model,
-            "trace_id": value.get("trace_id"),
-            "evidence_package_id": value.get("evidence_package_id"),
-            "session_id": value.get("session_id"),
-            "review": value.get("review"),
-            "stream_source": "runtime_workflow",
             "choices": [{
                 "index": 0,
                 "delta": {},
@@ -7737,7 +7708,10 @@ mod tests {
         let public = public_completion_value(&cached);
         assert!(public.get("_runtime_stream_events").is_none());
         assert!(public.get("_stream_source").is_none());
-        assert_eq!(public["session_id"], "session-test");
+        assert!(public.get("session_id").is_none());
+        assert!(public.get("trace_id").is_none());
+        assert!(public.get("evidence_package_id").is_none());
+        assert!(public.get("review").is_none());
     }
 
     #[test]
@@ -9291,12 +9265,10 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         let metadata_json: Value = serde_json::from_str(content).expect("metadata content is json");
         assert_eq!(metadata_json["title"], json!("通灵玉证据复核"));
         assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
-        assert!(
-            body["trace_id"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("tly-"))
-        );
-        assert_eq!(body["evidence_package_id"], Value::Null);
+        assert!(body.get("trace_id").is_none());
+        assert!(body.get("evidence_package_id").is_none());
+        assert!(body.get("review").is_none());
+        assert!(body.get("session_id").is_none());
 
         let conn = open_db(&db_path).expect("db opens");
         tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
@@ -9331,6 +9303,66 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
     }
 
+    #[tokio::test]
+    async fn chat_completion_accepts_long_openwebui_history() {
+        let db_path = temp_gateway_db_path("tonglingyu-long-history");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Guidelines:
+- The output must be a single, raw JSON object, without any markdown code fences.
+### Output:
+JSON format: { "title": "your concise title here" }
+### Chat History:
+<chat_history>
+USER: 介绍尤三姐
+</chat_history>"#;
+        let mut messages = Vec::new();
+        for index in 0..state.max_messages {
+            messages.push(json!({
+                "role": "user",
+                "content": format!("历史消息 {index}"),
+            }));
+        }
+        messages.push(json!({"role": "user", "content": metadata_prompt}));
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": messages,
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-long-history-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(body.get("trace_id").is_none());
+        assert!(body.get("evidence_package_id").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM workflow_states WHERE state = 'Message History Truncated'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("history truncation state count"),
+            1
+        );
+        assert_eq!(audit_event_count(&db_path, "message_history_truncated"), 1);
+
+        remove_sqlite_file_set(&db_path);
+    }
+
     #[test]
     fn public_completion_does_not_expose_rqa_internal_fields() {
         let package = EvidencePackage {
@@ -9354,11 +9386,16 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
             Some("session-public-rqa-test"),
         );
 
-        let rendered = serde_json::to_string(&value).expect("completion serializes");
+        let rendered =
+            serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
 
         assert!(!rendered.contains("retrieval_failures"));
         assert!(!rendered.contains("retrieval_quality_summary"));
         assert!(!rendered.contains("quality_report"));
+        assert!(!rendered.contains("trace-public-rqa-test"));
+        assert!(!rendered.contains("pkg-public-rqa-test"));
+        assert!(!rendered.contains("reviewer"));
+        assert!(!rendered.contains("session-public-rqa-test"));
     }
 
     #[tokio::test]
@@ -9389,6 +9426,10 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         assert!(!rendered.contains("retrieval_failures"));
         assert!(!rendered.contains("retrieval_quality_summary"));
         assert!(!rendered.contains("quality_report"));
+        assert!(!rendered.contains("trace-public-rqa-stream-test"));
+        assert!(!rendered.contains("pkg-public-rqa-stream-test"));
+        assert!(!rendered.contains("reviewer"));
+        assert!(!rendered.contains("session-public-rqa-stream-test"));
     }
 
     #[test]

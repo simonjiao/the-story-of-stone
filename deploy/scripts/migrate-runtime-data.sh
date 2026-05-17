@@ -3,17 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-RUNTIME_DIR="${HUIXIANGDOU_RUNTIME_DIR:-${HOME}/huixiangdou-home-runtime}"
+RUNTIME_DIR="${TONGLINGYU_RUNTIME_DIR:-${HOME}/tonglingyu-home-runtime}"
 OLD_DATA_DIR="${DEPLOY_DIR}/data"
 NEW_DATA_DIR="${RUNTIME_DIR}/data"
 
 mkdir -p \
-  "${NEW_DATA_DIR}/hermes" \
-  "${NEW_DATA_DIR}/open-webui" \
-  "${NEW_DATA_DIR}/tonglingyu" \
-  "${NEW_DATA_DIR}/agent-platform-postgres" \
-  "${NEW_DATA_DIR}/agent-action-gateway" \
-  "${RUNTIME_DIR}/backups"
+	  "${NEW_DATA_DIR}/hermes" \
+	  "${NEW_DATA_DIR}/open-webui" \
+	  "${NEW_DATA_DIR}/tonglingyu" \
+	  "${RUNTIME_DIR}/backups"
 
 if [[ ! -d "${OLD_DATA_DIR}" ]]; then
   echo "No legacy data directory at ${OLD_DATA_DIR}"
