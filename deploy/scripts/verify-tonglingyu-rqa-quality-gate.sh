@@ -488,6 +488,20 @@ def latest_kb_diff_report_summary(conn):
     report_digest = canonical_digest(report)
     diff = report.get("diff") if isinstance(report.get("diff"), dict) else {}
     eval_diff = report.get("eval_diff") if isinstance(report.get("eval_diff"), dict) else {}
+    knowledge_state_diff = diff.get("knowledge_state")
+    if not isinstance(knowledge_state_diff, dict):
+        knowledge_state_diff = {
+            "object": "tonglingyu.knowledge_state_kb_diff",
+            "schema_version": "tonglingyu-knowledge-item-state-v1",
+            "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+            "state_counts": {},
+            "by_kind": {},
+            "state_change_refs": [],
+            "runtime_policy_promotion_summary": {},
+            "calibration_job_summary": {},
+            "unresolved_gaps": [],
+            "status": "unchanged",
+        }
     summary = {
         "object": "tonglingyu.kb_version_diff_release_ref",
         "report_id": report["report_id"],
@@ -499,7 +513,7 @@ def latest_kb_diff_report_summary(conn):
         "report_sha256": report_digest,
         "diff_sha256": canonical_digest(diff),
         "eval_diff_sha256": canonical_digest(eval_diff),
-        "knowledge_state_diff": diff.get("knowledge_state"),
+        "knowledge_state_diff": knowledge_state_diff,
         "eval_diff": eval_diff,
     }
     return summary, report_digest
