@@ -152,17 +152,36 @@ curl -fsS --connect-timeout '${CURL_CONNECT_TIMEOUT_SECONDS}' --max-time '${CURL
 " >"${RUN_DIR}/chat.json"
   CHAT_FINISHED_MS="$(now_epoch_ms)"
 
-  python3 - "${RUN_DIR}/chat.json" "${RUN_DIR}/ids.json" <<'PY'
+  python3 - "${RUN_DIR}/chat.json" "${HOST_DB_PATH}" "${MESSAGE_ID}" "${RUN_DIR}/ids.json" <<'PY'
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
-chat = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-trace_id = chat.get("trace_id")
-package_id = chat.get("evidence_package_id")
+chat_path, db_path, external_message_id, ids_path = sys.argv[1:5]
+chat = json.loads(Path(chat_path).read_text(encoding="utf-8"))
+for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+    if forbidden in chat:
+        raise SystemExit(f"public chat leaked {forbidden}")
+conn = sqlite3.connect(db_path)
+try:
+    rows = conn.execute(
+        """
+        SELECT trace_id, package_id
+        FROM gateway_messages
+        WHERE external_message_id = ?
+        ORDER BY created_at, message_id
+        """,
+        (external_message_id,),
+    ).fetchall()
+finally:
+    conn.close()
+if len(rows) != 1:
+    raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+trace_id, package_id = rows[0]
 if not trace_id or not package_id:
-    raise SystemExit("chat response missing trace/package")
-Path(sys.argv[2]).write_text(
+    raise SystemExit("gateway message metadata missing trace/package")
+Path(ids_path).write_text(
     json.dumps({"trace_id": trace_id, "package_id": package_id}, sort_keys=True) + "\n",
     encoding="utf-8",
 )

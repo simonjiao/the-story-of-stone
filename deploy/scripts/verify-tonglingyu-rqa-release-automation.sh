@@ -64,10 +64,22 @@ fi
 schema_migration_status="failed"
 schema_migration_gateway_bin="${TONGLINGYU_RQA_SCHEMA_MIGRATION_GATEWAY_BIN:-${TONGLINGYU_RQA_GATEWAY_BIN:-${REPO_DIR}/agent-platform/target/debug/tonglingyu-gateway}}"
 schema_migration_db_path="${TONGLINGYU_RQA_SCHEMA_MIGRATION_DB_PATH:-${TONGLINGYU_RQA_DB_PATH:-${REPO_DIR}/data/tonglingyu/tonglingyu.db}}"
-if "${schema_migration_gateway_bin}" runtime-schema-migrate \
-  --db "${schema_migration_db_path}" \
-  >"${SCHEMA_MIGRATION_STDOUT}" 2>"${SCHEMA_MIGRATION_STDERR}"; then
-  schema_migration_status="passed"
+schema_migration_docker_service="${TONGLINGYU_RQA_SCHEMA_MIGRATION_DOCKER_SERVICE:-}"
+if [[ -n "${schema_migration_docker_service}" ]]; then
+  schema_migration_container_bin="${TONGLINGYU_RQA_SCHEMA_MIGRATION_CONTAINER_GATEWAY_BIN:-tonglingyu-gateway}"
+  schema_migration_container_db="${TONGLINGYU_RQA_SCHEMA_MIGRATION_CONTAINER_DB_PATH:-${TONGLINGYU_DB_PATH:-/data/tonglingyu.db}}"
+  if docker compose exec -T "${schema_migration_docker_service}" \
+    "${schema_migration_container_bin}" runtime-schema-migrate \
+    --db "${schema_migration_container_db}" \
+    >"${SCHEMA_MIGRATION_STDOUT}" 2>"${SCHEMA_MIGRATION_STDERR}"; then
+    schema_migration_status="passed"
+  fi
+else
+  if "${schema_migration_gateway_bin}" runtime-schema-migrate \
+    --db "${schema_migration_db_path}" \
+    >"${SCHEMA_MIGRATION_STDOUT}" 2>"${SCHEMA_MIGRATION_STDERR}"; then
+    schema_migration_status="passed"
+  fi
 fi
 
 live_capacity_status="not_run"

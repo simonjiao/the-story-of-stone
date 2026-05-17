@@ -189,17 +189,38 @@ if ! curl "${CURL_ARGS[@]}" \
 fi
 CHAT_FINISHED_MS="$(now_ms)"
 
-if ! python3 - "${WORK_DIR}/chat.json" "${WORK_DIR}/ids.json" <<'PY'
+if ! python3 - "${WORK_DIR}/chat.json" "${DB_PATH}" "performance-smoke-write" "${WORK_DIR}/ids.json" <<'PY'
 import json
+import sqlite3
 import sys
 
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
+chat_path, db_path, external_message_id, ids_path = sys.argv[1:5]
+with open(chat_path, "r", encoding="utf-8") as handle:
     value = json.load(handle)
-trace_id = value.get("trace_id")
-package_id = value.get("evidence_package_id")
+
+for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+    if forbidden in value:
+        raise SystemExit(f"public chat leaked {forbidden}")
+
+conn = sqlite3.connect(db_path)
+try:
+    rows = conn.execute(
+        """
+        SELECT trace_id, package_id
+        FROM gateway_messages
+        WHERE external_message_id = ?
+        ORDER BY created_at, message_id
+        """,
+        (external_message_id,),
+    ).fetchall()
+finally:
+    conn.close()
+if len(rows) != 1:
+    raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+trace_id, package_id = rows[0]
 if not trace_id or not package_id:
-    raise SystemExit("chat response missing trace/package")
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    raise SystemExit("gateway message metadata missing trace/package")
+with open(ids_path, "w", encoding="utf-8") as handle:
     json.dump({"trace_id": trace_id, "package_id": package_id}, handle, sort_keys=True)
     handle.write("\n")
 PY

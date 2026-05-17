@@ -315,6 +315,35 @@ PY
 )"
 if [ -f "${remote_artifact_dir}/restore-refs.env" ]; then
   . "${remote_artifact_dir}/restore-refs.env"
+else
+  restore_canary_report="${remote_artifact_dir}/restore-canary/restore-canary-prepare.json"
+  restore_canary_stdout="${remote_artifact_dir}/restore-canary-prepare.stdout"
+  restore_canary_stderr="${remote_artifact_dir}/restore-canary-prepare.stderr"
+  if TONGLINGYU_RQA_RESTORE_CANARY_DB_PATH="${host_db}" \
+    TONGLINGYU_RQA_RESTORE_CANARY_GATEWAY_BIN="${TONGLINGYU_RQA_GATEWAY_BIN}" \
+    TONGLINGYU_RQA_RESTORE_CANARY_SKIP_BUILD=true \
+    TONGLINGYU_RQA_RESTORE_CANARY_ARTIFACT_DIR="${remote_artifact_dir}/restore-canary" \
+    TONGLINGYU_RQA_RESTORE_CANARY_REPORT_PATH="${restore_canary_report}" \
+    TONGLINGYU_RQA_RESTORE_CANARY_DOCKER_FALLBACK=true \
+    TONGLINGYU_RQA_RESTORE_CANARY_DOCKER_SERVICE=tonglingyu-gateway \
+    TONGLINGYU_RQA_RESTORE_CANARY_CONTAINER_DB_PATH="${TONGLINGYU_DB_PATH:-/data/tonglingyu.db}" \
+    "${project_dir}/scripts/prepare-tonglingyu-rqa-restore-canary.sh" \
+    >"${restore_canary_stdout}" 2>"${restore_canary_stderr}"; then
+    restore_canary_refs="$(
+      python3 - "${restore_canary_report}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(payload.get("restore_refs_env_path") or "")
+PY
+    )"
+    if [ -n "${restore_canary_refs}" ] && [ -f "${restore_canary_refs}" ]; then
+      cp "${restore_canary_refs}" "${remote_artifact_dir}/restore-refs.env"
+      . "${remote_artifact_dir}/restore-refs.env"
+    fi
+  fi
 fi
 export TONGLINGYU_DEPLOY_ENV_FILE="${project_dir}/.env"
 export TONGLINGYU_RQA_RELEASE_RUN_ID="${run_id}"
