@@ -16,6 +16,18 @@
   `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`；所有固定容器名
   使用 `tonglingyu-` 前缀，Open WebUI 只连接
   `http://tonglingyu-gateway:8090/v1`。
+- 2026-05-17 已在 `hhost` 完成 Tonglingyu-only 重建：当前部署目录为
+  `$HOME/tonglingyu-home-deploy`，运行时目录为
+  `$HOME/tonglingyu-home-runtime`，运行容器为 `tonglingyu-hermes-agent`、
+  `tonglingyu-gateway`、`tonglingyu-open-webui` 和
+  `tonglingyu-cloudflared`。
+- `hhost` 重建后 runtime config、`agent_identity_bridge`、
+  `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
+  chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
+- 本次重建不等于 production-ready 发布：aggregate release readiness 当前仍是
+  summary-only，`production_release_ready=false`，还缺 browser-side review、
+  security scan/digest-pinned image、RQA migration/restore/performance/API/user
+  lifecycle、release ops 和监控证据。
 
 ## 已确认
 
@@ -28,7 +40,9 @@
 - `不红居士` 是风格名，不替换转录文本中的 `不红君`。
 - `官中`、`宫中`、`公中` 等高风险同音词必须回到已登记证据确认。
 - 第一批资料从维基文库获取；允许联网下载公开资料；第一版只使用 SQLite/FTS，不接外部向量库。
-- 远程部署复用一个现有 Open WebUI，Gateway 单独部署。
+- 早期远程部署曾复用现有 Open WebUI，Gateway 单独部署；2026-05-17
+  重建后改为 Tonglingyu-only stack，Open WebUI、Gateway、Hermes 和
+  Cloudflare Tunnel 均在新的 `tonglingyu-home` compose 项目内运行。
 - 已下载第一批 source snapshot：`hongloumeng-wikisource-120`、`hongloumeng-wikisource-chengjia`、`hongloumeng-wikisource-chengyi`、`shitouji-wikisource-zhiyanzhai`、`shitouji-wikisource-jiaxu`。
 - `hongloumeng-wikisource-chengjia` 已通过 ProofreadPage Page namespace 展开补齐正文。
 - 第一批 Wikisource snapshot 已补 source snapshot ready 口径和 19 个跨版本

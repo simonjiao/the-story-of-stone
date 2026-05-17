@@ -88,9 +88,9 @@ Required changes:
 - `AGENT_RUNTIME_HERMES_BASE_URL`, `AGENT_RUNTIME_HERMES_MODEL`,
   `AGENT_RUNTIME_HERMES_PROFILE_MODELS`, `AGENT_RUNTIME_HERMES_API_KEY`, and
   `AGENT_RUNTIME_TIMEOUT_SECONDS`: Hermes runtime client settings used by
-  Tonglingyu Gateway and Agent Worker. The Gateway container receives the same
-  Hermes key as its upstream generation key, but it still keeps separate
-  Gateway/admin inbound credentials.
+  Tonglingyu Gateway. The Gateway container receives the same Hermes key as its
+  upstream generation key, but it still keeps separate Gateway/admin inbound
+  credentials.
 - `TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS`: per-profile Runtime Agent
   budget for Tonglingyu Gateway. Default is `30`; keep it high enough for the
   live Hermes/sub2api tool-call loop and low enough to fail closed before
@@ -113,37 +113,49 @@ Required changes:
 
 ## Verified hhost Deployment Snapshot
 
-This snapshot was checked directly on `hhost` on 2026-05-17 without reading or
-printing `.env` secret values. It records current state only; the Tonglingyu-only
-rebuild target is tracked in
+This snapshot was checked directly on `hhost` on 2026-05-17 after the
+Tonglingyu-only rebuild, without reading or printing `.env` secret values. It
+records current state only; the rebuild checklist is tracked in
 `docs/tonglingyu-agent-design/23_hhost重建Checklist.md`.
 
 - Hostname: `DESKTOP-1C5QUGQ`.
-- Current deploy directory: `$HOME/hermes-home-deploy`.
-- Current runtime directory: `$HOME/huixiangdou-home-runtime`.
-- Current backup directory: `$HOME/hermes-home-deploy-backups`.
+- Current deploy directory: `$HOME/tonglingyu-home-deploy`.
+- Current runtime directory: `$HOME/tonglingyu-home-runtime`.
+- Current rebuild backup directory:
+  `$HOME/tonglingyu-home-rebuild-backups/20260517T064057Z`.
 - Current compose files:
-  - `$HOME/hermes-home-deploy/docker-compose.yml`
-  - `$HOME/hermes-home-deploy-backups/20260509-215438/docker-compose.yml`
+  - `$HOME/tonglingyu-home-deploy/docker-compose.yml`
   - `$HOME/sub2api/docker-compose.yml`
-- Current running Tonglingyu-related containers include `hermes-agent`,
-  `hermes-open-webui`, `hermes-cloudflared`, and `tonglingyu-gateway`.
-- Current running Agent Platform containers include `agent-manager`,
-  `agent-orchestrator`, `agent-worker`, `agent-observer`, and
-  `agent-platform-postgres`; these are not part of the Tonglingyu-only target
-  production path.
+- Current `tonglingyu-home` stack containers:
+  `tonglingyu-hermes-agent`, `tonglingyu-gateway`,
+  `tonglingyu-open-webui`, and `tonglingyu-cloudflared`.
+- The old `hermes-home` Agent Platform containers are no longer part of the
+  current running Tonglingyu stack.
 - Current `sub2api` stack containers include `sub2api`, `sub2api-postgres`, and
   `sub2api-redis`; treat that stack as an external upstream dependency, not as
   Tonglingyu runtime state.
-- Current `hermes-agent` container name does not satisfy the new
-  `tonglingyu-` prefix requirement. Rebuild must create
-  `tonglingyu-hermes-agent`.
+- Open WebUI provider state was checked through `webui.db`; no
+  `agent-orchestrator` provider residual was found. Old `hermes-agent` strings
+  remain only in historical chat/model records.
+- Public endpoint `https://chat.huixiangdou.top/` returned HTTP 200.
 
-Runtime data is separate from deploy files. The current remote node still keeps
-runtime state under `$HOME/huixiangdou-home-runtime/data` and deploy files under
-`$HOME/hermes-home-deploy`. The Tonglingyu-only rebuild target should move to
-`$HOME/tonglingyu-home-runtime` and `$HOME/tonglingyu-home-deploy`; keep the old
-paths only as rollback references after backup.
+Runtime data is separate from deploy files. The current remote node keeps
+runtime state under `$HOME/tonglingyu-home-runtime/data` and deploy files under
+`$HOME/tonglingyu-home-deploy`; keep the old `$HOME/hermes-home-deploy` and
+`$HOME/huixiangdou-home-runtime` paths only as rollback references after backup.
+
+The 2026-05-17 live gates passed for rendered runtime config,
+`agent_identity_bridge`, `tonglingyu_gateway_admin`, model-upstream probing, and
+strict Gateway chat/streaming/admin trace checks. The final strict Gateway trace
+was `tly-019e34b4aef3728090f56eec23f49376`; the streaming trace was
+`tly-019e34b4d7fe79f092483acea4b25bbf`; the evidence package was
+`pkg-019e34b4af497a038b63116b0aca5588`.
+
+The aggregate release-readiness run is still summary-only and reports
+`production_release_ready=false`. Production-ready evidence still requires
+browser-side review evidence, production image digest pinning and security scan
+artifacts, RQA migration/restore/performance/API/user-lifecycle evidence, and
+release operations, incident/capacity, and post-release monitoring evidence.
 
 Create persistent directories:
 
