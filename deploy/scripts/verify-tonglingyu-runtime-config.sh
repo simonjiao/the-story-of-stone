@@ -231,11 +231,25 @@ for forbidden_service in [
     if forbidden_service in services:
         errors.append(f"service_forbidden={forbidden_service}")
 
-for service_name in ["hermes", "open-webui", "tonglingyu-gateway", "cloudflared"]:
+expected_container_names = {
+    "hermes": "tonglingyu-hermes-agent",
+    "tonglingyu-gateway": "tonglingyu-gateway",
+}
+for service_name, expected_name in expected_container_names.items():
     service = services.get(service_name) or {}
     container_name = str(service.get("container_name") or "").strip()
-    if container_name and not container_name.startswith("tonglingyu-"):
-        errors.append(f"{service_name}.container_name must start with tonglingyu-")
+    if container_name != expected_name:
+        errors.append(f"{service_name}.container_name must be {expected_name}")
+
+front_layer_container_names = {
+    "open-webui": "home-open-webui",
+    "cloudflared": "home-cloudflared",
+}
+for service_name, expected_name in front_layer_container_names.items():
+    service = services.get(service_name) or {}
+    container_name = str(service.get("container_name") or "").strip()
+    if container_name != expected_name:
+        errors.append(f"{service_name}.container_name must be {expected_name}")
 
 gateway_api_key = value(gateway_env, "TONGLINGYU_GATEWAY_API_KEY")
 gateway_api_keys = value(gateway_env, "TONGLINGYU_GATEWAY_API_KEYS")
@@ -329,7 +343,8 @@ print(json.dumps(
             "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY",
             "TONGLINGYU_AGENT_RUNTIME_MODE",
             "TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS",
-            "container_name_prefix",
+            "tonglingyu_agent_container_names",
+            "front_layer_container_names",
         ],
     },
     ensure_ascii=True,

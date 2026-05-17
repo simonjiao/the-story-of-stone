@@ -20,6 +20,8 @@ Cloudflare Tunnel
 - [x] 用户可见中文名统一为“通灵玉”。
 - [x] 通灵玉本身按 Agent 处理，不只是一个 Gateway、模型 id 或知识库。
 - [x] 用于通灵玉的 Hermes Agent 容器名必须以 `tonglingyu-` 开头；目标名为 `tonglingyu-hermes-agent`。
+- [x] Open WebUI 和 Cloudflared 是位于 Tonglingyu Agent 前面的入口层，不按
+  Tonglingyu Agent 容器命名，不强制加 `tonglingyu-` 前缀。
 - [x] Docker Compose 服务名可以继续用 `hermes`，以保持内部 DNS 和 Gateway 配置稳定。
 - [x] Open WebUI Function ID `agent_identity_bridge` 保持不变；不改名为 Tonglingyu 专用 ID。
 - [x] `agent_identity_bridge` 的目标模型和语义可以调整，但历史 Function ID、安装脚本入口和验证脚本入口必须保持兼容。
@@ -146,6 +148,8 @@ $HOME/tonglingyu-home-runtime/
 ## 验收闸门
 
 - [x] 容器名检查：Tonglingyu Hermes Agent 容器名为 `tonglingyu-hermes-agent`
+- [x] 前置层容器名检查：Open WebUI 为 `home-open-webui`，Cloudflared 为
+  `home-cloudflared`，不使用 `tonglingyu-` 前缀
 - [x] 拼写检查：仓库和部署产物中不得出现把 `tonglingyu` 写错的形式
 - [x] `/healthz` 返回 KB 非空，source/block 数符合当前 source snapshot registry
 - [x] `/v1/models` 只暴露 `tonglingyu`
@@ -165,9 +169,10 @@ $HOME/tonglingyu-home-runtime/
 
 - [x] `deploy/docker-compose.yml` 已收敛为 Tonglingyu-only stack：
   `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`
-- [x] 所有固定容器名已使用 `tonglingyu-` 前缀：
-  `tonglingyu-hermes-agent`、`tonglingyu-gateway`、
-  `tonglingyu-open-webui`、`tonglingyu-cloudflared`
+- [x] Tonglingyu 后端固定容器名使用明确的 Agent/网关命名：
+  `tonglingyu-hermes-agent`、`tonglingyu-gateway`
+- [x] 前置层固定容器名不使用 `tonglingyu-` 前缀：
+  `home-open-webui`、`home-cloudflared`
 - [x] Compose project name 已改为 `tonglingyu-home`
 - [x] 内部 Docker 网络目标已改为 `tonglingyu-internal`
 - [x] Open WebUI 默认只连接 `http://tonglingyu-gateway:8090/v1`
@@ -184,7 +189,7 @@ $HOME/tonglingyu-home-runtime/
 - [x] 旧 stack 已停止；当前只保留 `sub2api` 外部依赖 stack 和新的
   `tonglingyu-home` stack
 - [x] 新运行容器：`tonglingyu-hermes-agent`、`tonglingyu-gateway`、
-  `tonglingyu-open-webui`、`tonglingyu-cloudflared`
+  `home-open-webui`、`home-cloudflared`
 - [x] 新内部网络：`tonglingyu-internal`
 - [x] 远端备份目录：
   `$HOME/tonglingyu-home-rebuild-backups/20260517T064057Z`

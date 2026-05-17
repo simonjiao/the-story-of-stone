@@ -19,8 +19,12 @@ Services:
   source-snapshot, evidence package, reviewer, replay, audit, and stats work.
   Hermes remains the upstream generation layer when configured.
 - `open-webui`: email/password login and chat UI. It connects directly to
-  `tonglingyu-gateway` as the Tonglingyu user-facing Agent endpoint.
+  `tonglingyu-gateway` as the Tonglingyu user-facing Agent endpoint. It is a
+  front-layer service, so its container name is `home-open-webui`, not a
+  `tonglingyu-` Agent container name.
 - `cloudflared`: Cloudflare Tunnel connector.
+  It is also a front-layer service, so its container name is
+  `home-cloudflared`.
 
 Open WebUI starts in offline mode to avoid blocking first boot on Hugging Face
 embedding-model downloads. Chat works normally through Hermes. Enable and
@@ -127,8 +131,8 @@ records current state only; the rebuild checklist is tracked in
   - `$HOME/tonglingyu-home-deploy/docker-compose.yml`
   - `$HOME/sub2api/docker-compose.yml`
 - Current `tonglingyu-home` stack containers:
-  `tonglingyu-hermes-agent`, `tonglingyu-gateway`,
-  `tonglingyu-open-webui`, and `tonglingyu-cloudflared`.
+  `tonglingyu-hermes-agent`, `tonglingyu-gateway`, `home-open-webui`, and
+  `home-cloudflared`.
 - The old `hermes-home` Agent Platform containers are no longer part of the
   current running Tonglingyu stack.
 - Current `sub2api` stack containers include `sub2api`, `sub2api-postgres`, and
@@ -200,10 +204,11 @@ values.
 
 This gate checks the compose-rendered service environment for strict
 Tonglingyu/Hermes runtime wiring, `DEFAULT_MODELS=tonglingyu`, Gateway/admin key
-set isolation, and Open WebUI provider keys that do not contain admin
-credentials. It also rejects old Agent Platform/Global Router services and the
-known `tonglignyu` spelling error in rendered compose config. It prints variable
-names and gate status only; it must not print secret values.
+set isolation, Open WebUI provider keys that do not contain admin credentials,
+Tonglingyu backend container names, and neutral front-layer container names. It
+also rejects old Agent Platform/Global Router services and the known
+`tonglignyu` spelling error in rendered compose config. It prints variable names
+and gate status only; it must not print secret values.
 
 After the stack is running, verify the live Gateway surface from inside the
 formal Docker network:

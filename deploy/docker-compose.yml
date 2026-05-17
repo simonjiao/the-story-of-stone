@@ -46,7 +46,7 @@ services:
 
   open-webui:
     image: "${OPEN_WEBUI_IMAGE_REF:-ghcr.io/open-webui/open-webui:main}"
-    container_name: tonglingyu-open-webui
+    container_name: home-open-webui
     restart: unless-stopped
     depends_on:
       tonglingyu-gateway:
@@ -148,7 +148,7 @@ services:
 
   cloudflared:
     image: "${CLOUDFLARED_IMAGE_REF:-cloudflare/cloudflared:latest}"
-    container_name: tonglingyu-cloudflared
+    container_name: home-cloudflared
     restart: unless-stopped
     network_mode: host
     command: tunnel --no-autoupdate --protocol ${CLOUDFLARED_PROTOCOL:-auto} run

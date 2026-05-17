@@ -13,14 +13,15 @@
   `tonglingyu-gateway`；旧 Agent Platform 控制面、Global Router、Postgres
   store、worker、agentctl、旧 Dockerfile 和旧设计文档已退出仓库主线。
 - 2026-05-17 `deploy/docker-compose.yml` 已收敛为 Tonglingyu-only stack：
-  `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`；所有固定容器名
-  使用 `tonglingyu-` 前缀，Open WebUI 只连接
+  `hermes`、`tonglingyu-gateway`、`open-webui`、`cloudflared`；Tonglingyu
+  后端容器使用 `tonglingyu-hermes-agent` 和 `tonglingyu-gateway`，Open
+  WebUI/Cloudflared 作为前置入口层使用 `home-open-webui` 和
+  `home-cloudflared`，Open WebUI 只连接
   `http://tonglingyu-gateway:8090/v1`。
 - 2026-05-17 已在 `hhost` 完成 Tonglingyu-only 重建：当前部署目录为
   `$HOME/tonglingyu-home-deploy`，运行时目录为
   `$HOME/tonglingyu-home-runtime`，运行容器为 `tonglingyu-hermes-agent`、
-  `tonglingyu-gateway`、`tonglingyu-open-webui` 和
-  `tonglingyu-cloudflared`。
+  `tonglingyu-gateway`、`home-open-webui` 和 `home-cloudflared`。
 - `hhost` 重建后 runtime config、`agent_identity_bridge`、
   `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
   chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
