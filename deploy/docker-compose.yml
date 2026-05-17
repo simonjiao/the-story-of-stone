@@ -17,7 +17,7 @@ x-tonglingyu-gateway-image: &tonglingyu-gateway-image
 services:
   hermes:
     image: "${HERMES_IMAGE_REF:-nousresearch/hermes-agent:latest}"
-    container_name: hermes-agent
+    container_name: tonglingyu-hermes-agent
     restart: unless-stopped
     command: gateway run
     environment:

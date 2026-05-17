@@ -46,7 +46,7 @@
   和 `/v1/chat/completions`。
 - `deploy/docker-compose.yml` 已加入真实 `tonglingyu-gateway` 服务，Open WebUI
   默认连接该 Rust Gateway，Gateway 再按配置调用 Hermes 上游生成层。
-- 2026-05-09 已在远程 `hhost:/home/simon/hermes-home-deploy` 真实部署：
+- 2026-05-09 已在远程 `hhost:~/hermes-home-deploy` 真实部署：
   启动 `tonglingyu-gateway` 和现有 `hermes-open-webui`，远端 gateway
   healthcheck 为 healthy。
 - `tonglingyu-gateway` 已拆为独立镜像，使用
@@ -425,7 +425,7 @@
   credential、关闭 Gateway key admin fallback，并收敛 Open WebUI provider key；
   helper 输出未打印 secret value。
 - 2026-05-11 已改用远程 `hhost` Docker 做 live gate：同步当前 compose、部署脚本
-  和 `agent-platform` 源码到 `/home/simon/hermes-home-deploy`，不覆盖远端
+  和 `agent-platform` 源码到 `$HOME/hermes-home-deploy`，不覆盖远端
   `.env`；远端 env guard `--check` 通过，`verify-tonglingyu-runtime-config.sh`
   通过，`tonglingyu-gateway` 重建后 `/healthz` 和 metrics 均显示
   `agent_runtime.mode=hermes`。
@@ -481,9 +481,9 @@
   summary/audit gate fail-closed；目标 `hhost` runtime config、model upstream
   network、strict Gateway、Open WebUI Bridge Function、Gateway Admin Action 和
   Open WebUI browser-side 单入口复测均已通过。最终 production report 为
-  `/home/simon/hermes-home-deploy/tonglingyu-release-readiness-production.json`，
+  `$HOME/hermes-home-deploy/tonglingyu-release-readiness-production.json`，
   browser review evidence 为
-  `/home/simon/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
+  `$HOME/hermes-home-deploy/openwebui-browser-review/openwebui-browser-review.json`。
   事实源、证据包和最终 reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。
 - RQA Milestone A 已完成代码切片：
   `tonglingyu-runtime` 的 text/commentary search 输出已携带
@@ -904,7 +904,7 @@
   `deploy/scripts/prepare-tonglingyu-rqa-restore-canary.sh` 会先备份 live DB，host
   权限不足时通过 `docker compose exec tonglingyu-gateway` 在容器内执行。`hhost`
   canary artifact 为
-  `/home/simon/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
+  `$HOME/huixiangdou-home-runtime/data/tonglingyu/restore-canaries/20260516T030746Z-1265117/restore-canary-prepare.json`。
   restore drill 本身也已支持容器内备份并 `docker compose cp` 回 gate artifact，
   避免 root-owned live DB 使 host tool 误判失败。
 - 2026-05-16 远端 live DB 暴露出旧 KB schema：`sources` 缺
@@ -913,7 +913,7 @@
   `tonglingyu-gateway kb-source-metadata-backfill` 和
   `deploy/scripts/remediate-tonglingyu-kb-source-metadata.sh`，并在 `hhost` 容器内
   执行 additive backfill；备份保存在
-  `hhost:/home/simon/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
+  `hhost:~/hermes-home-deploy/data/tonglingyu/kb-source-metadata/kb-source-metadata-20260516T023622Z-1242044/live-db-before-kb-source-metadata.db`，
   backfill 报告显示 6 个 metadata 列补齐、5 个 source 更新、缺失值为 0。随后
   目标 live RQA quality gate 通过，`expected_evidence_hit@8=5/5`、
   `quality_report_coverage=103/103`、open P0 failure/task 为 0。远端 gateway
@@ -988,7 +988,7 @@
   validator 会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。2026-05-16
   目标环境 run `remote-release-20260516T074522Z-71051` 已执行 60 分钟
   post-release monitor，生成 13 条样本，artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/post-release-ops/`；
   `post-release-monitor-evidence.json` 为 `status=ok`，live gates、admin
   Action/API evidence、operator/environment 和 report path 校验均通过。该 evidence
   已绑定进同一 artifact 目录的 `release_ops_readiness` 复核；Milestone L 的值守证据
@@ -1015,7 +1015,7 @@
   创建 RQA failure / governance task，再通过 live admin API 查询、翻页、metrics、
   状态关闭和 live DB quality gate 生成 capacity/load、incident/audit 和
   `rqa_incident_capacity` evidence。短窗口远端 smoke 已证明脚本可生成完整失败报告：
-  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
+  `$HOME/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`
   的 `tonglingyu.rqa_live_capacity_load_smoke` 显示 live gateway 请求、admin 查询、
   incident audit 和 quality gate 均可执行，但 `rqa_write_p95_ms=11567`，超过当前
   10s production 预算，因此 capacity/load evidence 和 `rqa_incident_capacity`
@@ -1031,9 +1031,9 @@
   `cargo fmt --check` 和 `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
   2026-05-16 已将提交 `4f514d0` 同步到 `hhost`，重建并重启
   `tonglingyu-gateway`；远端 `.env` 先备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
   后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
   并 pin 回新 image id
   `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
   完整远端 release automation
@@ -1041,7 +1041,7 @@
   窗口下通过 `rqa_incident_capacity`：`rqa_write_p95_ms=7816`、
   `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
   artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
   因此 RQA incident/capacity 性能 blocker 已关闭；该 run 当时仍失败，剩余
   required failures 为 `security_scan`、`release_ops_readiness` 和
   `openwebui_browser_review`，后续记录已继续收敛这些 blocker。
@@ -1052,9 +1052,9 @@
   `has_tonglingyu=true`。
 - 同日已完成 Open WebUI browser-side review evidence，并绑定进远端 `.env`
   （更新前已备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
   evidence ref 为 `browser-review-20260516T063114Z`，远端 evidence JSON 为
-  `/home/simon/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
+  `$HOME/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
   `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
   visibility、streaming chat UX、admin audit visibility 和 persisted provider
   settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
@@ -1068,7 +1068,7 @@
   47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
   tonglingyu-gateway -- -D warnings` 通过。
 - 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
   `tonglingyu-gateway` 已重建并 pin 到 image id
   `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
   远端 metadata smoke 证明 title prompt 返回 JSON、没有
@@ -1094,11 +1094,11 @@
   gate 在新策略下通过。
 - 最终 live release readiness 已在提交
   `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上复核通过：远端报告
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
   显示 `status=passed`、`production_release_ready=true`、
   `release_conditions_met=true`、`required_failures=[]`、`release_blockers=[]`，
   并绑定 `git.tracked_dirty=false`。saved report validator 输出
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
   为 `status=ok`、`errors=[]`。因此通灵玉 RQA production-ready release gate
   已闭合。
 - Incident drill / audit-history 已有可复核 evidence 机制：

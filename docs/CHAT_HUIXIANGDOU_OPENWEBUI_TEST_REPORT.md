@@ -81,7 +81,7 @@
 | 2026-05-07 14:02 CST | 记录剩余问题。 | 正文关键词历史搜索失败；新对话可访问上一会话测试代号，需确认是否为 Hermes 跨会话记忆的预期行为。 |
 | 2026-05-07 14:28 CST | 修复 `ISSUE-003`。 | 已更新 Hermes 配置渲染脚本：写配置前备份，并默认关闭 `memory.memory_enabled` 与 `memory.user_profile_enabled`。 |
 | 2026-05-07 14:28 CST | 定位 `ISSUE-002`。 | Open WebUI 官方文档预期历史搜索支持消息内容；当前部署无可用配置项，需 Open WebUI 代码修复或升级验证。 |
-| 2026-05-08 16:07 CST | 正式部署前备份远程 `deploy/.env`。 | 备份路径：`/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |
+| 2026-05-08 16:07 CST | 正式部署前备份远程 `deploy/.env`。 | 备份路径：`$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |
 | 2026-05-08 16:08 CST | 同步正式 Agent Platform 构建上下文、compose 和 README 到远程部署目录。 | 远程 `docker compose config` 通过；早期测试镜像构建成功。当前正式 tag 已改为 `formal`。 |
 | 2026-05-08 16:15 CST | 首次正式 `docker compose up` 启动 Open WebUI 失败。 | Docker 返回 `failed to set up container networking: Address already in use`；`agent-manager` 动态占用 `172.20.0.3/16`，与 Open WebUI 固定 origin IP 冲突。 |
 | 2026-05-08 16:18 CST | 修复内部网络地址分配。 | `hermes-agent` 固定 `172.20.0.2`，`open-webui` 固定 `172.20.0.3`，Agent Platform 服务固定在 `.4` 与 `.10`-`.13`。 |
@@ -90,7 +90,7 @@
 | 2026-05-08 16:20 CST | 验证 Agent Platform 控制类请求。 | 控制指令返回 `approval_required`，请求 `req_019e06ac5efa7663a9a397b00408ea4d` 写入 Manager，审计记录包含 `request:create_agent`。 |
 | 2026-05-08 16:20 CST | 验证公网入口。 | `https://chat.huixiangdou.top/api/config` 返回 HTTP 200。 |
 | 2026-05-08 16:21 CST | 清理临时测试资源。 | 已删除早期临时测试容器、临时数据库和临时用户，`hermes-internal` 网络中不再存在临时测试容器。 |
-| 2026-05-08 16:23 CST | 正式部署 Hermes memory 配置。 | 配置备份：`/home/simon/hermes-home-deploy/data/hermes/config.yaml.bak.20260508-082325`；已确认 `memory_enabled: false` 与 `user_profile_enabled: false`。 |
+| 2026-05-08 16:23 CST | 正式部署 Hermes memory 配置。 | 配置备份：`$HOME/hermes-home-deploy/data/hermes/config.yaml.bak.20260508-082325`；已确认 `memory_enabled: false` 与 `user_profile_enabled: false`。 |
 | 2026-05-08 16:24 CST | Hermes 重启后复测。 | 普通聊天返回 `HERMES_FORMAL_AFTER_RESTART_OK`；API 级跨请求记忆复测返回 `UNKNOWN_ONLY`；公网 `/api/config` 仍返回 HTTP 200。 |
 | 2026-05-08 18:20 CST | 使用测试账号重新执行 UI 关键路径与长回答专项。 | 登录成功，模型选择器显示 `hermes-agent`；UI 普通聊天返回 `ROUTE_UI_OK`；UI Agent Platform 控制指令返回 `approval_required`。 |
 | 2026-05-08 18:24 CST | 执行长回答 Markdown 渲染测试。 | 会话 `/c/cd0fa0fe-43b5-49e8-ac93-bb905e91e32a` 返回二级标题、列表、表格、代码块和结束标记 `LONG_RENDER_DONE_20260508_A`。 |
@@ -107,14 +107,14 @@
 | 2026-05-09 11:01 CST | 修复正式环境 Function 校验脚本差异。 | 远端没有 `OPEN_WEBUI_ADMIN_TOKEN`；`verify-openwebui-function.sh` 新增 compose DB fallback，输出 `source=compose-db`、Function 状态和 valve key names，不输出 secret 值。 |
 | 2026-05-09 11:03 CST | 执行 hardening 远端复测。 | 合成 Open WebUI subject/chat 覆盖审批建链、follow-up run、同 message_id 去重、nonce replay 冲突、关闭 session、不同 subject 隔离、Orchestrator 重启后 binding 复用；关键服务日志无错误关键词。 |
 | 2026-05-09 11:33 CST | 使用正式 Open WebUI 真实账号复测 Bridge。 | 用真实 admin 与普通 user 账号的 Open WebUI API auth 走 `/api/chat/completions`，确认 Function 注入真实账号上下文；两个测试 chat 已在复测后删除。 |
-| 2026-05-09 15:42 CST | 修复 Open WebUI session secret 配置来源。 | 远端 `.env` 已备份到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；新增 `OPEN_WEBUI_SECRET_KEY`，未输出 secret 值；Open WebUI 重建后健康。 |
+| 2026-05-09 15:42 CST | 修复 Open WebUI session secret 配置来源。 | 远端 `.env` 已备份到 `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；新增 `OPEN_WEBUI_SECRET_KEY`，未输出 secret 值；Open WebUI 重建后健康。 |
 | 2026-05-09 16:26 CST | 增加 System Observer status session。 | Manager 新增专用 session 入口，Orchestrator 可识别“系统状态/Observer 报告”并为 Open WebUI admin 创建只读 `System Observer` agent/session；普通 user 被拒绝。 |
 
 ## 2026-05-08 正式部署验证
 
 | 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| DEPLOY-01 | PASS | 远程 `.env` 已在变更前备份。 | `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |  | 未输出密钥或密码。 |
+| DEPLOY-01 | PASS | 远程 `.env` 已在变更前备份。 | `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-160755`。 |  | 未输出密钥或密码。 |
 | DEPLOY-02 | PASS | 正式 compose 配置可解析，Agent Platform 镜像可构建。 | `remote_compose_config_ok`；早期测试镜像构建成功。当前正式 tag 已改为 `formal`。 |  | 首次构建受 crates.io 网络重试影响，但最终成功。 |
 | DEPLOY-03 | PASS | 正式服务全部健康或运行中。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator`、`agent-platform-postgres`、`hermes-agent`、`hermes-open-webui` healthy，worker/observer running。 |  |  |
 | NET-01 | PASS | Open WebUI origin IP 冲突已修复。 | `hermes-open-webui 172.20.0.3/16`；`agent-manager 172.20.0.10/16`；无临时测试容器。 | P1 | 见 `ISSUE-004`。 |
@@ -156,7 +156,7 @@
 
 | 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| BRIDGE-DEPLOY-20260508 | PASS | 正式远程 Docker 已部署 `hermes-agent-platform:formal`，Manager/Orchestrator/Worker/Observer 健康。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator` healthy，worker/observer running；Open WebUI healthy。 |  | 变更前备份 `.env` 到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-201853`。 |
+| BRIDGE-DEPLOY-20260508 | PASS | 正式远程 Docker 已部署 `hermes-agent-platform:formal`，Manager/Orchestrator/Worker/Observer 健康。 | `docker compose ps` 显示 `agent-manager`、`agent-orchestrator` healthy，worker/observer running；Open WebUI healthy。 |  | 变更前备份 `.env` 到 `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260508-201853`。 |
 | BRIDGE-FUNCTION-20260508 | PASS | 正式 Open WebUI 已安装全局 `agent_identity_bridge` Filter。 | Open WebUI `function` 表存在 `agent_identity_bridge`，`type=filter`、`is_active=1`、`is_global=1`。 |  | 测试账号非 admin，Function 通过正式容器持久 DB 写入并重启 Open WebUI 生效；未使用临时 Open WebUI。 |
 | BRIDGE-CHAT-SHORT-20260508 | PASS | 普通短聊天仍走默认 Hermes。 | Open WebUI `/api/chat/completions` 返回 `我在线。`。 |  |  |
 | BRIDGE-CHAT-LONG-20260508 | PASS | 普通长回答仍可完成。 | `BRIDGE-SMOKE-LONG-20260508` 返回 634 字中文回答。 |  |  |
@@ -242,9 +242,9 @@
 
 | 用例 ID | 状态 | 实际结果 | 证据 | 问题等级 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| P1-REMOTE-UNIT-20260509 | PASS | P1 代码在远端 Docker Rust 环境通过 workspace 测试。 | `docker run --rm -v /home/simon/hermes-home-deploy/agent-platform:/workspace -w /workspace rust:1.95 cargo test --workspace` 通过。 | P1 | 本地 Docker 不可用，改用远端 Docker。 |
+| P1-REMOTE-UNIT-20260509 | PASS | P1 代码在远端 Docker Rust 环境通过 workspace 测试。 | `docker run --rm -v $HOME/hermes-home-deploy/agent-platform:/workspace -w /workspace rust:1.95 cargo test --workspace` 通过。 | P1 | 本地 Docker 不可用，改用远端 Docker。 |
 | P1-DEPLOY-20260509 | PASS | 正式镜像 `hermes-agent-platform:formal` 已重建并重启。 | `docker compose ps` 显示 Manager/Orchestrator healthy，Worker/Observer running；Open WebUI、Hermes、Postgres healthy。 | P1 | `docker compose config --quiet` 通过。 |
-| P1-OPENWEBUI-SECRET-20260509 | FAIL->PASS | 初次 smoke 发现 Open WebUI JWT secret 未由 `.env` 注入；修复后来自环境变量。 | 变更前已备份远端 `.env` 到 `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；修复后容器内校验 `webui_secret_source=env`、`webui_secret_length_ok=True`。 | P1 | 见 `ISSUE-010`；未输出 secret 值。 |
+| P1-OPENWEBUI-SECRET-20260509 | FAIL->PASS | 初次 smoke 发现 Open WebUI JWT secret 未由 `.env` 注入；修复后来自环境变量。 | 变更前已备份远端 `.env` 到 `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260509-154242`；修复后容器内校验 `webui_secret_source=env`、`webui_secret_length_ok=True`。 | P1 | 见 `ISSUE-010`；未输出 secret 值。 |
 | P1-OPENWEBUI-AUTH-20260509 | PASS | Open WebUI auth 和模型选择关键路径通过。 | `GET /api/v1/auths/` 返回 HTTP 200；`GET /api/models` 返回 HTTP 200，包含并选择 `hermes-agent`。 | P1 | 使用服务器端短期 JWT 代表真实 admin 账号，未输出 token 或密码。 |
 | P1-OPENWEBUI-CHAT-20260509 | PASS | 基础聊天经正式 Open WebUI API、Function、Orchestrator 和 Hermes 返回。 | `POST /api/chat/completions` 返回 HTTP 200，修复前返回 18 字，修复后返回 9 字。 | P1 | 两次均使用 `model=hermes-agent`。 |
 | P1-OPENWEBUI-SESSION-20260509 | PASS | 会话保存可创建、读取并清理。 | 修复后临时 chat `b0404ab1-14ff-4ca7-9125-71d26d18e244` 创建后可通过 `/api/v1/chats/{id}` 读取，随后删除成功。 | P1 | 不保留测试聊天污染用户列表。 |

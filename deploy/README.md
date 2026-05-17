@@ -1,6 +1,7 @@
 # Hermes Home Deployment
 
-This directory deploys Hermes Agent behind Open WebUI through Cloudflare Tunnel.
+This directory deploys the Tonglingyu Agent system behind Open WebUI through
+Cloudflare Tunnel.
 
 Public endpoint:
 
@@ -11,6 +12,8 @@ https://chat.huixiangdou.top
 Services:
 
 - `hermes`: Hermes Agent API server, internal Docker network only.
+  The container name for this Tonglingyu-owned Hermes Agent must start with
+  `tonglingyu-`; the current target name is `tonglingyu-hermes-agent`.
 - `tonglingyu-gateway`: Rust OpenAI-compatible “通灵玉” gateway. It owns the
   HTTP/auth/rate-limit/model surface and calls `tonglingyu-runtime` for
   source-snapshot, evidence package, reviewer, replay, audit, and stats work.
@@ -21,8 +24,7 @@ Services:
 - `agent-worker`: Agent run worker.
 - `agent-observer`: read-only Observer Agent report loop.
 - `open-webui`: email/password login and chat UI. It connects directly to
-  `tonglingyu-gateway` and `agent-orchestrator` as separate OpenAI-compatible
-  connections.
+  `tonglingyu-gateway` as the Tonglingyu user-facing Agent endpoint.
 - `cloudflared`: Cloudflare Tunnel connector.
 - `agent-platform-postgres`: dedicated Agent Platform database, internal
   Docker network only.
@@ -184,10 +186,39 @@ Required changes:
   - `LOCAL_OPENAI_API_KEY`, usually `none` for local inference servers
   - `LOCAL_OPENAI_DOCKER_NETWORK`, for example `sub2api_sub2api-network`
 
-Runtime data is separate from deploy files. On the remote node, keep all
-runtime state under `$HOME/huixiangdou-home-runtime/data`; the deploy
-directory `$HOME/hermes-home-deploy` should contain only compose, scripts,
-source/build context, and Open WebUI Function files.
+## Verified hhost Deployment Snapshot
+
+This snapshot was checked directly on `hhost` on 2026-05-17 without reading or
+printing `.env` secret values. It records current state only; the Tonglingyu-only
+rebuild target is tracked in
+`docs/tonglingyu-agent-design/23_hhost重建Checklist.md`.
+
+- Hostname: `DESKTOP-1C5QUGQ`.
+- Current deploy directory: `$HOME/hermes-home-deploy`.
+- Current runtime directory: `$HOME/huixiangdou-home-runtime`.
+- Current backup directory: `$HOME/hermes-home-deploy-backups`.
+- Current compose files:
+  - `$HOME/hermes-home-deploy/docker-compose.yml`
+  - `$HOME/hermes-home-deploy-backups/20260509-215438/docker-compose.yml`
+  - `$HOME/sub2api/docker-compose.yml`
+- Current running Tonglingyu-related containers include `hermes-agent`,
+  `hermes-open-webui`, `hermes-cloudflared`, and `tonglingyu-gateway`.
+- Current running Agent Platform containers include `agent-manager`,
+  `agent-orchestrator`, `agent-worker`, `agent-observer`, and
+  `agent-platform-postgres`; these are not part of the Tonglingyu-only target
+  production path.
+- Current `sub2api` stack containers include `sub2api`, `sub2api-postgres`, and
+  `sub2api-redis`; treat that stack as an external upstream dependency, not as
+  Tonglingyu runtime state.
+- Current `hermes-agent` container name does not satisfy the new
+  `tonglingyu-` prefix requirement. Rebuild must create
+  `tonglingyu-hermes-agent`.
+
+Runtime data is separate from deploy files. The current remote node still keeps
+runtime state under `$HOME/huixiangdou-home-runtime/data` and deploy files under
+`$HOME/hermes-home-deploy`. The Tonglingyu-only rebuild target should move to
+`$HOME/tonglingyu-home-runtime` and `$HOME/tonglingyu-home-deploy`; keep the old
+paths only as rollback references after backup.
 
 Create persistent directories:
 

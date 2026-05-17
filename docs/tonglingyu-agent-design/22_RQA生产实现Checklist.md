@@ -1184,7 +1184,7 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
 - 同日 1 分钟远端 smoke 证明目标环境 runner 能生成完整失败报告：
   `rqa_live_capacity_load_smoke` 的 live gateway/admin/incident audit/quality
   gate 路径可执行，artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`；
+  `$HOME/hermes-home-deploy/data/tonglingyu/live-capacity-load/live-capacity-smoke-20260516T052621Z-1397271/`；
   但 `rqa_write_p95_ms=11567` 超过 10s production 预算，导致
   `rqa_capacity_load_evidence` 与 `rqa_incident_capacity` fail-closed。后续不能
   用调松预算或短窗口替代修复，必须优化实际 live 路径后再绑定 release report。
@@ -1212,9 +1212,9 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
   `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
 - 2026-05-16 已将提交 `4f514d0` 部署到 `hhost` 并重启
   `tonglingyu-gateway`。远端 `.env` 已按规则备份两次：先备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
   后用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
+  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
   并 pin 回新 image id
   `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
 - 完整远端 release automation `remote-release-20260516T055004Z-50395` 已在默认
@@ -1222,7 +1222,7 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
   `rqa_live_capacity_load_smoke.status=ok`，`rqa_write_p95_ms=7816`、
   `admin_read_p95_ms=381`、`metrics_read_p95_ms=171`、`release_gate_ms=22558`，
   `rqa_incident_capacity.status=passed`，artifact 位于
-  `/home/simon/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
+  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T055004Z-50395/live-capacity-load/`。
 - Milestone M 可以标记为完成；早期 release automation 的 required failures 为
   `security_scan`、`release_ops_readiness` 和 `openwebui_browser_review`，后续 run
   已继续收敛这些 blocker，最终整体 RQA production-ready 仍以当前干净提交上的 live
@@ -1233,7 +1233,7 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
   普通用户
   `/api/models` 验证 `has_tonglingyu=true`。browser review evidence ref 为
   `browser-review-20260516T063114Z`，远端 evidence JSON 为
-  `/home/simon/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`，
+  `$HOME/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`，
   verifier 已确认 ordinary-user model visibility、streaming chat UX、admin audit
   visibility 和 persisted provider settings 四项均通过。
 - browser review 同时暴露 Open WebUI metadata prompt 污染 RQA 队列的问题。
