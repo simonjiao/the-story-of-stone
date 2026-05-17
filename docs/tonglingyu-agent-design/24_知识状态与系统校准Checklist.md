@@ -492,6 +492,21 @@ saved report validator 和 Open WebUI/Gateway 证据后，才允许声明：
 目标 live 环境当前 release 具备运行中知识状态治理闭环。
 ```
 
+当前证据：
+
+- 2026-05-17 远端 run `remote-release-20260517T185847Z-39274` 已在
+  `/home/simon/tonglingyu-home-deploy` 目标环境重新生成并通过完整 live release
+  automation。`release-readiness.json` 为 `production_release_ready=true`、
+  `required_failures=[]`、`release_blockers=[]`；saved report validator 为
+  `status=ok`、`errors=[]`。
+- 该 release report 已绑定 live KB `source_snapshot_digest`、
+  `kb_build_hash=39a48e74c2e76491d473c419f2ba9cae417c12519d9c295398d8239680a31a28`、
+  `kb_version=kb-019e34ad728a70728646513367bcc15a`、KB diff report、
+  eval impact、knowledge state summary 和 open P0 governance state。
+  `unresolved_calibration_gaps` 全部为 0，open P0 retrieval failures /
+  governance tasks 均为 0。
+- 该声明仍不包含影印件/权威校注本/学术整理本增强，也不表示所有知识条目已人工确认。
+
 仍不能声明：
 
 ```text
