@@ -216,6 +216,309 @@ def canonical_digest(value):
     return sha256_bytes(encoded.encode("utf-8"))
 
 
+def table_exists(conn, name):
+    return conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = ?
+        LIMIT 1
+        """,
+        (name,),
+    ).fetchone() is not None
+
+
+def load_json_value(raw, default):
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def state_count_defaults():
+    return {
+        "source_snapshot": 0,
+        "candidate": 0,
+        "system_calibrated": 0,
+        "runtime_usable": 0,
+        "human_marked": 0,
+        "rejected": 0,
+        "deprecated": 0,
+    }
+
+
+def build_knowledge_state_db_summary(conn):
+    required_tables = [
+        "knowledge_items",
+        "knowledge_item_state_history",
+        "knowledge_calibration_reports",
+        "knowledge_calibration_jobs",
+        "kb_version_diff_reports",
+    ]
+    missing_tables = [name for name in required_tables if not table_exists(conn, name)]
+    for name in missing_tables:
+        errors.append(f"knowledge_state_table_missing={name}")
+    states = state_count_defaults()
+    by_kind = {}
+    runtime_policy_version = "tonglingyu-knowledge-runtime-policy-v1"
+    runtime_policy_promotion_summary = {
+        "object": "tonglingyu.knowledge_runtime_policy_promotion_summary",
+        "policy_version": runtime_policy_version,
+        "runtime_usable_count": 0,
+        "human_marked_count": 0,
+        "by_kind": {},
+        "release_run_refs": [],
+    }
+    if "knowledge_items" not in missing_tables:
+        for row in conn.execute("SELECT state, COUNT(*) FROM knowledge_items GROUP BY state"):
+            states[str(row[0])] = int(row[1])
+        for row in conn.execute(
+            """
+            SELECT kind, state, COUNT(*)
+            FROM knowledge_items
+            GROUP BY kind, state
+            ORDER BY kind, state
+            """
+        ):
+            by_kind.setdefault(str(row[0]), {})[str(row[1])] = int(row[2])
+        release_run_refs = set()
+        for row in conn.execute(
+            """
+            SELECT kind, state, payload_json
+            FROM knowledge_items
+            WHERE state IN ('runtime_usable', 'human_marked')
+            ORDER BY kind, state
+            """
+        ):
+            kind = str(row[0])
+            state = str(row[1])
+            payload = load_json_value(row[2], {})
+            runtime_policy_promotion_summary["by_kind"].setdefault(kind, {})
+            runtime_policy_promotion_summary["by_kind"][kind][state] = (
+                runtime_policy_promotion_summary["by_kind"][kind].get(state, 0) + 1
+            )
+            if state == "runtime_usable":
+                runtime_policy_promotion_summary["runtime_usable_count"] += 1
+                release_run_id = (payload.get("runtime_policy") or {}).get("release_run_id")
+                if isinstance(release_run_id, str) and release_run_id.strip():
+                    release_run_refs.add("sha256:" + sha256_bytes(release_run_id.encode("utf-8")))
+            if state == "human_marked":
+                runtime_policy_promotion_summary["human_marked_count"] += 1
+        runtime_policy_promotion_summary["release_run_refs"] = sorted(release_run_refs)
+    report_summary = {
+        "total": 0,
+        "by_decision": {},
+        "latest_report_ref": None,
+        "latest_report_hash": None,
+    }
+    if "knowledge_calibration_reports" not in missing_tables:
+        for row in conn.execute(
+            """
+            SELECT decision, COUNT(*)
+            FROM knowledge_calibration_reports
+            GROUP BY decision
+            """
+        ):
+            report_summary["by_decision"][str(row[0])] = int(row[1])
+            report_summary["total"] += int(row[1])
+        latest_report = conn.execute(
+            """
+            SELECT report_ref, report_hash
+            FROM knowledge_calibration_reports
+            ORDER BY created_at DESC, report_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_report is not None:
+            report_summary["latest_report_ref"] = latest_report[0]
+            report_summary["latest_report_hash"] = latest_report[1]
+    calibration_job_summary = {
+        "object": "tonglingyu.knowledge_calibration_job_summary",
+        "total": 0,
+        "by_status": {},
+        "latest_run_id": None,
+        "latest_input_artifact_digest": None,
+        "latest_output_report_digest": None,
+        "config_digests": [],
+        "failed_task_summary": [],
+        "failed_or_retry_waiting": 0,
+    }
+    if "knowledge_calibration_jobs" not in missing_tables:
+        for row in conn.execute(
+            """
+            SELECT status, COUNT(*)
+            FROM knowledge_calibration_jobs
+            GROUP BY status
+            """
+        ):
+            calibration_job_summary["by_status"][str(row[0])] = int(row[1])
+            calibration_job_summary["total"] += int(row[1])
+        latest_job = conn.execute(
+            """
+            SELECT job_id, input_digest, config_digest, report_id
+            FROM knowledge_calibration_jobs
+            ORDER BY updated_at DESC, job_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_job is not None:
+            calibration_job_summary["latest_run_id"] = latest_job[0]
+            calibration_job_summary["latest_input_artifact_digest"] = latest_job[1]
+            if latest_job[2]:
+                calibration_job_summary["config_digests"].append(latest_job[2])
+            if latest_job[3] and "knowledge_calibration_reports" not in missing_tables:
+                report_hash = conn.execute(
+                    """
+                    SELECT report_hash
+                    FROM knowledge_calibration_reports
+                    WHERE report_id = ?
+                    """,
+                    (latest_job[3],),
+                ).fetchone()
+                if report_hash is not None:
+                    calibration_job_summary["latest_output_report_digest"] = report_hash[0]
+        for row in conn.execute(
+            """
+            SELECT job_id, status, input_kind, method, last_error_sha256
+            FROM knowledge_calibration_jobs
+            WHERE status IN ('failed', 'retry_waiting')
+            ORDER BY updated_at DESC, job_id DESC
+            LIMIT 20
+            """
+        ):
+            calibration_job_summary["failed_task_summary"].append({
+                "job_id": row[0],
+                "status": row[1],
+                "input_kind": row[2],
+                "method": row[3],
+                "last_error_sha256": row[4],
+            })
+        calibration_job_summary["failed_or_retry_waiting"] = len(
+            calibration_job_summary["failed_task_summary"]
+        )
+    per_kind_coverage_matrix = []
+    for kind, counts in sorted(by_kind.items()):
+        total = sum(int(value) for value in counts.values())
+        runtime_or_human = int(counts.get("runtime_usable", 0)) + int(
+            counts.get("human_marked", 0)
+        )
+        per_kind_coverage_matrix.append({
+            "kind": kind,
+            "state_counts": counts,
+            "total": total,
+            "runtime_or_human_usable": runtime_or_human,
+            "runtime_or_human_ratio": (runtime_or_human / total) if total else None,
+        })
+    unresolved_gaps = {
+        "candidate_or_source_snapshot": states["candidate"] + states["source_snapshot"],
+        "system_calibrated_not_runtime_usable": states["system_calibrated"],
+        "rejected_or_deprecated": states["rejected"] + states["deprecated"],
+        "calibration_failed_or_retry_waiting": calibration_job_summary["failed_or_retry_waiting"],
+    }
+    state_counts = {
+        "object": "tonglingyu.knowledge_state_counts",
+        "states": states,
+        "runtime_usable_count": states["runtime_usable"],
+        "human_marked_count": states["human_marked"],
+        "system_calibrated_count": states["system_calibrated"],
+        "rejected_or_deprecated_count": states["rejected"] + states["deprecated"],
+        "candidate_or_source_snapshot_count": states["candidate"] + states["source_snapshot"],
+        "total_count": sum(states.values()),
+    }
+    summary = {
+        "object": "tonglingyu.knowledge_state_release_summary",
+        "schema_version": "tonglingyu-knowledge-item-state-v1",
+        "runtime_policy_version": runtime_policy_version,
+        "state_counts": state_counts,
+        "by_kind": by_kind,
+        "calibration_report_summary": report_summary,
+        "calibration_job_summary": calibration_job_summary,
+        "runtime_policy_promotion_summary": runtime_policy_promotion_summary,
+        "per_kind_coverage_matrix": per_kind_coverage_matrix,
+        "unresolved_gaps": unresolved_gaps,
+    }
+    summary["summary_sha256"] = canonical_digest({
+        "state_counts": state_counts,
+        "by_kind": by_kind,
+        "calibration_report_summary": report_summary,
+        "calibration_job_summary": calibration_job_summary,
+        "runtime_policy_promotion_summary": runtime_policy_promotion_summary,
+        "per_kind_coverage_matrix": per_kind_coverage_matrix,
+        "unresolved_gaps": unresolved_gaps,
+    })
+    return summary
+
+
+def latest_kb_diff_report_summary(conn):
+    if not table_exists(conn, "kb_version_diff_reports"):
+        errors.append("kb_diff_reports_table_missing")
+        return {}, ""
+    row = conn.execute(
+        """
+        SELECT report_id, schema_version, before_version_id, after_version_id,
+               source_root, before_summary_json, after_summary_json, diff_json,
+               eval_before_summary_json, eval_after_summary_json, eval_diff_json,
+               created_at, updated_at
+        FROM kb_version_diff_reports
+        ORDER BY created_at DESC, report_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        errors.append("kb_diff_report_missing")
+        return {}, ""
+    report = {
+        "object": "tonglingyu.kb_version_diff_report",
+        "report_id": row[0],
+        "schema_version": row[1],
+        "before_version_id": row[2],
+        "after_version_id": row[3],
+        "source_root": row[4],
+        "before_summary": load_json_value(row[5], None),
+        "after_summary": load_json_value(row[6], {}),
+        "diff": load_json_value(row[7], {}),
+        "eval_before_summary": load_json_value(row[8], None),
+        "eval_after_summary": load_json_value(row[9], {}),
+        "eval_diff": load_json_value(row[10], {}),
+        "created_at": row[11],
+        "updated_at": row[12],
+    }
+    report_digest = canonical_digest(report)
+    diff = report.get("diff") if isinstance(report.get("diff"), dict) else {}
+    eval_diff = report.get("eval_diff") if isinstance(report.get("eval_diff"), dict) else {}
+    knowledge_state_diff = diff.get("knowledge_state")
+    if not isinstance(knowledge_state_diff, dict):
+        knowledge_state_diff = {
+            "object": "tonglingyu.knowledge_state_kb_diff",
+            "schema_version": "tonglingyu-knowledge-item-state-v1",
+            "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+            "state_counts": {},
+            "by_kind": {},
+            "state_change_refs": [],
+            "runtime_policy_promotion_summary": {},
+            "calibration_job_summary": {},
+            "unresolved_gaps": [],
+            "status": "unchanged",
+        }
+    summary = {
+        "object": "tonglingyu.kb_version_diff_release_ref",
+        "report_id": report["report_id"],
+        "schema_version": report["schema_version"],
+        "before_version_id": report["before_version_id"],
+        "after_version_id": report["after_version_id"],
+        "created_at": report["created_at"],
+        "updated_at": report["updated_at"],
+        "report_sha256": report_digest,
+        "diff_sha256": canonical_digest(diff),
+        "eval_diff_sha256": canonical_digest(eval_diff),
+        "knowledge_state_diff": knowledge_state_diff,
+        "eval_diff": eval_diff,
+    }
+    return summary, report_digest
+
+
 def ratio(summary, field):
     value = summary.get(field)
     if not isinstance(value, dict):
@@ -288,6 +591,26 @@ if ratio(summary, "reviewer_status_matched") != thresholds["reviewer_status_matc
 expected_denominator = summary.get("expected_evidence_denominator")
 if not isinstance(expected_denominator, int) or expected_denominator < thresholds["expected_evidence_denominator_min"]:
     errors.append("expected_evidence_denominator_below_threshold")
+knowledge_state_quality = summary.get("knowledge_state_quality")
+if not isinstance(knowledge_state_quality, dict):
+    errors.append("knowledge_state_quality_missing")
+    knowledge_state_quality = {}
+add_if(
+    knowledge_state_quality.get("runtime_policy_rejected_count") != 0,
+    "knowledge_state_runtime_policy_rejected",
+)
+add_if(
+    knowledge_state_quality.get("rejected_or_deprecated_selected_count") != 0,
+    "knowledge_state_rejected_or_deprecated_selected",
+)
+add_if(
+    knowledge_state_quality.get("reviewer_downgrade_cases") != 0,
+    "knowledge_state_reviewer_downgrade",
+)
+add_if(
+    knowledge_state_quality.get("forbidden_failure_cases") != 0,
+    "knowledge_state_forbidden_failure",
+)
 
 source_coverage_boundary = summary.get("source_coverage_boundary") or {}
 if not isinstance(source_coverage_boundary, dict):
@@ -318,6 +641,30 @@ open_retrieval_failures = None
 open_governance_tasks = None
 source_snapshot_digest = ""
 kb_build_hash = ""
+knowledge_state_summary = {
+    "object": "tonglingyu.knowledge_state_release_summary",
+    "schema_version": "tonglingyu-knowledge-item-state-v1",
+    "runtime_policy_version": "tonglingyu-knowledge-runtime-policy-v1",
+    "state_counts": {
+        "object": "tonglingyu.knowledge_state_counts",
+        "states": state_count_defaults(),
+        "runtime_usable_count": 0,
+        "human_marked_count": 0,
+        "system_calibrated_count": 0,
+        "rejected_or_deprecated_count": 0,
+        "candidate_or_source_snapshot_count": 0,
+        "total_count": 0,
+    },
+    "by_kind": {},
+    "calibration_report_summary": {},
+    "calibration_job_summary": {},
+    "runtime_policy_promotion_summary": {},
+    "per_kind_coverage_matrix": [],
+    "unresolved_gaps": {},
+    "summary_sha256": "",
+}
+kb_diff_report = {}
+kb_diff_report_sha256 = ""
 if not db_path.is_file():
     errors.append("db_not_found")
 else:
@@ -423,6 +770,11 @@ else:
             ).fetchone()[0]
             if open_governance_tasks != thresholds["open_p0_governance_tasks"]:
                 errors.append("open_governance_tasks_present")
+        knowledge_state_summary = build_knowledge_state_db_summary(conn)
+        kb_diff_report, kb_diff_report_sha256 = latest_kb_diff_report_summary(conn)
+        calibration_jobs = knowledge_state_summary.get("calibration_job_summary") or {}
+        if calibration_jobs.get("failed_or_retry_waiting") != 0:
+            errors.append("knowledge_calibration_jobs_failed_or_retry_waiting")
     except sqlite3.Error:
         errors.append("db_query_failed")
 
@@ -439,6 +791,7 @@ quality_summary_public = {
     "source_boundary_confirmation_avoided": summary.get("source_boundary_confirmation_avoided"),
     "forbidden_conclusion_avoided": summary.get("forbidden_conclusion_avoided"),
     "reviewer_status_matched": summary.get("reviewer_status_matched"),
+    "knowledge_state_quality": knowledge_state_quality,
     "eval_failure_records": summary.get("eval_failure_records"),
     "source_coverage_boundary": source_coverage_boundary,
     "source_diversity": {
@@ -481,6 +834,13 @@ behavior_config = {
     "decoding_parameters_source": "gateway_runtime_config",
 }
 behavior_config["behavior_config_digest"] = canonical_digest(behavior_config)
+eval_impact = {
+    "object": "tonglingyu.knowledge_state_eval_impact",
+    "eval_run_id": eval_run_id,
+    "quality_summary_status": summary.get("status"),
+    "knowledge_state_quality": knowledge_state_quality,
+    "kb_diff_eval_diff": kb_diff_report.get("eval_diff") if isinstance(kb_diff_report, dict) else {},
+}
 gate = {
     "object": "tonglingyu.rqa_quality_gate",
     "schema_version": 1,
@@ -511,6 +871,15 @@ gate = {
     },
     "source_license_summary": source_license_summary,
     "quality_summary": quality_summary_public,
+    "knowledge_state_summary": knowledge_state_summary,
+    "knowledge_state_summary_sha256": knowledge_state_summary.get("summary_sha256"),
+    "kb_diff_report": kb_diff_report,
+    "kb_diff_report_sha256": kb_diff_report_sha256,
+    "eval_impact": eval_impact,
+    "runtime_policy_promotion_summary": knowledge_state_summary.get("runtime_policy_promotion_summary"),
+    "per_kind_coverage_matrix": knowledge_state_summary.get("per_kind_coverage_matrix"),
+    "calibration_job_summary": knowledge_state_summary.get("calibration_job_summary"),
+    "unresolved_calibration_gaps": knowledge_state_summary.get("unresolved_gaps"),
     "open_p0_retrieval_failures": open_retrieval_failures,
     "open_p0_governance_tasks": open_governance_tasks,
     "behavior_config": behavior_config,

@@ -1074,14 +1074,14 @@
   `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
   visibility、streaming chat UX、admin audit visibility 和 persisted provider
   settings 四项 evidence ref，`status=ok`，`evidence_sha256=e9564f9c586...`。
-- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签后台任务也会
+- browser review 暴露出一个真实产品路径问题：Open WebUI 自动标题/标签/追问后台任务也会
   走 `tonglingyu`，旧 gateway 会把这些非 RQA metadata prompt 当成文学问答处理，
   从而写入 open P0 retrieval failure / governance task。`tonglingyu-gateway`
-  已新增 Open WebUI metadata prompt 隔离：识别 title/tags 任务后返回确定性 JSON，
+  已新增 Open WebUI metadata prompt 隔离：识别 title/tags/follow-up 任务后返回确定性 JSON，
   记录 `openwebui_metadata_request_handled` audit event，但不创建 evidence package、
   retrieval failure 或治理任务。本地验证：
   `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-  47 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
+  56 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
   tonglingyu-gateway -- -D warnings` 通过。
 - 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
   `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
@@ -1090,32 +1090,49 @@
   远端 metadata smoke 证明 title prompt 返回 JSON、没有
   `evidence_package_id`，trace 为 `tly-019e2f90fc947651abccbdb2b91f6f00`；随后 live
   DB 复核 `open_failures=0`、`open_p0_tasks=0`、metadata audit events `>=1`。
-- 最新 release evidence baseline 为
-  `remote-release-20260516T074522Z-71051`。该完整远端 automation 已生成 live
-  capacity/load evidence 和 60 分钟 post-release ops evidence；初次收尾暴露出第二次
-  readiness 复核复用 migration backup path 的脚本问题，已在提交
-  `ab9ce22d503c97daa2678529762f6da523b4eb8c` 修复为独立 backup/restore artifact
-  path 并重同步远端。使用同一 artifact 目录、原 `release-readiness.json` report path、
-  live capacity env 和 post-release ops env 复核后，`rqa_migration_preflight`、
-  `rqa_incident_capacity`、`release_ops_readiness`、`openwebui_browser_review` 均
-  `passed`，open P0 retrieval failures / governance tasks 均为 0；当时
-  `required_failures=["security_scan"]`，`production_release_ready=false`。
+- 2026-05-17 最新 release evidence baseline 为
+  `remote-release-20260517T185847Z-39274`。该完整远端 automation 在当前
+  `/home/simon/tonglingyu-home-deploy` 目标环境运行，已生成并回收 live
+  capacity/load evidence、60 分钟 post-release ops evidence、release readiness
+  report、release automation report 和 saved report validator artifact。最终
+  `release-readiness.json` 显示 `status=passed`、
+  `production_release_ready=true`、`required_failures=[]`、
+  `release_blockers=[]`，open P0 retrieval failures / governance tasks 均为 0。
+- 同一 run 绑定当前 live context：`environment=hhost`、`target=tonglingyu-rqa`、
+  `valid_until=2026-05-18T20:12:40.878578+00:00`、source commit
+  `d9d17bc27a1f93d51d59ec2500dacd3ed18229cf` 且
+  `tracked_dirty=false`。运行镜像 inventory 记录 4 个服务，其中
+  `tonglingyu-gateway` pin 到
+  `sha256:8743346ed34fe58b9e503564d4322c16c7fff4d2da347a4389b9616b2b8dfb23`。
+- 该 run 的 RQA/知识状态证据已绑定 live KB：
+  `source_snapshot_digest=f80cd6f7c3f314396bce39cdeb89a7237083537ff0196f55abd94712bf776119`、
+  `kb_build_hash=39a48e74c2e76491d473c419f2ba9cae417c12519d9c295398d8239680a31a28`、
+  `kb_version=kb-019e34ad728a70728646513367bcc15a`、
+  `eval_run_id=rqa-eval-16e7dfebf2e8a8e2`、
+  `knowledge_state.unresolved_calibration_gaps` 全部为 0。
 - 2026-05-17 已调整 release security policy：镜像扫描按所有权分类，
   `TONGLINGYU_GATEWAY_IMAGE_REF` 的 high/critical findings 仍 fail-closed，第三方
   镜像 findings 进入 `nonblocking_errors` 和 ownership summary，不再阻塞
   production-ready。contract smoke 已覆盖“自有镜像 high 仍失败”和“仅第三方镜像
   high 通过但记录 nonblocking risk”；使用最新远端 Trivy raw reports 本地复核时，
   自有镜像为 0 critical / 0 high，第三方镜像为 63 critical / 714 high，security
-  gate 在新策略下通过。
-- 最终 live release readiness 已在提交
-  `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上复核通过：远端报告
-  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness.json`
-  显示 `status=passed`、`production_release_ready=true`、
-  `release_conditions_met=true`、`required_failures=[]`、`release_blockers=[]`，
-  并绑定 `git.tracked_dirty=false`。saved report validator 输出
-  `$HOME/hermes-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260516T074522Z-71051/release-readiness-validation-final-ed6cdb6-current.json`
-  为 `status=ok`、`errors=[]`。因此通灵玉 RQA production-ready release gate
-  已闭合。
+  gate 在新策略下通过。当前最终 automation 中 `security_scan`、
+  `release_ops_readiness`、`rqa_incident_capacity`、
+  `openwebui_browser_review`、`model_upstream_network`、`strict_gateway`、
+  `openwebui_function` 和 `openwebui_admin_action` 均通过。
+- 为避免把模型上游瞬时 500 当作系统失败或靠手工重跑碰运气，release readiness
+  对 live `strict_gateway` 采用 bounded retry policy：默认最多 3 次、失败尝试写入
+  gate 结果摘要，最终仍必须拿到原 strict gate 的成功 JSON。本次最终报告中
+  `strict_gateway.attempt_count=1`、`failed_attempt_count=0`、
+  `retry_policy=bounded_retry`。
+- 最终 saved report validator 输出
+  `/home/simon/tonglingyu-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260517T185847Z-39274/release-readiness-validation.json`
+  为 `status=ok`、`production_release_ready=true`、`errors=[]`。release
+  automation report
+  `/home/simon/tonglingyu-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260517T185847Z-39274/release-automation.json`
+  为 `status=ok`、`production_ready=true`，本地回收 artifact 位于
+  `data/tonglingyu/remote-release-automation/remote-release-20260517T185847Z-39274/`。
+  因此通灵玉 RQA production-ready release gate 已在当前 run 中闭合。
 - Incident drill / audit-history 已有可复核 evidence 机制：
   `deploy/scripts/verify-tonglingyu-rqa-incident-audit-evidence.sh` 会生成
   `tonglingyu.rqa_incident_audit_evidence` JSON，校验 status-history event/actor、
@@ -1124,8 +1141,11 @@
   `rqa_incident_capacity` 必须绑定该 evidence path/hash，saved report validator
   会拒绝缺失、未校验或 hash 不匹配的 production-ready 报告。目标环境真实
   incident drill、capacity/load 和 audit-history evidence 已在
-  `remote-release-20260516T055004Z-50395` 和最终
-  `remote-release-20260516T074522Z-71051` 复核中执行并通过该 gate。
+  `remote-release-20260516T055004Z-50395`、历史最终
+  `remote-release-20260516T074522Z-71051` 和当前最终
+  `remote-release-20260517T185847Z-39274` 复核中执行并通过该 gate。当前 run 的
+  60 分钟 post-release monitor 从 `2026-05-17T19:11:08Z` 到
+  `2026-05-17T20:11:09Z`，13 条样本全部 `status=ok`。
 
 ## 下一步
 
@@ -1135,7 +1155,7 @@
 2. 保持 RQA Milestone L 值守证据闭环：后续正式 release 仍必须绑定当次
    post-release monitor JSON artifact、60 分钟窗口、operator/environment、live gate
    evidence 和 admin Action/API evidence；当前
-   `remote-release-20260516T074522Z-71051` 已证明该路径可通过。
+   `remote-release-20260517T185847Z-39274` 已证明该路径可通过。
 3. 在目标 live 环境持续复核 open retrieval failures / open governance tasks 为 0；
    最终 production-ready report 已证明当前为 0，后续 release 仍必须绑定当次证据。
 4. 建立分层知识标记：人物、关系、事件、诗词判词和评测题先允许经过 LLM、规则、
@@ -1163,3 +1183,54 @@
 9. `system_calibrated` 与 `runtime_usable` 必须分离：没有 runtime policy version、
    promotion summary、per-kind coverage matrix、release run 和 saved report validator
    证据时，不能把系统校准条目放入 selected evidence，也不能声明知识状态治理闭环完成。
+10. 2026-05-17 已完成 Knowledge State Milestone A：`tonglingyu-runtime` 新增
+    `KnowledgeState`、`KnowledgeItemKind`、`knowledge_items`、
+    `knowledge_item_state_history`、状态历史、CAS 更新、Runtime store API 和 Gateway
+    只读 admin API。已通过 `cargo test -p tonglingyu-runtime` 和
+    `cargo test -p tonglingyu-gateway`。这只证明知识状态模型完成，不能声明运行中
+    人工复核或完整知识状态治理闭环完成。
+11. 2026-05-17 已完成 Knowledge State Milestone B：`tonglingyu-runtime` 新增
+    `KnowledgeCalibrationReport`、内部 `honglou-knowledge-calibrator` profile
+    contract、配置化 LLM 校准配置、离线 calibration runner、异步 calibration job
+    模型、规则/eval/RQA/LLM evidence judge 校准路径、coverage matrix、report hash、
+    admin audit 引用和 KB summary/diff report refs；`tonglingyu-gateway` 新增
+    `knowledge-calibrate --input <json>` 离线命令。已通过 runtime/gateway 单包测试和
+    clippy。Milestone B 完成只表示 candidate 可以被系统校准为
+    `system_calibrated`；Milestone C-E 仍未完成，`system_calibrated` 仍不能进入普通
+    selected evidence、不能自动提升为 `runtime_usable`，也不能显示“人工标记”。
+12. 2026-05-17 已完成 Knowledge State Milestone C：`tonglingyu-runtime` 新增
+    runtime knowledge policy、`evidence_claim_knowledge_links`、显式
+    `runtime_usable` promotion API、知识状态摘要、claim-to-evidence 的 knowledge item
+    内部追踪，以及公开 package/replay/local answer 的安全摘要；`system_calibrated`、
+    `candidate`、`source_snapshot`、`rejected` 和 `deprecated` 不进入 selected
+    evidence，只有 `runtime_usable` / `human_marked` 可被运行使用。`tonglingyu-gateway`
+    的非流式/流式公开输出和 strict Gateway gate 已增加知识状态标签泄露检查。已通过
+    runtime/gateway 单包测试和 clippy。Milestone C 完成不表示人工复核入口或
+    release gate 闭合；Milestone D 已在后续节点处理，Milestone E 仍未完成，不能
+    声明运行中知识状态治理闭环完成。
+13. 2026-05-17 已完成 Knowledge State Milestone D：`tonglingyu-runtime` 新增
+    `KnowledgeItemHumanReviewDecision`、`KnowledgeItemHumanReviewInput` 和
+    `review_knowledge_item_human` Store API，强制 `human_marked` 只能通过绑定
+    governance task、reviewer、review note、evidence ref 和 CAS state version 的人工
+    复核动作写入；人工否决可进入 `rejected` 或 `deprecated`，并继续保留状态历史和
+    audit。`tonglingyu-gateway` 新增 knowledge item review 管理端入口，并支持
+    knowledge item / eval miss 作为 governance task source entity；Open WebUI admin
+    Action 新增 knowledge item list/read/review 操作，并通过 action contract gate
+    校验 role guard、valves、required API path 和 secret 输出边界。已通过
+    runtime/gateway 单包测试、clippy 和 Open WebUI admin action contract。Milestone D
+    完成不表示 KB diff、eval impact、saved report validator 或 release gate 闭合；
+    Milestone E 仍未完成，不能声明完整知识状态治理闭环完成。
+14. 2026-05-17 已完成 Knowledge State Milestone E：`tonglingyu-runtime` 的
+    KB summary/diff 记录 knowledge state counts、state change refs、calibration
+    report refs、human review refs、audit refs、runtime policy promotion summary、
+    calibration job summary 和 unresolved gaps；`tonglingyu-gateway` eval report
+    新增 `knowledge_state_quality`，对未提升 `system_calibrated`、
+    rejected/deprecated selected evidence、reviewer downgrade 和 forbidden failure
+    fail-closed；RQA quality gate、release manifest、artifact registry 和 saved
+    report validator 绑定 knowledge state summary、KB diff hash、eval impact、
+    calibration run/job digest、promotion summary、per-kind coverage matrix 和
+    open P0 governance state。已通过 runtime/gateway 单包测试、clippy 和
+    `test-tonglingyu-release-readiness-contract.sh`。前 5 个 milestone repo-local
+    已闭合，但这仍不是目标 live 环境当次 production-ready release；正式上线仍必须
+    重新生成并验证当次 release readiness、KB diff、calibration report、saved report
+    validator 和 Open WebUI/Gateway 证据。

@@ -60,69 +60,6 @@ print(value)
 ' "$path"
 }
 
-stream_pair_summary() {
-  local stream_path="$1"
-  local duplicate_stream_path="$2"
-  python3 - "${stream_path}" "${duplicate_stream_path}" <<'PY'
-import json
-import sys
-
-stream_path, duplicate_stream_path = sys.argv[1:3]
-
-
-def parse_events(path):
-    events = []
-    with open(path, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line.startswith("data:"):
-                continue
-            payload = line[len("data:"):].strip()
-            if not payload or payload == "[DONE]":
-                continue
-            events.append(json.loads(payload))
-    if not events:
-        raise SystemExit(f"{path} did not contain JSON SSE chunks")
-    return events
-
-
-def unique_value(events, key):
-    values = {
-        event.get(key)
-        for event in events
-        if isinstance(event, dict) and event.get(key)
-    }
-    if len(values) != 1:
-        raise SystemExit(f"expected exactly one {key}, got {sorted(values)}")
-    return next(iter(values))
-
-
-def has_content_delta(event):
-    for choice in event.get("choices") or []:
-        if not isinstance(choice, dict):
-            continue
-        delta = choice.get("delta") or {}
-        if isinstance(delta, dict) and delta.get("content"):
-            return True
-    return False
-
-
-stream = parse_events(stream_path)
-duplicate = parse_events(duplicate_stream_path)
-metadata = {
-    "chunk_count": len(stream),
-    "duplicate_chunk_count": len(duplicate),
-    "content_delta_count": sum(1 for event in stream if has_content_delta(event)),
-    "duplicate_content_delta_count": sum(1 for event in duplicate if has_content_delta(event)),
-}
-if metadata["content_delta_count"] < 1:
-    raise SystemExit(f"stream did not contain content deltas: {metadata}")
-if metadata["duplicate_content_delta_count"] < 1:
-    raise SystemExit(f"duplicate stream did not contain content deltas: {metadata}")
-print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
-PY
-}
-
 expect_status() {
   local expected="$1"
   local output="$2"
@@ -152,8 +89,12 @@ forbidden_keys = {
     "_stream_source",
     "agent_runtime_summary",
     "audit_events",
+    "evidence_package_id",
+    "review",
     "runtime_step_outputs",
     "runtime_step_plan",
+    "session_id",
+    "trace_id",
 }
 errors = []
 
@@ -213,10 +154,11 @@ if not events:
 content_delta_events = [
     event
     for event in events
-    if isinstance(event, dict) and has_content_delta(event)
+    if isinstance(event, dict)
+    and has_content_delta(event)
 ]
 if not content_delta_events:
-    errors.append("missing assistant content_delta chunks")
+    errors.append("missing assistant content delta chunks")
 
 for index, event in enumerate(events):
     for path in forbidden_paths(event, f"$[{index}]"):
@@ -226,6 +168,47 @@ if errors:
     for error in errors:
         print(f"stream_contract_error={error}", file=sys.stderr)
     sys.exit(1)
+PY
+}
+
+message_metadata_from_db() {
+  local external_message_id="$1"
+  python3 - "${DB_PATH}" "${external_message_id}" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, external_message_id = sys.argv[1:3]
+conn = sqlite3.connect(db_path)
+try:
+    rows = conn.execute(
+        """
+        SELECT session_id, trace_id, package_id
+        FROM gateway_messages
+        WHERE external_message_id = ?
+        ORDER BY created_at, message_id
+        """,
+        (external_message_id,),
+    ).fetchall()
+finally:
+    conn.close()
+if len(rows) != 1:
+    raise SystemExit(
+        f"expected one gateway message for {external_message_id}, got {len(rows)}"
+    )
+session_id, trace_id, package_id = rows[0]
+if not trace_id or not package_id or not session_id:
+    raise SystemExit(f"gateway message metadata incomplete for {external_message_id}")
+metadata = {
+    "external_message_id": external_message_id,
+    "trace_id": trace_id,
+    "evidence_package_id": package_id,
+    "session_id": session_id,
+    "duplicate_trace_id": trace_id,
+    "duplicate_evidence_package_id": package_id,
+    "duplicate_session_id": session_id,
+}
+print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
 PY
 }
 
@@ -267,6 +250,7 @@ MODELS_JSON="${SMOKE_DIR}/models.json"
 SEARCH_JSON="${SMOKE_DIR}/search.json"
 CHAT_JSON="${SMOKE_DIR}/chat.json"
 DUP_CHAT_JSON="${SMOKE_DIR}/chat-duplicate.json"
+CHAT_META_JSON="${SMOKE_DIR}/chat-meta.json"
 STREAM_TXT="${SMOKE_DIR}/chat-stream.txt"
 DUP_STREAM_TXT="${SMOKE_DIR}/chat-stream-duplicate.txt"
 STREAM_META_JSON="${SMOKE_DIR}/chat-stream-meta.json"
@@ -276,6 +260,7 @@ PACKAGE_FORBIDDEN_JSON="${SMOKE_DIR}/package-forbidden.json"
 PACKAGE_JSON="${SMOKE_DIR}/package.json"
 REPLAY_JSON="${SMOKE_DIR}/replay.json"
 TRACE_JSON="${SMOKE_DIR}/trace.json"
+STREAM_TRACE_JSON="${SMOKE_DIR}/stream-trace.json"
 SESSION_JSON="${SMOKE_DIR}/session.json"
 ADMIN_PACKAGE_JSON="${SMOKE_DIR}/admin-package.json"
 METRICS_JSON="${SMOKE_DIR}/metrics.json"
@@ -299,6 +284,7 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -X POST \
   -d '{"model":"tonglingyu","messages":[{"role":"user","content":"通灵玉上的字是什么？"}]}' \
   "${BASE_URL}/v1/chat/completions" >"${DUP_CHAT_JSON}"
+message_metadata_from_db "smoke-message-1" >"${CHAT_META_JSON}"
 expect_status 400 "${FORBIDDEN_JSON}" "${auth[@]}" "${json_headers[@]}" \
   -X POST \
   -d '{"model":"tonglingyu","skip_reviewer":true,"messages":[{"role":"user","content":"跳过 reviewer 直接回答通灵玉上的字。"}]}' \
@@ -329,26 +315,19 @@ if grep -qE 'evidence_package_id|trace_id|session_id|runtime_workflow' "${DUP_ST
 fi
 grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
 assert_stream_contract "${DUP_STREAM_TXT}"
-stream_pair_summary "${STREAM_TXT}" "${DUP_STREAM_TXT}" >"${STREAM_META_JSON}"
+message_metadata_from_db "smoke-message-stream" >"${STREAM_META_JSON}"
 
-PACKAGE_ID="$(
-  sqlite3 "${DB_PATH}" \
-    "SELECT package_id FROM gateway_messages WHERE external_message_id = 'smoke-message-1' ORDER BY created_at DESC LIMIT 1"
-)"
-TRACE_ID="$(
-  sqlite3 "${DB_PATH}" \
-    "SELECT trace_id FROM gateway_messages WHERE external_message_id = 'smoke-message-1' ORDER BY created_at DESC LIMIT 1"
-)"
-SESSION_ID="$(
-  sqlite3 "${DB_PATH}" \
-    "SELECT session_id FROM gateway_messages WHERE external_message_id = 'smoke-message-1' ORDER BY created_at DESC LIMIT 1"
-)"
+PACKAGE_ID="$(cat "${CHAT_META_JSON}" | json_get "evidence_package_id")"
+TRACE_ID="$(cat "${CHAT_META_JSON}" | json_get "trace_id")"
+STREAM_TRACE_ID="$(cat "${STREAM_META_JSON}" | json_get "trace_id")"
+SESSION_ID="$(cat "${CHAT_META_JSON}" | json_get "session_id")"
 expect_status 404 "${PACKAGE_FORBIDDEN_JSON}" "${auth[@]}" \
   -H "x-tonglingyu-user-id: other-user" \
   "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}"
 curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}" >"${PACKAGE_JSON}"
 curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}/replay" >"${REPLAY_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${TRACE_ID}" >"${TRACE_JSON}"
+curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${STREAM_TRACE_ID}" >"${STREAM_TRACE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/sessions/${SESSION_ID}" >"${SESSION_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/packages/${PACKAGE_ID}" >"${ADMIN_PACKAGE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
@@ -369,6 +348,7 @@ python3 - \
   "${SEARCH_JSON}" \
   "${CHAT_JSON}" \
   "${DUP_CHAT_JSON}" \
+  "${CHAT_META_JSON}" \
   "${FORBIDDEN_JSON}" \
   "${MODEL_REJECT_JSON}" \
   "${PACKAGE_FORBIDDEN_JSON}" \
@@ -376,6 +356,7 @@ python3 - \
   "${REPLAY_JSON}" \
   "${TRACE_JSON}" \
   "${STREAM_META_JSON}" \
+  "${STREAM_TRACE_JSON}" \
   "${SESSION_JSON}" \
   "${ADMIN_PACKAGE_JSON}" \
   "${METRICS_JSON}" \
@@ -387,8 +368,8 @@ import json
 import sys
 
 paths = sys.argv[1:]
-prometheus_path = paths[16]
-json_paths = paths[:16] + paths[17:]
+prometheus_path = paths[18]
+json_paths = paths[:18] + paths[19:]
 (
     health,
     models_unauth,
@@ -396,6 +377,7 @@ json_paths = paths[:16] + paths[17:]
     search,
     chat,
     duplicate,
+    chat_meta,
     forbidden,
     model_reject,
     package_forbidden,
@@ -403,6 +385,7 @@ json_paths = paths[:16] + paths[17:]
     replay,
     trace,
     stream_meta,
+    stream_trace,
     session,
     admin_package,
     metrics,
@@ -430,6 +413,11 @@ assert any(
     for item in search["data"]
 ), search
 
+assert chat_meta["evidence_package_id"] == package["package_id"], (chat_meta, package)
+assert chat_meta["trace_id"] == package["trace_id"], (chat_meta, package)
+assert chat_meta["session_id"] == stream_meta["session_id"], (chat_meta, stream_meta)
+assert chat_meta["duplicate_session_id"] == chat_meta["session_id"], chat_meta
+assert chat == duplicate, (chat, duplicate)
 public_completion_keys = {
     "id",
     "object",
@@ -459,10 +447,10 @@ assert package_forbidden["error"] == "not_found", package_forbidden
 
 assert package["claim_evidence_map"], package
 assert package["access"]["scope"] == "owner", package
-assert package["review"]["status"] == "passed", package
 assert all("forbidden_conclusions" in item for item in package["claim_evidence_map"]), package
 assert replay["object"] == "tonglingyu.evidence_package_replay", replay
 assert replay["package"]["package_id"] == package["package_id"], replay
+assert replay["answer"].strip(), replay
 assert package["package_id"] not in replay["answer"], replay
 
 states = {item["state"]: item["status"] for item in trace["workflow_states"]}
@@ -493,8 +481,30 @@ for event_type in [
 ]:
     assert event_type in event_types, (event_type, event_types)
 assert trace["messages"][0]["package_id"] == package["package_id"], trace
-assert stream_meta["content_delta_count"] >= 1, stream_meta
-assert stream_meta["duplicate_content_delta_count"] >= 1, stream_meta
+assert stream_trace["trace_id"] == stream_meta["trace_id"], (stream_trace, stream_meta)
+assert stream_meta["duplicate_trace_id"] == stream_meta["trace_id"], stream_meta
+assert stream_meta["duplicate_evidence_package_id"] == stream_meta["evidence_package_id"], stream_meta
+assert stream_meta["duplicate_session_id"] == stream_meta["session_id"], stream_meta
+stream_event_types = {
+    item["event_type"]
+    for item in stream_trace["audit_events"]
+}
+for event_type in [
+    "request_normalized",
+    "agent_runtime_profile_step_executed",
+    "agent_runtime_profile_execution_summarized",
+    "response_finalized",
+]:
+    assert event_type in stream_event_types, (event_type, stream_event_types)
+assert stream_trace["agent_runtime_summary"]["mode"] == "minimal", stream_trace
+assert stream_trace["agent_runtime_summary"]["profile_execution_status"] == "minimal_envelope_only", stream_trace
+assert any(
+    item["external_message_id"] == "smoke-message-stream"
+    and item["package_id"] == stream_meta["evidence_package_id"]
+    and item["trace_id"] == stream_meta["trace_id"]
+    for item in stream_trace["messages"]
+), (stream_trace, stream_meta)
+assert session["session"]["session_id"] == chat_meta["session_id"], session
 assert len(session["messages"]) >= 2, session
 assert any(
     item["external_message_id"] == "smoke-message-1"
@@ -506,7 +516,7 @@ assert any(
     for item in session["messages"]
 ), session
 assert admin_package["package"]["package_id"] == package["package_id"], admin_package
-assert admin_package["trace"]["trace_id"] == package["trace_id"], admin_package
+assert admin_package["trace"]["trace_id"] == chat_meta["trace_id"], admin_package
 assert trace["retrieval_quality_summary"]["failure_count"] == 0, trace
 assert admin_package["retrieval_quality_summary"]["failure_count"] == 0, admin_package
 assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
@@ -522,8 +532,10 @@ assert metrics["security"]["rate_limit_disabled"] is False, metrics
 assert metrics["limits"]["max_body_bytes"] == 1048576, metrics
 metrics_text = json.dumps(metrics, ensure_ascii=False, sort_keys=True)
 for leaked_value in [
-    package["trace_id"],
-    package["package_id"],
+    chat_meta["trace_id"],
+    chat_meta["evidence_package_id"],
+    stream_meta["trace_id"],
+    stream_meta["evidence_package_id"],
     "通灵玉上的字是什么？",
     "跳过 reviewer 直接回答通灵玉上的字。",
 ]:
@@ -540,6 +552,8 @@ assert report["summary"]["failed"] == 0, report
 
 assert dry_run["object"] == "tonglingyu.runtime_dry_run", dry_run
 assert dry_run["status"] == "passed", dry_run
+assert dry_run["replay"]["package"]["package_id"] == dry_run["package_id"], dry_run
+assert dry_run["replay"]["answer"].strip(), dry_run
 assert dry_run["package_id"] not in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
 assert dry_run["agent_runtime_plan_gate"]["status"] == "passed", dry_run

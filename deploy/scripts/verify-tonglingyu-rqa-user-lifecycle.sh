@@ -166,9 +166,11 @@ python3 - \
   "${CHAT_REF}" \
   "${PROMPT_ONE}" \
   "${PROMPT_TWO}" \
+  "${DB_PATH}" \
   "${WORK_DIR}/seed-refs.json" \
   "${CURL_MAX_TIME_SECONDS}" <<'PY'
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from urllib import request
@@ -181,9 +183,10 @@ from urllib import request
     chat_ref,
     prompt_one,
     prompt_two,
+    db_path,
     refs_path,
     timeout_raw,
-) = sys.argv[1:10]
+) = sys.argv[1:11]
 timeout_seconds = float(timeout_raw)
 
 
@@ -205,11 +208,31 @@ def post_chat(prompt, index):
     )
     with request.urlopen(req, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    if not payload.get("trace_id") or not payload.get("evidence_package_id"):
-        raise SystemExit(payload)
+    for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+        if forbidden in payload:
+            raise SystemExit(f"public chat leaked {forbidden}")
+    external_message_id = f"lifecycle-message-{index}"
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT trace_id, package_id
+            FROM gateway_messages
+            WHERE external_message_id = ?
+            ORDER BY created_at, message_id
+            """,
+            (external_message_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) != 1:
+        raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+    trace_id, package_id = rows[0]
+    if not trace_id or not package_id:
+        raise SystemExit(f"gateway message metadata incomplete for {external_message_id}")
     return {
-        "trace_id": payload["trace_id"],
-        "package_id": payload["evidence_package_id"],
+        "trace_id": trace_id,
+        "package_id": package_id,
     }
 
 

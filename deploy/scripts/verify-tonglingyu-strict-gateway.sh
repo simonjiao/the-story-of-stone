@@ -321,16 +321,34 @@ forbidden_public_chat_keys = {
     "agent_runtime_plan_gate",
     "agent_runtime_summary",
     "audit_events",
+    "calibration_report_ref",
     "evidence_package_id",
     "internal_trace",
+    "knowledge_item_ref",
+    "knowledge_item_refs",
+    "policy_version",
     "review",
+    "runtime_policy",
     "runtime_event",
     "runtime_step_outputs",
     "runtime_step_plan",
+    "state_version",
     "session_id",
     "stream_source",
     "trace_id",
     "workflow_states",
+}
+forbidden_public_knowledge_state_terms = {
+    "system_calibrated",
+    "runtime_usable",
+    "human_marked",
+    "knowledge_item_ref",
+    "knowledge_item_refs",
+    "calibration_report_ref",
+    "runtime_policy",
+    "policy_version",
+    "state_version",
+    "release_run_id",
 }
 
 
@@ -346,6 +364,22 @@ def forbidden_public_chat_paths(value, prefix="$"):
     elif isinstance(value, list):
         for index, child in enumerate(value):
             paths.extend(forbidden_public_chat_paths(child, f"{prefix}[{index}]"))
+    return paths
+
+
+def forbidden_public_knowledge_state_value_paths(value, prefix="$"):
+    paths = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(forbidden_public_knowledge_state_value_paths(child, f"{prefix}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(forbidden_public_knowledge_state_value_paths(child, f"{prefix}[{index}]"))
+    elif isinstance(value, str):
+        lower = value.lower()
+        for term in sorted(forbidden_public_knowledge_state_terms):
+            if term in lower:
+                paths.append(f"{prefix}:{term}")
     return paths
 
 
@@ -752,6 +786,8 @@ if not chat_package_id:
     errors.append("chat trace ref must include package_id")
 for forbidden_chat_path in forbidden_public_chat_paths(chat):
     errors.append(f"chat response must not expose {forbidden_chat_path}")
+for forbidden_chat_path in forbidden_public_knowledge_state_value_paths(chat):
+    errors.append(f"chat response must not expose knowledge state label at {forbidden_chat_path}")
 stream_events, stream_done_seen = parse_stream_events(stream)
 if not stream_done_seen:
     errors.append("stream response must include data: [DONE]")
@@ -786,6 +822,10 @@ for content_event in content_delta_events:
 for index, stream_event in enumerate(stream_events):
     for forbidden_stream_path in forbidden_public_chat_paths(stream_event, f"$[{index}]"):
         errors.append(f"stream response must not expose {forbidden_stream_path}")
+    for forbidden_stream_path in forbidden_public_knowledge_state_value_paths(stream_event, f"$[{index}]"):
+        errors.append(
+            f"stream response must not expose knowledge state label at {forbidden_stream_path}"
+        )
 if stream_trace_id and stream_package_id:
     validate_trace_summary_surface(
         stream_trace,
@@ -948,10 +988,22 @@ for item in runtime_step_events:
             errors.append(f"runtime step {operation} must enforce local package")
     if operation == "draft_answer":
         content_application = agent_runtime.get("content_application") or {}
-        if content_application.get("draft_consumed") is not True:
-            errors.append(f"runtime step {operation} must consume Hermes draft output")
         if content_application.get("local_reviewer_enforced") is not True:
             errors.append(f"runtime step {operation} must enforce local reviewer")
+        if content_application.get("draft_consumed") is True:
+            if content_application.get("content_used_for_final_answer") is not True:
+                errors.append(
+                    f"runtime step {operation} consumed draft must feed final answer"
+                )
+        else:
+            if not content_application.get("rejected_reason"):
+                errors.append(
+                    f"runtime step {operation} rejected draft must include reason"
+                )
+            if content_application.get("content_used_for_final_answer") is not False:
+                errors.append(
+                    f"runtime step {operation} rejected draft must not feed final answer"
+                )
     if operation == "review_answer":
         review_observation = agent_runtime.get("review_observation") or {}
         if review_observation.get("local_reviewer_enforced") is not True:

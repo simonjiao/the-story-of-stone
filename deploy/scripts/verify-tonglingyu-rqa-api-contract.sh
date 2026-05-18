@@ -233,6 +233,28 @@ def add_error(condition, code):
         errors.append(code)
 
 
+def gateway_message_metadata(external_message_id):
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT trace_id, package_id
+            FROM gateway_messages
+            WHERE external_message_id = ?
+            ORDER BY created_at, message_id
+            """,
+            (external_message_id,),
+        ).fetchall()
+    if len(rows) != 1:
+        errors.append(f"chat_metadata_count_invalid={external_message_id}")
+        return {"trace_id": "", "evidence_package_id": ""}
+    trace_id, package_id = rows[0]
+    if not trace_id:
+        errors.append(f"chat_metadata_trace_missing={external_message_id}")
+    if not package_id:
+        errors.append(f"chat_metadata_package_missing={external_message_id}")
+    return {"trace_id": trace_id or "", "evidence_package_id": package_id or ""}
+
+
 def sqlite_columns(table_name):
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -337,6 +359,7 @@ def stable_desc_page(items, *, primary_field, id_field):
 
 chat_refs = []
 for index, prompt in enumerate(raw_prompts):
+    external_message_id = f"api-contract-smoke-{index}"
     status, payload = request_json(
         "POST",
         "/v1/chat/completions",
@@ -347,13 +370,13 @@ for index, prompt in enumerate(raw_prompts):
         extra_headers={
             "x-tonglingyu-user-id": "api-contract-smoke",
             "x-tonglingyu-chat-id": "api-contract-smoke",
-            "x-tonglingyu-message-id": f"api-contract-smoke-{index}",
+            "x-tonglingyu-message-id": external_message_id,
         },
     )
     add_error(status != 200, f"chat_{index}_http_{status}")
-    add_error(not payload.get("trace_id"), f"chat_{index}_trace_missing")
-    add_error(not payload.get("evidence_package_id"), f"chat_{index}_package_missing")
-    chat_refs.append(payload)
+    for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+        add_error(forbidden in payload, f"chat_{index}_{forbidden}_leaked")
+    chat_refs.append(gateway_message_metadata(external_message_id))
 
 status, failures_page = request_json(
     "GET",

@@ -74,6 +74,9 @@ required_actions = [
     "governance_task_create",
     "governance_task_from_failure",
     "governance_task_update",
+    "knowledge_items",
+    "knowledge_item",
+    "knowledge_item_review",
     "knowledge_patch_proposal",
 ]
 required_api_paths = [
@@ -84,6 +87,7 @@ required_api_paths = [
     "/v1/admin/retrieval-failures",
     "/v1/admin/governance/tasks",
     "/v1/admin/governance/proposals",
+    "/v1/admin/knowledge/items",
 ]
 present_actions = [action for action in required_actions if action in content]
 present_api_paths = [path for path in required_api_paths if path in content]
@@ -207,6 +211,9 @@ required_actions = [
     "governance_task_create",
     "governance_task_from_failure",
     "governance_task_update",
+    "knowledge_items",
+    "knowledge_item",
+    "knowledge_item_review",
     "knowledge_patch_proposal",
 ]
 required_api_paths = [
@@ -217,6 +224,7 @@ required_api_paths = [
     "/v1/admin/retrieval-failures",
     "/v1/admin/governance/tasks",
     "/v1/admin/governance/proposals",
+    "/v1/admin/knowledge/items",
 ]
 present_actions = [action for action in required_actions if action in content]
 present_api_paths = [path for path in required_api_paths if path in content]
@@ -357,6 +365,9 @@ required_actions = [
     "governance_task_create",
     "governance_task_from_failure",
     "governance_task_update",
+    "knowledge_items",
+    "knowledge_item",
+    "knowledge_item_review",
     "knowledge_patch_proposal",
 ]
 required_api_paths = [
@@ -367,6 +378,7 @@ required_api_paths = [
     "/v1/admin/retrieval-failures",
     "/v1/admin/governance/tasks",
     "/v1/admin/governance/proposals",
+    "/v1/admin/knowledge/items",
 ]
 present_actions = [action for action in required_actions if action in content]
 present_api_paths = [path for path in required_api_paths if path in content]

@@ -23,10 +23,13 @@ use std::{
 use time::OffsetDateTime;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
-    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
-    KnowledgeGovernanceTaskCreateFromFailureInput, KnowledgeGovernanceTaskCreateInput,
-    KnowledgeGovernanceTaskListInput, KnowledgeGovernanceTaskRecord,
-    KnowledgeGovernanceTaskUpdateInput, KnowledgePatchProposalCreateInput,
+    KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
+    KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION, KNOWLEDGE_PATCH_PROPOSAL_SCHEMA_VERSION,
+    KnowledgeCalibrationRunInput, KnowledgeGovernanceTaskCreateFromFailureInput,
+    KnowledgeGovernanceTaskCreateInput, KnowledgeGovernanceTaskListInput,
+    KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
+    KnowledgeItemHumanReviewDecision, KnowledgeItemHumanReviewInput, KnowledgeItemKind,
+    KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
     RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
@@ -67,6 +70,18 @@ const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
 const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
 const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
 const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
+const PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS: &[&str] = &[
+    "system_calibrated",
+    "runtime_usable",
+    "human_marked",
+    "knowledge_item_ref",
+    "knowledge_item_refs",
+    "calibration_report_ref",
+    "runtime_policy",
+    "policy_version",
+    "state_version",
+    "release_run_id",
+];
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -85,7 +100,9 @@ enum Command {
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
+    KnowledgeCalibrate(KnowledgeCalibrateArgs),
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
+    RuntimeSchemaMigrate(RuntimeSchemaMigrateArgs),
     BackupDb(BackupDbArgs),
     PruneRuntime(PruneRuntimeArgs),
     RqaRestoreCanary(RqaRestoreCanaryArgs),
@@ -192,7 +209,29 @@ struct EvalArgs {
 }
 
 #[derive(Debug, Parser, Clone)]
+struct KnowledgeCalibrateArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    input: PathBuf,
+}
+
+#[derive(Debug, Parser, Clone)]
 struct RuntimeSchemaPreflightArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RuntimeSchemaMigrateArgs {
     #[arg(
         long,
         env = "TONGLINGYU_DB_PATH",
@@ -559,6 +598,8 @@ struct GovernanceTaskCreateRequest {
 struct GovernanceTaskManualCreateRequest {
     source_entity_type: String,
     source_entity_id: String,
+    trace_id: Option<String>,
+    package_id: Option<String>,
     task_type: Option<String>,
     priority: Option<String>,
     proposed_fix: Option<String>,
@@ -584,6 +625,19 @@ struct GovernanceTaskUpdateRequest {
     review_note: Option<String>,
     evidence_ref: Option<String>,
     if_match_updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnowledgeItemHumanReviewRequest {
+    task_id: String,
+    decision: String,
+    trace_id: String,
+    reviewer: String,
+    review_note: String,
+    evidence_ref: String,
+    if_match_state_version: i64,
+    if_match_task_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1081,11 +1135,30 @@ async fn main() -> Result<()> {
                 Err(anyhow!("tonglingyu eval failed"))
             }
         }
+        Command::KnowledgeCalibrate(args) => {
+            let data = fs::read_to_string(&args.input)
+                .with_context(|| format!("read {}", args.input.display()))?;
+            let input: KnowledgeCalibrationRunInput = serde_json::from_str(&data)
+                .with_context(|| format!("parse {}", args.input.display()))?;
+            let report = TonglingyuRuntimeStore::new(args.db.clone())
+                .run_knowledge_calibration_offline(input)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
         Command::RuntimeSchemaPreflight(args) => {
             let report = TonglingyuRuntimeStore::new(args.db.clone())
                 .runtime_schema_migration_preflight()?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
+        }
+        Command::RuntimeSchemaMigrate(args) => {
+            let report = runtime_schema_migrate_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("runtime schema migration did not complete"))
+            }
         }
         Command::KbSourceMetadataBackfill(args) => {
             let conn = open_db(&args.db)?;
@@ -1259,6 +1332,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
             "/v1/admin/governance/proposals",
             post(create_knowledge_patch_proposal_endpoint),
         )
+        .route("/v1/admin/knowledge/items", get(knowledge_items_endpoint))
+        .route(
+            "/v1/admin/knowledge/items/{item_id}",
+            get(knowledge_item_endpoint),
+        )
+        .route(
+            "/v1/admin/knowledge/items/{item_id}/review",
+            post(review_knowledge_item_endpoint),
+        )
         .route(
             "/v1/admin/governance/tasks/{task_id}",
             get(governance_task_endpoint).patch(update_governance_task_endpoint),
@@ -1388,6 +1470,41 @@ fn backup_db(args: &BackupDbArgs) -> Result<()> {
         args.output.display()
     );
     Ok(())
+}
+
+fn runtime_schema_migrate_command(args: &RuntimeSchemaMigrateArgs) -> Result<Value> {
+    let store = TonglingyuRuntimeStore::new(args.db.clone());
+    let before = store.runtime_schema_migration_preflight()?;
+    if let Some(parent) = args.db.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let conn = open_db(&args.db)?;
+    tonglingyu_runtime::init_runtime_schema(&conn)?;
+    let after = store.runtime_schema_migration_preflight()?;
+    let before_pending = before
+        .get("pending_migrations")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let after_pending = after
+        .get("pending_migrations")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    Ok(json!({
+        "object": "tonglingyu.runtime_schema_migration_apply",
+        "schema_version": 1,
+        "status": if after_pending == 0 { "ok" } else { "failed" },
+        "db_path_sha256": hash_text(&args.db.display().to_string()),
+        "before": before,
+        "after": after,
+        "pending_before": before_pending,
+        "pending_after": after_pending,
+        "applied_count": before_pending.saturating_sub(after_pending),
+        "will_rebuild_knowledge_base": false,
+        "will_delete_runtime_data": false,
+        "secret_values_printed": false,
+    }))
 }
 
 fn prune_runtime_command(args: &PruneRuntimeArgs) -> Result<Value> {
@@ -2915,6 +3032,16 @@ struct EvalQualityAccumulator {
     edition_labels: BTreeSet<String>,
     eval_failure_records: usize,
     blockers: BTreeSet<String>,
+    knowledge_state_selected_count: usize,
+    knowledge_state_runtime_usable_count: usize,
+    knowledge_state_human_marked_count: usize,
+    knowledge_state_system_calibrated_rejected_count: usize,
+    knowledge_state_rejected_or_deprecated_count: usize,
+    knowledge_state_candidate_or_source_snapshot_count: usize,
+    knowledge_state_runtime_policy_rejected_count: usize,
+    knowledge_state_reviewer_downgrade_cases: usize,
+    knowledge_state_forbidden_failure_cases: usize,
+    knowledge_state_eval_failure_cases: usize,
 }
 
 #[derive(Debug)]
@@ -3188,6 +3315,9 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
         } else {
             quality.forbidden_conclusion_avoided += 1;
         }
+        let knowledge_state_quality =
+            eval_case_knowledge_state_quality(package, forbidden_conclusion_hit);
+        record_eval_knowledge_state_quality(&mut quality, &knowledge_state_quality, &mut failures);
         if package.review.status == case.expected_review_status {
             quality.reviewer_status_matched += 1;
         }
@@ -3256,6 +3386,7 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
                 "source_ids": package.cards.iter().map(|card| card.source_id.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "edition_labels": package.cards.iter().map(|card| card.source_title.clone()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
                 "source_coverage_boundary": "wikisource_source_snapshot_only_not_facsimile_or_authoritative_collation",
+                "knowledge_state_summary": knowledge_state_quality,
             },
             "package_id": &package.package_id,
             "trace_id": &package.trace_id,
@@ -3520,6 +3651,129 @@ fn fallback_eval_quality_report(
     }
 }
 
+fn eval_case_knowledge_state_quality(
+    package: &EvidencePackage,
+    forbidden_conclusion_hit: bool,
+) -> Value {
+    let summary = &package.knowledge_state_summary;
+    let reviewer_downgrade =
+        summary.system_calibrated_rejected_count > 0 && package.review.status == "needs_revision";
+    let forbidden_failure = forbidden_conclusion_hit && summary.runtime_policy_rejected_count > 0;
+    json!({
+        "object": "tonglingyu.eval_case_knowledge_state_quality",
+        "policy_version": &summary.policy_version,
+        "selected_count": summary.selected_count,
+        "runtime_usable_selected_count": summary.runtime_usable_count,
+        "human_marked_selected_count": summary.human_marked_count,
+        "system_calibrated_rejected_count": summary.system_calibrated_rejected_count,
+        "rejected_or_deprecated_selected_count": summary.rejected_or_deprecated_count,
+        "candidate_or_source_snapshot_rejected_count": summary.candidate_or_source_snapshot_count,
+        "runtime_policy_rejected_count": summary.runtime_policy_rejected_count,
+        "reviewer_downgrade_case": reviewer_downgrade,
+        "forbidden_failure_case": forbidden_failure,
+        "state_grouped_eval": {
+            "runtime_usable": {
+                "selected_count": summary.runtime_usable_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": false,
+            },
+            "human_marked": {
+                "selected_count": summary.human_marked_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": false,
+            },
+            "system_calibrated": {
+                "rejected_count": summary.system_calibrated_rejected_count,
+                "reviewer_downgrade_case": reviewer_downgrade,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.system_calibrated_rejected_count > 0,
+            },
+            "rejected_or_deprecated": {
+                "matched_count": summary.rejected_or_deprecated_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.rejected_or_deprecated_count > 0,
+            },
+            "candidate_or_source_snapshot": {
+                "rejected_count": summary.candidate_or_source_snapshot_count,
+                "reviewer_downgrade_case": false,
+                "forbidden_failure_case": forbidden_failure
+                    && summary.candidate_or_source_snapshot_count > 0,
+            },
+        },
+    })
+}
+
+fn record_eval_knowledge_state_quality(
+    quality: &mut EvalQualityAccumulator,
+    case_quality: &Value,
+    failures: &mut Vec<String>,
+) {
+    let selected_count = eval_quality_usize(case_quality, "selected_count");
+    let runtime_usable_count = eval_quality_usize(case_quality, "runtime_usable_selected_count");
+    let human_marked_count = eval_quality_usize(case_quality, "human_marked_selected_count");
+    let system_calibrated_rejected_count =
+        eval_quality_usize(case_quality, "system_calibrated_rejected_count");
+    let rejected_or_deprecated_count =
+        eval_quality_usize(case_quality, "rejected_or_deprecated_selected_count");
+    let candidate_or_source_snapshot_count =
+        eval_quality_usize(case_quality, "candidate_or_source_snapshot_rejected_count");
+    let runtime_policy_rejected_count =
+        eval_quality_usize(case_quality, "runtime_policy_rejected_count");
+    let reviewer_downgrade_case = case_quality
+        .get("reviewer_downgrade_case")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let forbidden_failure_case = case_quality
+        .get("forbidden_failure_case")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    quality.knowledge_state_selected_count += selected_count;
+    quality.knowledge_state_runtime_usable_count += runtime_usable_count;
+    quality.knowledge_state_human_marked_count += human_marked_count;
+    quality.knowledge_state_system_calibrated_rejected_count += system_calibrated_rejected_count;
+    quality.knowledge_state_rejected_or_deprecated_count += rejected_or_deprecated_count;
+    quality.knowledge_state_candidate_or_source_snapshot_count +=
+        candidate_or_source_snapshot_count;
+    quality.knowledge_state_runtime_policy_rejected_count += runtime_policy_rejected_count;
+    if reviewer_downgrade_case {
+        quality.knowledge_state_reviewer_downgrade_cases += 1;
+    }
+    if forbidden_failure_case {
+        quality.knowledge_state_forbidden_failure_cases += 1;
+    }
+    if runtime_policy_rejected_count > 0
+        || rejected_or_deprecated_count > 0
+        || reviewer_downgrade_case
+        || forbidden_failure_case
+    {
+        quality.knowledge_state_eval_failure_cases += 1;
+    }
+    if runtime_policy_rejected_count > 0 {
+        failures.push(format!(
+            "knowledge state runtime policy rejected {} matched item(s)",
+            runtime_policy_rejected_count
+        ));
+    }
+    if rejected_or_deprecated_count > 0 {
+        failures.push(format!(
+            "rejected or deprecated knowledge matched selected evidence: {}",
+            rejected_or_deprecated_count
+        ));
+    }
+    if reviewer_downgrade_case {
+        failures.push("system_calibrated knowledge caused reviewer downgrade".to_string());
+    }
+    if forbidden_failure_case {
+        failures.push("knowledge state rejection coincided with forbidden conclusion".to_string());
+    }
+}
+
+fn eval_quality_usize(value: &Value, key: &str) -> usize {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
 fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     let mut blockers = quality.blockers.clone();
     if quality.quality_report_cases != quality.total_cases {
@@ -3567,6 +3821,18 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
     if quality.reviewer_status_matched != quality.total_cases {
         blockers.insert("reviewer_status_matched_below_100_percent".to_string());
     }
+    if quality.knowledge_state_runtime_policy_rejected_count > 0 {
+        blockers.insert("knowledge_state_runtime_policy_rejected".to_string());
+    }
+    if quality.knowledge_state_rejected_or_deprecated_count > 0 {
+        blockers.insert("knowledge_state_rejected_or_deprecated_selected".to_string());
+    }
+    if quality.knowledge_state_reviewer_downgrade_cases > 0 {
+        blockers.insert("knowledge_state_reviewer_downgrade".to_string());
+    }
+    if quality.knowledge_state_forbidden_failure_cases > 0 {
+        blockers.insert("knowledge_state_forbidden_failure".to_string());
+    }
     json!({
         "schema_version": EVAL_QUALITY_SCHEMA_VERSION,
         "status": if blockers.is_empty() { "passed" } else { "failed" },
@@ -3602,6 +3868,51 @@ fn eval_quality_summary(quality: &EvalQualityAccumulator) -> Value {
             quality.forbidden_conclusion_cases,
         ),
         "reviewer_status_matched": ratio_json(quality.reviewer_status_matched, quality.total_cases),
+        "knowledge_state_quality": {
+            "object": "tonglingyu.eval_knowledge_state_quality",
+            "policy_version": tonglingyu_runtime::KNOWLEDGE_RUNTIME_POLICY_VERSION,
+            "selected_count": quality.knowledge_state_selected_count,
+            "runtime_usable_selected_count": quality.knowledge_state_runtime_usable_count,
+            "human_marked_selected_count": quality.knowledge_state_human_marked_count,
+            "system_calibrated_rejected_count": quality
+                .knowledge_state_system_calibrated_rejected_count,
+            "rejected_or_deprecated_selected_count": quality
+                .knowledge_state_rejected_or_deprecated_count,
+            "candidate_or_source_snapshot_rejected_count": quality
+                .knowledge_state_candidate_or_source_snapshot_count,
+            "runtime_policy_rejected_count": quality
+                .knowledge_state_runtime_policy_rejected_count,
+            "reviewer_downgrade_cases": quality.knowledge_state_reviewer_downgrade_cases,
+            "forbidden_failure_cases": quality.knowledge_state_forbidden_failure_cases,
+            "eval_failure_cases": quality.knowledge_state_eval_failure_cases,
+            "state_grouped_eval": {
+                "runtime_usable": {
+                    "selected_count": quality.knowledge_state_runtime_usable_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "human_marked": {
+                    "selected_count": quality.knowledge_state_human_marked_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "system_calibrated": {
+                    "rejected_count": quality.knowledge_state_system_calibrated_rejected_count,
+                    "reviewer_downgrade_cases": quality.knowledge_state_reviewer_downgrade_cases,
+                    "forbidden_failure_cases": quality.knowledge_state_forbidden_failure_cases,
+                },
+                "rejected_or_deprecated": {
+                    "matched_count": quality.knowledge_state_rejected_or_deprecated_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+                "candidate_or_source_snapshot": {
+                    "rejected_count": quality.knowledge_state_candidate_or_source_snapshot_count,
+                    "reviewer_downgrade_cases": 0,
+                    "forbidden_failure_cases": 0,
+                },
+            },
+        },
         "eval_failure_records": quality.eval_failure_records,
         "source_coverage_boundary": {
             "source_snapshot_status": "wikisource_source_snapshot",
@@ -5273,6 +5584,18 @@ async fn create_governance_task_endpoint(
     };
     let source_entity_type = payload.source_entity_type.trim().to_string();
     let source_entity_id = payload.source_entity_id.trim().to_string();
+    let request_trace_id = payload
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let request_package_id = payload
+        .package_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let task_type = payload
         .task_type
         .filter(|value| !value.trim().is_empty())
@@ -5326,6 +5649,62 @@ async fn create_governance_task_endpoint(
             Ok(None) => Err(anyhow!("source package not found")),
             Err(error) => Err(error),
         },
+        "knowledge_item" => match state.runtime_store.read_knowledge_item(&source_entity_id) {
+            Ok(Some(_)) => {
+                let trace_id = match request_trace_id {
+                    Some(trace_id) => trace_id,
+                    None => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "governance_task_trace_required",
+                            "trace_id is required for knowledge item review tasks",
+                            None,
+                        );
+                    }
+                };
+                state
+                    .runtime_store
+                    .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                        source_entity_type: "knowledge_item".to_string(),
+                        source_entity_id: source_entity_id.clone(),
+                        trace_id,
+                        package_id: request_package_id,
+                        source_failure_id: None,
+                        task_type,
+                        priority: payload.priority,
+                        proposed_fix: payload.proposed_fix,
+                        agent_cluster_key: payload.agent_cluster_key,
+                    })
+            }
+            Ok(None) => Err(anyhow!("source knowledge item not found")),
+            Err(error) => Err(error),
+        },
+        "eval_miss" | "user_feedback" => {
+            let trace_id = match request_trace_id {
+                Some(trace_id) => trace_id,
+                None => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "governance_task_trace_required",
+                        "trace_id is required for this governance task source",
+                        None,
+                    );
+                }
+            };
+            state
+                .runtime_store
+                .create_governance_task(KnowledgeGovernanceTaskCreateInput {
+                    source_entity_type: source_entity_type.clone(),
+                    source_entity_id: source_entity_id.clone(),
+                    trace_id,
+                    package_id: request_package_id,
+                    source_failure_id: None,
+                    task_type,
+                    priority: payload.priority,
+                    proposed_fix: payload.proposed_fix,
+                    agent_cluster_key: payload.agent_cluster_key,
+                })
+        }
         _ => Err(anyhow!("unsupported governance task source entity")),
     };
     match create_result {
@@ -5521,6 +5900,308 @@ async fn create_knowledge_patch_proposal_endpoint(
             error_response(
                 StatusCode::BAD_REQUEST,
                 "knowledge_patch_proposal_create_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn knowledge_items_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match knowledge_item_list_input(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_knowledge_item_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    match state.runtime_store.list_knowledge_items(input) {
+        Ok(list) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_list",
+                &actor,
+                json!({
+                    "action": "list",
+                    "filter_summary": knowledge_item_filter_summary(&params),
+                    "page_size": list.limit,
+                    "offset": list.offset,
+                    "result_count": list.items.len(),
+                    "trace_id": Value::Null,
+                    "result": "listed",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_list",
+                "schema_version": KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
+                "list": list,
+            }))
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "knowledge item list failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "knowledge_item_list_failed",
+                "knowledge item list failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn knowledge_item_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(item_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match state.runtime_store.read_knowledge_item(&item_id) {
+        Ok(Some(item)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "item_id": item_id,
+                    "kind": item.kind.as_str(),
+                    "state": item.state.as_str(),
+                    "result_count": 1,
+                    "result": "found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_read",
+                "schema_version": KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION,
+                "item": item,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_read",
+                &actor,
+                json!({
+                    "action": "read",
+                    "item_id_sha256": hash_text(&item_id),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::NOT_FOUND,
+                "knowledge_item_not_found",
+                "knowledge item was not found",
+                None,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(item_id = %item_id, error = %error, "knowledge item read failed");
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "knowledge_item_read_failed",
+                "knowledge item read failed",
+                None,
+            )
+        }
+    }
+}
+
+async fn review_knowledge_item_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(item_id): AxumPath<String>,
+    Json(payload): Json<KnowledgeItemHumanReviewRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "knowledge_item_review") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let decision = match KnowledgeItemHumanReviewDecision::parse(&payload.decision) {
+        Ok(decision) => decision,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_knowledge_item_review_decision",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let input = KnowledgeItemHumanReviewInput {
+        task_id: payload.task_id,
+        decision,
+        trace_id: payload.trace_id,
+        actor: actor.clone(),
+        reviewer: payload.reviewer,
+        review_note: payload.review_note,
+        evidence_ref: payload.evidence_ref,
+        expected_state_version: payload.if_match_state_version,
+        expected_task_updated_at: payload.if_match_task_updated_at,
+    };
+    match state
+        .runtime_store
+        .review_knowledge_item_human(&item_id, input)
+    {
+        Ok(Some(result)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &result.item.item_id,
+                    "task_id": &result.task.task_id,
+                    "decision": result.decision.as_str(),
+                    "state": result.item.state.as_str(),
+                    "state_version": result.item.state_version,
+                    "reviewer": &result.task.reviewer,
+                    "review_note_sha256": result.task.review_note.as_deref().map(hash_text),
+                    "evidence_ref_sha256": result.task.evidence_ref.as_deref().map(hash_text),
+                    "kb_rebuild_required": result.kb_rebuild_required,
+                    "eval_diff_required": result.eval_diff_required,
+                    "release_gate_required": result.release_gate_required,
+                    "result_count": 1,
+                    "result": "reviewed_or_idempotent",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.knowledge_item_admin_review",
+                "schema_version": KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Ok(None) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id_sha256": hash_text(&item_id),
+                    "result_count": 0,
+                    "result": "not_found",
+                }),
+            ) {
+                tracing::warn!(error = %error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::NOT_FOUND,
+                "knowledge_item_not_found",
+                "knowledge item was not found",
+                None,
+            )
+        }
+        Err(error) if error.to_string().contains("conflict") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &item_id,
+                    "result_count": 0,
+                    "result": "conflict",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            error_response(
+                StatusCode::CONFLICT,
+                "knowledge_item_review_conflict",
+                "knowledge item review conflict",
+                None,
+            )
+        }
+        Err(error) if error.to_string().contains("not found") => {
+            if let Err(audit_error) = append_admin_audit_event(
+                &state.db,
+                "knowledge_item_admin_review",
+                &actor,
+                json!({
+                    "action": "review",
+                    "item_id": &item_id,
+                    "result_count": 0,
+                    "result": "source_not_found",
+                }),
+            ) {
+                tracing::warn!(error = %audit_error, "knowledge item admin review audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(item_id = %item_id, error = %error, "knowledge item review failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "knowledge_item_review_failed",
                 safe_error_detail(&error),
                 None,
             )
@@ -5862,6 +6543,7 @@ async fn admin_access_denial_endpoint(
 enum OpenWebUiMetadataTask {
     Title,
     Tags,
+    FollowUps,
 }
 
 impl OpenWebUiMetadataTask {
@@ -5869,6 +6551,7 @@ impl OpenWebUiMetadataTask {
         match self {
             Self::Title => "title",
             Self::Tags => "tags",
+            Self::FollowUps => "follow_ups",
         }
     }
 }
@@ -5887,6 +6570,11 @@ fn detect_openwebui_metadata_task(question: &str) -> Option<OpenWebUiMetadataTas
         && normalized.contains(r#"JSON format: { "tags""#)
     {
         return Some(OpenWebUiMetadataTask::Tags);
+    }
+    if normalized.contains("Suggest 3-5 relevant follow-up questions or prompts")
+        && normalized.contains(r#"JSON format: { "follow_ups""#)
+    {
+        return Some(OpenWebUiMetadataTask::FollowUps);
     }
     None
 }
@@ -5909,6 +6597,22 @@ fn openwebui_metadata_completion_content(task: OpenWebUiMetadataTask, question: 
                 vec!["Arts", "Literature", "Evidence Review"]
             };
             json!({ "tags": tags }).to_string()
+        }
+        OpenWebUiMetadataTask::FollowUps => {
+            let follow_ups = if use_chinese {
+                vec![
+                    "还需要哪些证据才能确认版本边界？",
+                    "当前证据包覆盖了哪些正文位置？",
+                    "哪些结论必须等待人工复核？",
+                ]
+            } else {
+                vec![
+                    "Which evidence is still needed for edition boundaries?",
+                    "Which source passages are covered by the current package?",
+                    "Which claims still require human review?",
+                ]
+            };
+            json!({ "follow_ups": follow_ups }).to_string()
         }
     }
 }
@@ -6538,7 +7242,29 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("review");
         map.remove("session_id");
     }
+    if let Some(content) = public
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(public_answer_content)
+    {
+        public["choices"][0]["message"]["content"] = json!(content);
+    }
     public
+}
+
+fn public_answer_content(content: &str) -> String {
+    if contains_public_forbidden_knowledge_state_term(content) {
+        "当前回答未通过公开输出检查，不能直接返回。请基于可追溯证据重新提问。".to_string()
+    } else {
+        content.to_string()
+    }
+}
+
+fn contains_public_forbidden_knowledge_state_term(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS
+        .iter()
+        .any(|term| lower.contains(term))
 }
 
 fn cached_runtime_stream_events(value: &Value) -> Option<Vec<RuntimeWorkflowStreamEvent>> {
@@ -6558,10 +7284,12 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_MODEL_ID);
-    let content = value
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let content = public_answer_content(
+        value
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
     let mut chunks = Vec::new();
     chunks.push(format!(
@@ -6577,7 +7305,7 @@ fn streaming_response_from_completion_value(value: &Value) -> Response {
             }]
         })
     ));
-    for piece in text_stream_chunks(content, 96) {
+    for piece in text_stream_chunks(&content, 96) {
         chunks.push(format!(
             "data: {}\n\n",
             json!({
@@ -6632,6 +7360,14 @@ fn streaming_response_from_runtime_events(
     value: &Value,
     events: &[RuntimeWorkflowStreamEvent],
 ) -> Response {
+    let streamed_content = events
+        .iter()
+        .filter(|event| event.event_type == "content_delta")
+        .filter_map(|event| event.content_delta.as_deref())
+        .collect::<String>();
+    if contains_public_forbidden_knowledge_state_term(&streamed_content) {
+        return streaming_response_from_completion_value(&public_completion_value(value));
+    }
     let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
     let mut chunks = Vec::new();
     chunks.push(format!(
@@ -7073,6 +7809,8 @@ fn governance_task_list_input(
             "retrieval_failure_cluster",
             "trace",
             "package",
+            "knowledge_item",
+            "eval_miss",
             "user_feedback",
             "knowledge_patch_proposal",
         ],
@@ -7116,6 +7854,43 @@ fn governance_task_filter_summary(params: &BTreeMap<String, String>) -> Value {
         "has_source_failure_id": params.contains_key("source_failure_id"),
         "source_entity_type": params.get("source_entity_type"),
         "has_source_entity_id": params.contains_key("source_entity_id"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
+fn knowledge_item_list_input(params: &BTreeMap<String, String>) -> Result<KnowledgeItemListInput> {
+    for key in params.keys() {
+        if !matches!(key.as_str(), "kind" | "state" | "limit" | "offset") {
+            return Err(anyhow!("unsupported knowledge item filter {key}"));
+        }
+    }
+    let kind = params
+        .get("kind")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(KnowledgeItemKind::parse)
+        .transpose()?;
+    let state = params
+        .get("state")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(KnowledgeState::parse)
+        .transpose()?;
+    let limit = parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50);
+    let offset = parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0);
+    Ok(KnowledgeItemListInput {
+        kind,
+        state,
+        limit,
+        offset,
+    })
+}
+
+fn knowledge_item_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "kind": params.get("kind"),
+        "state": params.get("state"),
         "has_limit": params.contains_key("limit"),
         "has_offset": params.contains_key("offset"),
     })
@@ -7681,7 +8456,10 @@ fn new_trace_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tonglingyu_runtime::{RetrievalFailureListInput, RetrievalFailureView, ReviewRecord};
+    use tonglingyu_runtime::{
+        KnowledgeItemCreateInput, KnowledgeItemStateUpdateInput, RetrievalFailureListInput,
+        RetrievalFailureView, ReviewRecord,
+    };
 
     #[test]
     fn public_completion_strips_cached_runtime_stream_events() {
@@ -7861,6 +8639,32 @@ mod tests {
         std::env::temp_dir().join(format!("{label}-{}.db", new_trace_id()))
     }
 
+    #[test]
+    fn runtime_schema_migrate_command_applies_additive_migrations() {
+        let db_path = temp_gateway_db_path("tonglingyu-runtime-schema-migrate");
+        remove_sqlite_file_set(&db_path);
+        let report = runtime_schema_migrate_command(&RuntimeSchemaMigrateArgs {
+            db: db_path.clone(),
+        })
+        .expect("runtime schema migrate");
+
+        assert_eq!(
+            report["object"],
+            json!("tonglingyu.runtime_schema_migration_apply")
+        );
+        assert_eq!(report["status"], json!("ok"));
+        assert_eq!(report["pending_after"], json!(0));
+        assert_eq!(report["will_rebuild_knowledge_base"], json!(false));
+        assert_eq!(report["will_delete_runtime_data"], json!(false));
+        assert_eq!(report["secret_values_printed"], json!(false));
+        assert!(
+            report["pending_before"].as_u64().unwrap_or_default() > 0,
+            "{report}"
+        );
+        assert_eq!(report["after"]["pending_migrations"], json!([]), "{report}");
+        remove_sqlite_file_set(&db_path);
+    }
+
     fn test_app_state(db_path: PathBuf) -> AppState {
         AppState {
             db: db_path.clone(),
@@ -7902,6 +8706,7 @@ mod tests {
             cards: Vec::new(),
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -8270,6 +9075,46 @@ mod tests {
     }
 
     #[test]
+    fn eval_quality_summary_fails_closed_on_knowledge_state_rejection() {
+        let quality = EvalQualityAccumulator {
+            total_cases: 1,
+            quality_report_cases: 1,
+            quality_report_production_ready_required_cases: 1,
+            quality_report_production_ready_cases: 1,
+            classified_cases: 1,
+            expected_evidence_cases: 1,
+            expected_hit_at_1: 1,
+            expected_hit_at_3: 1,
+            expected_hit_at_8: 1,
+            required_type_cases: 1,
+            required_type_passed: 1,
+            exact_term_total: 1,
+            exact_term_passed: 1,
+            source_boundary_confirmation_cases: 1,
+            source_boundary_confirmation_avoided: 1,
+            forbidden_conclusion_cases: 1,
+            forbidden_conclusion_avoided: 1,
+            reviewer_status_matched: 1,
+            knowledge_state_runtime_policy_rejected_count: 1,
+            knowledge_state_system_calibrated_rejected_count: 1,
+            knowledge_state_reviewer_downgrade_cases: 1,
+            ..EvalQualityAccumulator::default()
+        };
+
+        let summary = eval_quality_summary(&quality);
+
+        assert_eq!(summary["status"], json!("failed"));
+        assert_eq!(
+            summary["knowledge_state_quality"]["runtime_policy_rejected_count"],
+            json!(1)
+        );
+        assert!(summary["blockers"].as_array().is_some_and(|items| {
+            items.contains(&json!("knowledge_state_runtime_policy_rejected"))
+                && items.contains(&json!("knowledge_state_reviewer_downgrade"))
+        }));
+    }
+
+    #[test]
     fn eval_cli_defaults_to_snapshot_copy() {
         let args = Args::try_parse_from(["tonglingyu-gateway", "eval"]).expect("parse eval args");
         let Command::Eval(eval_args) = args.command else {
@@ -8355,6 +9200,7 @@ mod tests {
             cards: Vec::new(),
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -8867,6 +9713,8 @@ mod tests {
             Json(GovernanceTaskManualCreateRequest {
                 source_entity_type: "trace".to_string(),
                 source_entity_id: "trace-admin-governance-task".to_string(),
+                trace_id: None,
+                package_id: None,
                 task_type: Some("expert_review".to_string()),
                 priority: Some("p0".to_string()),
                 proposed_fix: Some("request expert review".to_string()),
@@ -9035,6 +9883,329 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_admin_endpoints_list_read_and_audit_state_boundary() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Alias,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-item".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-item".to_string()],
+                payload: json!({
+                    "alias": "stone",
+                    "person_id": "p-baoyu",
+                    "scope": "admin endpoint test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin endpoint test".to_string(),
+            })
+            .expect("knowledge item creates");
+        let updated = state
+            .runtime_store
+            .update_knowledge_item_state(
+                &created.item_id,
+                KnowledgeItemStateUpdateInput {
+                    new_state: KnowledgeState::SystemCalibrated,
+                    trace_id: "trace-admin-knowledge-item".to_string(),
+                    actor: "calibration-runner".to_string(),
+                    reason: "evidence judge passed for admin endpoint test".to_string(),
+                    evidence_refs: vec!["block://wikisource/admin-item".to_string()],
+                    expected_state_version: created.state_version,
+                },
+            )
+            .expect("knowledge item state updates")
+            .expect("knowledge item exists");
+
+        let mut params = BTreeMap::new();
+        params.insert("kind".to_string(), "alias".to_string());
+        params.insert("state".to_string(), "system_calibrated".to_string());
+        let list_response =
+            knowledge_items_endpoint(State(state.clone()), admin_headers(), Query(params)).await;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body: Value =
+            serde_json::from_str(&response_text(list_response).await).expect("list response json");
+        assert_eq!(
+            list_body["object"],
+            json!("tonglingyu.knowledge_item_admin_list")
+        );
+        assert_eq!(
+            list_body["schema_version"],
+            json!(KNOWLEDGE_ITEM_STATE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            list_body["list"]["items"][0]["item_id"],
+            json!(updated.item_id)
+        );
+        assert_eq!(list_body["list"]["items"][0]["kind"], json!("alias"));
+        assert_eq!(
+            list_body["list"]["items"][0]["state"],
+            json!("system_calibrated")
+        );
+        assert_eq!(list_body["list"]["items"][0]["state_version"], json!(2));
+
+        let read_response = knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(updated.item_id.clone()),
+        )
+        .await;
+        assert_eq!(read_response.status(), StatusCode::OK);
+        let read_body: Value =
+            serde_json::from_str(&response_text(read_response).await).expect("read response json");
+        assert_eq!(
+            read_body["object"],
+            json!("tonglingyu.knowledge_item_admin_read")
+        );
+        assert_eq!(read_body["item"]["state"], json!("system_calibrated"));
+        assert_eq!(read_body["item"]["payload"]["alias"], json!("stone"));
+
+        let mut invalid_params = BTreeMap::new();
+        invalid_params.insert("state".to_string(), "accepted".to_string());
+        let invalid_response =
+            knowledge_items_endpoint(State(state), admin_headers(), Query(invalid_params)).await;
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_list"), 1);
+        assert_eq!(audit_event_count(&db_path, "knowledge_item_admin_read"), 1);
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_admin_review_requires_admin_task_and_records_boundaries() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item-review");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Alias,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-review".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-review".to_string()],
+                payload: json!({
+                    "alias": "stone",
+                    "scope": "admin review endpoint test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin review endpoint test".to_string(),
+            })
+            .expect("knowledge item creates");
+
+        let task_response = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "knowledge_item".to_string(),
+                source_entity_id: created.item_id.clone(),
+                trace_id: Some("trace-admin-knowledge-item-review".to_string()),
+                package_id: None,
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("review knowledge item before human marking".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(task_response.status(), StatusCode::OK);
+        let task_body: Value =
+            serde_json::from_str(&response_text(task_response).await).expect("task response json");
+        assert_eq!(
+            task_body["task"]["source_entity_type"],
+            json!("knowledge_item")
+        );
+        let task_id = task_body["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let task_updated_at = task_body["task"]["updated_at"]
+            .as_str()
+            .expect("task updated_at")
+            .to_string();
+
+        let ordinary = review_knowledge_item_endpoint(
+            State(state.clone()),
+            gateway_headers("user-1"),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some(task_updated_at.clone()),
+            }),
+        )
+        .await;
+        assert_eq!(ordinary.status(), StatusCode::UNAUTHORIZED);
+
+        let review = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted for human marked boundary".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some(task_updated_at),
+            }),
+        )
+        .await;
+        assert_eq!(review.status(), StatusCode::OK);
+        let review_body: Value =
+            serde_json::from_str(&response_text(review).await).expect("review response json");
+        assert_eq!(
+            review_body["object"],
+            json!("tonglingyu.knowledge_item_admin_review")
+        );
+        assert_eq!(
+            review_body["schema_version"],
+            json!(KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            review_body["result"]["item"]["state"],
+            json!("human_marked")
+        );
+        assert_eq!(review_body["result"]["task"]["status"], json!("accepted"));
+        assert_eq!(review_body["result"]["kb_rebuild_required"], json!(true));
+        assert_eq!(review_body["result"]["eval_diff_required"], json!(true));
+        assert_eq!(review_body["result"]["release_gate_required"], json!(true));
+
+        let retry = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id,
+                decision: "accept".to_string(),
+                trace_id: "trace-admin-knowledge-item-review".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "accepted for human marked boundary".to_string(),
+                evidence_ref: "source://review-note/admin-review".to_string(),
+                if_match_state_version: created.state_version,
+                if_match_task_updated_at: Some("stale-task-updated-at".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let conn = open_db(&db_path).expect("db opens");
+        let history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM knowledge_item_state_history WHERE item_id = ?1",
+                params![created.item_id],
+                |row| row.get(0),
+            )
+            .expect("history count");
+        assert_eq!(history_count, 2);
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_admin_review"),
+            2
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_human_reviewed"),
+            1
+        );
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn knowledge_item_review_conflict_does_not_update_task_or_item() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-knowledge-item-review-conflict");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let created = state
+            .runtime_store
+            .create_knowledge_item(KnowledgeItemCreateInput {
+                kind: KnowledgeItemKind::Term,
+                initial_state: KnowledgeState::Candidate,
+                source_refs: vec!["source://wikisource/chapter/admin-review-conflict".to_string()],
+                evidence_refs: vec!["block://wikisource/admin-review-conflict".to_string()],
+                payload: json!({
+                    "term": "stone",
+                    "scope": "admin review conflict test",
+                }),
+                schema_version: None,
+                trace_id: "trace-admin-knowledge-item-review-conflict".to_string(),
+                actor: "system-calibration".to_string(),
+                reason: "candidate created for admin review conflict test".to_string(),
+            })
+            .expect("knowledge item creates");
+        let task_response = create_governance_task_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(GovernanceTaskManualCreateRequest {
+                source_entity_type: "knowledge_item".to_string(),
+                source_entity_id: created.item_id.clone(),
+                trace_id: Some("trace-admin-knowledge-item-review-conflict".to_string()),
+                package_id: None,
+                task_type: Some("expert_review".to_string()),
+                priority: Some("p0".to_string()),
+                proposed_fix: Some("review knowledge item before rejection".to_string()),
+                agent_cluster_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(task_response.status(), StatusCode::OK);
+        let task_body: Value =
+            serde_json::from_str(&response_text(task_response).await).expect("task response json");
+        let task_id = task_body["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+        let task_updated_at = task_body["task"]["updated_at"]
+            .as_str()
+            .expect("task updated_at")
+            .to_string();
+
+        let conflict = review_knowledge_item_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(created.item_id.clone()),
+            Json(KnowledgeItemHumanReviewRequest {
+                task_id: task_id.clone(),
+                decision: "reject".to_string(),
+                trace_id: "trace-admin-knowledge-item-review-conflict".to_string(),
+                reviewer: "admin-1".to_string(),
+                review_note: "reject with stale item state".to_string(),
+                evidence_ref: "source://review-note/admin-review-conflict".to_string(),
+                if_match_state_version: created.state_version + 1,
+                if_match_task_updated_at: Some(task_updated_at),
+            }),
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let item = state
+            .runtime_store
+            .read_knowledge_item(&created.item_id)
+            .expect("item reads")
+            .expect("item exists");
+        assert_eq!(item.state, KnowledgeState::Candidate);
+        let task = state
+            .runtime_store
+            .read_governance_task(&task_id)
+            .expect("task reads")
+            .expect("task exists");
+        assert_eq!(task["status"], json!("open"));
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_admin_review"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "knowledge_item_human_reviewed"),
+            0
+        );
+        remove_sqlite_file_set(&db_path);
     }
 
     #[tokio::test]
@@ -9215,6 +10386,16 @@ JSON format: { "tags": ["tag1", "tag2", "tag3"] }
 <chat_history>
 USER: 通灵玉是什么？
 </chat_history>"#;
+        let follow_ups_prompt = r#"### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a **user**, based on the chat history, to help continue or deepen the discussion.
+
+### Output:
+JSON format: { "follow_ups": ["Question 1?", "Question 2?", "Question 3?"] }
+
+### Chat History:
+<chat_history>
+USER: 通灵玉是什么？
+</chat_history>"#;
 
         assert_eq!(
             detect_openwebui_metadata_task(title_prompt),
@@ -9223,6 +10404,10 @@ USER: 通灵玉是什么？
         assert_eq!(
             detect_openwebui_metadata_task(tags_prompt),
             Some(OpenWebUiMetadataTask::Tags)
+        );
+        assert_eq!(
+            detect_openwebui_metadata_task(follow_ups_prompt),
+            Some(OpenWebUiMetadataTask::FollowUps)
         );
         assert_eq!(detect_openwebui_metadata_task("通灵玉是什么？"), None);
     }
@@ -9306,6 +10491,82 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
     }
 
     #[tokio::test]
+    async fn openwebui_follow_ups_request_does_not_mutate_rqa_governance() {
+        let db_path = temp_gateway_db_path("tonglingyu-openwebui-follow-ups");
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let metadata_prompt = r#"### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next in this conversation as a **user**, based on the chat history, to help continue or deepen the discussion.
+### Guidelines:
+- Response must be a JSON object with a "follow_ups" key containing an array of strings, no extra text or formatting.
+### Output:
+JSON format: { "follow_ups": ["Question 1?", "Question 2?", "Question 3?"] }
+### Chat History:
+<chat_history>
+USER: 请简要说明第三回林黛玉初进荣国府时当前证据状态。
+ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持部分文本事实。
+</chat_history>"#;
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("openwebui-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": metadata_prompt}],
+                "metadata": {
+                    "user_id": "openwebui-user",
+                    "chat_id": "openwebui-chat",
+                    "message_id": "openwebui-follow-ups-message",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        let content = body["choices"][0]["message"]["content"]
+            .as_str()
+            .expect("metadata content");
+        let metadata_json: Value = serde_json::from_str(content).expect("metadata content is json");
+        assert!(metadata_json["follow_ups"].is_array());
+        assert_eq!(body["model"], json!(DEFAULT_MODEL_ID));
+        assert!(body.get("trace_id").is_none());
+        assert!(body.get("evidence_package_id").is_none());
+        assert!(body.get("review").is_none());
+        assert!(body.get("session_id").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        assert_eq!(
+            table_count(&conn, "retrieval_failures").expect("failure count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "knowledge_governance_tasks").expect("task count"),
+            0
+        );
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata message count"),
+            1
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "openwebui_metadata_request_handled"),
+            1
+        );
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
     async fn chat_completion_accepts_long_openwebui_history() {
         let db_path = temp_gateway_db_path("tonglingyu-long-history");
         let state = Arc::new(test_app_state(db_path.clone()));
@@ -9374,6 +10635,7 @@ USER: 介绍尤三姐
             cards: vec![eval_test_card("block-public-rqa-test")],
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
@@ -9400,6 +10662,31 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("session-public-rqa-test"));
     }
 
+    #[test]
+    fn public_completion_blocks_knowledge_state_labels_in_answer_content() {
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "internal state: system_calibrated runtime_usable human_marked knowledge_item_refs"
+                .to_string(),
+            None,
+            Some("session-public-knowledge-state-test"),
+        );
+
+        let rendered =
+            serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
+
+        for forbidden in [
+            "system_calibrated",
+            "runtime_usable",
+            "human_marked",
+            "knowledge_item_refs",
+            "session-public-knowledge-state-test",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+        assert!(rendered.contains("公开输出检查"));
+    }
+
     #[tokio::test]
     async fn streaming_completion_does_not_expose_rqa_internal_fields() {
         let package = EvidencePackage {
@@ -9409,6 +10696,7 @@ USER: 介绍尤三姐
             cards: vec![eval_test_card("block-public-rqa-stream-test")],
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
+            knowledge_state_summary: Default::default(),
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
@@ -9432,6 +10720,44 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("pkg-public-rqa-stream-test"));
         assert!(!rendered.contains("reviewer"));
         assert!(!rendered.contains("session-public-rqa-stream-test"));
+    }
+
+    #[tokio::test]
+    async fn streaming_completion_blocks_knowledge_state_labels_in_deltas() {
+        let value = completion_value(
+            DEFAULT_MODEL_ID,
+            "fallback contains no internal label".to_string(),
+            None,
+            Some("session-public-knowledge-state-stream-test"),
+        );
+        let response = streaming_response_from_runtime_events(
+            DEFAULT_MODEL_ID,
+            &value,
+            &[RuntimeWorkflowStreamEvent {
+                sequence: 1,
+                event_type: "content_delta".to_string(),
+                profile: "honglou-main".to_string(),
+                trace_id: "trace-public-knowledge-state-stream-test".to_string(),
+                content_delta: Some("leaked runtime_usable knowledge_item_refs".to_string()),
+                output_ref: None,
+                package_id: None,
+                metadata: json!({"state": "system_calibrated"}),
+            }],
+        );
+
+        let rendered = response_text(response).await;
+
+        for forbidden in [
+            "system_calibrated",
+            "runtime_usable",
+            "human_marked",
+            "knowledge_item_refs",
+            "trace-public-knowledge-state-stream-test",
+            "session-public-knowledge-state-stream-test",
+        ] {
+            assert!(!rendered.contains(forbidden));
+        }
+        assert!(rendered.contains("fallback contains no internal label"));
     }
 
     #[test]
