@@ -8,6 +8,7 @@ use agent_core::{
 use agent_runtime::{HermesRuntimeClient, MinimalRuntimeClient, RuntimeProfileRegistry};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use ferrous_opencc::{OpenCC, config::BuiltinConfig};
 use futures_util::future::try_join_all;
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 use time::OffsetDateTime;
@@ -92,6 +93,49 @@ pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report
 pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
 
+pub trait TextNormalizer {
+    fn normalize_for_search(&self, input: &str) -> String;
+    fn normalize_query(&self, input: &str) -> String;
+    fn normalize_alias(&self, input: &str) -> String;
+    fn normalize_title(&self, input: &str) -> String;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct OpenCcTextNormalizer;
+
+impl TextNormalizer for OpenCcTextNormalizer {
+    fn normalize_for_search(&self, input: &str) -> String {
+        let converted = t2s_opencc().convert(input);
+        apply_project_normalization_overrides(&converted)
+    }
+
+    fn normalize_query(&self, input: &str) -> String {
+        self.normalize_for_search(input)
+    }
+
+    fn normalize_alias(&self, input: &str) -> String {
+        self.normalize_for_search(input)
+    }
+
+    fn normalize_title(&self, input: &str) -> String {
+        self.normalize_for_search(input)
+    }
+}
+
+static TEXT_NORMALIZER: OpenCcTextNormalizer = OpenCcTextNormalizer;
+static T2S_OPENCC: OnceLock<OpenCC> = OnceLock::new();
+
+fn text_normalizer() -> &'static dyn TextNormalizer {
+    &TEXT_NORMALIZER
+}
+
+fn t2s_opencc() -> &'static OpenCC {
+    T2S_OPENCC.get_or_init(|| {
+        OpenCC::from_config(BuiltinConfig::T2s)
+            .expect("embedded OpenCC t2s config must load for search normalization")
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalQuerySummary {
     pub question_sha256: String,
@@ -156,6 +200,7 @@ pub struct RetrievalQualityReport {
     pub expanded_terms: Vec<String>,
     pub protected_terms: Vec<String>,
     pub expanded_aliases: Vec<String>,
+    pub normalized_match_channels: BTreeMap<String, usize>,
     pub candidate_count: usize,
     pub selected_count: usize,
     pub channel_distribution: BTreeMap<String, usize>,
@@ -8759,6 +8804,7 @@ fn reviewer_retrieval_quality_report(
         expanded_terms: redacted_terms,
         protected_terms: Vec::new(),
         expanded_aliases: Vec::new(),
+        normalized_match_channels: BTreeMap::new(),
         candidate_count: package.cards.len(),
         selected_count: package.cards.len(),
         channel_distribution: retrieval_channel_distribution(&package.cards),
@@ -10502,6 +10548,7 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
             source_id TEXT NOT NULL REFERENCES sources(source_id),
             section_id TEXT NOT NULL,
             source_title TEXT NOT NULL,
+            normalized_source_title TEXT NOT NULL DEFAULT '',
             source_url TEXT NOT NULL,
             revision_id INTEGER,
             block_index INTEGER NOT NULL,
@@ -10589,6 +10636,7 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS aliases (
             alias TEXT PRIMARY KEY,
+            normalized_alias TEXT NOT NULL DEFAULT '',
             person_id TEXT NOT NULL REFERENCES people(person_id),
             scope TEXT NOT NULL
         );
@@ -10659,6 +10707,9 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
         CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
         CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
+        CREATE INDEX IF NOT EXISTS idx_blocks_normalized_source_title
+            ON blocks(normalized_source_title);
+        CREATE INDEX IF NOT EXISTS idx_aliases_normalized_alias ON aliases(normalized_alias);
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
         CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
         CREATE INDEX IF NOT EXISTS idx_commentary_links_block ON commentary_links(block_id);
@@ -10671,6 +10722,7 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
         "#,
     )?;
     ensure_source_metadata_columns(conn)?;
+    ensure_search_normalization_columns(conn)?;
     Ok(())
 }
 
@@ -10694,6 +10746,73 @@ fn ensure_source_metadata_columns(conn: &Connection) -> Result<()> {
         if !existing.contains(column) {
             conn.execute(&format!("ALTER TABLE sources ADD COLUMN {column} TEXT"), [])?;
         }
+    }
+    Ok(())
+}
+
+fn ensure_search_normalization_columns(conn: &Connection) -> Result<()> {
+    let block_columns = table_column_names(conn, "blocks")?;
+    if !block_columns.contains("normalized_source_title") {
+        conn.execute(
+            "ALTER TABLE blocks ADD COLUMN normalized_source_title TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    let alias_columns = table_column_names(conn, "aliases")?;
+    if !alias_columns.contains("normalized_alias") {
+        conn.execute(
+            "ALTER TABLE aliases ADD COLUMN normalized_alias TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_blocks_normalized_source_title ON blocks(normalized_source_title)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_aliases_normalized_alias ON aliases(normalized_alias)",
+        [],
+    )?;
+    backfill_search_normalization_columns(conn)?;
+    Ok(())
+}
+
+fn backfill_search_normalization_columns(conn: &Connection) -> Result<()> {
+    let block_rows = {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT block_id, source_title
+            FROM blocks
+            WHERE normalized_source_title IS NULL OR normalized_source_title = ''
+            "#,
+        )?;
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (block_id, source_title) in block_rows {
+        conn.execute(
+            "UPDATE blocks SET normalized_source_title = ?1 WHERE block_id = ?2",
+            params![normalize_title(&source_title), block_id],
+        )?;
+    }
+    let alias_rows = {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT alias
+            FROM aliases
+            WHERE normalized_alias IS NULL OR normalized_alias = ''
+            "#,
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for alias in alias_rows {
+        conn.execute(
+            "UPDATE aliases SET normalized_alias = ?1 WHERE alias = ?2",
+            params![normalize_alias(&alias), alias],
+        )?;
     }
     Ok(())
 }
@@ -11054,6 +11173,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
     for block in read_jsonl::<BlockRecord>(&blocks_path)? {
         block_count += 1;
         let normalized_text = normalize_text(&block.text);
+        let normalized_source_title = normalize_title(&block.source_title);
         let evidence_type = evidence_type(&source.source_category, &source.source_id, &block);
         let chapter_no = extract_chapter_no(&block.source_title);
         if let Some(no) = chapter_no {
@@ -11068,15 +11188,17 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
         conn.execute(
             r#"
             INSERT INTO blocks (
-                block_id, source_id, section_id, source_title, source_url, revision_id,
-                block_index, kind, tag, text, normalized_text, evidence_type, chapter_no
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 block.block_id,
                 block.source_id,
                 block.section_id,
                 block.source_title,
+                normalized_source_title,
                 block.source_url,
                 block.revision_id,
                 block.block_index,
@@ -11260,15 +11382,17 @@ fn apply_alias_patch(
         &person_id,
         "accepted alias proposal target person does not exist",
     )?;
-    let existing_person_id: Option<String> = conn
-        .query_row(
-            "SELECT person_id FROM aliases WHERE alias = ?1",
-            params![&alias],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(existing_person_id) = existing_person_id {
-        if existing_person_id != person_id {
+    let normalized_alias = normalize_alias(&alias);
+    let existing_person_ids = conn
+        .prepare(
+            "SELECT DISTINCT person_id FROM aliases WHERE alias = ?1 OR normalized_alias = ?2",
+        )?
+        .query_map(params![&alias, &normalized_alias], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !existing_person_ids.is_empty() {
+        if existing_person_ids.iter().any(|item| item != &person_id) {
             return Err(anyhow!(
                 "accepted alias proposal conflicts with existing alias {alias}"
             ));
@@ -11281,8 +11405,8 @@ fn apply_alias_patch(
             )
         });
         conn.execute(
-            "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
-            params![&alias, &person_id, scope],
+            "INSERT INTO aliases (alias, normalized_alias, person_id, scope) VALUES (?1, ?2, ?3, ?4)",
+            params![&alias, normalized_alias, &person_id, scope],
         )?;
     }
     Ok(("aliases".to_string(), alias))
@@ -12496,8 +12620,8 @@ fn seed_aliases(conn: &Connection) -> Result<()> {
         )?;
         for alias in aliases {
             conn.execute(
-                "INSERT INTO aliases (alias, person_id, scope) VALUES (?1, ?2, ?3)",
-                params![alias, person_id, "v1_seed_alias"],
+                "INSERT INTO aliases (alias, normalized_alias, person_id, scope) VALUES (?1, ?2, ?3, ?4)",
+                params![alias, normalize_alias(alias), person_id, "v1_seed_alias"],
             )?;
         }
     }
@@ -12817,9 +12941,11 @@ fn search_evidence_result(
         .collect::<Vec<_>>();
     let mut scored: BTreeMap<String, (i64, EvidenceCard)> = BTreeMap::new();
     let mut candidate_block_ids = BTreeSet::new();
+    let mut match_channel_blocks = BTreeMap::<String, BTreeSet<String>>::new();
     for term in &terms {
         for block in query_blocks_like(conn, term, limit * 4)? {
             candidate_block_ids.insert(block.block_id.clone());
+            record_match_channels(&mut match_channel_blocks, &block, term);
             let score = score_block(question, term, &block);
             let card = evidence_card_from_block_with_focus(block, term);
             scored
@@ -12831,6 +12957,7 @@ fn search_evidence_result(
     if scored.is_empty() {
         for block in query_blocks_like(conn, question, limit * 2)? {
             candidate_block_ids.insert(block.block_id.clone());
+            record_match_channels(&mut match_channel_blocks, &block, question);
             let card = evidence_card_from_block_with_focus(block, question);
             scored.insert(card.block_id.clone(), (1, card));
         }
@@ -12850,10 +12977,13 @@ fn search_evidence_result(
         .collect::<HashSet<_>>();
     for exact_term in &exact_terms {
         for block in query_blocks_exact_text(conn, exact_term, limit * 8)? {
-            if !block.text.contains(exact_term) {
+            if !block.text.contains(exact_term)
+                && !block.normalized_text.contains(&normalize_text(exact_term))
+            {
                 continue;
             }
             candidate_block_ids.insert(block.block_id.clone());
+            record_match_channels(&mut match_channel_blocks, &block, exact_term);
             let card = evidence_card_from_block(block);
             if seen.insert(card.block_id.clone()) {
                 cards.insert(0, card);
@@ -12871,6 +13001,7 @@ fn search_evidence_result(
         for term in &terms {
             for block in query_blocks_like(conn, term, limit * 8)? {
                 candidate_block_ids.insert(block.block_id.clone());
+                record_match_channels(&mut match_channel_blocks, &block, term);
                 let card = evidence_card_from_block(block);
                 if card.evidence_type == *required_type && seen.insert(card.block_id.clone()) {
                     cards.insert(0, card);
@@ -12886,13 +13017,49 @@ fn search_evidence_result(
         }
     }
     cards.truncate(limit.max(required_evidence_types.len()));
+    let match_channel_counts = match_channel_blocks
+        .into_iter()
+        .map(|(channel, block_ids)| (channel, block_ids.len()))
+        .collect();
     Ok(SearchEvidenceResult {
         cards,
         expanded_terms: terms,
         expanded_aliases: extracted_query_terms.aliases,
+        match_channel_counts,
         exact_terms,
         candidate_count: candidate_block_ids.len(),
     })
+}
+
+fn record_match_channels(
+    channels: &mut BTreeMap<String, BTreeSet<String>>,
+    block: &SearchBlockRecord,
+    term: &str,
+) {
+    for channel in block_match_channels(block, term) {
+        channels
+            .entry(channel)
+            .or_default()
+            .insert(block.block_id.clone());
+    }
+}
+
+fn block_match_channels(block: &SearchBlockRecord, term: &str) -> Vec<String> {
+    let normalized_term = normalize_text(term);
+    let mut channels = Vec::new();
+    if block.text.contains(term) {
+        channels.push("raw_text".to_string());
+    }
+    if block.source_title.contains(term) {
+        channels.push("raw_source_title".to_string());
+    }
+    if block.normalized_text.contains(&normalized_term) {
+        channels.push("normalized_text".to_string());
+    }
+    if block.normalized_source_title.contains(&normalized_term) {
+        channels.push("normalized_source_title".to_string());
+    }
+    channels
 }
 
 fn text_search_required_evidence_types(required_evidence_types: &[String]) -> Vec<String> {
@@ -12982,6 +13149,7 @@ fn retrieval_quality_report(
         expanded_terms: redacted_terms,
         protected_terms,
         expanded_aliases,
+        normalized_match_channels: search.match_channel_counts.clone(),
         candidate_count: search.candidate_count,
         selected_count: search.cards.len(),
         channel_distribution: retrieval_channel_distribution(&search.cards),
@@ -13646,15 +13814,15 @@ fn character_intro_answer(question: &str, package: &EvidencePackage) -> Option<S
         return None;
     }
     let focus = question_focus_term(question, &package.cards)?;
-    if normalize_text(&focus) != "尤三姐" {
-        return None;
-    }
     let evidence_text = package
         .cards
         .iter()
         .map(|card| normalize_text(&card.text))
         .collect::<Vec<_>>()
         .join("\n");
+    if normalize_text(&focus) != "尤三姐" {
+        return generic_character_intro_answer(question, &focus, package);
+    }
     let mut points = Vec::new();
     if evidence_text.contains("珍大嫂子的妹妹三姑娘") {
         points.push(
@@ -13684,6 +13852,74 @@ fn character_intro_answer(question: &str, package: &EvidencePackage) -> Option<S
     Some(answer)
 }
 
+fn generic_character_intro_answer(
+    question: &str,
+    focus: &str,
+    package: &EvidencePackage,
+) -> Option<String> {
+    let focus_display = character_intro_display_name(question, focus);
+    let evidence_cards = package
+        .cards
+        .iter()
+        .filter(|card| {
+            card.text.contains(focus)
+                || normalize_text(&card.text).contains(&focus_display)
+                || card.source_title.contains(focus)
+                || normalize_title(&card.source_title).contains(&focus_display)
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    if evidence_cards.is_empty() {
+        return None;
+    }
+    let source_titles = evidence_cards
+        .iter()
+        .map(|card| normalize_title(&card.source_title))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(3)
+        .collect::<Vec<_>>();
+    let mut answer =
+        format!("{focus_display}是当前《红楼梦》source snapshot 中可定位到的人物或称谓。");
+    if !source_titles.is_empty() {
+        answer.push_str(&format!(
+            "现有命中材料主要分布在{}，可支持她在这些文本位置出现或参与相关场景。",
+            source_titles.join("、")
+        ));
+    }
+    answer.push_str(
+        "这些证据还不足以单独完成完整人物小传；身份、关系、性格和命运等概括仍需要人物库、关系库、事件库和更多代表性原文共同支持。",
+    );
+    answer.push_str("\n\n依据（原文引文保留来源字形）：\n");
+    for (index, card) in evidence_cards.iter().enumerate() {
+        answer.push_str(&format!(
+            "{}. {}：{}\n",
+            index + 1,
+            card.source_title,
+            card.text
+        ));
+    }
+    Some(answer)
+}
+
+fn character_intro_display_name(question: &str, focus: &str) -> String {
+    let focus_display = normalize_text(focus);
+    if focus_display.chars().count() != 2 {
+        return focus_display;
+    }
+    for token in cjk_tokens(question) {
+        let mut candidates = vec![token.clone()];
+        candidates.extend(cjk_focus_terms(&token));
+        for candidate in candidates {
+            let normalized = normalize_text(&candidate);
+            if normalized.chars().count() == 3 && normalized.ends_with(&focus_display) {
+                return normalized;
+            }
+        }
+    }
+    focus_display
+}
+
 fn question_focus_term(question: &str, cards: &[EvidenceCard]) -> Option<String> {
     let mut terms = Vec::new();
     for token in cjk_tokens(question) {
@@ -13691,6 +13927,11 @@ fn question_focus_term(question: &str, cards: &[EvidenceCard]) -> Option<String>
             push_term(&mut terms, &token);
         }
         for focus_term in cjk_focus_terms(&token) {
+            if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 8 {
+                push_term(&mut terms, &focus_term);
+            }
+        }
+        for focus_term in cjk_person_short_forms(&token) {
             if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 8 {
                 push_term(&mut terms, &focus_term);
             }
@@ -13704,6 +13945,29 @@ fn question_focus_term(question: &str, cards: &[EvidenceCard]) -> Option<String>
                     || normalize_text(&card.text).contains(&normalize_text(term))
             })
     })
+}
+
+fn normalized_primary_focus(question: &str) -> Option<String> {
+    let mut terms = Vec::new();
+    for token in cjk_tokens(question) {
+        let focus_terms = cjk_focus_terms(&token);
+        let source_terms = if focus_terms.is_empty() {
+            vec![token]
+        } else {
+            focus_terms
+        };
+        for term in source_terms {
+            let normalized = normalize_query(&term);
+            if normalized.chars().count() >= 2
+                && normalized.chars().count() <= 8
+                && !generic_question_term(&normalized)
+            {
+                push_term(&mut terms, &normalized);
+            }
+        }
+    }
+    terms.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    terms.into_iter().next()
 }
 
 fn generic_question_term(term: &str) -> bool {
@@ -13996,8 +14260,10 @@ struct SearchBlockRecord {
     revision_id: Option<i64>,
     source_id: String,
     source_title: String,
+    normalized_source_title: String,
     source_url: String,
     text: String,
+    normalized_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -14005,6 +14271,7 @@ struct SearchEvidenceResult {
     cards: Vec<EvidenceCard>,
     expanded_terms: Vec<String>,
     expanded_aliases: Vec<String>,
+    match_channel_counts: BTreeMap<String, usize>,
     exact_terms: Vec<String>,
     candidate_count: usize,
 }
@@ -14025,6 +14292,15 @@ fn required_exact_terms(question: &str) -> Vec<&'static str> {
     if normalized.contains("青埂") {
         terms.push("青埂");
     }
+    if normalized.contains("第八回") {
+        terms.push("第八回");
+    }
+    if normalized.contains("第八十回") {
+        terms.push("第八十");
+    }
+    if normalized.contains("第八十一回") || normalized.contains("后四十") {
+        terms.push("第八十一");
+    }
     if question.contains("寳玉") {
         terms.push("寳玉");
     }
@@ -14037,7 +14313,8 @@ fn required_exact_terms(question: &str) -> Vec<&'static str> {
 fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQueryTerms> {
     let mut terms = Vec::new();
     let mut aliases = Vec::new();
-    let normalized = normalize_text(question);
+    let mut canonical_person_ids = Vec::new();
+    let normalized = normalize_query(question);
     let seed_terms = [
         ("通灵玉", "通靈玉"),
         ("通灵宝玉", "通靈寶玉"),
@@ -14105,7 +14382,7 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
     for (simple, traditional) in seed_terms {
         if question.contains(simple)
             || question.contains(traditional)
-            || normalized.contains(&normalize_text(simple))
+            || normalized.contains(&normalize_query(simple))
         {
             push_term(&mut terms, simple);
             push_term(&mut terms, traditional);
@@ -14142,15 +14419,35 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
         push_term(&mut terms, "八十一");
     }
 
-    let mut stmt = conn.prepare("SELECT alias FROM aliases")?;
-    let alias_rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare(
+        "SELECT alias, normalized_alias, person_id FROM aliases ORDER BY LENGTH(alias) DESC, alias",
+    )?;
+    let alias_rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     for alias in alias_rows {
-        let alias = alias?;
-        if question.contains(&alias) || normalized.contains(&normalize_text(&alias)) {
+        let (alias, normalized_alias, person_id) = alias?;
+        let normalized_alias = if normalized_alias.trim().is_empty() {
+            normalize_alias(&alias)
+        } else {
+            normalized_alias
+        };
+        if question.contains(&alias)
+            || normalized.contains(&normalized_alias)
+            || normalize_alias(question).contains(&normalized_alias)
+        {
             push_term(&mut terms, &alias);
+            push_term(&mut terms, &normalized_alias);
             push_term(&mut aliases, &alias);
+            push_term(&mut aliases, &normalized_alias);
+            push_term(&mut canonical_person_ids, &person_id);
         }
     }
+    expand_canonical_person_terms(conn, &canonical_person_ids, &mut terms, &mut aliases)?;
 
     for token in cjk_tokens(question) {
         if token.chars().count() >= 2 && token.chars().count() <= 8 {
@@ -14161,11 +14458,58 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
                 push_term(&mut terms, &focus_term);
             }
         }
+        for focus_term in cjk_person_short_forms(&token) {
+            if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 8 {
+                push_term(&mut terms, &focus_term);
+            }
+        }
     }
     if terms.is_empty() && question.chars().count() <= 24 {
         push_term(&mut terms, question);
     }
     Ok(ExtractedQueryTerms { terms, aliases })
+}
+
+fn expand_canonical_person_terms(
+    conn: &Connection,
+    person_ids: &[String],
+    terms: &mut Vec<String>,
+    aliases: &mut Vec<String>,
+) -> Result<()> {
+    for person_id in person_ids {
+        let canonical_name: Option<String> = conn
+            .query_row(
+                "SELECT canonical_name FROM people WHERE person_id = ?1",
+                params![person_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(canonical_name) = canonical_name {
+            push_term(terms, &canonical_name);
+            push_term(terms, &normalize_alias(&canonical_name));
+            push_term(aliases, &canonical_name);
+            push_term(aliases, &normalize_alias(&canonical_name));
+        }
+        let mut stmt = conn.prepare(
+            "SELECT alias, normalized_alias FROM aliases WHERE person_id = ?1 ORDER BY LENGTH(alias) DESC, alias",
+        )?;
+        let rows = stmt.query_map(params![person_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (alias, normalized_alias) = row?;
+            let normalized_alias = if normalized_alias.trim().is_empty() {
+                normalize_alias(&alias)
+            } else {
+                normalized_alias
+            };
+            push_term(terms, &alias);
+            push_term(terms, &normalized_alias);
+            push_term(aliases, &alias);
+            push_term(aliases, &normalized_alias);
+        }
+    }
+    Ok(())
 }
 
 fn query_blocks_like(
@@ -14180,18 +14524,33 @@ fn query_blocks_like(
     );
     let mut stmt = conn.prepare(
         r#"
-        SELECT block_id, kind, revision_id, source_id, source_title, source_url, text
+        SELECT block_id, kind, revision_id, source_id, source_title,
+               normalized_source_title, source_url, text, normalized_text
         FROM blocks
         WHERE text LIKE ?1 ESCAPE '\'
            OR source_title LIKE ?1 ESCAPE '\'
            OR normalized_text LIKE ?2 ESCAPE '\'
+           OR normalized_source_title LIKE ?2 ESCAPE '\'
         ORDER BY
+          CASE
+            WHEN text LIKE ?1 ESCAPE '\' THEN 1
+            WHEN normalized_text LIKE ?2 ESCAPE '\' THEN 2
+            WHEN source_title LIKE ?1 ESCAPE '\' THEN 3
+            WHEN normalized_source_title LIKE ?2 ESCAPE '\' THEN 4
+            ELSE 5
+          END,
           CASE evidence_type
             WHEN 'base_text' THEN 1
             WHEN 'commentary' THEN 2
             WHEN 'version_note' THEN 3
             ELSE 4
           END,
+          CASE kind
+            WHEN 'heading' THEN 3
+            WHEN 'poem' THEN 2
+            ELSE 1
+          END,
+          CASE WHEN LENGTH(text) <= 16 THEN 2 ELSE 1 END,
           LENGTH(text) ASC
         LIMIT ?3
         "#,
@@ -14203,8 +14562,10 @@ fn query_blocks_like(
             revision_id: row.get(2)?,
             source_id: row.get(3)?,
             source_title: row.get(4)?,
-            source_url: row.get(5)?,
-            text: row.get(6)?,
+            normalized_source_title: row.get(5)?,
+            source_url: row.get(6)?,
+            text: row.get(7)?,
+            normalized_text: row.get(8)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -14219,9 +14580,11 @@ fn query_blocks_exact_text(
     let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
     let mut stmt = conn.prepare(
         r#"
-        SELECT block_id, kind, revision_id, source_id, source_title, source_url, text
+        SELECT block_id, kind, revision_id, source_id, source_title,
+               normalized_source_title, source_url, text, normalized_text
         FROM blocks
         WHERE text LIKE ?1 ESCAPE '\'
+           OR normalized_text LIKE ?2 ESCAPE '\'
         ORDER BY
           CASE
             WHEN source_id = 'hongloumeng-wikisource-120' THEN 1
@@ -14230,18 +14593,24 @@ fn query_blocks_exact_text(
             ELSE 4
           END,
           LENGTH(text) ASC
-        LIMIT ?2
+        LIMIT ?3
         "#,
     )?;
-    let rows = stmt.query_map(params![like, limit as i64], |row| {
+    let normalized_like = format!(
+        "%{}%",
+        normalize_text(term).replace('%', "\\%").replace('_', "\\_")
+    );
+    let rows = stmt.query_map(params![like, normalized_like, limit as i64], |row| {
         Ok(SearchBlockRecord {
             block_id: row.get(0)?,
             kind: row.get(1)?,
             revision_id: row.get(2)?,
             source_id: row.get(3)?,
             source_title: row.get(4)?,
-            source_url: row.get(5)?,
-            text: row.get(6)?,
+            normalized_source_title: row.get(5)?,
+            source_url: row.get(6)?,
+            text: row.get(7)?,
+            normalized_text: row.get(8)?,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -14310,14 +14679,45 @@ fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) 
 
 fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
     let mut score = 1;
+    let normalized_term = normalize_text(term);
+    let intro_question = question.contains("介绍")
+        || question.contains("介紹")
+        || question.contains("人物")
+        || question.contains("是谁")
+        || question.contains("是誰");
+    let normalized_focus = if intro_question {
+        normalized_primary_focus(question)
+    } else {
+        None
+    };
     if block.text.contains(term) {
-        score += 10;
+        score += 18;
     }
-    if normalize_text(&block.text).contains(&normalize_text(term)) {
-        score += 8;
+    if block.normalized_text.contains(&normalized_term) {
+        score += 12;
     }
     if block.source_title.contains(term) {
         score += 5;
+    }
+    if block.normalized_source_title.contains(&normalized_term) {
+        score += 3;
+    }
+    if let Some(focus) = normalized_focus.as_deref() {
+        let focus_len = focus.chars().count();
+        if focus_len >= 3 && normalized_term == focus {
+            if block.normalized_text.contains(focus) {
+                score += 45;
+            }
+            if block.normalized_source_title.contains(focus) {
+                score += 12;
+            }
+        } else if focus_len >= 3
+            && normalized_term.chars().count() < focus_len
+            && !block.normalized_text.contains(focus)
+            && !block.normalized_source_title.contains(focus)
+        {
+            score -= 10;
+        }
     }
     if question.contains("脂批")
         && (block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu"))
@@ -14331,7 +14731,18 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
         score += 40;
     }
     if block.kind == "heading" {
-        score -= 2;
+        score -= 12;
+    }
+    let text_len = block.text.chars().count();
+    if text_len <= 8 {
+        score -= 18;
+    } else if text_len <= 24 {
+        score -= 8;
+    } else if text_len >= 80 {
+        score += 6;
+    }
+    if intro_question && block.kind != "heading" && text_len >= 40 {
+        score += 12;
     }
     let asks_inscription = question.contains('字')
         || question.contains("铭")
@@ -14371,69 +14782,37 @@ fn evidence_type(source_category: &str, source_id: &str, block: &BlockRecord) ->
     }
 }
 
+pub fn normalize_for_search(input: &str) -> String {
+    text_normalizer().normalize_for_search(input)
+}
+
 fn normalize_text(input: &str) -> String {
+    normalize_for_search(input)
+}
+
+fn normalize_query(input: &str) -> String {
+    text_normalizer().normalize_query(input)
+}
+
+fn normalize_alias(input: &str) -> String {
+    text_normalizer().normalize_alias(input)
+}
+
+fn normalize_title(input: &str) -> String {
+    text_normalizer().normalize_title(input)
+}
+
+fn apply_project_normalization_overrides(input: &str) -> String {
     let replacements = [
-        ("紅", "红"),
-        ("樓", "楼"),
-        ("夢", "梦"),
-        ("寶", "宝"),
         ("寳", "宝"),
-        ("賈", "贾"),
-        ("襲", "袭"),
-        ("紈", "纨"),
-        ("媧", "娲"),
-        ("隱", "隐"),
-        ("興", "兴"),
-        ("劉", "刘"),
-        ("觀", "观"),
-        ("園", "园"),
-        ("院", "院"),
-        ("瀟", "潇"),
-        ("館", "馆"),
-        ("蕪", "芜"),
-        ("榮", "荣"),
-        ("國", "国"),
-        ("寧", "宁"),
-        ("兒", "儿"),
-        ("璉", "琏"),
-        ("鐘", "钟"),
-        ("靜", "静"),
-        ("鑒", "鉴"),
-        ("補", "补"),
-        ("燈", "灯"),
-        ("親", "亲"),
-        ("鎖", "锁"),
         ("玉寶靈通", "玉宝灵通"),
-        ("靈", "灵"),
-        ("釵", "钗"),
-        ("鳳", "凤"),
-        ("壽", "寿"),
-        ("恆", "恒"),
-        ("恒", "恒"),
         ("僊", "仙"),
-        ("癒", "愈"),
-        ("療", "疗"),
-        ("禍", "祸"),
-        ("硯", "砚"),
-        ("齋", "斋"),
-        ("評", "评"),
+        ("冩", "写"),
         ("衆", "众"),
-        ("眾", "众"),
         ("裏", "里"),
         ("裡", "里"),
-        ("説", "说"),
-        ("說", "说"),
-        ("冩", "写"),
-        ("臺", "台"),
         ("檯", "台"),
-        ("後", "后"),
-        ("來", "来"),
-        ("許", "许"),
-        ("給", "给"),
-        ("盡", "尽"),
-        ("蓮", "莲"),
-        ("媽", "妈"),
-        ("為", "为"),
+        ("恒", "恒"),
     ];
     let mut output = input.to_lowercase();
     for (from, to) in replacements {
@@ -14645,6 +15024,26 @@ fn cjk_focus_terms(token: &str) -> Vec<String> {
     }
 }
 
+fn cjk_person_short_forms(token: &str) -> Vec<String> {
+    let focus_terms = cjk_focus_terms(token);
+    let source_terms = if focus_terms.is_empty() {
+        vec![token.trim().to_string()]
+    } else {
+        focus_terms
+    };
+    source_terms
+        .into_iter()
+        .filter_map(|term| {
+            let chars = term.chars().collect::<Vec<_>>();
+            if chars.len() == 3 && chars.iter().all(|ch| is_cjk(*ch)) {
+                Some(chars[1..].iter().collect::<String>())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn is_cjk(ch: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&ch)
         || ('\u{3400}'..='\u{4dbf}').contains(&ch)
@@ -14675,10 +15074,13 @@ fn trim_text(text: &str, max_chars: usize) -> String {
 
 fn trim_text_around(text: &str, focus: &str, max_chars: usize) -> String {
     let chars = text.chars().collect::<Vec<_>>();
-    let Some(byte_index) = text.find(focus) else {
+    let focus_index = if let Some(byte_index) = text.find(focus) {
+        text[..byte_index].chars().count()
+    } else if let Some(index) = normalized_focus_char_index(text, focus) {
+        index
+    } else {
         return trim_text(text, max_chars);
     };
-    let focus_index = text[..byte_index].chars().count();
     let half = max_chars / 2;
     let start = focus_index.saturating_sub(half);
     let end = (start + max_chars).min(chars.len());
@@ -14693,6 +15095,16 @@ fn trim_text_around(text: &str, focus: &str, max_chars: usize) -> String {
         output.push_str("...");
     }
     output
+}
+
+fn normalized_focus_char_index(text: &str, focus: &str) -> Option<usize> {
+    let normalized_focus = normalize_text(focus);
+    if normalized_focus.is_empty() {
+        return None;
+    }
+    let normalized_text = normalize_text(text);
+    let byte_index = normalized_text.find(&normalized_focus)?;
+    Some(normalized_text[..byte_index].chars().count())
 }
 
 fn blocked_prompt_controls(question: &str) -> Vec<String> {
@@ -15714,6 +16126,30 @@ mod tests {
         ] {
             assert!(columns.contains(column), "missing column {column}");
         }
+        let block_columns = conn
+            .prepare("PRAGMA table_info(blocks)")
+            .expect("blocks table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query block columns")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect block columns");
+        assert!(block_columns.contains("normalized_source_title"));
+        let alias_columns = conn
+            .prepare("PRAGMA table_info(aliases)")
+            .expect("aliases table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query alias columns")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect alias columns");
+        assert!(alias_columns.contains("normalized_alias"));
+    }
+
+    #[test]
+    fn text_normalizer_uses_opencc_plus_project_overrides() {
+        let normalized = normalize_text("介紹史湘雲與寶釵，通靈玉上寫有仙壽恒昌。");
+
+        assert_eq!(normalized, "介绍史湘云与宝钗，通灵玉上写有仙寿恒昌。");
+        assert_eq!(normalize_text("寳玉與顰兒"), "宝玉与颦儿");
     }
 
     #[test]
@@ -15890,7 +16326,12 @@ mod tests {
             quality_report.channel_distribution.get("base_text"),
             Some(&1_usize)
         );
-        assert_eq!(quality_report.expanded_aliases, vec!["灵玉".to_string()]);
+        assert!(
+            quality_report
+                .expanded_aliases
+                .iter()
+                .any(|alias| alias == "灵玉")
+        );
         assert_eq!(quality_report.expected_evidence_hit, None);
         assert_eq!(
             quality_report.expected_evidence_status,
@@ -15986,6 +16427,344 @@ mod tests {
     }
 
     #[test]
+    fn text_search_matches_simplified_query_to_traditional_alias_and_raw_evidence() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        conn.execute(
+            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
+            params!["person:xiangyun-test", "史湘云", "test"],
+        )
+        .expect("insert person");
+        for alias in ["史湘云", "史湘雲", "湘云", "湘雲"] {
+            conn.execute(
+                "INSERT INTO aliases (alias, normalized_alias, person_id, scope) VALUES (?1, ?2, ?3, ?4)",
+                params![alias, normalize_alias(alias), "person:xiangyun-test", "test"],
+            )
+            .expect("insert alias");
+        }
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, 'quality-source', 'quality-section-xiangyun',
+                '紅樓夢/第三十一回', ?2, 'https://example.test/source/31',
+                1, 2, 'paragraph', NULL, ?3, ?4, 'base_text', 31)
+            "#,
+            params![
+                "quality-block-xiangyun-trad",
+                normalize_title("紅樓夢/第三十一回"),
+                "賈母回頭囑咐湘雲：「別讓你寶哥哥多吃了。」湘雲答應著。",
+                normalize_text("賈母回頭囑咐湘雲：「別讓你寶哥哥多吃了。」湘雲答應著。"),
+            ],
+        )
+        .expect("insert xiangyun block");
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "介绍史湘云".to_string(),
+                limit: 4,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        let card = cards
+            .iter()
+            .find(|card| card.block_id == "quality-block-xiangyun-trad")
+            .expect("simplified query should retrieve traditional raw evidence");
+        assert!(card.text.contains("湘雲"));
+        assert!(!card.text.contains("湘云答应"));
+        assert!(
+            quality_report
+                .normalized_match_channels
+                .get("normalized_text")
+                .is_some_and(|count| *count >= 1)
+        );
+        assert!(
+            quality_report
+                .expanded_aliases
+                .iter()
+                .any(|alias| alias == "湘雲")
+        );
+    }
+
+    #[test]
+    fn text_search_prefers_full_normalized_character_match_over_short_alias_only() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        conn.execute(
+            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
+            params!["person:xiangyun-default-alias-test", "史湘云", "test"],
+        )
+        .expect("insert person");
+        for alias in ["湘云", "湘雲"] {
+            conn.execute(
+                "INSERT INTO aliases (alias, normalized_alias, person_id, scope) VALUES (?1, ?2, ?3, ?4)",
+                params![alias, normalize_alias(alias), "person:xiangyun-default-alias-test", "test"],
+            )
+            .expect("insert alias");
+        }
+        for (block_id, block_index, text) in [
+            (
+                "quality-block-xiangyun-full-name",
+                1_i64,
+                "且說史湘雲住了兩日，因要回去。賈母因說：“等過了你寶姐姐的生日，看了戲再回去。”",
+            ),
+            (
+                "quality-block-xiangyun-short-alias-only",
+                2_i64,
+                "湘雲笑道：“你快下去，你不中用。”",
+            ),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO blocks (
+                    block_id, source_id, section_id, source_title, normalized_source_title,
+                    source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                    evidence_type, chapter_no
+                ) VALUES (?1, 'quality-source', 'quality-section-xiangyun-rank',
+                    '紅樓夢/第二十二回', ?2, 'https://example.test/source/22',
+                    1, ?3, 'paragraph', NULL, ?4, ?5, 'base_text', 22)
+                "#,
+                params![
+                    block_id,
+                    normalize_title("紅樓夢/第二十二回"),
+                    block_index,
+                    text,
+                    normalize_text(text),
+                ],
+            )
+            .expect("insert xiangyun ranking block");
+        }
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "介绍史湘云".to_string(),
+                limit: 1,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards { cards, .. } = output else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].block_id, "quality-block-xiangyun-full-name");
+        assert!(cards[0].text.contains("史湘雲"));
+    }
+
+    #[test]
+    fn text_search_prioritizes_body_match_over_source_title_only_match() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        for (block_id, source_title, block_index, text) in [
+            (
+                "quality-block-title-only",
+                "红楼梦/第一回",
+                1_i64,
+                "短句不含题名。",
+            ),
+            (
+                "quality-block-body-title",
+                "测试来源/题名线索",
+                2_i64,
+                "此处正文直接写出题名红楼梦，可作为题名出现位置的证据。",
+            ),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO blocks (
+                    block_id, source_id, section_id, source_title, normalized_source_title,
+                    source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                    evidence_type, chapter_no
+                ) VALUES (?1, 'quality-source', 'quality-section-title-rank',
+                    ?2, ?3, 'https://example.test/source/title',
+                    1, ?4, 'paragraph', NULL, ?5, ?6, 'base_text', 1)
+                "#,
+                params![
+                    block_id,
+                    source_title,
+                    normalize_title(source_title),
+                    block_index,
+                    text,
+                    normalize_text(text),
+                ],
+            )
+            .expect("insert title ranking block");
+        }
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "红楼梦题名在哪里出现？".to_string(),
+                limit: 1,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards { cards, .. } = output else {
+            panic!("expected evidence cards");
+        };
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].block_id, "quality-block-body-title");
+        assert!(cards[0].text.contains("红楼梦"));
+    }
+
+    #[test]
+    fn text_search_matches_traditional_query_to_simplified_alias_and_text() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, 'quality-source', 'quality-section-baochai',
+                '红楼梦/第八回', ?2, 'https://example.test/source/8',
+                1, 3, 'paragraph', NULL, ?3, ?4, 'base_text', 8)
+            "#,
+            params![
+                "quality-block-baochai-simplified",
+                normalize_title("红楼梦/第八回"),
+                "宝钗笑道：宝兄弟从那里来？",
+                normalize_text("宝钗笑道：宝兄弟从那里来？"),
+            ],
+        )
+        .expect("insert baochai block");
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "寶釵是谁".to_string(),
+                limit: 4,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert!(
+            cards
+                .iter()
+                .any(|card| card.block_id == "quality-block-baochai-simplified")
+        );
+        assert!(
+            quality_report
+                .normalized_match_channels
+                .get("normalized_text")
+                .is_some_and(|count| *count >= 1)
+        );
+    }
+
+    #[test]
+    fn intro_answer_defaults_to_simplified_body_and_keeps_raw_quotes() {
+        let mut card = sample_card("base_text");
+        card.source_title = "紅樓夢/第三十一回".to_string();
+        card.block_id = "quality-block-xiangyun-answer".to_string();
+        card.text = "賈母回頭囑咐湘雲：「別讓你寶哥哥多吃了。」湘雲答應著。".to_string();
+        let package = EvidencePackage {
+            package_id: "pkg-answer-normalization-test".to_string(),
+            trace_id: "trace-answer-normalization-test".to_string(),
+            question: "介紹史湘雲".to_string(),
+            cards: vec![card],
+            claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer 通过。".to_string(),
+            },
+            knowledge_state_summary: KnowledgeStateSummary::default(),
+        };
+
+        let answer = local_answer("介紹史湘雲", &package);
+
+        assert!(answer.starts_with("史湘云是当前"));
+        assert!(answer.contains("依据（原文引文保留来源字形）"));
+        assert!(answer.contains("湘雲"));
+        assert!(!answer.contains("證據"));
+        assert!(!answer.contains(&package.package_id));
+    }
+
+    #[test]
+    fn trim_text_around_locates_normalized_focus_without_mutating_raw_text() {
+        let text = format!("{}史湘雲問道：“寶玉哥哥不在家么？”", "甲".repeat(300));
+
+        let snippet = trim_text_around(&text, "史湘云", 40);
+
+        assert!(snippet.starts_with("..."));
+        assert!(snippet.contains("史湘雲問道"));
+        assert!(!snippet.contains("史湘云问道"));
+    }
+
+    #[test]
     fn redacted_query_terms_hash_sensitive_patterns() {
         for sensitive in [
             "password=SECRET_RUNTIME_TOKEN",
@@ -16031,6 +16810,14 @@ mod tests {
         assert_eq!(
             required_exact_terms("青埂峰和顽石在哪里出现？"),
             vec!["青埂"]
+        );
+        assert_eq!(
+            required_exact_terms("一百二十回本第八回通灵玉在哪里？"),
+            vec!["第八回"]
+        );
+        assert_eq!(
+            required_exact_terms("后四十回从哪里开始？"),
+            vec!["第八十一"]
         );
     }
 

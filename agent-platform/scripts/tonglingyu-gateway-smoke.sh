@@ -298,6 +298,10 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -X POST \
   -d '{"model":"tonglingyu","stream":true,"messages":[{"role":"user","content":"黛玉命运是什么？"}]}' \
   "${BASE_URL}/v1/chat/completions" >"${STREAM_TXT}"
+if grep -qE 'evidence_package_id|trace_id|session_id|runtime_workflow' "${STREAM_TXT}"; then
+  echo "stream response exposed internal metadata" >&2
+  exit 1
+fi
 grep -q 'data: \[DONE\]' "${STREAM_TXT}"
 assert_stream_contract "${STREAM_TXT}"
 curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
@@ -305,6 +309,10 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -X POST \
   -d '{"model":"tonglingyu","stream":true,"messages":[{"role":"user","content":"黛玉命运是什么？"}]}' \
   "${BASE_URL}/v1/chat/completions" >"${DUP_STREAM_TXT}"
+if grep -qE 'evidence_package_id|trace_id|session_id|runtime_workflow' "${DUP_STREAM_TXT}"; then
+  echo "duplicate stream response exposed internal metadata" >&2
+  exit 1
+fi
 grep -q 'data: \[DONE\]' "${DUP_STREAM_TXT}"
 assert_stream_contract "${DUP_STREAM_TXT}"
 message_metadata_from_db "smoke-message-stream" >"${STREAM_META_JSON}"
@@ -418,6 +426,10 @@ public_completion_keys = {
 }
 assert set(chat) <= public_completion_keys, chat
 assert set(duplicate) <= public_completion_keys, duplicate
+assert "evidence_package_id" not in chat, chat
+assert "trace_id" not in chat, chat
+assert "session_id" not in chat, chat
+assert "review" not in chat, chat
 for payload in [chat, duplicate]:
     encoded = json.dumps(payload, ensure_ascii=False)
     for forbidden_public_field in [
@@ -439,6 +451,7 @@ assert all("forbidden_conclusions" in item for item in package["claim_evidence_m
 assert replay["object"] == "tonglingyu.evidence_package_replay", replay
 assert replay["package"]["package_id"] == package["package_id"], replay
 assert replay["answer"].strip(), replay
+assert package["package_id"] not in replay["answer"], replay
 
 states = {item["state"]: item["status"] for item in trace["workflow_states"]}
 for state in [
@@ -541,6 +554,7 @@ assert dry_run["object"] == "tonglingyu.runtime_dry_run", dry_run
 assert dry_run["status"] == "passed", dry_run
 assert dry_run["replay"]["package"]["package_id"] == dry_run["package_id"], dry_run
 assert dry_run["replay"]["answer"].strip(), dry_run
+assert dry_run["package_id"] not in dry_run["replay"]["answer"], dry_run
 assert dry_run["runtime_step_plan"]["steps"], dry_run
 assert dry_run["agent_runtime_plan_gate"]["status"] == "passed", dry_run
 assert dry_run["agent_runtime"]["mode"] == "minimal", dry_run
