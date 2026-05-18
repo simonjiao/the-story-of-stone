@@ -31,6 +31,21 @@
   summary-only，`production_release_ready=false`，还缺 browser-side review、
   security scan/digest-pinned image、RQA migration/restore/performance/API/user
   lifecycle、release ops 和监控证据。
+- 2026-05-18 已新增 scoped context / session journal / scoped memory 设计入口：
+  `26_Scoped_Context与受控Memory设计.md`。该工作当前是设计收敛，不代表代码
+  已实现多轮上下文或长期 memory 生产能力；现有运行路径仍是单轮问题、会话映射、
+  Runtime workflow、证据包和 reviewer。
+- 2026-05-18 scoped context / memory 设计已完成实现前反思：可以进入 Phase 1
+  Scoped Context 最小闭环实现。Phase 1 只做 `user_session`、
+  `interaction_context`、`context_pack`、`session_journal` 和
+  `resolved_question`；不迁移旧 `gateway_sessions` / `gateway_messages`，不实现
+  active memory、不做审核页面、不拆独立 Context Governance 服务。scoped memory
+  production-ready 仍需后续 Memory Collector、审核、ACL、lifecycle、hhost live gate
+  和容量验证闭合。
+- 2026-05-18 `26_Scoped_Context与受控Memory设计.md` 已重构为稳定实现规格稿：
+  固定解释顺序、数据对象、运行流程、Phase 1 工作包、禁止项、Phase 2-4 边界和
+  production gate。当前只允许进入 Phase 1 编码，不能把文档冻结误读为实现完成或
+  production-ready。
 
 ## 已确认
 
