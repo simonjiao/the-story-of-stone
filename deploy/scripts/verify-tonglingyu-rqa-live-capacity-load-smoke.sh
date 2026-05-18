@@ -121,7 +121,7 @@ else
     -H \"Authorization: Bearer \${key}\" \
     '${GATEWAY_URL}${path}'
 fi
-" >"${output_path}"
+" </dev/null >"${output_path}"
 }
 
 STARTED_AT="$(now_iso)"
@@ -213,6 +213,8 @@ ids_path = Path(sys.argv[2])
 ids = json.loads(ids_path.read_text(encoding="utf-8"))
 ids["failure_id"] = failure_ids[0]
 ids["task_id"] = task_ids[0]
+ids["failure_ids"] = failure_ids
+ids["task_ids"] = task_ids
 ids_path.write_text(json.dumps(ids, sort_keys=True) + "\n", encoding="utf-8")
 PY
   read -r FAILURE_ID TASK_ID < <(
@@ -242,28 +244,33 @@ PY
 
   python3 - "${RUN_DIR}/admin-failures.json" "${RUN_DIR}/admin-tasks.json" \
     "${RUN_DIR}/admin-failures-page2.json" "${RUN_DIR}/admin-tasks-page2.json" \
-    "${RUN_DIR}/admin-metrics.json" "${FAILURE_ID}" "${TASK_ID}" <<'PY'
+    "${RUN_DIR}/admin-metrics.json" "${RUN_DIR}/ids.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-failure_path, task_path, failure_page2_path, task_page2_path, metrics_path, failure_id, task_id = sys.argv[1:8]
+failure_path, task_path, failure_page2_path, task_page2_path, metrics_path, ids_path = sys.argv[1:7]
 failures = json.loads(Path(failure_path).read_text(encoding="utf-8"))
 tasks = json.loads(Path(task_path).read_text(encoding="utf-8"))
 failure_page2 = json.loads(Path(failure_page2_path).read_text(encoding="utf-8"))
 task_page2 = json.loads(Path(task_page2_path).read_text(encoding="utf-8"))
 metrics = json.loads(Path(metrics_path).read_text(encoding="utf-8"))
+ids = json.loads(Path(ids_path).read_text(encoding="utf-8"))
+failure_ids = set(ids.get("failure_ids") or [ids.get("failure_id")])
+task_ids = set(ids.get("task_ids") or [ids.get("task_id")])
 failure_page = failures.get("list")
 task_page = tasks.get("list")
 failure_list = failure_page.get("items") if isinstance(failure_page, dict) else None
 task_list = task_page.get("items") if isinstance(task_page, dict) else None
-if not isinstance(failure_list, list) or not any(
-    item.get("failure_id") == failure_id for item in failure_list if isinstance(item, dict)
-):
+listed_failure_ids = {
+    item.get("failure_id") for item in failure_list or [] if isinstance(item, dict)
+}
+listed_task_ids = {
+    item.get("task_id") for item in task_list or [] if isinstance(item, dict)
+}
+if not isinstance(failure_list, list) or not failure_ids.issubset(listed_failure_ids):
     raise SystemExit("created failure missing from admin list")
-if not isinstance(task_list, list) or not any(
-    item.get("task_id") == task_id for item in task_list if isinstance(item, dict)
-):
+if not isinstance(task_list, list) or not task_ids.issubset(listed_task_ids):
     raise SystemExit("created governance task missing from admin list")
 for page_name, page in (("failure_page2", failure_page2), ("task_page2", task_page2)):
     page_value = page.get("list")
@@ -280,29 +287,63 @@ if not isinstance(metrics.get("rqa"), dict):
 PY
 
   UPDATE_STARTED_MS="$(now_epoch_ms)"
-  compose_curl "${RUN_DIR}/admin-failure-update.json" PATCH \
-    "/v1/admin/retrieval-failures/${FAILURE_ID}" \
-    '{"human_review_status":"resolved","reviewer":"live-capacity-smoke","review_note":"live capacity smoke resolved without raw question"}' \
-    admin
-  compose_curl "${RUN_DIR}/admin-task-update.json" PATCH \
-    "/v1/admin/governance/tasks/${TASK_ID}" \
-    '{"status":"closed","reviewer":"live-capacity-smoke","review_note":"live capacity smoke closed","evidence_ref":"live-capacity-load-gate"}' \
-    admin
-  UPDATE_FINISHED_MS="$(now_epoch_ms)"
-
-  python3 - "${RUN_DIR}/admin-failure-update.json" "${RUN_DIR}/admin-task-update.json" <<'PY'
+  update_index=0
+  while read -r update_kind update_id; do
+    update_index=$((update_index + 1))
+    if [[ "${update_kind}" == "failure" ]]; then
+      compose_curl "${RUN_DIR}/admin-failure-update-${update_index}.json" PATCH \
+        "/v1/admin/retrieval-failures/${update_id}" \
+        '{"human_review_status":"resolved","reviewer":"live-capacity-smoke","review_note":"live capacity smoke resolved without raw question"}' \
+        admin
+    elif [[ "${update_kind}" == "task" ]]; then
+      compose_curl "${RUN_DIR}/admin-task-update-${update_index}.json" PATCH \
+        "/v1/admin/governance/tasks/${update_id}" \
+        '{"status":"closed","reviewer":"live-capacity-smoke","review_note":"live capacity smoke closed","evidence_ref":"live-capacity-load-gate"}' \
+        admin
+    fi
+  done < <(
+    python3 - "${RUN_DIR}/ids.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-failure_update = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-task_update = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-failure = failure_update.get("failure")
-task = task_update.get("task")
-if not isinstance(failure, dict) or failure.get("human_review_status") != "resolved":
-    raise SystemExit("retrieval failure was not resolved")
-if not isinstance(task, dict) or task.get("status") != "closed":
-    raise SystemExit("governance task was not closed")
+ids = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+for failure_id in ids.get("failure_ids") or [ids["failure_id"]]:
+    print("failure", failure_id)
+for task_id in ids.get("task_ids") or [ids["task_id"]]:
+    print("task", task_id)
+PY
+  )
+  UPDATE_FINISHED_MS="$(now_epoch_ms)"
+
+  python3 - "${HOST_DB_PATH}" "${RUN_DIR}/ids.json" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, ids_path = sys.argv[1:3]
+ids = json.loads(Path(ids_path).read_text(encoding="utf-8"))
+failure_ids = ids.get("failure_ids") or [ids["failure_id"]]
+task_ids = ids.get("task_ids") or [ids["task_id"]]
+conn = sqlite3.connect(db_path)
+try:
+    for failure_id in failure_ids:
+        row = conn.execute(
+            "SELECT human_review_status FROM retrieval_failures WHERE failure_id = ?",
+            (failure_id,),
+        ).fetchone()
+        if row is None or row[0] != "resolved":
+            raise SystemExit(f"retrieval failure was not resolved: {failure_id}")
+    for task_id in task_ids:
+        row = conn.execute(
+            "SELECT status FROM knowledge_governance_tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row[0] != "closed":
+            raise SystemExit(f"governance task was not closed: {task_id}")
+finally:
+    conn.close()
 PY
 
   python3 - "${RUNS_JSONL}" "${RUN_DIR}/ids.json" \
