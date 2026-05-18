@@ -168,19 +168,20 @@ try:
     rows = conn.execute(
         """
         SELECT trace_id, package_id
-        FROM gateway_messages
+        FROM session_journal
         WHERE external_message_id = ?
-        ORDER BY created_at, message_id
+          AND entry_type = 'final_response'
+        ORDER BY created_at DESC, journal_id DESC
         """,
         (external_message_id,),
     ).fetchall()
 finally:
     conn.close()
 if len(rows) != 1:
-    raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+    raise SystemExit(f"expected one session journal final response for {external_message_id}, got {len(rows)}")
 trace_id, package_id = rows[0]
 if not trace_id or not package_id:
-    raise SystemExit("gateway message metadata missing trace/package")
+    raise SystemExit("session journal metadata missing trace/package")
 Path(ids_path).write_text(
     json.dumps({"trace_id": trace_id, "package_id": package_id}, sort_keys=True) + "\n",
     encoding="utf-8",

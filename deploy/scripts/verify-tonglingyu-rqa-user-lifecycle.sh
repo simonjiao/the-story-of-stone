@@ -217,19 +217,20 @@ def post_chat(prompt, index):
         rows = conn.execute(
             """
             SELECT trace_id, package_id
-            FROM gateway_messages
+            FROM session_journal
             WHERE external_message_id = ?
-            ORDER BY created_at, message_id
+              AND entry_type = 'final_response'
+            ORDER BY created_at DESC, journal_id DESC
             """,
             (external_message_id,),
         ).fetchall()
     finally:
         conn.close()
     if len(rows) != 1:
-        raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+        raise SystemExit(f"expected one session journal final response for {external_message_id}, got {len(rows)}")
     trace_id, package_id = rows[0]
     if not trace_id or not package_id:
-        raise SystemExit(f"gateway message metadata incomplete for {external_message_id}")
+        raise SystemExit(f"session journal metadata incomplete for {external_message_id}")
     return {
         "trace_id": trace_id,
         "package_id": package_id,
@@ -335,11 +336,16 @@ reports = {
 conn = sqlite3.connect(db_path)
 raw_values = [user_ref, chat_ref, prompt_one, prompt_two]
 scan_columns = [
-    ("gateway_sessions", "user_ref"),
-    ("gateway_sessions", "chat_ref"),
-    ("gateway_messages", "external_message_id"),
-    ("gateway_messages", "question"),
-    ("gateway_messages", "response_json"),
+    ("user_sessions", "external_user_ref"),
+    ("user_sessions", "external_session_id"),
+    ("session_journal", "external_message_id"),
+    ("session_journal", "content"),
+    ("session_journal", "summary"),
+    ("session_journal", "metadata_json"),
+    ("context_packs", "resolved_question"),
+    ("context_packs", "session_summary"),
+    ("context_packs", "candidate_scopes_json"),
+    ("context_packs", "profile_views_json"),
     ("evidence_packages", "question"),
     ("workflow_states", "detail_json"),
     ("audit_events", "payload_json"),
@@ -378,7 +384,7 @@ for ref in refs:
     trace_id = ref["trace_id"]
     package_id = ref["package_id"]
     trace_readable += conn.execute(
-        "SELECT COUNT(*) FROM gateway_messages WHERE trace_id = ?",
+        "SELECT COUNT(*) FROM session_journal WHERE trace_id = ?",
         (trace_id,),
     ).fetchone()[0]
     package_readable += conn.execute(

@@ -53,7 +53,7 @@ import json
 import sys
 payload = {
     "model": "tonglingyu",
-    "messages": [{"role": "user", "content": "介绍尤三姐"}],
+    "messages": [{"role": "user", "content": "介绍贾宝玉"}],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False)
@@ -77,7 +77,7 @@ import json
 import sys
 payload = {
     "model": "tonglingyu",
-    "messages": [{"role": "user", "content": "她最后怎么样？"}],
+    "messages": [{"role": "user", "content": "他是谁？"}],
 }
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle, ensure_ascii=False)
@@ -115,7 +115,7 @@ Generate a concise, 3-5 word title with an emoji summarizing the chat history.
 JSON format: { "title": "your concise title here" }
 ### Chat History:
 <chat_history>
-USER: 介绍尤三姐
+USER: 介绍贾宝玉
 </chat_history>""",
 })
 payload = {"model": "tonglingyu", "messages": messages}
@@ -304,7 +304,7 @@ if not second_packs:
     errors.append("second_context_pack_missing")
 else:
     pack = second_packs[-1]
-    if pack.get("resolved_question") != "尤三姐最后怎么样？":
+    if pack.get("resolved_question") != "贾宝玉是谁？":
         errors.append("second_resolved_question_unexpected")
     if pack.get("memory_read_refs") != []:
         errors.append("second_memory_read_refs_must_be_empty")

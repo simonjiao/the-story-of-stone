@@ -1909,6 +1909,7 @@ struct LifecycleMessageRef {
     external_message_id: String,
     trace_id: String,
     package_id: Option<String>,
+    context_pack_id: Option<String>,
     question: String,
     response_json: String,
 }
@@ -1920,6 +1921,7 @@ struct RqaUserLifecyclePlan {
     messages: Vec<LifecycleMessageRef>,
     trace_ids: BTreeSet<String>,
     package_ids: BTreeSet<String>,
+    context_pack_ids: BTreeSet<String>,
     workflow_state_ids: BTreeSet<String>,
     audit_event_ids: BTreeSet<String>,
     retrieval_failure_ids: BTreeSet<String>,
@@ -1965,6 +1967,10 @@ fn build_rqa_user_lifecycle_plan(
         .iter()
         .filter_map(|message| message.package_id.clone())
         .collect::<BTreeSet<_>>();
+    let context_pack_ids = messages
+        .iter()
+        .filter_map(|message| message.context_pack_id.clone())
+        .collect::<BTreeSet<_>>();
     let session_ids = sessions
         .iter()
         .map(|session| session.session_id.clone())
@@ -1985,6 +1991,7 @@ fn build_rqa_user_lifecycle_plan(
         messages,
         trace_ids,
         package_ids,
+        context_pack_ids,
         workflow_state_ids,
         audit_event_ids,
         retrieval_failure_ids,
@@ -1996,10 +2003,10 @@ fn build_rqa_user_lifecycle_plan(
 fn query_lifecycle_sessions(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleSessionRef>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT session_id, user_ref, chat_ref
-        FROM gateway_sessions
-        WHERE user_ref = ?1
-        ORDER BY session_id
+        SELECT user_session_id, external_user_ref, external_session_id
+        FROM user_sessions
+        WHERE external_user_ref = ?1
+        ORDER BY user_session_id
         "#,
     )?;
     stmt.query_map(params![user_ref], |row| {
@@ -2016,12 +2023,13 @@ fn query_lifecycle_sessions(conn: &Connection, user_ref: &str) -> Result<Vec<Lif
 fn query_lifecycle_messages(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleMessageRef>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT gm.message_id, gm.external_message_id, gm.trace_id,
-               gm.package_id, gm.question, gm.response_json
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gs.user_ref = ?1
-        ORDER BY gm.created_at, gm.message_id
+        SELECT sj.journal_id, COALESCE(sj.external_message_id, ''), sj.trace_id,
+               sj.package_id, sj.context_pack_id, COALESCE(sj.content, sj.summary),
+               sj.metadata_json
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE us.external_user_ref = ?1
+        ORDER BY sj.created_at, sj.journal_id
         "#,
     )?;
     stmt.query_map(params![user_ref], |row| {
@@ -2030,8 +2038,9 @@ fn query_lifecycle_messages(conn: &Connection, user_ref: &str) -> Result<Vec<Lif
             external_message_id: row.get(1)?,
             trace_id: row.get(2)?,
             package_id: row.get(3)?,
-            question: row.get(4)?,
-            response_json: row.get(5)?,
+            context_pack_id: row.get(4)?,
+            question: row.get(5)?,
+            response_json: row.get(6)?,
         })
     })?
     .collect::<rusqlite::Result<Vec<_>>>()
@@ -2182,6 +2191,7 @@ fn lifecycle_export_manifest(plan: &RqaUserLifecyclePlan) -> Value {
         "messages": messages,
         "trace_sha256": hashed_values(&plan.trace_ids),
         "package_sha256": hashed_values(&plan.package_ids),
+        "context_pack_sha256": hashed_values(&plan.context_pack_ids),
         "retrieval_failure_sha256": hashed_values(&plan.retrieval_failure_ids),
         "governance_task_sha256": hashed_values(&plan.governance_task_ids),
         "source_text_included": false,
@@ -2349,7 +2359,7 @@ fn rqa_user_lifecycle_anonymize(
             let anonymized_chat =
                 format!("anonymized-chat:{}", &hash_text(&session.session_id)[..16]);
             tx.execute(
-                "UPDATE gateway_sessions SET user_ref = ?1, chat_ref = ?2 WHERE session_id = ?3",
+                "UPDATE user_sessions SET external_user_ref = ?1, external_session_id = ?2 WHERE user_session_id = ?3",
                 params![anonymized_user, anonymized_chat, &session.session_id],
             )?;
         }
@@ -2359,14 +2369,20 @@ fn rqa_user_lifecycle_anonymize(
                 "anonymized-message:{}",
                 &hash_text(&message.message_id)[..16]
             );
+            let redacted_question = format!(
+                "[redacted:rqa-user-lifecycle:{}]",
+                &hash_text(&message.question)[..12]
+            );
             tx.execute(
-                "UPDATE gateway_messages SET external_message_id = ?1, question = ?2, response_json = ?3 WHERE message_id = ?4",
+                "UPDATE session_journal
+                 SET external_message_id = CASE WHEN external_message_id IS NULL THEN NULL ELSE ?1 END,
+                     content = CASE WHEN content IS NULL THEN NULL ELSE ?2 END,
+                     summary = ?2,
+                     metadata_json = ?3
+                 WHERE journal_id = ?4",
                 params![
                     anonymized_external_message,
-                    format!(
-                        "[redacted:rqa-user-lifecycle:{}]",
-                        &hash_text(&message.question)[..12]
-                    ),
+                    redacted_question,
                     response_json,
                     &message.message_id,
                 ],
@@ -2383,6 +2399,43 @@ fn rqa_user_lifecycle_anonymize(
                     package_id,
                 ],
             )?;
+        }
+        for context_pack_id in &plan.context_pack_ids {
+            redact_text_column_by_ids(
+                tx,
+                "context_packs",
+                "context_pack_id",
+                "resolved_question",
+                &BTreeSet::from([context_pack_id.clone()]),
+                &sensitive_values,
+            )?;
+            redact_text_column_by_ids(
+                tx,
+                "context_packs",
+                "context_pack_id",
+                "session_summary",
+                &BTreeSet::from([context_pack_id.clone()]),
+                &sensitive_values,
+            )?;
+            for column in [
+                "active_scopes_json",
+                "candidate_scopes_json",
+                "allowed_tools_json",
+                "forbidden_tools_json",
+                "memory_read_refs_json",
+                "forbidden_context_json",
+                "output_contract_json",
+                "profile_views_json",
+            ] {
+                redact_json_column_by_ids(
+                    tx,
+                    "context_packs",
+                    "context_pack_id",
+                    column,
+                    &BTreeSet::from([context_pack_id.clone()]),
+                    &sensitive_values,
+                )?;
+            }
         }
         redact_json_column_by_ids(
             tx,
@@ -2439,6 +2492,31 @@ fn lifecycle_sensitive_values(user_ref: &str, plan: &RqaUserLifecyclePlan) -> Ve
         .into_iter()
         .filter(|value| !value.trim().is_empty())
         .collect()
+}
+
+fn redact_text_column_by_ids(
+    conn: &Connection,
+    table: &str,
+    id_column: &str,
+    text_column: &str,
+    ids: &BTreeSet<String>,
+    sensitive_values: &[String],
+) -> Result<()> {
+    let select_sql = format!("SELECT {text_column} FROM {table} WHERE {id_column} = ?1");
+    let update_sql = format!("UPDATE {table} SET {text_column} = ?1 WHERE {id_column} = ?2");
+    let mut select = conn.prepare(&select_sql)?;
+    for id in ids {
+        let value = select
+            .query_row(params![id], |row| row.get::<_, String>(0))
+            .optional()?;
+        if let Some(value) = value {
+            conn.execute(
+                &update_sql,
+                params![redact_plain_text(&value, sensitive_values), id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn redact_json_column_by_ids(
@@ -2513,6 +2591,7 @@ fn lifecycle_counts(plan: &RqaUserLifecyclePlan) -> Value {
         "message_count": plan.messages.len(),
         "trace_count": plan.trace_ids.len(),
         "package_count": plan.package_ids.len(),
+        "context_pack_count": plan.context_pack_ids.len(),
         "workflow_state_count": plan.workflow_state_ids.len(),
         "audit_event_count": plan.audit_event_ids.len(),
         "retrieval_failure_count": plan.retrieval_failure_ids.len(),
