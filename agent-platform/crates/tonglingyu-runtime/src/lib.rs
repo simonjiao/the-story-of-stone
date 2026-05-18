@@ -10707,9 +10707,6 @@ pub fn init_knowledge_base_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_blocks_source ON blocks(source_id);
         CREATE INDEX IF NOT EXISTS idx_blocks_chapter ON blocks(chapter_no);
         CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(evidence_type);
-        CREATE INDEX IF NOT EXISTS idx_blocks_normalized_source_title
-            ON blocks(normalized_source_title);
-        CREATE INDEX IF NOT EXISTS idx_aliases_normalized_alias ON aliases(normalized_alias);
         CREATE INDEX IF NOT EXISTS idx_commentaries_source ON commentaries(source_id);
         CREATE INDEX IF NOT EXISTS idx_terms_term ON terms(term);
         CREATE INDEX IF NOT EXISTS idx_commentary_links_block ON commentary_links(block_id);
@@ -16142,6 +16139,81 @@ mod tests {
             .collect::<std::result::Result<BTreeSet<_>, _>>()
             .expect("collect alias columns");
         assert!(alias_columns.contains("normalized_alias"));
+    }
+
+    #[test]
+    fn kb_schema_upgrades_legacy_search_normalization_columns_before_indexing() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE blocks (
+                block_id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                chapter_no INTEGER,
+                evidence_type TEXT NOT NULL,
+                source_title TEXT NOT NULL
+            );
+            CREATE TABLE aliases (
+                alias TEXT PRIMARY KEY,
+                person_id TEXT NOT NULL,
+                scope TEXT NOT NULL
+            );
+            INSERT INTO blocks (
+                block_id, source_id, chapter_no, evidence_type, source_title
+            ) VALUES (
+                'legacy-block', 'legacy-source', 1, 'base_text', '紅樓夢/第一回'
+            );
+            INSERT INTO aliases (alias, person_id, scope)
+            VALUES ('寳玉', 'person-baoyu', 'global');
+            "#,
+        )
+        .expect("legacy search tables");
+
+        init_knowledge_base_schema(&conn).expect("kb schema upgrades legacy search columns");
+
+        let block_columns = conn
+            .prepare("PRAGMA table_info(blocks)")
+            .expect("blocks table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query block columns")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect block columns");
+        assert!(block_columns.contains("normalized_source_title"));
+        let alias_columns = conn
+            .prepare("PRAGMA table_info(aliases)")
+            .expect("aliases table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query alias columns")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect alias columns");
+        assert!(alias_columns.contains("normalized_alias"));
+
+        let indexes = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
+            .expect("index query")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query indexes")
+            .collect::<std::result::Result<BTreeSet<_>, _>>()
+            .expect("collect indexes");
+        assert!(indexes.contains("idx_blocks_normalized_source_title"));
+        assert!(indexes.contains("idx_aliases_normalized_alias"));
+
+        let normalized_title: String = conn
+            .query_row(
+                "SELECT normalized_source_title FROM blocks WHERE block_id = 'legacy-block'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("normalized title");
+        let normalized_alias: String = conn
+            .query_row(
+                "SELECT normalized_alias FROM aliases WHERE alias = '寳玉'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("normalized alias");
+        assert_eq!(normalized_title, "红楼梦/第一回");
+        assert_eq!(normalized_alias, "宝玉");
     }
 
     #[test]
