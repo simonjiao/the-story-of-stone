@@ -36,9 +36,17 @@ positive_int() {
   esac
 }
 
+nonnegative_int() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$1" -ge 0 ] ;;
+  esac
+}
+
 OPERATOR="${TONGLINGYU_RQA_LIVE_CAPACITY_OPERATOR:-${TONGLINGYU_RELEASE_OPERATOR:-${USER:-release-operator}}}"
 ENVIRONMENT="${TONGLINGYU_RQA_LIVE_CAPACITY_ENVIRONMENT:-${TONGLINGYU_RELEASE_ENVIRONMENT:-hhost}}"
 ITERATIONS="${TONGLINGYU_RQA_LIVE_CAPACITY_ITERATIONS:-3}"
+WARMUP_REQUESTS="${TONGLINGYU_RQA_LIVE_CAPACITY_WARMUP_REQUESTS:-1}"
 MIN_WINDOW_MINUTES="${TONGLINGYU_RQA_LIVE_CAPACITY_MIN_WINDOW_MINUTES:-10}"
 RUN_ID="${TONGLINGYU_RQA_LIVE_CAPACITY_RUN_ID:-live-capacity-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 INCIDENT_SEVERITY="${TONGLINGYU_RQA_INCIDENT_SEVERITY:-sev3}"
@@ -51,6 +59,7 @@ CURL_CONNECT_TIMEOUT_SECONDS="${TONGLINGYU_RQA_LIVE_CAPACITY_CURL_CONNECT_TIMEOU
 CURL_MAX_TIME_SECONDS="${TONGLINGYU_RQA_LIVE_CAPACITY_CURL_MAX_TIME_SECONDS:-30}"
 
 positive_int "${ITERATIONS}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_ITERATIONS must be a positive integer"
+nonnegative_int "${WARMUP_REQUESTS}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_WARMUP_REQUESTS must be a non-negative integer"
 positive_int "${MIN_WINDOW_MINUTES}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_MIN_WINDOW_MINUTES must be a positive integer"
 [ -n "${OPERATOR// }" ] || fail "operator is required"
 [ -n "${ENVIRONMENT// }" ] || fail "environment is required"
@@ -80,6 +89,7 @@ REPORT_PATH="${TONGLINGYU_RQA_LIVE_CAPACITY_REPORT_PATH:-${ARTIFACT_DIR}/rqa-liv
 SUMMARY_PATH="${ARTIFACT_DIR}/live-capacity-load-raw-summary.json"
 METRICS_ENV="${ARTIFACT_DIR}/live-capacity-load.env"
 RUNS_JSONL="${ARTIFACT_DIR}/live-performance-runs.jsonl"
+WARMUP_JSONL="${ARTIFACT_DIR}/live-warmup-runs.jsonl"
 INCIDENT_DRILL_PATH="${ARTIFACT_DIR}/incident-drill-live.json"
 CAPACITY_LOAD_EVIDENCE_PATH="${ARTIFACT_DIR}/rqa-capacity-load-evidence.json"
 INCIDENT_AUDIT_EVIDENCE_PATH="${ARTIFACT_DIR}/rqa-incident-audit-evidence.json"
@@ -87,6 +97,7 @@ INCIDENT_CAPACITY_REPORT_PATH="${ARTIFACT_DIR}/rqa-incident-capacity-live-gate.j
 QUALITY_REPORT_PATH="${ARTIFACT_DIR}/rqa-quality-eval-report.json"
 QUALITY_GATE_PATH="${ARTIFACT_DIR}/rqa-quality-gate.json"
 : >"${RUNS_JSONL}"
+: >"${WARMUP_JSONL}"
 
 compose_curl() {
   local output_path="$1"
@@ -126,6 +137,54 @@ fi
 
 STARTED_AT="$(now_iso)"
 STARTED_MS="$(now_epoch_ms)"
+
+for index in $(seq 1 "${WARMUP_REQUESTS}"); do
+  RUN_DIR="${ARTIFACT_DIR}/warmup-${index}"
+  mkdir -p "${RUN_DIR}"
+  MESSAGE_ID="live-capacity-${RUN_ID}-warmup-${index}"
+  CHAT_BODY='{"model":"tonglingyu","messages":[{"role":"user","content":"通灵玉是什么？"}]}'
+
+  WARMUP_STARTED_MS="$(now_epoch_ms)"
+  docker compose exec -T \
+    -e TLY_REQUEST_BODY="${CHAT_BODY}" \
+    -e TLY_MESSAGE_ID="${MESSAGE_ID}" \
+    open-webui sh -lc "
+set -eu
+key=\"\${OPENAI_API_KEYS%%;*}\"
+test -n \"\${key}\"
+curl -fsS --connect-timeout '${CURL_CONNECT_TIMEOUT_SECONDS}' --max-time '${CURL_MAX_TIME_SECONDS}' \
+  -H \"Authorization: Bearer \${key}\" \
+  -H 'content-type: application/json' \
+  -H 'x-tonglingyu-user-id: live-capacity-warmup' \
+  -H 'x-tonglingyu-chat-id: live-capacity-warmup-${RUN_ID}' \
+  -H \"x-tonglingyu-message-id: \${TLY_MESSAGE_ID}\" \
+  --data \"\${TLY_REQUEST_BODY}\" \
+  '${GATEWAY_URL}/v1/chat/completions'
+" >"${RUN_DIR}/chat.json"
+  WARMUP_FINISHED_MS="$(now_epoch_ms)"
+
+  python3 - "${RUN_DIR}/chat.json" "${WARMUP_JSONL}" \
+    "${WARMUP_STARTED_MS}" "${WARMUP_FINISHED_MS}" "${index}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+chat_path, warmup_path, started, finished, index = sys.argv[1:6]
+chat = json.loads(Path(chat_path).read_text(encoding="utf-8"))
+for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+    if forbidden in chat:
+        raise SystemExit(f"public warmup chat leaked {forbidden}")
+entry = {
+    "index": int(index),
+    "message": "ordinary live gateway warmup before measured RQA writes",
+    "measurements": {
+        "warmup_write_ms": int(finished) - int(started),
+    },
+}
+with Path(warmup_path).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
+PY
+done
 
 for index in $(seq 1 "${ITERATIONS}"); do
   RUN_DIR="${ARTIFACT_DIR}/run-${index}"
@@ -412,8 +471,8 @@ if [ "${ELAPSED_MS}" -lt "${REQUIRED_MS}" ]; then
 fi
 FINISHED_AT="$(now_iso)"
 
-python3 - "${RUNS_JSONL}" "${SUMMARY_PATH}" "${METRICS_ENV}" \
-  "${QUALITY_STARTED_MS}" "${QUALITY_FINISHED_MS}" "${ITERATIONS}" <<'PY'
+python3 - "${RUNS_JSONL}" "${WARMUP_JSONL}" "${SUMMARY_PATH}" "${METRICS_ENV}" \
+  "${QUALITY_STARTED_MS}" "${QUALITY_FINISHED_MS}" "${ITERATIONS}" "${WARMUP_REQUESTS}" <<'PY'
 import hashlib
 import json
 import math
@@ -422,18 +481,27 @@ import sys
 from pathlib import Path
 
 runs_path = Path(sys.argv[1])
-summary_path = Path(sys.argv[2])
-metrics_env_path = Path(sys.argv[3])
-quality_started = int(sys.argv[4])
-quality_finished = int(sys.argv[5])
-iterations = int(sys.argv[6])
+warmup_path = Path(sys.argv[2])
+summary_path = Path(sys.argv[3])
+metrics_env_path = Path(sys.argv[4])
+quality_started = int(sys.argv[5])
+quality_finished = int(sys.argv[6])
+iterations = int(sys.argv[7])
+warmup_requests = int(sys.argv[8])
 runs = [
     json.loads(line)
     for line in runs_path.read_text(encoding="utf-8").splitlines()
     if line.strip()
 ]
+warmups = [
+    json.loads(line)
+    for line in warmup_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
 if len(runs) != iterations:
     raise SystemExit("run_count_mismatch")
+if len(warmups) != warmup_requests:
+    raise SystemExit("warmup_count_mismatch")
 
 
 def percentile_95(numbers):
@@ -470,10 +538,17 @@ summary = {
     "object": "tonglingyu.rqa_live_capacity_load_raw_summary",
     "schema_version": 1,
     "performance_report_count": len(runs),
+    "warmup_report_count": len(warmups),
     "capacity_counts": {
         "eval_report_count": 1,
         "failure_count": len(runs),
         "admin_list_page_count": 2,
+    },
+    "warmup": {
+        "policy": "ordinary live gateway warmup before measured RQA writes",
+        "request_count": len(warmups),
+        "measurements": [warmup["measurements"] for warmup in warmups],
+        "excluded_from_capacity_budget": True,
     },
     "load_measurements": {
         "rqa_write_p95_ms": rqa_write_p95_ms,
@@ -736,6 +811,7 @@ payload = {
     "iterations": int(iterations_raw),
     "min_window_minutes": int(min_window_minutes_raw),
     "artifact_dir": artifact_dir_raw,
+    "warmup": summary.get("warmup"),
     "performance_runs": runs,
     "capacity_counts": summary["capacity_counts"],
     "load_measurements": summary["load_measurements"],
