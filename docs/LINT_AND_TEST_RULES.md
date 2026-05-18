@@ -17,13 +17,41 @@ formats change.
 ## Python
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py
-python3 -m compileall scripts
+uv lock --check
+uv run --no-sync python -m py_compile \
+  scripts/bilibili_hlm_pipeline.py \
+  scripts/extract_epub.py \
+  scripts/download_wikisource.py \
+  scripts/validate_source_snapshots.py \
+  scripts/version.py
+uv run --no-sync python -m compileall -q scripts tests
+uv run --no-sync python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Use `ruff` and `pytest` when the repo later adds config or tests. Source
+Use `ruff` when the repo later adds config. The current lightweight Python
+tests use `unittest`; add `pytest` only when a test suite needs it. Source
 snapshot changes also need a temp-dir smoke test rather than a full corpus
 rewrite.
+
+## Versioning
+
+Version rules are in `docs/VERSIONING_RULES.md`. The minimum local check is:
+
+```bash
+uv run --no-sync python scripts/version.py check
+```
+
+Every real deploy must bump the third version number with:
+
+```bash
+deploy/scripts/bump-deploy-version.sh
+```
+
+The project QA wrapper combines version, Python, shell, and Rust format gates:
+
+```bash
+scripts/qa.sh --quick
+```
 
 ## Markdown
 
@@ -51,7 +79,7 @@ Rust coding rules are in `docs/RUST_CODING_RULES.md`. If Rust code is touched,
 use the workspace commands scoped to the changed crates first:
 
 ```bash
-cargo fmt --manifest-path agent-platform/Cargo.toml --check
+cargo fmt --manifest-path agent-platform/Cargo.toml --all --check
 cargo clippy --manifest-path agent-platform/Cargo.toml \
   --workspace --all-targets -- -D warnings
 cargo test --manifest-path agent-platform/Cargo.toml --workspace

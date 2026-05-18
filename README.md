@@ -46,6 +46,7 @@
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
 - [跨项目进展索引](docs/PROGRESS.md)
 - [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
+- [Versioning Rules](docs/VERSIONING_RULES.md)
 
 ## 资料边界
 
@@ -60,7 +61,7 @@
 ## 通灵玉常用命令
 
 ```bash
-.venv/bin/python scripts/extract_epub.py path/to/source.epub \
+uv run python scripts/extract_epub.py path/to/source.epub \
   --source-id tonglingyu-source-id \
   --source-category base_material \
   --edition "edition label" \
@@ -68,7 +69,7 @@
 ```
 
 ```bash
-.venv/bin/python scripts/download_wikisource.py \
+uv run python scripts/download_wikisource.py \
   --source-id hongloumeng-wikisource \
   --title "红楼梦 维基文库全本" \
   --work "红楼梦" \
@@ -79,7 +80,7 @@
 ```
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py
+scripts/qa.sh --quick
 git diff --check
 ```
 

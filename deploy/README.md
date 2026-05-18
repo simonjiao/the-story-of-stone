@@ -46,14 +46,15 @@ Required changes:
 - `TONGLINGYU_GATEWAY_BUILD_CONTEXT`: build context for the standalone
   Tonglingyu Gateway image. Set to `./agent-platform` on the remote deploy node.
   The local default is `../agent-platform`.
-- `TONGLINGYU_GATEWAY_IMAGE_TAG`: standalone gateway image tag. Default is
-  `formal`.
+- `TONGLINGYU_VERSION`: project deploy version used by local Gateway image
+  defaults, build args, and OCI labels. Do not bump it by hand; run
+  `./scripts/bump-deploy-version.sh` before each real deploy.
 - `*_IMAGE_REF`: production release image references with immutable digests.
   Set `TONGLINGYU_GATEWAY_IMAGE_REF`, `HERMES_IMAGE_REF`,
   `OPEN_WEBUI_IMAGE_REF`, and `CLOUDFLARED_IMAGE_REF` to
   `name@sha256:<digest>` or `name:tag@sha256:<digest>` before running production
-  security gates. The older `*_IMAGE_TAG` values are local build defaults and
-  are not sufficient for production-ready evidence.
+  security gates. Mutable tag defaults are local build defaults and are not
+  sufficient for production-ready evidence.
 - `OPEN_WEBUI_OPENAI_API_BASE_URLS`: Open WebUI's OpenAI-compatible endpoint
   list. The Tonglingyu-only compose default and release gate require exactly
   `http://tonglingyu-gateway:8090/v1`.
@@ -716,15 +717,15 @@ cargo run \
 Start the stack:
 
 ```bash
-docker compose build tonglingyu-gateway
-docker compose pull
-docker compose up -d
-docker compose ps
+./scripts/deploy-versioned-stack.sh
 ```
 
 `tonglingyu-gateway` is built from
 `agent-platform/crates/tonglingyu-gateway/Dockerfile` as a standalone image. It
 uses BuildKit cache mounts for Cargo registry, git sources, and `target/`.
+The deploy wrapper increments the project `PATCH` version, refreshes Rust/Python
+lockfiles, runs the quick QA gate, and then builds/starts the stack. Set
+`TONGLINGYU_DEPLOY_QA_MODE=full` when release-grade local gates are required.
 
 After re-rendering Hermes config, restart Hermes:
 
