@@ -27,25 +27,21 @@
 - `hhost` 重建后 runtime config、`agent_identity_bridge`、
   `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
   chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
-- 本次重建不等于 production-ready 发布：aggregate release readiness 当前仍是
-  summary-only，`production_release_ready=false`，还缺 browser-side review、
-  security scan/digest-pinned image、RQA migration/restore/performance/API/user
-  lifecycle、release ops 和监控证据。
-- 2026-05-18 已新增 scoped context / session journal / scoped memory 设计入口：
-  `26_Scoped_Context与受控Memory设计.md`。该工作当前是设计收敛，不代表代码
-  已实现多轮上下文或长期 memory 生产能力；现有运行路径仍是单轮问题、会话映射、
-  Runtime workflow、证据包和 reviewer。
-- 2026-05-18 scoped context / memory 设计已完成实现前反思：可以进入 Phase 1
-  Scoped Context 最小闭环实现。Phase 1 只做 `user_session`、
-  `interaction_context`、`context_pack`、`session_journal` 和
-  `resolved_question`；不迁移旧 `gateway_sessions` / `gateway_messages`，不实现
-  active memory、不做审核页面、不拆独立 Context Governance 服务。scoped memory
-  production-ready 仍需后续 Memory Collector、审核、ACL、lifecycle、hhost live gate
-  和容量验证闭合。
+- 2026-05-18 当前 `hhost` 版本已完成 production-ready release automation：
+  `remote-release-20260518T181347Z-50849` 为 `status=ok`、
+  `production_ready_proven=true`，release readiness 为 `status=passed`、
+  `production_release_ready=true`，saved validator 为 `status=ok`、`errors=[]`。
+  该结论覆盖当前 RQA release gate 和 Phase 1 scoped context，不覆盖 scoped memory
+  或 Memory Collector。
+- 2026-05-18 Phase 1 Scoped Context 已实现并部署：Gateway 请求路径写入
+  `user_session`、`interaction_context`、`context_pack` 和 `session_journal`，
+  支持 `resolved_question`、summary-only admin trace 回放和 fail-closed 追问解析。
+  旧 `gateway_sessions` / `gateway_messages` 未迁移为新 memory 来源。
 - 2026-05-18 `26_Scoped_Context与受控Memory设计.md` 已重构为稳定实现规格稿：
   固定解释顺序、数据对象、运行流程、Phase 1 工作包、禁止项、Phase 2-4 边界和
-  production gate。当前只允许进入 Phase 1 编码，不能把文档冻结误读为实现完成或
-  production-ready。
+  production gate。当前 Phase 1 scoped context 已闭合；Phase 2 仍必须继续遵守
+  active memory、Memory Collector、审核、ACL 和跨 scope memory 的边界，不能把
+  Phase 1 结论扩展成 scoped memory production-ready。
 
 ## 已确认
 
