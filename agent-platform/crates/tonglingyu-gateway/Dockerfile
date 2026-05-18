@@ -1,4 +1,4 @@
-ARG APP_VERSION=0.1.5
+ARG APP_VERSION=0.1.6
 FROM rust:1.95 AS builder
 
 WORKDIR /workspace
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Base digest verified 2026-05-16: sha256:d7aa809c1ae88f97cd727d6f5f91e4edab579a14f86f52fd0dd8c658c854286d.
 FROM cgr.dev/chainguard/glibc-dynamic:latest AS runtime
 
-ARG APP_VERSION=0.1.5
+ARG APP_VERSION=0.1.6
 LABEL org.opencontainers.image.title="tonglingyu-gateway" \
     org.opencontainers.image.version="${APP_VERSION}"
 ENV TONGLINGYU_VERSION="${APP_VERSION}"

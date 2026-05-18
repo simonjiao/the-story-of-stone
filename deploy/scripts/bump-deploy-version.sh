@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION_FALLBACK="0.1.5"
+PROJECT_VERSION_FALLBACK="0.1.6"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/resolve-layout.sh
