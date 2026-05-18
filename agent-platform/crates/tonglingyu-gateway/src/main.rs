@@ -41,8 +41,14 @@ use tonglingyu_runtime::{
 };
 use tower_http::trace::TraceLayer;
 
+mod context_governance;
 mod plan;
 
+use crate::context_governance::{
+    ContextMessage, ContextRequestInput, FinalResponseJournalInput, append_final_response,
+    append_review_journal, append_runtime_step_journal, create_context_for_request,
+    load_deduped_final_response, table_counts as context_table_counts,
+};
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
 };
@@ -985,6 +991,16 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "instructions",
         "profile_config",
         "internal_config",
+        "interaction_context_id",
+        "context_pack_id",
+        "context_scope_binding",
+        "scope_id",
+        "scope_graph",
+        "memory_read_scopes",
+        "memory_write_scopes",
+        "memory_scope",
+        "memory_card",
+        "session_journal",
     ];
     const NESTED_OBJECTS: &[&str] = &["metadata", "extra_body", "options", "parameters", "config"];
     const SHALLOW_NESTED_OBJECTS: &[&str] = &["user"];
@@ -1450,6 +1466,11 @@ fn remove_sqlite_file_set(path: &Path) {
 fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        DELETE FROM session_journal;
+        DELETE FROM context_packs;
+        DELETE FROM context_scope_bindings;
+        DELETE FROM interaction_contexts;
+        DELETE FROM user_sessions;
         DELETE FROM gateway_messages;
         DELETE FROM gateway_sessions;
         DELETE FROM workflow_states;
@@ -2765,6 +2786,7 @@ fn init_gateway_schema(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-rqa-user-lifecycle-v1", now_rfc3339()],
     )?;
+    context_governance::init_schema(conn)?;
     Ok(())
 }
 
@@ -2822,84 +2844,6 @@ fn record_workflow_state(
         }),
     )?;
     Ok(())
-}
-
-fn get_or_create_session(
-    conn: &Connection,
-    context: &GatewayRequestContext,
-    model_id: &str,
-) -> Result<String> {
-    let existing = conn
-        .query_row(
-            "SELECT session_id FROM gateway_sessions WHERE user_ref = ?1 AND chat_ref = ?2 AND model_id = ?3",
-            params![&context.user_ref, &context.chat_ref, model_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(session_id) = existing {
-        conn.execute(
-            "UPDATE gateway_sessions SET updated_at = ?1 WHERE session_id = ?2",
-            params![now_rfc3339(), session_id],
-        )?;
-        return Ok(session_id);
-    }
-    let session_id = format!("session-{}", uuid::Uuid::now_v7().simple());
-    let now = now_rfc3339();
-    conn.execute(
-        "INSERT INTO gateway_sessions (session_id, user_ref, chat_ref, model_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            session_id,
-            &context.user_ref,
-            &context.chat_ref,
-            model_id,
-            now,
-            now,
-        ],
-    )?;
-    Ok(session_id)
-}
-
-fn load_deduped_message(
-    conn: &Connection,
-    session_id: &str,
-    external_message_id: &str,
-) -> Result<Option<Value>> {
-    conn.query_row(
-        "SELECT response_json FROM gateway_messages WHERE session_id = ?1 AND external_message_id = ?2",
-        params![session_id, external_message_id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()?
-    .map(|value| serde_json::from_str::<Value>(&value).map_err(Into::into))
-    .transpose()
-}
-
-fn store_gateway_message(conn: &Connection, message: GatewayMessageRecord<'_>) -> Result<()> {
-    conn.execute(
-        "INSERT INTO gateway_messages (message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            format!("msg-{}", uuid::Uuid::now_v7().simple()),
-            message.session_id,
-            &message.context.external_message_id,
-            message.trace_id,
-            message.package_id,
-            message.request_hash,
-            message.question,
-            serde_json::to_string(message.response)?,
-            now_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
-struct GatewayMessageRecord<'a> {
-    session_id: &'a str,
-    context: &'a GatewayRequestContext,
-    trace_id: &'a str,
-    package_id: Option<&'a str>,
-    request_hash: &'a str,
-    question: &'a str,
-    response: &'a Value,
 }
 
 fn hash_value(value: &Value) -> Result<String> {
@@ -6756,8 +6700,13 @@ async fn chat_completions(
         );
     }
     let context = request_context(&headers, &payload, auth_subject);
-    let session_id = match get_or_create_session(&conn, &context, &state.model_id) {
-        Ok(session_id) => session_id,
+    let user_session_id = match context_governance::get_or_create_user_session(
+        &conn,
+        &context.user_ref,
+        &context.chat_ref,
+        &state.model_id,
+    ) {
+        Ok(user_session_id) => user_session_id,
         Err(error) => {
             tracing::warn!(%trace_id, error = %error, "session mapping failed");
             return error_response(
@@ -6771,11 +6720,12 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&user_session_id),
         None,
         "Normalized",
         "ok",
         &json!({
+            "user_session_id": &user_session_id,
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
@@ -6790,12 +6740,12 @@ async fn chat_completions(
         let detail = json!({
             "message_count": message_count,
             "max_messages": state.max_messages,
-            "behavior": "processed_last_user_message_only",
+            "behavior": "session_summary_created",
         });
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&user_session_id),
             None,
             "Message History Truncated",
             "ok",
@@ -6808,7 +6758,7 @@ async fn chat_completions(
         &trace_id,
         "request_normalized",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &user_session_id,
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
@@ -6819,12 +6769,12 @@ async fn chat_completions(
     );
 
     if context.external_message_id_provided {
-        match load_deduped_message(&conn, &session_id, &context.external_message_id) {
+        match load_deduped_final_response(&conn, &user_session_id, &context.external_message_id) {
             Ok(Some(value)) => {
                 let _ = record_workflow_state(
                     &conn,
                     &trace_id,
-                    Some(&session_id),
+                    Some(&user_session_id),
                     value.get("evidence_package_id").and_then(Value::as_str),
                     "Finalized",
                     "deduped",
@@ -6849,38 +6799,160 @@ async fn chat_completions(
         }
     }
 
+    let context_messages = context_messages_from_chat(&request.messages);
+    let scoped_context = match create_context_for_request(
+        &conn,
+        ContextRequestInput {
+            trace_id: &trace_id,
+            model_id: &state.model_id,
+            external_user_ref: &context.user_ref,
+            external_session_id: &context.chat_ref,
+            external_message_id: &context.external_message_id,
+            question: &question,
+            messages: &context_messages,
+            history_over_limit,
+            max_messages: state.max_messages,
+        },
+    ) {
+        Ok(scoped_context) => scoped_context,
+        Err(error) => {
+            tracing::warn!(%trace_id, error = %error, "context governance failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "context_governance_failed",
+                "context governance failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let _ = record_workflow_state(
+        &conn,
+        &trace_id,
+        Some(&scoped_context.user_session_id),
+        None,
+        "Context Pack Created",
+        if scoped_context.needs_clarification {
+            "needs_clarification"
+        } else {
+            "ok"
+        },
+        &json!({
+            "context_pack_id": &scoped_context.context_pack_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "resolved_question": &scoped_context.resolved_question,
+            "session_summary_sha256": hash_text(&scoped_context.session_summary),
+            "confidence": scoped_context.confidence,
+            "needs_clarification": scoped_context.needs_clarification,
+            "used_context_refs": &scoped_context.used_context_refs,
+            "context_pack": &scoped_context.context_pack,
+        }),
+    );
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "context_pack_created",
+        &json!({
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "resolved_question": &scoped_context.resolved_question,
+            "confidence": scoped_context.confidence,
+            "needs_clarification": scoped_context.needs_clarification,
+            "used_context_refs": &scoped_context.used_context_refs,
+        }),
+    );
+
     if question.trim().is_empty() {
         let value = completion_value(
             &state.model_id,
             "请提出一个《红楼梦》相关问题。".to_string(),
             None,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
+        );
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
         );
         return Json(public_completion_value(&value)).into_response();
     }
 
-    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
-        let content = openwebui_metadata_completion_content(metadata_task, &question);
-        let mut value = completion_value(&state.model_id, content, None, Some(&session_id));
+    if scoped_context.needs_clarification {
+        let content = scoped_context
+            .clarification_question
+            .clone()
+            .unwrap_or_else(|| "请补充明确的指代对象后再继续。".to_string());
+        let mut value = completion_value(
+            &state.model_id,
+            content,
+            None,
+            Some(&scoped_context.user_session_id),
+        );
         value["trace_id"] = json!(&trace_id);
-        if let Ok(request_hash) = hash_value(&payload) {
-            let _ = store_gateway_message(
-                &conn,
-                GatewayMessageRecord {
-                    session_id: &session_id,
-                    context: &context,
-                    trace_id: &trace_id,
-                    package_id: None,
-                    request_hash: &request_hash,
-                    question: &question,
-                    response: &value,
-                },
-            );
-        }
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
+        );
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
+            None,
+            "Finalized",
+            "clarification_required",
+            &json!({
+                "context_pack_id": &scoped_context.context_pack_id,
+                "unsupported_reason": &scoped_context.unsupported_reason,
+                "elapsed_ms": elapsed_ms(started),
+            }),
+        );
+        return if request.stream.unwrap_or(false) {
+            streaming_response_from_completion_value(&value)
+        } else {
+            Json(public_completion_value(&value)).into_response()
+        };
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &question);
+        let mut value = completion_value(
+            &state.model_id,
+            content,
+            None,
+            Some(&scoped_context.user_session_id),
+        );
+        value["trace_id"] = json!(&trace_id);
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
+        );
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&scoped_context.user_session_id),
             None,
             "Open WebUI Metadata Request Handled",
             "ok",
@@ -6896,7 +6968,8 @@ async fn chat_completions(
             &trace_id,
             "openwebui_metadata_request_handled",
             &json!({
-                "session_id": &session_id,
+                "user_session_id": &scoped_context.user_session_id,
+                "context_pack_id": &scoped_context.context_pack_id,
                 "user_ref": &context.user_ref,
                 "chat_ref": &context.chat_ref,
                 "external_message_id": &context.external_message_id,
@@ -6909,7 +6982,7 @@ async fn chat_completions(
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
             None,
             "Finalized",
             "metadata_response",
@@ -6925,12 +6998,12 @@ async fn chat_completions(
         };
     }
 
-    let mut policy = search_policy(&question);
+    let mut policy = search_policy(&scoped_context.resolved_question);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
-        question: question.clone(),
+        question: scoped_context.resolved_question.clone(),
         required_evidence_types: policy.required_evidence_types.clone(),
         profiles: runtime_workflow_profiles(&state.profiles),
     })
@@ -6941,7 +7014,7 @@ async fn chat_completions(
             let _ = record_workflow_state(
                 &conn,
                 &trace_id,
-                Some(&session_id),
+                Some(&scoped_context.user_session_id),
                 None,
                 "Failed with Controlled Response",
                 "agent_runtime_plan_gate_failed",
@@ -6958,7 +7031,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         None,
         "Planned",
         "ok",
@@ -6973,7 +7046,9 @@ async fn chat_completions(
         &trace_id,
         "retrieval_plan_created",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "resolved_question": &scoped_context.resolved_question,
             "question_type": &policy.question_type,
             "required_evidence_types": &policy.required_evidence_types,
             "planned_profiles": &policy.planned_profiles,
@@ -6987,7 +7062,8 @@ async fn chat_completions(
         &trace_id,
         "agent_runtime_plan_gate_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "agent_runtime_client": &agent_runtime_plan_gate.agent_runtime_client,
             "profile_contract_version": &agent_runtime_plan_gate.profile_contract_version,
             "profile_contract_count": agent_runtime_plan_gate.profile_contract_count,
@@ -6999,7 +7075,7 @@ async fn chat_completions(
         .runtime_store
         .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
             trace_id: trace_id.clone(),
-            question: question.clone(),
+            question: scoped_context.resolved_question.clone(),
             limit: state.max_evidence,
             required_evidence_types: policy.required_evidence_types.clone(),
             profiles: runtime_workflow_profiles(&state.profiles),
@@ -7011,7 +7087,7 @@ async fn chat_completions(
             let _ = record_workflow_state(
                 &conn,
                 &trace_id,
-                Some(&session_id),
+                Some(&scoped_context.user_session_id),
                 None,
                 "Failed with Controlled Response",
                 "runtime_workflow_failed",
@@ -7030,7 +7106,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Runtime Executed",
         "ok",
@@ -7043,7 +7119,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Evidence Retrieved",
         "ok",
@@ -7057,7 +7133,8 @@ async fn chat_completions(
         &trace_id,
         "agent_invocation_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "profiles": &policy.planned_profiles,
             "operation": "runtime_profile_workflow",
             "package_id": &package.package_id,
@@ -7070,7 +7147,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Bundle Created",
         "ok",
@@ -7084,7 +7161,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Drafted",
         "ok",
@@ -7098,7 +7175,8 @@ async fn chat_completions(
         &trace_id,
         "agent_invocation_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "package_id": &package.package_id,
             "profile": "honglou-main",
             "operation": "draft_answer",
@@ -7115,7 +7193,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Reviewed",
         &package.review.status,
@@ -7124,7 +7202,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Revised if Needed",
         revision_status,
@@ -7136,7 +7214,8 @@ async fn chat_completions(
             &trace_id,
             "revision_applied",
             &json!({
-                "session_id": &session_id,
+                "user_session_id": &scoped_context.user_session_id,
+                "context_pack_id": &scoped_context.context_pack_id,
                 "package_id": &package.package_id,
                 "review_status": &package.review.status,
                 "issues": &package.review.issues,
@@ -7147,27 +7226,46 @@ async fn chat_completions(
         &state.model_id,
         final_answer,
         Some(&package),
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
     );
     let cached_value = cache_completion_value(&value, &workflow.stream_events);
-    if let Ok(request_hash) = hash_value(&payload) {
-        let _ = store_gateway_message(
-            &conn,
-            GatewayMessageRecord {
-                session_id: &session_id,
-                context: &context,
-                trace_id: &trace_id,
-                package_id: Some(&package.package_id),
-                request_hash: &request_hash,
-                question: &question,
-                response: &cached_value,
-            },
-        );
-    }
+    let _ = append_runtime_step_journal(
+        &conn,
+        &trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package.package_id),
+        json!({
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    let _ = append_review_journal(
+        &conn,
+        &trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package.package_id),
+        json!(&package.review),
+    );
+    let _ = append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &context.external_message_id,
+            package_id: Some(&package.package_id),
+            response: &cached_value,
+        },
+    );
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Finalized",
         "ok",
@@ -7182,7 +7280,8 @@ async fn chat_completions(
         &trace_id,
         "response_finalized",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "package_id": &package.package_id,
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
@@ -7241,6 +7340,12 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("evidence_package_id");
         map.remove("review");
         map.remove("session_id");
+        map.remove("user_session_id");
+        map.remove("interaction_context_id");
+        map.remove("context_pack_id");
+        map.remove("session_journal");
+        map.remove("context_pack");
+        map.remove("memory_read_refs");
     }
     if let Some(content) = public
         .pointer("/choices/0/message/content")
@@ -7499,10 +7604,10 @@ fn package_owned_by_subject(
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gm.package_id = ?1
-          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE sj.package_id = ?1
+          AND (us.external_user_ref = ?2 OR us.external_user_ref = ?3)
         "#,
         params![package_id, &access.user_ref, &access.subject],
         |row| row.get(0),
@@ -7518,10 +7623,10 @@ fn trace_owned_by_subject(
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gm.trace_id = ?1
-          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE sj.trace_id = ?1
+          AND (us.external_user_ref = ?2 OR us.external_user_ref = ?3)
         "#,
         params![trace_id, &access.user_ref, &access.subject],
         |row| row.get(0),
@@ -7936,15 +8041,19 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     )?;
     let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
     let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
-    let messages = load_rows_json(
-        &conn,
-        "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
-        trace_id,
-    )?;
+    let scoped_context = context_governance::load_trace_context(&conn, trace_id)?;
+    let scoped_context_has_rows = scoped_context
+        .get("context_packs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || scoped_context
+            .get("session_journal")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
     if package_ids.is_empty()
         && workflow_states.is_empty()
         && audit_events.is_empty()
-        && messages.is_empty()
+        && !scoped_context_has_rows
     {
         return Ok(None);
     }
@@ -7965,7 +8074,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "retrieval_failures": retrieval_failures,
         "governance_task_ids": governance_task_ids(&governance_tasks),
         "governance_tasks": governance_tasks,
-        "messages": messages,
+        "scoped_context": scoped_context,
         "packages": packages,
     })))
 }
@@ -8073,52 +8182,14 @@ fn governance_task_ids(tasks: &[Value]) -> Vec<String> {
 
 fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
-    let session = conn
-        .query_row(
-            "SELECT session_id, user_ref, chat_ref, model_id, created_at, updated_at FROM gateway_sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| {
-                Ok(json!({
-                    "session_id": row.get::<_, String>(0)?,
-                    "user_ref": row.get::<_, String>(1)?,
-                    "chat_ref": row.get::<_, String>(2)?,
-                    "model_id": row.get::<_, String>(3)?,
-                    "created_at": row.get::<_, String>(4)?,
-                    "updated_at": row.get::<_, String>(5)?,
-                }))
-            },
-        )
-        .optional()?;
-    let Some(session) = session else {
-        return Ok(None);
-    };
-    let mut stmt = conn.prepare(
-        "SELECT message_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE session_id = ?1 ORDER BY created_at, message_id",
-    )?;
-    let messages = stmt
-        .query_map(params![session_id], |row| {
-            Ok(json!({
-                "message_id": row.get::<_, String>(0)?,
-                "external_message_id": row.get::<_, String>(1)?,
-                "trace_id": row.get::<_, String>(2)?,
-                "package_id": row.get::<_, Option<String>>(3)?,
-                "request_hash": row.get::<_, String>(4)?,
-                "question": row.get::<_, String>(5)?,
-                "created_at": row.get::<_, String>(6)?,
-            }))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(Some(json!({
-        "object": "tonglingyu.session",
-        "session": session,
-        "messages": messages,
-    })))
+    context_governance::load_session(&conn, session_id)
 }
 
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
     let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
+    let scoped_context_counts = context_table_counts(&conn)?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -8158,8 +8229,12 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "counts": {
             "sources": runtime_stats.sources,
             "blocks": runtime_stats.blocks,
-            "sessions": table_count(&conn, "gateway_sessions")?,
-            "messages": table_count(&conn, "gateway_messages")?,
+            "sessions": scoped_context_counts["user_sessions"].clone(),
+            "messages": scoped_context_counts["session_journal"].clone(),
+            "user_sessions": scoped_context_counts["user_sessions"].clone(),
+            "interaction_contexts": scoped_context_counts["interaction_contexts"].clone(),
+            "context_packs": scoped_context_counts["context_packs"].clone(),
+            "session_journal": scoped_context_counts["session_journal"].clone(),
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
             "retrieval_failures": runtime_stats.retrieval_failures,
@@ -8168,6 +8243,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
+        "scoped_context": scoped_context_counts,
         "review_status": runtime_stats.review_status,
         "evidence_types": runtime_stats.evidence_types,
         "rqa": {
@@ -8197,6 +8273,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
     let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
+    let scoped_context_counts = context_table_counts(&conn)?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -8211,11 +8288,23 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         ("tonglingyu_blocks_total", runtime_stats.blocks),
         (
             "tonglingyu_sessions_total",
-            table_count(&conn, "gateway_sessions")?,
+            metric_i64(&scoped_context_counts, "user_sessions"),
         ),
         (
             "tonglingyu_messages_total",
-            table_count(&conn, "gateway_messages")?,
+            metric_i64(&scoped_context_counts, "session_journal"),
+        ),
+        (
+            "tonglingyu_interaction_contexts_total",
+            metric_i64(&scoped_context_counts, "interaction_contexts"),
+        ),
+        (
+            "tonglingyu_context_packs_total",
+            metric_i64(&scoped_context_counts, "context_packs"),
+        ),
+        (
+            "tonglingyu_session_journal_entries_total",
+            metric_i64(&scoped_context_counts, "session_journal"),
         ),
         (
             "tonglingyu_evidence_packages_total",
@@ -8346,6 +8435,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+fn metric_i64(counts: &Value, key: &str) -> i64 {
+    counts.get(key).and_then(Value::as_i64).unwrap_or_default()
+}
+
 fn escape_metric_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -8430,17 +8523,31 @@ fn last_user_message(messages: &[ChatMessage]) -> String {
         .iter()
         .rev()
         .find(|message| message.role == "user")
-        .map(|message| match &message.content {
-            MessageContent::Text(text) => text.clone(),
-            MessageContent::Parts(parts) => parts
-                .iter()
-                .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
-                .filter_map(|part| part.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            MessageContent::Other(value) => value.to_string(),
-        })
+        .map(chat_message_text)
         .unwrap_or_default()
+}
+
+fn context_messages_from_chat(messages: &[ChatMessage]) -> Vec<ContextMessage> {
+    messages
+        .iter()
+        .map(|message| ContextMessage {
+            role: message.role.clone(),
+            content: chat_message_text(message),
+        })
+        .collect()
+}
+
+fn chat_message_text(message: &ChatMessage) -> String {
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MessageContent::Other(value) => value.to_string(),
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -8752,37 +8859,126 @@ mod tests {
 
     fn seed_owned_gateway_package(db_path: &Path, user_id: &str) -> EvidencePackage {
         let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let question = "通灵玉回答是否有证据？";
         let package = runtime_store
             .create_package(
                 "trace-user-feedback-test",
-                "通灵玉回答是否有证据？",
+                question,
                 vec![eval_test_card("block-user-feedback-test")],
             )
             .expect("package creates");
         let conn = open_db(db_path).expect("gateway db opens");
-        let context = GatewayRequestContext {
-            user_ref: user_id.to_string(),
-            chat_ref: "chat-user-feedback-test".to_string(),
-            external_message_id: "message-user-feedback-test".to_string(),
-            external_message_id_provided: true,
-            auth_subject: user_id.to_string(),
-        };
-        let session_id =
-            get_or_create_session(&conn, &context, DEFAULT_MODEL_ID).expect("session creates");
-        store_gateway_message(
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: question.to_string(),
+        }];
+        let scoped_context = create_context_for_request(
             &conn,
-            GatewayMessageRecord {
-                session_id: &session_id,
-                context: &context,
+            ContextRequestInput {
                 trace_id: &package.trace_id,
-                package_id: Some(&package.package_id),
-                request_hash: &hash_text("通灵玉回答是否有证据？"),
-                question: "通灵玉回答是否有证据？",
-                response: &json!({"object": "chat.completion", "id": "cmpl-user-feedback-test"}),
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: user_id,
+                external_session_id: "chat-user-feedback-test",
+                external_message_id: "message-user-feedback-test",
+                question,
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
             },
         )
-        .expect("gateway message stores");
+        .expect("scoped context creates");
+        let response = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some(&scoped_context.user_session_id),
+        );
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &package.trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: "message-user-feedback-test",
+                package_id: Some(&package.package_id),
+                response: &response,
+            },
+        )
+        .expect("final response journal stores");
         package
+    }
+
+    fn seed_runtime_chat_source(db_path: &Path) {
+        let conn = open_db(db_path).expect("gateway db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema");
+        conn.execute(
+            r#"
+            INSERT INTO sources (
+                source_id, source_category, format, title, work, edition, language,
+                source_url, api_url, fetched_at, license, license_url,
+                license_source_url, attribution, usage_boundary, notes,
+                snapshot_contract_json, source_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            "#,
+            params![
+                "quality-source",
+                "base_material",
+                "mediawiki",
+                "质量测试红楼梦 source",
+                "红楼梦",
+                "测试底本；仅用于 Gateway scoped context 单元测试",
+                "zh",
+                "https://example.test/source",
+                "https://example.test/api",
+                "2026-05-18T00:00:00Z",
+                "CC-BY-SA-4.0",
+                "https://creativecommons.org/licenses/by-sa/4.0/",
+                "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "Wikisource contributors",
+                "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+                "测试 source snapshot",
+                serde_json::to_string(&json!({
+                    "license": "CC-BY-SA-4.0",
+                    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                    "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                    "attribution": "Wikisource contributors",
+                    "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+                }))
+                .expect("snapshot contract json"),
+                "hash-quality-source",
+            ],
+        )
+        .expect("insert source");
+        let source_title = "质量测试红楼梦/第六十六回";
+        let text = "尤三姐最后自刎，以明心迹；此处仅作 scoped context 单元测试证据。";
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                "quality-block-yousanjie",
+                "quality-source",
+                "quality-section-066",
+                source_title,
+                tonglingyu_runtime::normalize_for_search(source_title),
+                "https://example.test/source/66",
+                1_i64,
+                1_i64,
+                "paragraph",
+                Option::<String>::None,
+                text,
+                tonglingyu_runtime::normalize_for_search(text),
+                "base_text",
+                66_i64,
+            ],
+        )
+        .expect("insert block");
     }
 
     #[test]
@@ -10473,12 +10669,29 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         );
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'metadata_prompt'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("metadata message count"),
+            .expect("metadata journal count"),
             1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'final_response'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata final response journal count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_packs").expect("context pack count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
+            0
         );
         assert_eq!(
             audit_event_count(&db_path, "openwebui_metadata_request_handled"),
@@ -10551,12 +10764,29 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
         );
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'metadata_prompt'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("metadata message count"),
+            .expect("metadata journal count"),
             1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'final_response'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata final response journal count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_packs").expect("context pack count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
+            0
         );
         assert_eq!(
             audit_event_count(&db_path, "openwebui_metadata_request_handled"),
@@ -10570,6 +10800,7 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
     async fn chat_completion_accepts_long_openwebui_history() {
         let db_path = temp_gateway_db_path("tonglingyu-long-history");
         let state = Arc::new(test_app_state(db_path.clone()));
+        let max_messages = state.max_messages;
         let metadata_prompt = r#"### Task:
 Generate a concise, 3-5 word title with an emoji summarizing the chat history.
 ### Guidelines:
@@ -10581,7 +10812,7 @@ JSON format: { "title": "your concise title here" }
 USER: 介绍尤三姐
 </chat_history>"#;
         let mut messages = Vec::new();
-        for index in 0..state.max_messages {
+        for index in 0..max_messages {
             messages.push(json!({
                 "role": "user",
                 "content": format!("历史消息 {index}"),
@@ -10622,6 +10853,158 @@ USER: 介绍尤三姐
             1
         );
         assert_eq!(audit_event_count(&db_path, "message_history_truncated"), 1);
+        let session_summary = conn
+            .query_row(
+                "SELECT session_summary FROM context_packs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("context pack session summary");
+        assert!(session_summary.contains("历史消息"));
+        let metadata_json: String = conn
+            .query_row(
+                "SELECT metadata_json FROM session_journal WHERE entry_type = 'metadata_prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("metadata prompt journal metadata");
+        let metadata: Value = serde_json::from_str(&metadata_json).expect("journal metadata json");
+        assert_eq!(metadata["history_over_limit"], json!(true));
+        assert_eq!(metadata["max_messages"], json!(max_messages));
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn chat_completion_resolves_follow_up_from_session_journal() {
+        let db_path = temp_gateway_db_path("tonglingyu-scoped-context-follow-up");
+        seed_runtime_chat_source(&db_path);
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let first = chat_completions(
+            State(state.clone()),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "介绍尤三姐"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "scoped-chat",
+                    "message_id": "scoped-message-1",
+                },
+            })),
+        )
+        .await;
+        let first_status = first.status();
+        let first_text = response_text(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_text}");
+
+        let second = chat_completions(
+            State(state),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "她最后怎么样？"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "scoped-chat",
+                    "message_id": "scoped-message-2",
+                },
+            })),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(second).await).expect("response json");
+        assert!(body.get("context_pack_id").is_none());
+        assert!(body.get("interaction_context_id").is_none());
+        assert!(body.get("session_journal").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        let (trace_id, resolved_question): (String, String) = conn
+            .query_row(
+                "SELECT trace_id, resolved_question FROM context_packs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("latest context pack");
+        assert_eq!(resolved_question, "尤三姐最后怎么样？");
+
+        let trace = load_trace(&db_path, &trace_id)
+            .expect("trace loads")
+            .expect("trace exists");
+        assert_eq!(
+            trace["scoped_context"]["context_packs"][0]["resolved_question"],
+            json!("尤三姐最后怎么样？")
+        );
+        let rendered_trace = serde_json::to_string(&trace).expect("trace json");
+        assert!(!rendered_trace.contains("\"content\":"));
+        assert!(!rendered_trace.contains("memory_candidate_created"));
+        assert!(!rendered_trace.contains("memory_card"));
+        let profile_views = trace["scoped_context"]["context_packs"][0]["profile_views"]
+            .as_array()
+            .expect("profile views");
+        for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
+            let view = profile_views
+                .iter()
+                .find(|view| view["profile_name"] == json!(profile))
+                .expect("profile view exists");
+            assert!(view["session_summary"].is_null());
+            assert!(
+                !serde_json::to_string(view)
+                    .expect("profile view json")
+                    .contains("介绍尤三姐")
+            );
+        }
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn chat_completion_fails_closed_when_referent_is_unresolved() {
+        let db_path = temp_gateway_db_path("tonglingyu-scoped-context-unresolved");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "她最后怎么样？"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "new-scoped-chat",
+                    "message_id": "unresolved-message-1",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        assert!(
+            body["choices"][0]["message"]["content"]
+                .as_str()
+                .expect("assistant content")
+                .contains("请明确")
+        );
+        assert!(body.get("evidence_package_id").is_none());
+        assert!(body.get("context_pack_id").is_none());
+        let conn = open_db(&db_path).expect("db opens");
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM workflow_states WHERE status = 'clarification_required'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("clarification state count"),
+            1
+        );
 
         remove_sqlite_file_set(&db_path);
     }
@@ -10643,12 +11026,16 @@ USER: 介绍尤三姐
                 summary: "reviewer passed".to_string(),
             },
         };
-        let value = completion_value(
+        let mut value = completion_value(
             DEFAULT_MODEL_ID,
             "测试回答".to_string(),
             Some(&package),
             Some("session-public-rqa-test"),
         );
+        value["context_pack_id"] = json!("context-pack-public-rqa-test");
+        value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
+        value["session_journal"] = json!([{"entry_type": "user_message"}]);
+        value["memory_read_refs"] = json!(["memory:forbidden"]);
 
         let rendered =
             serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
@@ -10660,6 +11047,10 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("pkg-public-rqa-test"));
         assert!(!rendered.contains("reviewer"));
         assert!(!rendered.contains("session-public-rqa-test"));
+        assert!(!rendered.contains("context_pack_id"));
+        assert!(!rendered.contains("interaction_context_id"));
+        assert!(!rendered.contains("session_journal"));
+        assert!(!rendered.contains("memory_read_refs"));
     }
 
     #[test]
@@ -10768,11 +11159,15 @@ USER: 介绍尤三姐
             "metadata": {
                 "runtime_step_plan": [],
                 "admin_trace": {"trace_id": "forged"},
+                "interaction_context_id": "forged-context",
+                "session_journal": [{"content": "forged"}],
                 "nested": {"agent_runtime": {"mode": "forged"}},
                 "message_id": "open-webui-message",
             },
             "extra_body": {
                 "allowed_tools": ["tonglingyu.text.search"],
+                "context_pack_id": "forged-pack",
+                "memory_read_scopes": ["user_private:any"],
                 "layers": [{"runtime_step_outputs": []}],
             },
             "messages": [{"role": "user", "content": "通灵玉是什么？"}],
@@ -10784,10 +11179,14 @@ USER: 介绍尤三姐
             vec![
                 "agent_runtime_summary",
                 "extra_body.allowed_tools",
+                "extra_body.context_pack_id",
                 "extra_body.layers[0].runtime_step_outputs",
+                "extra_body.memory_read_scopes",
                 "metadata.admin_trace",
+                "metadata.interaction_context_id",
                 "metadata.nested.agent_runtime",
                 "metadata.runtime_step_plan",
+                "metadata.session_journal",
             ]
         );
     }
