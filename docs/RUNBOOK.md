@@ -6,8 +6,8 @@
 ## 环境
 
 ```bash
-.venv/bin/python --version
-.venv/bin/pip install -r requirements.txt
+uv sync
+uv run python --version
 ```
 
 ## 视频转录
@@ -16,8 +16,8 @@
 可提交；音频、视频和缓存不提交。
 
 ```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
-.venv/bin/python scripts/bilibili_hlm_pipeline.py \
+uv run python scripts/bilibili_hlm_pipeline.py --dry-run --limit 10
+uv run python scripts/bilibili_hlm_pipeline.py \
   --offset 3 \
   --limit 3 \
   --asr-model base
@@ -26,7 +26,7 @@
 带术语词表重转录：
 
 ```bash
-.venv/bin/python scripts/bilibili_hlm_pipeline.py \
+uv run python scripts/bilibili_hlm_pipeline.py \
   --limit 1 \
   --asr-model small \
   --asr-glossary resources/hongloumeng_asr_glossary.txt \
@@ -39,7 +39,7 @@
 EPUB 抽取：
 
 ```bash
-.venv/bin/python scripts/extract_epub.py path/to/source.epub \
+uv run python scripts/extract_epub.py path/to/source.epub \
   --source-id tonglingyu-source-id \
   --source-category base_material \
   --edition "edition label" \
@@ -49,7 +49,7 @@ EPUB 抽取：
 维基文库《红楼梦》全本：
 
 ```bash
-.venv/bin/python scripts/download_wikisource.py \
+uv run python scripts/download_wikisource.py \
   --source-id hongloumeng-wikisource \
   --title "红楼梦 维基文库全本" \
   --work "红楼梦" \
@@ -62,7 +62,7 @@ EPUB 抽取：
 脂批本或其他版本使用独立 `source_id` 和 `source_category`：
 
 ```bash
-.venv/bin/python scripts/download_wikisource.py \
+uv run python scripts/download_wikisource.py \
   --source-id zhipiben-wikisource \
   --source-category commentary_material \
   --title "脂批本 维基文库资料" \
@@ -80,7 +80,7 @@ EPUB 抽取：
 ## 验证
 
 ```bash
-python3 -m py_compile scripts/bilibili_hlm_pipeline.py scripts/extract_epub.py scripts/download_wikisource.py
+scripts/qa.sh --quick
 git diff --check
 ```
 
