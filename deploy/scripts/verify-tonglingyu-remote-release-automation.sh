@@ -101,6 +101,9 @@ if host_db.is_file():
             """
             select rf.trace_id, rf.package_id, rf.failure_id, kgt.task_id
             from retrieval_failures rf
+            join evidence_packages ep
+              on ep.package_id = rf.package_id
+             and ep.trace_id = rf.trace_id
             join knowledge_governance_tasks kgt
               on kgt.source_failure_id = rf.failure_id
             where rf.trace_id is not null
