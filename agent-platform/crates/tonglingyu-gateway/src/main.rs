@@ -1583,6 +1583,7 @@ fn restore_canary_quality_report(package: &EvidencePackage) -> RetrievalQualityR
         expanded_terms: Vec::new(),
         protected_terms: Vec::new(),
         expanded_aliases: Vec::new(),
+        normalized_match_channels: BTreeMap::new(),
         candidate_count: package.cards.len(),
         selected_count: package.cards.len(),
         channel_distribution,
@@ -3468,6 +3469,7 @@ fn fallback_eval_quality_report(
             .map(|term| (*term).to_string())
             .collect(),
         expanded_aliases: Vec::new(),
+        normalized_match_channels: BTreeMap::new(),
         candidate_count: package.cards.len(),
         selected_count: package.cards.len(),
         channel_distribution: package.cards.iter().fold(

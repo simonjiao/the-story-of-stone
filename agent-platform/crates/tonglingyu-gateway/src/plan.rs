@@ -3,7 +3,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tonglingyu_runtime::{
-    RuntimeWorkflowPlan, RuntimeWorkflowPlanInput, RuntimeWorkflowProfiles, runtime_workflow_plan,
+    RuntimeWorkflowPlan, RuntimeWorkflowPlanInput, RuntimeWorkflowProfiles, normalize_for_search,
+    runtime_workflow_plan,
 };
 
 #[cfg(test)]
@@ -163,24 +164,7 @@ fn blocked_prompt_controls(question: &str) -> Vec<String> {
 }
 
 fn normalize_text(input: &str) -> String {
-    let replacements = [
-        ("紅", "红"),
-        ("樓", "楼"),
-        ("夢", "梦"),
-        ("寶", "宝"),
-        ("寳", "宝"),
-        ("靈", "灵"),
-        ("釵", "钗"),
-        ("壽", "寿"),
-        ("恆", "恒"),
-        ("後", "后"),
-        ("評", "评"),
-    ];
-    let mut output = input.to_lowercase();
-    for (from, to) in replacements {
-        output = output.replace(from, to);
-    }
-    output
+    normalize_for_search(input)
 }
 
 #[cfg(test)]
