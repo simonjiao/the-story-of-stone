@@ -61,11 +61,16 @@ rsync_path() {
 }
 
 rsync_path "${REPO_DIR}/deploy/scripts/" "scripts"
+rsync_path "${REPO_DIR}/scripts/version.py" "scripts"
+rsync_path "${REPO_DIR}/scripts/qa.sh" "scripts"
 rsync_path "${REPO_DIR}/deploy/runbooks/" "runbooks"
 rsync_path "${REPO_DIR}/deploy/open-webui/" "open-webui"
 rsync_path "${REPO_DIR}/agent-platform/" "agent-platform" \
   --exclude target --exclude .git --exclude .direnv
 rsync_path "${REPO_DIR}/resources/" "resources"
+rsync_path "${REPO_DIR}/VERSION" "."
+rsync_path "${REPO_DIR}/pyproject.toml" "."
+rsync_path "${REPO_DIR}/uv.lock" "."
 if is_true "${INCLUDE_COMPOSE}"; then
   rsync -a "${REPO_DIR}/deploy/docker-compose.yml" \
     "${REMOTE_HOST}:${REMOTE_PROJECT_RESOLVED}/docker-compose.yml" \
