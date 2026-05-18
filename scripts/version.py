@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 
-PROJECT_VERSION_FALLBACK = "0.1.0"
+PROJECT_VERSION_FALLBACK = "0.1.1"
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CRATES = (
     "agent-core",
