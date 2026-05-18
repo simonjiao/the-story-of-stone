@@ -1,14 +1,14 @@
 name: tonglingyu-home
 
 x-tonglingyu-gateway-image: &tonglingyu-gateway-image
-  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:0.1.4}"
+  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:0.1.5}"
   build:
     context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: crates/tonglingyu-gateway/Dockerfile
     args:
-      APP_VERSION: "${TONGLINGYU_VERSION:-0.1.4}"
+      APP_VERSION: "${TONGLINGYU_VERSION:-0.1.5}"
   labels:
-    org.opencontainers.image.version: "${TONGLINGYU_VERSION:-0.1.4}"
+    org.opencontainers.image.version: "${TONGLINGYU_VERSION:-0.1.5}"
   restart: unless-stopped
 
 services:
