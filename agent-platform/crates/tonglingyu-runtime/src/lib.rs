@@ -3804,9 +3804,57 @@ fn agent_runtime_profile_step_message(
             output_ref = &step.output_ref,
             allowed_tools = step.allowed_tools.join(","),
             result_summary_contract = result_summary_contract,
-            step_output = serde_json::to_string(&step.output).unwrap_or_else(|_| "{}".to_string()),
+            step_output = serde_json::to_string(&step_output_message_payload(step))
+                .unwrap_or_else(|_| "{}".to_string()),
         ),
     )
+}
+
+fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
+    let package_id = step
+        .output
+        .get("package_id")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let evidence_ids = step
+        .output
+        .get("evidence_ids")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let evidence_types = step
+        .output
+        .get("evidence_types")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let review = step
+        .output
+        .get("review")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "object": step
+            .output
+            .get("object")
+            .cloned()
+            .unwrap_or_else(|| json!("tonglingyu.runtime_step_output")),
+        "operation": &step.operation,
+        "profile": &step.profile,
+        "output_ref": &step.output_ref,
+        "package_id": package_id,
+        "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
+        "claim_count": step.output.get("claim_count").cloned().unwrap_or(Value::Null),
+        "evidence_ids": evidence_ids,
+        "evidence_types": evidence_types,
+        "review_status": step
+            .output
+            .get("review_status")
+            .cloned()
+            .or_else(|| review.get("status").cloned())
+            .unwrap_or(Value::Null),
+        "review_severity": review.get("severity").cloned().unwrap_or(Value::Null),
+        "draft_consumed": step.output.get("draft_consumed").cloned().unwrap_or(Value::Null),
+        "revision_applied": step.output.get("revision_applied").cloned().unwrap_or(Value::Null),
+    })
 }
 
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {

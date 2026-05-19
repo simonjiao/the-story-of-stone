@@ -183,10 +183,11 @@ conn = sqlite3.connect(db_path)
 try:
     rows = conn.execute(
         """
-        SELECT session_id, trace_id, package_id
-        FROM gateway_messages
+        SELECT user_session_id, trace_id, package_id
+        FROM session_journal
         WHERE external_message_id = ?
-        ORDER BY created_at, message_id
+          AND entry_type = 'final_response'
+        ORDER BY created_at DESC, journal_id DESC
         """,
         (external_message_id,),
     ).fetchall()
@@ -194,19 +195,19 @@ finally:
     conn.close()
 if len(rows) != 1:
     raise SystemExit(
-        f"expected one gateway message for {external_message_id}, got {len(rows)}"
+        f"expected one final_response journal row for {external_message_id}, got {len(rows)}"
     )
-session_id, trace_id, package_id = rows[0]
-if not trace_id or not package_id or not session_id:
-    raise SystemExit(f"gateway message metadata incomplete for {external_message_id}")
+user_session_id, trace_id, package_id = rows[0]
+if not trace_id or not package_id or not user_session_id:
+    raise SystemExit(f"session journal metadata incomplete for {external_message_id}")
 metadata = {
     "external_message_id": external_message_id,
     "trace_id": trace_id,
     "evidence_package_id": package_id,
-    "session_id": session_id,
+    "session_id": user_session_id,
     "duplicate_trace_id": trace_id,
     "duplicate_evidence_package_id": package_id,
-    "duplicate_session_id": session_id,
+    "duplicate_session_id": user_session_id,
 }
 print(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
 PY
@@ -480,7 +481,13 @@ for event_type in [
     "response_finalized",
 ]:
     assert event_type in event_types, (event_type, event_types)
-assert trace["messages"][0]["package_id"] == package["package_id"], trace
+trace_journal = trace["scoped_context"]["session_journal"]
+assert any(
+    item["entry_type"] == "final_response"
+    and item["package_id"] == package["package_id"]
+    and item["external_message_id"] == "smoke-message-1"
+    for item in trace_journal
+), trace
 assert stream_trace["trace_id"] == stream_meta["trace_id"], (stream_trace, stream_meta)
 assert stream_meta["duplicate_trace_id"] == stream_meta["trace_id"], stream_meta
 assert stream_meta["duplicate_evidence_package_id"] == stream_meta["evidence_package_id"], stream_meta
@@ -502,18 +509,19 @@ assert any(
     item["external_message_id"] == "smoke-message-stream"
     and item["package_id"] == stream_meta["evidence_package_id"]
     and item["trace_id"] == stream_meta["trace_id"]
-    for item in stream_trace["messages"]
+    for item in stream_trace["scoped_context"]["session_journal"]
 ), (stream_trace, stream_meta)
-assert session["session"]["session_id"] == chat_meta["session_id"], session
-assert len(session["messages"]) >= 2, session
+assert session["session"]["user_session_id"] == chat_meta["session_id"], session
+session_journal = session["session_journal"]
+assert len(session_journal) >= 2, session
 assert any(
     item["external_message_id"] == "smoke-message-1"
     and item["package_id"] == package["package_id"]
-    for item in session["messages"]
+    for item in session_journal
 ), session
 assert any(
     item["external_message_id"] == "smoke-message-stream"
-    for item in session["messages"]
+    for item in session_journal
 ), session
 assert admin_package["package"]["package_id"] == package["package_id"], admin_package
 assert admin_package["trace"]["trace_id"] == chat_meta["trace_id"], admin_package
