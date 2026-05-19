@@ -18,9 +18,17 @@ HEALTH_JSON="${TONGLINGYU_SCOPED_CONTEXT_HEALTH_JSON:-${WORK_DIR}/health.json}"
 FIRST_PAYLOAD="${WORK_DIR}/first-payload.json"
 SECOND_PAYLOAD="${WORK_DIR}/second-payload.json"
 LONG_PAYLOAD="${WORK_DIR}/long-payload.json"
+MEMORY_PAYLOAD="${WORK_DIR}/memory-payload.json"
 FIRST_JSON="${TONGLINGYU_SCOPED_CONTEXT_FIRST_JSON:-${WORK_DIR}/first.json}"
 SECOND_JSON="${TONGLINGYU_SCOPED_CONTEXT_SECOND_JSON:-${WORK_DIR}/second.json}"
 LONG_JSON="${TONGLINGYU_SCOPED_CONTEXT_LONG_JSON:-${WORK_DIR}/long.json}"
+MEMORY_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_JSON:-${WORK_DIR}/memory.json}"
+MEMORY_REF_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_REF_JSON:-${WORK_DIR}/memory-ref.json}"
+MEMORY_COLLECTOR_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_COLLECTOR_JSON:-${WORK_DIR}/memory-collector.json}"
+MEMORY_CANDIDATES_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_CANDIDATES_JSON:-${WORK_DIR}/memory-candidates.json}"
+MEMORY_APPROVE_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_APPROVE_JSON:-${WORK_DIR}/memory-approve.json}"
+MEMORY_PROMOTE_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_PROMOTE_JSON:-${WORK_DIR}/memory-promote.json}"
+MEMORY_CARDS_JSON="${TONGLINGYU_SCOPED_CONTEXT_MEMORY_CARDS_JSON:-${WORK_DIR}/memory-cards.json}"
 SECOND_REF_JSON="${TONGLINGYU_SCOPED_CONTEXT_SECOND_REF_JSON:-${WORK_DIR}/second-ref.json}"
 LONG_REF_JSON="${TONGLINGYU_SCOPED_CONTEXT_LONG_REF_JSON:-${WORK_DIR}/long-ref.json}"
 SECOND_TRACE_JSON="${TONGLINGYU_SCOPED_CONTEXT_SECOND_TRACE_JSON:-${WORK_DIR}/second-trace.json}"
@@ -136,6 +144,35 @@ curl -fsS \
   http://tonglingyu-gateway:8090/v1/chat/completions
 ' <"${LONG_PAYLOAD}" >"${LONG_JSON}"
 
+python3 - "${MEMORY_PAYLOAD}" <<'PY'
+import json
+import sys
+payload = {
+    "model": "tonglingyu",
+    "messages": [
+        {
+            "role": "user",
+            "content": "以后回答《红楼梦》问题时，请用简体中文短句总结。现在介绍贾宝玉。",
+        }
+    ],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False)
+PY
+
+docker compose exec -T -e VERIFY_RUN_ID="${RUN_ID}" open-webui sh -lc '
+key="${OPENAI_API_KEYS%%;*}"
+test -n "${key}"
+curl -fsS \
+  -H "Authorization: Bearer ${key}" \
+  -H "content-type: application/json" \
+  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
+  -H "x-tonglingyu-message-id: scoped-context-live-memory-${VERIFY_RUN_ID}" \
+  --data-binary @- \
+  http://tonglingyu-gateway:8090/v1/chat/completions
+' <"${MEMORY_PAYLOAD}" >"${MEMORY_JSON}"
+
 resolve_scoped_message_ref() {
   local external_message_id="$1"
   python3 - "${DEPLOY_DIR}" "${external_message_id}" <<'PY'
@@ -199,6 +236,7 @@ PY
 
 resolve_scoped_message_ref "scoped-context-live-second-${RUN_ID}" >"${SECOND_REF_JSON}"
 resolve_scoped_message_ref "scoped-context-live-long-${RUN_ID}" >"${LONG_REF_JSON}"
+resolve_scoped_message_ref "scoped-context-live-memory-${RUN_ID}" >"${MEMORY_REF_JSON}"
 
 SECOND_TRACE_ID="$(
   python3 - "${SECOND_REF_JSON}" <<'PY'
@@ -227,9 +265,61 @@ test -n "${TLY_ADMIN_KEY}"
 curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/traces/'"${LONG_TRACE_ID}"'"
 ' >"${LONG_TRACE_JSON}"
 
+docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS \
+  -H "Authorization: Bearer ${TLY_ADMIN_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary "{\"trigger\":\"admin_manual\",\"limit\":100,\"dry_run\":false,\"llm_extraction_probe\":{\"candidate_type\":\"user_response_preference\",\"summary\":\"用户回答偏好: 以后回答时用简体短句。\",\"confidence\":0.84,\"risk_flags\":[]}}" \
+  http://tonglingyu-gateway:8090/v1/admin/memory/collector/run
+' >"${MEMORY_COLLECTOR_JSON}"
+
+MEMORY_CANDIDATE_ID="$(
+  python3 - "${MEMORY_COLLECTOR_JSON}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+items = payload.get("candidates") or []
+if not items:
+    raise SystemExit("memory collector produced no candidates")
+print(items[0]["candidate_id"])
+PY
+)"
+
+docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/memory/candidates?status=pending&limit=20"
+' >"${MEMORY_CANDIDATES_JSON}"
+
+docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS \
+  -H "Authorization: Bearer ${TLY_ADMIN_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary "{\"action\":\"approve\",\"reason\":\"scoped context live gate approve\"}" \
+  "http://tonglingyu-gateway:8090/v1/admin/memory/candidates/'"${MEMORY_CANDIDATE_ID}"'/transition"
+' >"${MEMORY_APPROVE_JSON}"
+
+docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS \
+  -H "Authorization: Bearer ${TLY_ADMIN_KEY}" \
+  -H "content-type: application/json" \
+  --data-binary "{\"action\":\"promote\",\"reason\":\"scoped context live gate promote\"}" \
+  "http://tonglingyu-gateway:8090/v1/admin/memory/candidates/'"${MEMORY_CANDIDATE_ID}"'/transition"
+' >"${MEMORY_PROMOTE_JSON}"
+
+docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
+test -n "${TLY_ADMIN_KEY}"
+curl -fsS -H "Authorization: Bearer ${TLY_ADMIN_KEY}" "http://tonglingyu-gateway:8090/v1/admin/memory/cards?status=active&limit=20"
+' >"${MEMORY_CARDS_JSON}"
+
 python3 - "${HEALTH_JSON}" "${FIRST_JSON}" "${SECOND_JSON}" "${LONG_JSON}" \
-  "${SECOND_REF_JSON}" "${LONG_REF_JSON}" "${SECOND_TRACE_JSON}" "${LONG_TRACE_JSON}" \
-  "${MAX_MESSAGES}" "${RUN_ID}" <<'PY'
+  "${MEMORY_JSON}" "${SECOND_REF_JSON}" "${LONG_REF_JSON}" "${MEMORY_REF_JSON}" \
+  "${SECOND_TRACE_JSON}" "${LONG_TRACE_JSON}" "${MEMORY_COLLECTOR_JSON}" \
+  "${MEMORY_CANDIDATES_JSON}" "${MEMORY_APPROVE_JSON}" "${MEMORY_PROMOTE_JSON}" \
+  "${MEMORY_CARDS_JSON}" "${MAX_MESSAGES}" "${RUN_ID}" <<'PY'
 import hashlib
 import json
 import sys
@@ -241,13 +331,20 @@ from pathlib import Path
     first_path,
     second_path,
     long_path,
+    memory_path,
     second_ref_path,
     long_ref_path,
+    memory_ref_path,
     second_trace_path,
     long_trace_path,
+    memory_collector_path,
+    memory_candidates_path,
+    memory_approve_path,
+    memory_promote_path,
+    memory_cards_path,
     max_messages_raw,
     run_id,
-) = sys.argv[1:11]
+) = sys.argv[1:18]
 
 
 def load(path):
@@ -271,14 +368,26 @@ health = load(health_path)
 first = load(first_path)
 second = load(second_path)
 long_response = load(long_path)
+memory_response = load(memory_path)
 second_ref = load(second_ref_path)
 long_ref = load(long_ref_path)
+memory_ref = load(memory_ref_path)
 second_trace = load(second_trace_path)
 long_trace = load(long_trace_path)
+memory_collector = load(memory_collector_path)
+memory_candidates = load(memory_candidates_path)
+memory_approve = load(memory_approve_path)
+memory_promote = load(memory_promote_path)
+memory_cards = load(memory_cards_path)
 max_messages = int(max_messages_raw)
 errors = []
 
-for name, response in [("first", first), ("second", second), ("long", long_response)]:
+for name, response in [
+    ("first", first),
+    ("second", second),
+    ("long", long_response),
+    ("memory", memory_response),
+]:
     if response.get("object") != "chat.completion":
         errors.append(f"{name}_response_object_invalid")
     public_text = rendered(response)
@@ -300,6 +409,12 @@ for name, response in [("first", first), ("second", second), ("long", long_respo
         "user_session_id",
         "session_journal",
         "memory_read_refs",
+        "memory_candidate",
+        "memory_candidate_id",
+        "memory_card",
+        "memory_card_id",
+        "llm_extraction",
+        "read_enabled",
         "trace_id",
         "evidence_package_id",
         "review",
@@ -459,6 +574,61 @@ second_projections = validate_context_projections("second", second_trace)
 long_projections = validate_context_projections("long", long_trace)
 validate_runtime_projection_binding("second", second_trace, second_projections)
 
+if not memory_ref.get("trace_id"):
+    errors.append("memory_trace_ref_missing")
+if memory_collector.get("object") != "tonglingyu.memory_collector_run":
+    errors.append("memory_collector_object_invalid")
+if memory_collector.get("status") != "ok":
+    errors.append("memory_collector_status_not_ok")
+if int(memory_collector.get("candidate_count") or 0) < 1:
+    errors.append("memory_collector_candidate_missing")
+probe = memory_collector.get("llm_extraction_probe_validation") or {}
+if probe.get("status") != "pending":
+    errors.append("memory_llm_probe_not_pending")
+boundary = memory_collector.get("llm_boundary") or {}
+if boundary.get("allowed") is not True or boundary.get("used") is not False:
+    errors.append("memory_llm_boundary_invalid")
+candidates = memory_collector.get("candidates") or []
+candidate_id = candidates[0].get("candidate_id") if candidates else ""
+candidate_list_items = memory_candidates.get("items") or []
+candidate = next(
+    (item for item in candidate_list_items if item.get("candidate_id") == candidate_id),
+    candidates[0] if candidates else {},
+)
+if not candidate:
+    errors.append("memory_candidate_not_listed")
+else:
+    if candidate.get("source_entry_type") != "user_message":
+        errors.append("memory_candidate_source_invalid")
+    if candidate.get("scope_type") != "user_session":
+        errors.append("memory_candidate_scope_invalid")
+    if candidate.get("candidate_type") != "user_response_preference":
+        errors.append("memory_candidate_type_invalid")
+    extraction = candidate.get("llm_extraction") or {}
+    participation = extraction.get("llm_participation") or {}
+    if participation.get("allowed") is not True or participation.get("used") is not False:
+        errors.append("memory_candidate_llm_boundary_invalid")
+    if "trace_id" not in candidate or "journal_id" not in candidate or "context_pack_id" not in candidate:
+        errors.append("memory_candidate_traceability_missing")
+if (memory_approve.get("candidate") or {}).get("status") != "approved":
+    errors.append("memory_candidate_approve_failed")
+if (memory_promote.get("candidate") or {}).get("status") != "approved":
+    errors.append("memory_candidate_promote_failed")
+if memory_promote.get("read_path_enabled") is not False:
+    errors.append("memory_promote_read_path_enabled")
+cards = memory_cards.get("items") or []
+card = next((item for item in cards if item.get("source_candidate_id") == candidate_id), {})
+if not card:
+    errors.append("memory_card_not_created")
+else:
+    if card.get("status") != "active":
+        errors.append("memory_card_status_invalid")
+    if card.get("read_enabled") is not False:
+        errors.append("memory_card_read_enabled")
+    acl = card.get("acl") or {}
+    if acl.get("phase3_read_disable_reason") != "phase3_read_path_not_enabled":
+        errors.append("memory_card_acl_reason_missing")
+
 for trace_name, trace in [("second", second_trace), ("long", long_trace)]:
     context = trace.get("scoped_context") or {}
     if context.get("raw_content_included") is not False:
@@ -518,7 +688,13 @@ checks = {
         or "admin_trace_exposes_projection_payload" in error
         for error in errors
     ),
-    "no_memory_phase1": not any("memory" in error for error in errors),
+    "memory_phase3_candidate_gate": not any(
+        error.startswith("memory_") for error in errors
+    ),
+    "memory_read_path_disabled": not any(
+        error in {"memory_promote_read_path_enabled", "memory_card_read_enabled"}
+        for error in errors
+    ),
 }
 payload = {
     "object": "tonglingyu.scoped_context_live_gate",
@@ -529,6 +705,7 @@ payload = {
     "max_messages": max_messages,
     "second_trace_id": second_ref.get("trace_id"),
     "long_trace_id": long_ref.get("trace_id"),
+    "memory_trace_id": memory_ref.get("trace_id"),
     "second_context_pack_id_sha256": hashlib.sha256(
         str(second_ref.get("context_pack_id") or "").encode("utf-8")
     ).hexdigest(),
@@ -537,8 +714,12 @@ payload = {
         "first_response": file_sha256(first_path),
         "second_response": file_sha256(second_path),
         "long_response": file_sha256(long_path),
+        "memory_response": file_sha256(memory_path),
         "second_trace": file_sha256(second_trace_path),
         "long_trace": file_sha256(long_trace_path),
+        "memory_collector": file_sha256(memory_collector_path),
+        "memory_candidates": file_sha256(memory_candidates_path),
+        "memory_cards": file_sha256(memory_cards_path),
     },
     "checks": checks,
     "errors": errors,

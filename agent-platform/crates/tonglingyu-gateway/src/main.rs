@@ -49,9 +49,12 @@ mod plan;
 
 use crate::context_governance::{
     ContextMessage, ContextProjection, ContextRequestInput, ContextResolution,
-    FinalResponseJournalInput, append_final_response, append_review_journal,
-    append_runtime_step_journal, create_context_for_request, load_deduped_final_response,
-    table_counts as context_table_counts,
+    FinalResponseJournalInput, MemoryCandidateListInput, MemoryCandidateTransitionInput,
+    MemoryCardListInput, MemoryCardTransitionInput, MemoryCollectorRunInput, append_final_response,
+    append_review_journal, append_runtime_step_journal, create_context_for_request,
+    list_memory_candidates, list_memory_cards, load_deduped_final_response, read_memory_candidate,
+    read_memory_card, run_memory_collector, table_counts as context_table_counts,
+    transition_memory_candidate, transition_memory_card, validate_llm_memory_extraction_output,
 };
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
@@ -117,6 +120,11 @@ enum Command {
     PruneRuntime(PruneRuntimeArgs),
     RqaRestoreCanary(RqaRestoreCanaryArgs),
     RqaUserLifecycle(RqaUserLifecycleArgs),
+    MemoryCollectorRun(MemoryCollectorRunArgs),
+    MemoryCandidateList(MemoryCandidateListArgs),
+    MemoryCandidateTransition(MemoryCandidateTransitionArgs),
+    MemoryCardList(MemoryCardListArgs),
+    MemoryCardTransition(MemoryCardTransitionArgs),
     Healthcheck(HealthcheckArgs),
     Serve(ServeArgs),
 }
@@ -306,6 +314,108 @@ struct RqaUserLifecycleArgs {
     action: RqaUserLifecycleAction,
     #[arg(long, default_value = "operator_requested")]
     reason: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCollectorRunArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long, default_value = "admin_manual")]
+    trigger: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCandidateListArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    scope_type: Option<String>,
+    #[arg(long)]
+    scope_ref: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCandidateTransitionArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    candidate_id: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    candidate_type: Option<String>,
+    #[arg(long)]
+    sensitivity: Option<String>,
+    #[arg(long)]
+    merge_target_candidate_id: Option<String>,
+    #[arg(long)]
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCardListArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    scope_type: Option<String>,
+    #[arg(long)]
+    scope_ref: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCardTransitionArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    memory_card_id: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -802,6 +912,33 @@ struct AdminAccessDenialRequest {
     model: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCollectorRunRequest {
+    trigger: Option<String>,
+    limit: Option<usize>,
+    dry_run: Option<bool>,
+    llm_extraction_probe: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCandidateTransitionRequest {
+    action: String,
+    reason: Option<String>,
+    candidate_type: Option<String>,
+    sensitivity: Option<String>,
+    merge_target_candidate_id: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCardTransitionRequest {
+    action: String,
+    reason: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PackageAccessContext {
     subject: String,
@@ -1156,7 +1293,18 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "memory_read_scopes",
         "memory_write_scopes",
         "memory_scope",
+        "memory_candidate",
+        "memory_candidate_id",
+        "memory_candidate_ref",
+        "memory_candidates",
         "memory_card",
+        "memory_card_id",
+        "memory_card_ref",
+        "memory_cards",
+        "memory_transition_audit",
+        "memory_collector",
+        "llm_extraction",
+        "read_enabled",
         "forbidden_tools",
         "tool_policy_digest",
         "output_contract_digest",
@@ -1377,6 +1525,43 @@ async fn main() -> Result<()> {
                 Err(anyhow!("rqa user lifecycle action did not complete"))
             }
         }
+        Command::MemoryCollectorRun(args) => {
+            let report = memory_collector_run_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory collector run did not complete"))
+            }
+        }
+        Command::MemoryCandidateList(args) => {
+            let report = memory_candidate_list_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::MemoryCandidateTransition(args) => {
+            let report = memory_candidate_transition_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory candidate transition did not complete"))
+            }
+        }
+        Command::MemoryCardList(args) => {
+            let report = memory_card_list_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::MemoryCardTransition(args) => {
+            let report = memory_card_transition_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory card transition did not complete"))
+            }
+        }
         Command::Healthcheck(args) => {
             let report = healthcheck_command(&args).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1483,6 +1668,31 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/access-denials",
             post(admin_access_denial_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/collector/run",
+            post(memory_collector_run_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates",
+            get(memory_candidates_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates/{candidate_id}",
+            get(memory_candidate_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates/{candidate_id}/transition",
+            post(memory_candidate_transition_endpoint),
+        )
+        .route("/v1/admin/memory/cards", get(memory_cards_endpoint))
+        .route(
+            "/v1/admin/memory/cards/{memory_card_id}",
+            get(memory_card_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/cards/{memory_card_id}/transition",
+            post(memory_card_transition_endpoint),
         )
         .route(
             "/v1/admin/retrieval-failures",
@@ -1626,6 +1836,12 @@ fn remove_sqlite_file_set(path: &Path) {
 fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        DELETE FROM memory_collector_leases;
+        DELETE FROM memory_collector_journal_status;
+        DELETE FROM memory_collector_runs;
+        DELETE FROM memory_transition_audit;
+        DELETE FROM memory_cards;
+        DELETE FROM memory_candidates;
         DELETE FROM session_journal;
         DELETE FROM context_packs;
         DELETE FROM context_scope_bindings;
@@ -2110,6 +2326,125 @@ fn rqa_user_lifecycle_command(args: &RqaUserLifecycleArgs) -> Result<Value> {
             rqa_user_lifecycle_anonymize(&conn, user_ref, &plan, reason)
         }
     }
+}
+
+fn memory_collector_run_command(args: &MemoryCollectorRunArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    run_memory_collector(
+        &conn,
+        MemoryCollectorRunInput {
+            trigger_type: args.trigger.trim(),
+            actor: args.actor.trim(),
+            limit: args.limit,
+            dry_run: args.dry_run,
+        },
+    )
+}
+
+fn memory_candidate_list_command(args: &MemoryCandidateListArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    list_memory_candidates(
+        &conn,
+        MemoryCandidateListInput {
+            status: args
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_type: args
+                .scope_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_ref: args
+                .scope_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            limit: args.limit,
+            offset: args.offset,
+        },
+    )
+}
+
+fn memory_candidate_transition_command(args: &MemoryCandidateTransitionArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    transition_memory_candidate(
+        &conn,
+        MemoryCandidateTransitionInput {
+            candidate_id: args.candidate_id.trim(),
+            action: args.action.trim(),
+            actor: args.actor.trim(),
+            reason: args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            candidate_type: args
+                .candidate_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            sensitivity: args
+                .sensitivity
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            merge_target_candidate_id: args
+                .merge_target_candidate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            expires_at: args
+                .expires_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    )
+}
+
+fn memory_card_list_command(args: &MemoryCardListArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    list_memory_cards(
+        &conn,
+        MemoryCardListInput {
+            status: args
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_type: args
+                .scope_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_ref: args
+                .scope_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            limit: args.limit,
+            offset: args.offset,
+        },
+    )
+}
+
+fn memory_card_transition_command(args: &MemoryCardTransitionArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    transition_memory_card(
+        &conn,
+        MemoryCardTransitionInput {
+            memory_card_id: args.memory_card_id.trim(),
+            action: args.action.trim(),
+            actor: args.actor.trim(),
+            reason: args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    )
 }
 
 fn build_rqa_user_lifecycle_plan(
@@ -5252,6 +5587,487 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 
+async fn memory_collector_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<MemoryCollectorRunRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_collector_run") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory collector db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_collector_db_failed",
+                "memory collector db failed",
+                None,
+            );
+        }
+    };
+    let trigger = payload.trigger.as_deref().unwrap_or("admin_manual");
+    let llm_probe_validation = if let Some(probe) = payload.llm_extraction_probe.as_ref() {
+        match validate_llm_memory_extraction_output(probe) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "llm_memory_extraction_invalid",
+                    safe_error_detail(&error),
+                    None,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    match run_memory_collector(
+        &conn,
+        MemoryCollectorRunInput {
+            trigger_type: trigger,
+            actor: &actor,
+            limit: payload.limit.unwrap_or(50),
+            dry_run: payload.dry_run.unwrap_or(false),
+        },
+    ) {
+        Ok(mut report) => {
+            if let Some(validation) = llm_probe_validation {
+                report["llm_extraction_probe_validation"] = validation;
+            }
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_collector_admin_run",
+                &actor,
+                json!({
+                    "run_id": report.get("run_id"),
+                    "trigger_type": trigger,
+                    "dry_run": payload.dry_run.unwrap_or(false),
+                    "processed_count": report.get("processed_count"),
+                    "candidate_count": report.get("candidate_count"),
+                    "suppressed_count": report.get("suppressed_count"),
+                    "denied_count": report.get("denied_count"),
+                    "duplicate_count": report.get("duplicate_count"),
+                    "secret_values_printed": false,
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory collector admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(report).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "memory collector run failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "memory_collector_run_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn memory_candidates_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match memory_candidate_list_input_from_params(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_candidate_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match list_memory_candidates(&conn, input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_list",
+                &actor,
+                json!({
+                    "filter": memory_admin_filter_summary(&params),
+                    "result_count": result.get("items").and_then(Value::as_array).map(Vec::len),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_list_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_candidate_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(candidate_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match read_memory_candidate(&conn, &candidate_id) {
+        Ok(Some(candidate)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_read",
+                &actor,
+                json!({
+                    "candidate_id": &candidate_id,
+                    "status": candidate.get("status"),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.memory_candidate_admin_read",
+                "candidate": candidate,
+                "read_path_enabled": false,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_read_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_candidate_transition_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(candidate_id): AxumPath<String>,
+    Json(payload): Json<MemoryCandidateTransitionRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_transition") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match transition_memory_candidate(
+        &conn,
+        MemoryCandidateTransitionInput {
+            candidate_id: &candidate_id,
+            action: payload.action.trim(),
+            actor: &actor,
+            reason: payload
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            candidate_type: payload
+                .candidate_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            sensitivity: payload
+                .sensitivity
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            merge_target_candidate_id: payload
+                .merge_target_candidate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            expires_at: payload
+                .expires_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    ) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_transition",
+                &actor,
+                json!({
+                    "candidate_id": &candidate_id,
+                    "action": payload.action,
+                    "reason_sha256": payload.reason.as_deref().map(hash_text),
+                    "status": result.get("candidate").and_then(|v| v.get("status")),
+                    "read_path_enabled": false,
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate transition audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_transition_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_cards_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match memory_card_list_input_from_params(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_card_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match list_memory_cards(&conn, input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_list",
+                &actor,
+                json!({
+                    "filter": memory_admin_filter_summary(&params),
+                    "result_count": result.get("items").and_then(Value::as_array).map(Vec::len),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_list_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_card_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(memory_card_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match read_memory_card(&conn, &memory_card_id) {
+        Ok(Some(memory_card)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_read",
+                &actor,
+                json!({
+                    "memory_card_id": &memory_card_id,
+                    "status": memory_card.get("status"),
+                    "read_enabled": memory_card.get("read_enabled"),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.memory_card_admin_read",
+                "memory_card": memory_card,
+                "read_path_enabled": false,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_read_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_card_transition_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(memory_card_id): AxumPath<String>,
+    Json(payload): Json<MemoryCardTransitionRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_transition") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match transition_memory_card(
+        &conn,
+        MemoryCardTransitionInput {
+            memory_card_id: &memory_card_id,
+            action: payload.action.trim(),
+            actor: &actor,
+            reason: payload
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    ) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_transition",
+                &actor,
+                json!({
+                    "memory_card_id": &memory_card_id,
+                    "action": payload.action,
+                    "reason_sha256": payload.reason.as_deref().map(hash_text),
+                    "status": result.get("memory_card").and_then(|v| v.get("status")),
+                    "read_enabled": false,
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card transition audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_transition_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
 async fn retrieval_failures_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7628,6 +8444,17 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("session_journal");
         map.remove("context_pack");
         map.remove("memory_read_refs");
+        map.remove("memory_candidate");
+        map.remove("memory_candidate_id");
+        map.remove("memory_candidate_ref");
+        map.remove("memory_candidates");
+        map.remove("memory_card");
+        map.remove("memory_card_id");
+        map.remove("memory_card_ref");
+        map.remove("memory_cards");
+        map.remove("memory_transition_audit");
+        map.remove("llm_extraction");
+        map.remove("read_enabled");
     }
     if let Some(content) = public
         .pointer("/choices/0/message/content")
@@ -8283,6 +9110,78 @@ fn knowledge_item_filter_summary(params: &BTreeMap<String, String>) -> Value {
     })
 }
 
+fn memory_candidate_list_input_from_params(
+    params: &BTreeMap<String, String>,
+) -> Result<MemoryCandidateListInput<'_>> {
+    validate_memory_filter_keys(params)?;
+    Ok(MemoryCandidateListInput {
+        status: params
+            .get("status")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_type: params
+            .get("scope_type")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_ref: params
+            .get("scope_ref")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        limit: parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50),
+        offset: parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0),
+    })
+}
+
+fn memory_card_list_input_from_params(
+    params: &BTreeMap<String, String>,
+) -> Result<MemoryCardListInput<'_>> {
+    validate_memory_filter_keys(params)?;
+    Ok(MemoryCardListInput {
+        status: params
+            .get("status")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_type: params
+            .get("scope_type")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_ref: params
+            .get("scope_ref")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        limit: parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50),
+        offset: parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0),
+    })
+}
+
+fn validate_memory_filter_keys(params: &BTreeMap<String, String>) -> Result<()> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "status" | "scope_type" | "scope_ref" | "limit" | "offset"
+        ) {
+            return Err(anyhow!("unsupported memory filter {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn memory_admin_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "status": params.get("status"),
+        "scope_type": params.get("scope_type"),
+        "has_scope_ref": params.contains_key("scope_ref"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
 fn append_admin_audit_event(
     db: &Path,
     event_type: &str,
@@ -8518,6 +9417,10 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "context_packs": scoped_context_counts["context_packs"].clone(),
             "context_projections": scoped_context_counts["context_projections"].clone(),
             "session_journal": scoped_context_counts["session_journal"].clone(),
+            "memory_candidates": scoped_context_counts["memory_candidates"].clone(),
+            "memory_cards": scoped_context_counts["memory_cards"].clone(),
+            "memory_transition_audit": scoped_context_counts["memory_transition_audit"].clone(),
+            "memory_collector_runs": scoped_context_counts["memory_collector_runs"].clone(),
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
             "retrieval_failures": runtime_stats.retrieval_failures,
@@ -8592,6 +9495,22 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         (
             "tonglingyu_session_journal_entries_total",
             metric_i64(&scoped_context_counts, "session_journal"),
+        ),
+        (
+            "tonglingyu_memory_candidates_total",
+            metric_i64(&scoped_context_counts, "memory_candidates"),
+        ),
+        (
+            "tonglingyu_memory_cards_total",
+            metric_i64(&scoped_context_counts, "memory_cards"),
+        ),
+        (
+            "tonglingyu_memory_transition_audit_total",
+            metric_i64(&scoped_context_counts, "memory_transition_audit"),
+        ),
+        (
+            "tonglingyu_memory_collector_runs_total",
+            metric_i64(&scoped_context_counts, "memory_collector_runs"),
         ),
         (
             "tonglingyu_evidence_packages_total",
@@ -9969,6 +10888,156 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn memory_admin_endpoints_collect_transition_and_keep_read_disabled() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-memory");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let conn = open_db(&db_path).expect("db opens");
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "以后回答时，请用简体中文短句总结。".to_string(),
+        }];
+        create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-1",
+                question: "以后回答时，请用简体中文短句总结。",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+
+        let collector = memory_collector_run_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(MemoryCollectorRunRequest {
+                trigger: Some("admin_manual".to_string()),
+                limit: Some(20),
+                dry_run: Some(false),
+                llm_extraction_probe: Some(json!({
+                    "candidate_type": "user_response_preference",
+                    "summary": "用户回答偏好: 以后回答时用简体短句。",
+                    "confidence": 0.84,
+                    "risk_flags": [],
+                })),
+            }),
+        )
+        .await;
+        assert_eq!(collector.status(), StatusCode::OK);
+        let collector_body: Value =
+            serde_json::from_str(&response_text(collector).await).expect("collector json");
+        assert_eq!(collector_body["candidate_count"], json!(1));
+        assert_eq!(
+            collector_body["llm_extraction_probe_validation"]["status"],
+            json!("pending")
+        );
+
+        let mut list_params = BTreeMap::new();
+        list_params.insert("status".to_string(), "pending".to_string());
+        let list =
+            memory_candidates_endpoint(State(state.clone()), admin_headers(), Query(list_params))
+                .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_body: Value =
+            serde_json::from_str(&response_text(list).await).expect("candidate list json");
+        let candidate_id = list_body["items"][0]["candidate_id"]
+            .as_str()
+            .expect("candidate id")
+            .to_string();
+
+        let approve = memory_candidate_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(candidate_id.clone()),
+            Json(MemoryCandidateTransitionRequest {
+                action: "approve".to_string(),
+                reason: Some("admin approved".to_string()),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(approve.status(), StatusCode::OK);
+        let promote = memory_candidate_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(candidate_id),
+            Json(MemoryCandidateTransitionRequest {
+                action: "promote".to_string(),
+                reason: Some("admin promoted for card lifecycle test".to_string()),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(promote.status(), StatusCode::OK);
+
+        let mut card_params = BTreeMap::new();
+        card_params.insert("status".to_string(), "active".to_string());
+        let cards =
+            memory_cards_endpoint(State(state.clone()), admin_headers(), Query(card_params)).await;
+        assert_eq!(cards.status(), StatusCode::OK);
+        let cards_body: Value =
+            serde_json::from_str(&response_text(cards).await).expect("memory card list json");
+        assert_eq!(cards_body["items"][0]["read_enabled"], json!(false));
+        let memory_card_id = cards_body["items"][0]["memory_card_id"]
+            .as_str()
+            .expect("memory card id")
+            .to_string();
+
+        let unauthorized = memory_cards_endpoint(
+            State(state.clone()),
+            gateway_headers("memory-user"),
+            Query(BTreeMap::new()),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        conn.execute(
+            "UPDATE memory_cards SET read_enabled = 1 WHERE memory_card_id = ?1",
+            params![memory_card_id],
+        )
+        .expect("force unsafe read enabled");
+        let fail_closed = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory-fail-closed",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-2",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect_err("read_enabled cards must fail closed");
+        assert!(fail_closed.to_string().contains("read_enabled cards exist"));
+        assert_eq!(audit_event_count(&db_path, "memory_collector_admin_run"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "memory_candidate_admin_transition"),
+            2
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -11383,6 +12452,10 @@ USER: 介绍尤三姐
         value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
         value["session_journal"] = json!([{"entry_type": "user_message"}]);
         value["memory_read_refs"] = json!(["memory:forbidden"]);
+        value["memory_candidate_id"] = json!("memory-candidate-public-rqa-test");
+        value["memory_card_id"] = json!("memory-card-public-rqa-test");
+        value["llm_extraction"] = json!({"summary": "internal"});
+        value["read_enabled"] = json!(true);
 
         let rendered =
             serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
@@ -11402,6 +12475,10 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("interaction_context_id"));
         assert!(!rendered.contains("session_journal"));
         assert!(!rendered.contains("memory_read_refs"));
+        assert!(!rendered.contains("memory_candidate_id"));
+        assert!(!rendered.contains("memory_card_id"));
+        assert!(!rendered.contains("llm_extraction"));
+        assert!(!rendered.contains("read_enabled"));
     }
 
     #[test]
@@ -11513,6 +12590,7 @@ USER: 介绍尤三姐
                 "interaction_context_id": "forged-context",
                 "runtime_adapter": "forged-runtime",
                 "session_journal": [{"content": "forged"}],
+                "memory_candidate_id": "forged-candidate",
                 "nested": {"agent_runtime": {"mode": "forged"}},
                 "message_id": "open-webui-message",
             },
@@ -11522,7 +12600,10 @@ USER: 介绍尤三姐
                 "context_projection_digest": "forged-digest",
                 "context_projection_ref": "forged-projection",
                 "forbidden_tools": ["tonglingyu.commentary.search"],
+                "llm_extraction": {"promotion": "forged"},
+                "memory_card_id": "forged-card",
                 "memory_read_scopes": ["user_private:any"],
+                "read_enabled": true,
                 "tool_policy_digest": "forged-tool-policy",
                 "layers": [{"runtime_step_outputs": []}],
             },
@@ -11540,10 +12621,14 @@ USER: 介绍尤三姐
                 "extra_body.context_projection_ref",
                 "extra_body.forbidden_tools",
                 "extra_body.layers[0].runtime_step_outputs",
+                "extra_body.llm_extraction",
+                "extra_body.memory_card_id",
                 "extra_body.memory_read_scopes",
+                "extra_body.read_enabled",
                 "extra_body.tool_policy_digest",
                 "metadata.admin_trace",
                 "metadata.interaction_context_id",
+                "metadata.memory_candidate_id",
                 "metadata.nested.agent_runtime",
                 "metadata.runtime_adapter",
                 "metadata.runtime_step_plan",

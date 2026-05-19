@@ -344,6 +344,15 @@ forbidden_public_chat_keys = {
     "context_pack",
     "session_journal",
     "memory_read_refs",
+    "memory_candidate",
+    "memory_candidate_id",
+    "memory_candidate_ref",
+    "memory_card",
+    "memory_card_id",
+    "memory_card_ref",
+    "memory_transition_audit",
+    "llm_extraction",
+    "read_enabled",
 }
 forbidden_public_knowledge_state_terms = {
     "system_calibrated",
