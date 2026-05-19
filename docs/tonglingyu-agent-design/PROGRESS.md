@@ -44,10 +44,11 @@
   Phase 1 结论扩展成 scoped memory production-ready。
 - 2026-05-19 Phase 2 已细化为独立实现 checklist：
   `28_Phase2_Context_Aware_Runtime_Implementation_Checklist.md`。Phase 2 只做
-  Context-aware Runtime，包括 `context_pack_ref` contract、profile projection
-  隔离、tool policy digest、Runtime audit、replay 和 hhost production gate；
-  不做 Memory Collector、`memory_candidate`、active `memory_card` 或审核页面。
-  当前状态是“可进入 Phase 2 实现”，不是“Phase 2 已完成”。
+  Context-aware Runtime，包括请求级 `context_pack`、consumer 级
+  `context_projection`、projection ref/digest contract、consumer projection 隔离、
+  tool policy digest、Runtime audit、replay 和 hhost production gate；不做 Memory
+  Collector、`memory_candidate`、active `memory_card`、审核页面或非 Hermes
+  external agent 接入。当前状态是“可进入 Phase 2 实现”，不是“Phase 2 已完成”。
 
 ## 已确认
 
