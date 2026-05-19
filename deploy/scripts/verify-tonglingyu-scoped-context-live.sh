@@ -284,6 +284,13 @@ for name, response in [("first", first), ("second", second), ("long", long_respo
     public_text = rendered(response)
     for forbidden in [
         "context_pack_id",
+        "context_pack_ref",
+        "context_projection_id",
+        "context_projection_ref",
+        "context_projections",
+        "consumer_type",
+        "consumer_name",
+        "runtime_adapter",
         "interaction_context_id",
         "user_session_id",
         "session_journal",
@@ -316,6 +323,137 @@ else:
         } and view.get("session_summary") is not None:
             errors.append(f"{view.get('profile_name')}_must_not_get_session_summary")
 
+
+def validate_context_projections(trace_name, trace):
+    context = trace.get("scoped_context") or {}
+    packs = context.get("context_packs") or []
+    projections = context.get("context_projections") or []
+    if len(projections) < 4:
+        errors.append(f"{trace_name}_context_projections_missing")
+        return []
+    pack_refs = {
+        pack.get("context_pack_ref")
+        for pack in packs
+        if pack.get("context_pack_ref")
+    }
+    consumers = {projection.get("consumer_name") for projection in projections}
+    for required in [
+        "honglou-main",
+        "honglou-text",
+        "honglou-commentary",
+        "honglou-reviewer",
+    ]:
+        if required not in consumers:
+            errors.append(f"{trace_name}_context_projection_missing_{required}")
+    for projection in projections:
+        consumer = projection.get("consumer_name") or "unknown"
+        if "projection_payload" in projection:
+            errors.append(f"{trace_name}_{consumer}_projection_payload_exposed")
+        if projection.get("consumer_type") != "runtime_profile":
+            errors.append(f"{trace_name}_{consumer}_consumer_type_invalid")
+        if projection.get("runtime_adapter") != "tonglingyu-runtime-adapter-v1":
+            errors.append(f"{trace_name}_{consumer}_runtime_adapter_invalid")
+        if projection.get("schema_version") != "tonglingyu-context-projection-v1":
+            errors.append(f"{trace_name}_{consumer}_projection_schema_invalid")
+        if not str(projection.get("context_projection_ref") or "").startswith(
+            "context-projection://tonglingyu/"
+        ):
+            errors.append(f"{trace_name}_{consumer}_projection_ref_invalid")
+        if pack_refs and projection.get("context_pack_ref") not in pack_refs:
+            errors.append(f"{trace_name}_{consumer}_projection_pack_ref_unbound")
+        for digest_field in [
+            "digest",
+            "tool_policy_digest",
+            "output_contract_digest",
+            "projection_payload_sha256",
+        ]:
+            if not projection.get(digest_field):
+                errors.append(f"{trace_name}_{consumer}_{digest_field}_missing")
+        summary = projection.get("projection_payload_summary")
+        if not isinstance(summary, dict):
+            errors.append(f"{trace_name}_{consumer}_projection_summary_missing")
+            summary = {}
+        if consumer in {
+            "honglou-text",
+            "honglou-commentary",
+            "honglou-reviewer",
+        } and summary.get("has_session_summary") is not False:
+            errors.append(f"{trace_name}_{consumer}_projection_session_summary_leak")
+    main_projection = next(
+        (item for item in projections if item.get("consumer_name") == "honglou-main"),
+        {},
+    )
+    main_tools = set(main_projection.get("allowed_tools") or [])
+    if "tonglingyu.evidence.package.create" not in main_tools:
+        errors.append(f"{trace_name}_main_projection_package_create_missing")
+    if "tonglingyu.evidence.package.read" not in main_tools:
+        errors.append(f"{trace_name}_main_projection_package_read_missing")
+    projection_journal = [
+        entry
+        for entry in context.get("session_journal") or []
+        if entry.get("entry_type") == "context_projection"
+    ]
+    if len(projection_journal) < len(projections):
+        errors.append(f"{trace_name}_context_projection_journal_missing")
+    return projections
+
+
+def validate_runtime_projection_binding(trace_name, trace, projections):
+    if not projections:
+        return
+    projections_by_ref = {
+        projection.get("context_projection_ref"): projection
+        for projection in projections
+        if projection.get("context_projection_ref")
+    }
+    profile_step_events = [
+        item
+        for item in trace.get("audit_events") or []
+        if item.get("event_type") == "runtime_profile_step_completed"
+    ]
+    if not profile_step_events:
+        errors.append(f"{trace_name}_runtime_profile_step_audit_missing")
+    for event in profile_step_events:
+        payload = event.get("payload") or {}
+        profile = payload.get("profile") or "unknown"
+        contract = payload.get("context_projection") or {}
+        projection_ref = contract.get("context_projection_ref")
+        projection = projections_by_ref.get(projection_ref)
+        if projection is None:
+            errors.append(f"{trace_name}_{profile}_runtime_step_projection_unbound")
+            continue
+        if contract.get("consumer_name") != profile:
+            errors.append(f"{trace_name}_{profile}_runtime_step_consumer_mismatch")
+        allowed = set(projection.get("allowed_tools") or [])
+        for tool in payload.get("allowed_tools") or []:
+            if tool not in allowed:
+                errors.append(f"{trace_name}_{profile}_runtime_step_tool_outside_projection")
+    agent_step_events = [
+        item
+        for item in trace.get("audit_events") or []
+        if item.get("event_type") == "agent_runtime_profile_step_executed"
+    ]
+    if not agent_step_events:
+        errors.append(f"{trace_name}_agent_runtime_step_audit_missing")
+    for event in agent_step_events:
+        payload = event.get("payload") or {}
+        profile = payload.get("profile") or "unknown"
+        agent_runtime = payload.get("agent_runtime") or {}
+        runtime_step = agent_runtime.get("runtime_step") or {}
+        context_contract = runtime_step.get("metadata", {}).get("context_contract") or {}
+        projection_ref = (
+            context_contract
+            .get("context_projection", {})
+            .get("context_projection_ref")
+        )
+        if projection_ref not in projections_by_ref:
+            errors.append(f"{trace_name}_{profile}_agent_runtime_projection_unbound")
+
+
+second_projections = validate_context_projections("second", second_trace)
+long_projections = validate_context_projections("long", long_trace)
+validate_runtime_projection_binding("second", second_trace, second_projections)
+
 for trace_name, trace in [("second", second_trace), ("long", long_trace)]:
     context = trace.get("scoped_context") or {}
     if context.get("raw_content_included") is not False:
@@ -327,6 +465,8 @@ for trace_name, trace in [("second", second_trace), ("long", long_trace)]:
         errors.append(f"{trace_name}_created_memory_candidate")
     if "memory_card" in trace_text:
         errors.append(f"{trace_name}_mentions_memory_card")
+    if '"projection_payload":' in trace_text:
+        errors.append(f"{trace_name}_admin_trace_exposes_projection_payload")
 
 long_context = long_trace.get("scoped_context") or {}
 long_packs = long_context.get("context_packs") or []
@@ -354,9 +494,25 @@ checks = {
     "multi_turn_resolved_question": "second_resolved_question_unexpected" not in errors,
     "long_history_session_summary": "long_session_summary_missing_history" not in errors,
     "context_pack_trace_replay": bool(second_packs and long_packs),
+    "context_projection_trace_replay": bool(second_projections and long_projections),
+    "runtime_projection_binding": not any(
+        "projection_unbound" in error
+        or "projection_pack_ref_unbound" in error
+        or "runtime_step_consumer_mismatch" in error
+        or "runtime_step_tool_outside_projection" in error
+        for error in errors
+    ),
     "public_response_redacted": not any("public_response_leaks" in error for error in errors),
-    "profile_history_isolation": not any("must_not_get_session_summary" in error for error in errors),
-    "journal_raw_content_hidden": not any("admin_trace_exposes_journal_content" in error for error in errors),
+    "profile_history_isolation": not any(
+        "must_not_get_session_summary" in error
+        or "projection_session_summary_leak" in error
+        for error in errors
+    ),
+    "journal_raw_content_hidden": not any(
+        "admin_trace_exposes_journal_content" in error
+        or "admin_trace_exposes_projection_payload" in error
+        for error in errors
+    ),
     "no_memory_phase1": not any("memory" in error for error in errors),
 }
 payload = {
