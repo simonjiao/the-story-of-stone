@@ -133,10 +133,14 @@ PY
     )"
     raw_report="${IMAGE_REPORT_DIR_LOCAL}/trivy-${image_hash}.json"
     stderr_path="${TRIVY_STDERR_DIR}/trivy-${image_hash}.stderr"
-    if [[ "${image_ref}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    if [[ "${image_ref}" =~ ^sha256:[0-9a-f]{64}$ || "${image_ref}" =~ (^|/)tonglingyu-gateway(:|@|$) ]]; then
       image_tar="${TRIVY_TAR_DIR}/image-${image_hash}.tar"
-      if ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_HOST}" \
-        "docker save '${image_ref}'" >"${image_tar}" 2>"${stderr_path}.docker-save"; then
+      if ssh -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_HOST}" \
+        'sh -s' -- "${image_ref}" >"${image_tar}" 2>"${stderr_path}.docker-save" <<'REMOTE'
+set -eu
+docker save "$1"
+REMOTE
+      then
         if ! DOCKER_CONFIG="${DOCKER_CONFIG_DIR}" trivy image --quiet --format json \
           --input "${image_tar}" >"${raw_report}" 2>"${stderr_path}"; then
           trivy_status="failed"

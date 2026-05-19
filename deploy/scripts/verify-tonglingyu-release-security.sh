@@ -475,9 +475,16 @@ def compose_image_policy():
     encoded_refs = ("\n".join(refs) + "\n") if refs else ""
     mutable = []
     digest_missing = []
-    for ref in refs:
+    owned_digest_missing = []
+    third_party_digest_missing = []
+    for item in image_items:
+        ref = item["ref"]
         if not image_ref_is_immutable(ref):
             digest_missing.append(ref)
+            if item["owner_type"] == "owned":
+                owned_digest_missing.append(ref)
+            else:
+                third_party_digest_missing.append(ref)
         if re.search(r"(:|\:-)(latest|main)([}:]|$)", ref):
             mutable.append(ref)
     return {
@@ -498,7 +505,9 @@ def compose_image_policy():
             ).encode("utf-8")
         ).hexdigest(),
         "mutable_tag_count": len(mutable),
-        "digest_missing_count": len(digest_missing),
+        "digest_missing_count": len(third_party_digest_missing),
+        "owned_digest_missing_count": len(owned_digest_missing),
+        "third_party_digest_missing_count": len(third_party_digest_missing),
     }
 
 
@@ -561,6 +570,7 @@ def apply_image_blocking_policy(image_scan, image_policy):
     third_party_high_count = 0
     total_critical_count = 0
     total_high_count = 0
+    scan_failure_count = 0
     findings = []
 
     for item, raw_report_path in zip(ownership, raw_report_paths):
@@ -575,11 +585,13 @@ def apply_image_blocking_policy(image_scan, image_policy):
         candidate = Path(str(raw_report_path or ""))
         if not candidate.is_file():
             policy_errors.append("image_ownership_raw_report_missing")
+            scan_failure_count += 1
             continue
         try:
             critical_count, high_count = count_trivy_high_critical(candidate)
         except (OSError, json.JSONDecodeError):
             policy_errors.append("image_ownership_raw_report_invalid")
+            scan_failure_count += 1
             continue
         total_critical_count += critical_count
         total_high_count += high_count
@@ -607,15 +619,17 @@ def apply_image_blocking_policy(image_scan, image_policy):
     if third_party_high_count > 0:
         nonblocking_errors.append("third_party_image_high_findings_present")
 
-    failed_image_count = image_scan.get("failed_image_count")
-    if not isinstance(failed_image_count, int):
-        failed_image_count = 0
-    blocking_failed = failed_image_count > 0 or bool(policy_errors)
+    scanner_failed_image_count = image_scan.get("failed_image_count")
+    if not isinstance(scanner_failed_image_count, int):
+        scanner_failed_image_count = 0
+    blocking_failed = bool(policy_errors)
     image_scan.update(
         {
             "status": "failed" if blocking_failed else "passed",
             "critical_count": total_critical_count,
             "high_count": total_high_count,
+            "failed_image_count": scan_failure_count,
+            "scanner_failed_image_count": scanner_failed_image_count,
             "image_policy_version": "tonglingyu-image-ownership-v1",
             "blocking_critical_count": owned_critical_count,
             "blocking_high_count": owned_high_count,

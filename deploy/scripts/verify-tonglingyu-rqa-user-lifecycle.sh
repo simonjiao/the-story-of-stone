@@ -462,7 +462,64 @@ memory_candidate_count = conn.execute("SELECT COUNT(*) FROM memory_candidates").
 memory_card_count = conn.execute("SELECT COUNT(*) FROM memory_cards").fetchone()[0]
 memory_policy_decision_count = conn.execute("SELECT COUNT(*) FROM memory_policy_decisions").fetchone()[0]
 memory_transition_audit_count = conn.execute("SELECT COUNT(*) FROM memory_transition_audit").fetchone()[0]
-memory_read_enabled_count = conn.execute("SELECT COUNT(*) FROM memory_cards WHERE read_enabled = 1").fetchone()[0]
+subject_sha256 = hashlib.sha256(user_ref.encode("utf-8")).hexdigest()
+anonymized_memory_scope = "user_private:sha256:" + hashlib.sha256(
+    f"anonymized-memory:{subject_sha256}".encode("utf-8")
+).hexdigest()
+memory_subject_candidate_ids = [
+    row[0]
+    for row in conn.execute(
+        """
+        SELECT candidate_id
+        FROM memory_candidates
+        WHERE scope_type = 'user_private'
+          AND scope_ref = ?
+        """,
+        (anonymized_memory_scope,),
+    )
+]
+memory_subject_card_ids = [
+    row[0]
+    for row in conn.execute(
+        """
+        SELECT memory_card_id
+        FROM memory_cards
+        WHERE scope_type = 'user_private'
+          AND scope_ref = ?
+        """,
+        (anonymized_memory_scope,),
+    )
+]
+memory_subject_policy_ids = [
+    row[0]
+    for row in conn.execute(
+        """
+        SELECT policy_decision_id
+        FROM memory_policy_decisions
+        WHERE scope_type = 'user_private'
+          AND scope_ref = ?
+        """,
+        (anonymized_memory_scope,),
+    )
+]
+memory_subject_transition_audit_count = 0
+for entity_id in (
+    memory_subject_candidate_ids + memory_subject_card_ids + memory_subject_policy_ids
+):
+    memory_subject_transition_audit_count += conn.execute(
+        "SELECT COUNT(*) FROM memory_transition_audit WHERE entity_id = ?",
+        (entity_id,),
+    ).fetchone()[0]
+memory_subject_read_enabled_count = conn.execute(
+    """
+    SELECT COUNT(*)
+    FROM memory_cards
+    WHERE scope_type = 'user_private'
+      AND scope_ref = ?
+      AND read_enabled = 1
+    """,
+    (anonymized_memory_scope,),
+).fetchone()[0]
 conn.close()
 export_manifest = reports["export"].get("extra", {}).get("export_manifest", {})
 export_manifest_text = json.dumps(export_manifest, sort_keys=True)
@@ -519,12 +576,12 @@ checks = {
         and task_count >= 1
     ),
     "scoped_memory_traceability_preserved": (
-        memory_candidate_count >= 1
-        and memory_card_count >= 1
-        and memory_policy_decision_count >= 3
-        and memory_transition_audit_count >= 3
+        len(memory_subject_candidate_ids) >= 1
+        and len(memory_subject_card_ids) >= 1
+        and len(memory_subject_policy_ids) >= 3
+        and memory_subject_transition_audit_count >= 3
     ),
-    "scoped_memory_anonymize_disabled_reads": memory_read_enabled_count == 0,
+    "scoped_memory_anonymize_disabled_reads": memory_subject_read_enabled_count == 0,
 }
 errors = [f"check_failed={name}" for name, passed in checks.items() if passed is not True]
 errors.extend(f"raw_value_leak={hit}" for hit in sorted(set(leak_hits)))
@@ -558,6 +615,13 @@ payload = {
         "subject_sha256": sha256(user_ref),
         "trace_sha256": sha256(refs[0]["trace_id"]),
         "package_sha256": sha256(refs[0]["package_id"]),
+    },
+    "scoped_memory_subject_counts": {
+        "memory_candidate_count": len(memory_subject_candidate_ids),
+        "memory_card_count": len(memory_subject_card_ids),
+        "memory_policy_decision_count": len(memory_subject_policy_ids),
+        "memory_transition_audit_count": memory_subject_transition_audit_count,
+        "memory_read_enabled_count": memory_subject_read_enabled_count,
     },
     "errors": errors,
     "secret_values_printed": False,
