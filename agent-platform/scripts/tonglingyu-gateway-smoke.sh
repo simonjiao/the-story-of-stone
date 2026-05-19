@@ -257,10 +257,11 @@ DUP_STREAM_TXT="${SMOKE_DIR}/chat-stream-duplicate.txt"
 STREAM_META_JSON="${SMOKE_DIR}/chat-stream-meta.json"
 MEMORY_CHAT_JSON="${SMOKE_DIR}/memory-chat.json"
 MEMORY_META_JSON="${SMOKE_DIR}/memory-meta.json"
+MEMORY_READ_JSON="${SMOKE_DIR}/memory-read.json"
+MEMORY_READ_META_JSON="${SMOKE_DIR}/memory-read-meta.json"
+MEMORY_READ_TRACE_JSON="${SMOKE_DIR}/memory-read-trace.json"
 MEMORY_COLLECTOR_JSON="${SMOKE_DIR}/memory-collector.json"
 MEMORY_CANDIDATES_JSON="${SMOKE_DIR}/memory-candidates.json"
-MEMORY_APPROVE_JSON="${SMOKE_DIR}/memory-approve.json"
-MEMORY_PROMOTE_JSON="${SMOKE_DIR}/memory-promote.json"
 MEMORY_CARDS_JSON="${SMOKE_DIR}/memory-cards.json"
 FORBIDDEN_JSON="${SMOKE_DIR}/forbidden.json"
 MODEL_REJECT_JSON="${SMOKE_DIR}/model-reject.json"
@@ -334,21 +335,18 @@ message_metadata_from_db "smoke-message-memory" >"${MEMORY_META_JSON}"
 MEMORY_TRACE_ID="$(cat "${MEMORY_META_JSON}" | json_get "trace_id")"
 curl -fsS "${admin_auth[@]}" "${json_headers[@]}" \
   -X POST \
-  -d '{"trigger":"admin_manual","limit":100,"dry_run":false,"trace_id":"'"${MEMORY_TRACE_ID}"'","llm_extraction_probe":{"candidate_type":"user_response_preference","summary":"用户回答偏好: 以后回答时用简体中文短句。","confidence":0.84,"risk_flags":[]}}' \
+  -d '{"trigger":"admin_manual","limit":100,"dry_run":false,"trace_id":"'"${MEMORY_TRACE_ID}"'","llm_extraction_probe":{"schema_version":"scoped-memory-llm-filter-v1","is_long_term_memory":true,"is_temporary_instruction":false,"is_quoted_or_third_party":false,"has_contradiction":false,"scope_type":"user_private","candidate_type":"language_preference","confidence":0.86,"sensitivity":"low","risk_flags":[],"ttl_hint":"180d","exclusion_flags":[]}}' \
   "${BASE_URL}/v1/admin/memory/collector/run" >"${MEMORY_COLLECTOR_JSON}"
 curl -fsS "${admin_auth[@]}" \
-  "${BASE_URL}/v1/admin/memory/candidates?status=pending&limit=10" >"${MEMORY_CANDIDATES_JSON}"
-MEMORY_CANDIDATE_ID="$(cat "${MEMORY_CANDIDATES_JSON}" | json_get "items.0.candidate_id")"
-curl -fsS "${admin_auth[@]}" "${json_headers[@]}" \
-  -X POST \
-  -d '{"action":"approve","reason":"gateway smoke approve"}' \
-  "${BASE_URL}/v1/admin/memory/candidates/${MEMORY_CANDIDATE_ID}/transition" >"${MEMORY_APPROVE_JSON}"
-curl -fsS "${admin_auth[@]}" "${json_headers[@]}" \
-  -X POST \
-  -d '{"action":"promote","reason":"gateway smoke promote"}' \
-  "${BASE_URL}/v1/admin/memory/candidates/${MEMORY_CANDIDATE_ID}/transition" >"${MEMORY_PROMOTE_JSON}"
+  "${BASE_URL}/v1/admin/memory/candidates?status=approved&limit=10" >"${MEMORY_CANDIDATES_JSON}"
 curl -fsS "${admin_auth[@]}" \
   "${BASE_URL}/v1/admin/memory/cards?status=active&limit=10" >"${MEMORY_CARDS_JSON}"
+curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
+  -H "x-tonglingyu-message-id: smoke-message-memory-read" \
+  -X POST \
+  -d '{"model":"tonglingyu","messages":[{"role":"user","content":"介绍林黛玉。"}]}' \
+  "${BASE_URL}/v1/chat/completions" >"${MEMORY_READ_JSON}"
+message_metadata_from_db "smoke-message-memory-read" >"${MEMORY_READ_META_JSON}"
 
 PACKAGE_ID="$(cat "${CHAT_META_JSON}" | json_get "evidence_package_id")"
 TRACE_ID="$(cat "${CHAT_META_JSON}" | json_get "trace_id")"
@@ -361,6 +359,8 @@ curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${
 curl -fsS "${auth[@]}" "${owui_headers[@]}" "${BASE_URL}/v1/evidence/packages/${PACKAGE_ID}/replay" >"${REPLAY_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${TRACE_ID}" >"${TRACE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${STREAM_TRACE_ID}" >"${STREAM_TRACE_JSON}"
+MEMORY_READ_TRACE_ID="$(cat "${MEMORY_READ_META_JSON}" | json_get "trace_id")"
+curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/traces/${MEMORY_READ_TRACE_ID}" >"${MEMORY_READ_TRACE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/sessions/${SESSION_ID}" >"${SESSION_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/packages/${PACKAGE_ID}" >"${ADMIN_PACKAGE_JSON}"
 curl -fsS "${admin_auth[@]}" "${BASE_URL}/v1/admin/metrics" >"${METRICS_JSON}"
@@ -384,10 +384,11 @@ python3 - \
   "${CHAT_META_JSON}" \
   "${MEMORY_CHAT_JSON}" \
   "${MEMORY_META_JSON}" \
+  "${MEMORY_READ_JSON}" \
+  "${MEMORY_READ_META_JSON}" \
+  "${MEMORY_READ_TRACE_JSON}" \
   "${MEMORY_COLLECTOR_JSON}" \
   "${MEMORY_CANDIDATES_JSON}" \
-  "${MEMORY_APPROVE_JSON}" \
-  "${MEMORY_PROMOTE_JSON}" \
   "${MEMORY_CARDS_JSON}" \
   "${FORBIDDEN_JSON}" \
   "${MODEL_REJECT_JSON}" \
@@ -408,8 +409,8 @@ import json
 import sys
 
 paths = sys.argv[1:]
-prometheus_path = paths[25]
-json_paths = paths[:25] + paths[26:]
+prometheus_path = paths[26]
+json_paths = paths[:26] + paths[27:]
 (
     health,
     models_unauth,
@@ -420,10 +421,11 @@ json_paths = paths[:25] + paths[26:]
     chat_meta,
     memory_chat,
     memory_meta,
+    memory_read,
+    memory_read_meta,
+    memory_read_trace,
     memory_collector,
     memory_candidates,
-    memory_approve,
-    memory_promote,
     memory_cards,
     forbidden,
     model_reject,
@@ -497,6 +499,9 @@ for payload in [chat, duplicate]:
         assert forbidden_public_field not in encoded, (forbidden_public_field, payload)
 memory_public = json.dumps(memory_chat, ensure_ascii=False)
 for forbidden_memory_public in [
+    "memory_read_refs",
+    "memory_summaries",
+    "memory_policy",
     "memory_candidate",
     "memory_candidate_id",
     "memory_card",
@@ -508,27 +513,40 @@ for forbidden_memory_public in [
 assert memory_collector["object"] == "tonglingyu.memory_collector_run", memory_collector
 assert memory_collector["status"] == "ok", memory_collector
 assert memory_collector["candidate_count"] >= 1, memory_collector
+assert memory_collector["auto_enabled_count"] >= 1, memory_collector
 assert memory_collector["llm_extraction_probe_validation"]["status"] == "pending", memory_collector
 assert memory_collector["llm_boundary"]["allowed"] is True, memory_collector
+assert memory_collector["memory_policy"]["policy_version"] == "scoped-memory-policy-v1", memory_collector
 assert memory_candidates["object"] == "tonglingyu.memory_candidate_list", memory_candidates
 assert memory_candidates["items"], memory_candidates
-assert all(item["status"] == "pending" for item in memory_candidates["items"]), memory_candidates
+assert all(item["status"] == "approved" for item in memory_candidates["items"]), memory_candidates
 candidate = memory_candidates["items"][0]
 assert candidate["source_entry_type"] == "user_message", candidate
 assert candidate["scope_type"] == "user_private", candidate
 assert candidate["scope_ref"].startswith("user_private:sha256:"), candidate
-assert candidate["candidate_type"] == "user_response_preference", candidate
+assert candidate["candidate_type"] == "language_preference", candidate
 assert candidate["llm_extraction"]["llm_participation"]["allowed"] is True, candidate
 assert candidate["llm_extraction"]["llm_participation"]["used"] is False, candidate
-assert memory_approve["candidate"]["status"] == "approved", memory_approve
-assert memory_promote["candidate"]["status"] == "approved", memory_promote
-assert memory_promote["read_path_enabled"] is False, memory_promote
 assert memory_cards["object"] == "tonglingyu.memory_card_list", memory_cards
 assert memory_cards["items"], memory_cards
 card = memory_cards["items"][0]
 assert card["status"] == "active", card
-assert card["read_enabled"] is False, card
-assert card["acl"]["phase3_read_disable_reason"] == "phase3_read_path_not_enabled", card
+assert card["read_enabled"] is True, card
+assert card["acl"]["policy_version"] == "scoped-memory-policy-v1", card
+assert memory_read_meta["session_id"] == memory_meta["session_id"], (memory_read_meta, memory_meta)
+read_packs = memory_read_trace["scoped_context"]["context_packs"]
+assert any(pack.get("memory_read_refs") for pack in read_packs), memory_read_trace
+read_projections = memory_read_trace["scoped_context"]["context_projections"]
+assert any(
+    item["consumer_name"] == "honglou-main"
+    and item["projection_payload_summary"]["memory_read_ref_count"] >= 1
+    for item in read_projections
+), memory_read_trace
+assert not any(
+    item["consumer_name"] == "honglou-reviewer"
+    and item["projection_payload_summary"]["memory_summary_count"] > 0
+    for item in read_projections
+), memory_read_trace
 assert forbidden["error"]["code"] == "forbidden_control_fields", forbidden
 assert model_reject["error"]["code"] == "model_not_allowed", model_reject
 assert package_forbidden["error"] == "not_found", package_forbidden
@@ -618,6 +636,7 @@ assert metrics["object"] == "tonglingyu.gateway_metrics", metrics
 assert metrics["counts"]["evidence_packages"] >= 1, metrics
 assert metrics["counts"]["memory_candidates"] >= 1, metrics
 assert metrics["counts"]["memory_cards"] >= 1, metrics
+assert metrics["counts"]["memory_policy_decisions"] >= 3, metrics
 assert metrics["counts"]["memory_collector_runs"] >= 1, metrics
 assert "rqa" in metrics and "retrieval_failures" in metrics["rqa"], metrics
 assert metrics["dependencies"]["sqlite"] == "ok", metrics
@@ -645,6 +664,7 @@ assert rqa_failures["object"] == "tonglingyu.retrieval_failure_admin_list", rqa_
 assert rqa_failures["list"]["schema_version"] == "tonglingyu-retrieval-failures-v1", rqa_failures
 assert "tonglingyu_memory_candidates_total" in prometheus, prometheus
 assert "tonglingyu_memory_cards_total" in prometheus, prometheus
+assert "tonglingyu_memory_policy_decisions_total" in prometheus, prometheus
 
 assert report["status"] == "passed", report
 assert report["summary"]["total"] >= 20, report

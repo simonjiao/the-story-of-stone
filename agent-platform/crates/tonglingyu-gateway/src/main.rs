@@ -1314,6 +1314,10 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "memory_read_scopes",
         "memory_write_scopes",
         "memory_scope",
+        "memory_summaries",
+        "memory_policy",
+        "memory_policy_digest",
+        "memory_usage_summary",
         "memory_candidate",
         "memory_candidate_id",
         "memory_candidate_ref",
@@ -1322,9 +1326,15 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "memory_card_id",
         "memory_card_ref",
         "memory_cards",
+        "memory_policy_decision",
+        "memory_policy_decision_id",
+        "memory_policy_decision_ref",
+        "memory_policy_decisions",
         "memory_transition_audit",
         "memory_collector",
         "llm_extraction",
+        "llm_filter",
+        "rule_filter",
         "read_enabled",
         "forbidden_tools",
         "tool_policy_digest",
@@ -1937,6 +1947,7 @@ fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
         DELETE FROM memory_collector_leases;
         DELETE FROM memory_collector_journal_status;
         DELETE FROM memory_collector_runs;
+        DELETE FROM memory_policy_decisions;
         DELETE FROM memory_transition_audit;
         DELETE FROM memory_cards;
         DELETE FROM memory_candidates;
@@ -2396,6 +2407,10 @@ struct RqaUserLifecyclePlan {
     trace_ids: BTreeSet<String>,
     package_ids: BTreeSet<String>,
     context_pack_ids: BTreeSet<String>,
+    memory_candidate_ids: BTreeSet<String>,
+    memory_card_ids: BTreeSet<String>,
+    memory_policy_decision_ids: BTreeSet<String>,
+    memory_transition_audit_ids: BTreeSet<String>,
     workflow_state_ids: BTreeSet<String>,
     audit_event_ids: BTreeSet<String>,
     retrieval_failure_ids: BTreeSet<String>,
@@ -2575,6 +2590,17 @@ fn build_rqa_user_lifecycle_plan(
         .collect::<BTreeSet<_>>();
     let workflow_state_ids = query_lifecycle_workflow_state_ids(conn, &trace_ids, &session_ids)?;
     let audit_event_ids = query_lifecycle_audit_event_ids(conn, &trace_ids)?;
+    let memory_candidate_ids =
+        query_lifecycle_memory_candidate_ids(conn, &session_ids, &trace_ids)?;
+    let memory_card_ids = query_lifecycle_memory_card_ids(conn, &memory_candidate_ids)?;
+    let memory_policy_decision_ids =
+        query_lifecycle_memory_policy_decision_ids(conn, &memory_candidate_ids, &memory_card_ids)?;
+    let memory_transition_audit_ids = query_lifecycle_memory_transition_audit_ids(
+        conn,
+        &memory_candidate_ids,
+        &memory_card_ids,
+        &memory_policy_decision_ids,
+    )?;
     let retrieval_failure_ids =
         query_lifecycle_retrieval_failure_ids(conn, &trace_ids, &package_ids)?;
     let governance_task_ids = query_lifecycle_governance_task_ids(conn, &trace_ids, &package_ids)?;
@@ -2590,6 +2616,10 @@ fn build_rqa_user_lifecycle_plan(
         trace_ids,
         package_ids,
         context_pack_ids,
+        memory_candidate_ids,
+        memory_card_ids,
+        memory_policy_decision_ids,
+        memory_transition_audit_ids,
         workflow_state_ids,
         audit_event_ids,
         retrieval_failure_ids,
@@ -2676,6 +2706,88 @@ fn query_lifecycle_audit_event_ids(
     for trace_id in trace_ids {
         for id in stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
             ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_candidate_ids(
+    conn: &Connection,
+    session_ids: &BTreeSet<String>,
+    trace_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_session =
+        conn.prepare("SELECT candidate_id FROM memory_candidates WHERE user_session_id = ?1")?;
+    for session_id in session_ids {
+        for id in by_session.query_map(params![session_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_trace =
+        conn.prepare("SELECT candidate_id FROM memory_candidates WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in by_trace.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_card_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut stmt =
+        conn.prepare("SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1")?;
+    for candidate_id in candidate_ids {
+        for id in stmt.query_map(params![candidate_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_policy_decision_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+    memory_card_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_candidate = conn.prepare(
+        "SELECT policy_decision_id FROM memory_policy_decisions WHERE candidate_id = ?1",
+    )?;
+    for candidate_id in candidate_ids {
+        for id in by_candidate.query_map(params![candidate_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_card = conn.prepare(
+        "SELECT policy_decision_id FROM memory_policy_decisions WHERE memory_card_id = ?1",
+    )?;
+    for memory_card_id in memory_card_ids {
+        for id in by_card.query_map(params![memory_card_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_transition_audit_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+    memory_card_ids: &BTreeSet<String>,
+    policy_decision_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut stmt =
+        conn.prepare("SELECT audit_id FROM memory_transition_audit WHERE entity_id = ?1")?;
+    for id_set in [candidate_ids, memory_card_ids, policy_decision_ids] {
+        for entity_id in id_set {
+            for audit_id in stmt.query_map(params![entity_id], |row| row.get::<_, String>(0))? {
+                ids.insert(audit_id?);
+            }
         }
     }
     Ok(ids)
@@ -2790,6 +2902,10 @@ fn lifecycle_export_manifest(plan: &RqaUserLifecyclePlan) -> Value {
         "trace_sha256": hashed_values(&plan.trace_ids),
         "package_sha256": hashed_values(&plan.package_ids),
         "context_pack_sha256": hashed_values(&plan.context_pack_ids),
+        "memory_candidate_sha256": hashed_values(&plan.memory_candidate_ids),
+        "memory_card_sha256": hashed_values(&plan.memory_card_ids),
+        "memory_policy_decision_sha256": hashed_values(&plan.memory_policy_decision_ids),
+        "memory_transition_audit_sha256": hashed_values(&plan.memory_transition_audit_ids),
         "retrieval_failure_sha256": hashed_values(&plan.retrieval_failure_ids),
         "governance_task_sha256": hashed_values(&plan.governance_task_ids),
         "source_text_included": false,
@@ -3035,6 +3151,100 @@ fn rqa_user_lifecycle_anonymize(
                 )?;
             }
         }
+        let anonymized_memory_scope = format!(
+            "user_private:sha256:{}",
+            hash_text(&format!("anonymized-memory:{}", plan.subject_sha256))
+        );
+        redact_text_column_by_ids(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            "summary",
+            &plan.memory_candidate_ids,
+            &sensitive_values,
+        )?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            "raw_excerpt_redacted",
+            &plan.memory_candidate_ids,
+            &sensitive_values,
+        )?;
+        for column in ["risk_flags_json", "llm_extraction_json"] {
+            redact_json_column_by_ids(
+                tx,
+                "memory_candidates",
+                "candidate_id",
+                column,
+                &plan.memory_candidate_ids,
+                &sensitive_values,
+            )?;
+        }
+        update_user_private_scope_refs(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            &plan.memory_candidate_ids,
+            &anonymized_memory_scope,
+        )?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            "summary",
+            &plan.memory_card_ids,
+            &sensitive_values,
+        )?;
+        redact_json_column_by_ids(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            "acl_json",
+            &plan.memory_card_ids,
+            &sensitive_values,
+        )?;
+        update_user_private_scope_refs(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            &plan.memory_card_ids,
+            &anonymized_memory_scope,
+        )?;
+        disable_memory_card_reads_for_ids(tx, &plan.memory_card_ids)?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_policy_decisions",
+            "policy_decision_id",
+            "decision_reason",
+            &plan.memory_policy_decision_ids,
+            &sensitive_values,
+        )?;
+        for column in ["rule_filter_json", "llm_filter_json", "risk_flags_json"] {
+            redact_json_column_by_ids(
+                tx,
+                "memory_policy_decisions",
+                "policy_decision_id",
+                column,
+                &plan.memory_policy_decision_ids,
+                &sensitive_values,
+            )?;
+        }
+        update_user_private_scope_refs(
+            tx,
+            "memory_policy_decisions",
+            "policy_decision_id",
+            &plan.memory_policy_decision_ids,
+            &anonymized_memory_scope,
+        )?;
+        redact_json_column_by_ids(
+            tx,
+            "memory_transition_audit",
+            "audit_id",
+            "metadata_json",
+            &plan.memory_transition_audit_ids,
+            &sensitive_values,
+        )?;
         redact_json_column_by_ids(
             tx,
             "workflow_states",
@@ -3140,6 +3350,48 @@ fn redact_json_column_by_ids(
     Ok(())
 }
 
+fn update_user_private_scope_refs(
+    conn: &Connection,
+    table: &str,
+    id_column: &str,
+    ids: &BTreeSet<String>,
+    anonymized_scope_ref: &str,
+) -> Result<()> {
+    let update_sql = format!(
+        "UPDATE {table}
+         SET scope_ref = CASE WHEN scope_type = 'user_private' THEN ?1 ELSE scope_ref END
+         WHERE {id_column} = ?2"
+    );
+    for id in ids {
+        conn.execute(&update_sql, params![anonymized_scope_ref, id])?;
+    }
+    Ok(())
+}
+
+fn disable_memory_card_reads_for_ids(
+    conn: &Connection,
+    memory_card_ids: &BTreeSet<String>,
+) -> Result<()> {
+    let mut select = conn.prepare("SELECT acl_json FROM memory_cards WHERE memory_card_id = ?1")?;
+    for memory_card_id in memory_card_ids {
+        let acl_json = select
+            .query_row(params![memory_card_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        let mut acl = acl_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .unwrap_or_else(|| json!({}));
+        if let Some(object) = acl.as_object_mut() {
+            object.insert("read_enabled".to_string(), json!(false));
+        }
+        conn.execute(
+            "UPDATE memory_cards SET read_enabled = 0, acl_json = ?1 WHERE memory_card_id = ?2",
+            params![serde_json::to_string(&acl)?, memory_card_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn redact_json_string(value: &str, sensitive_values: &[String]) -> Result<String> {
     match serde_json::from_str::<Value>(value) {
         Ok(parsed) => Ok(serde_json::to_string(&redact_json_value(
@@ -3190,6 +3442,10 @@ fn lifecycle_counts(plan: &RqaUserLifecyclePlan) -> Value {
         "trace_count": plan.trace_ids.len(),
         "package_count": plan.package_ids.len(),
         "context_pack_count": plan.context_pack_ids.len(),
+        "memory_candidate_count": plan.memory_candidate_ids.len(),
+        "memory_card_count": plan.memory_card_ids.len(),
+        "memory_policy_decision_count": plan.memory_policy_decision_ids.len(),
+        "memory_transition_audit_count": plan.memory_transition_audit_ids.len(),
         "workflow_state_count": plan.workflow_state_ids.len(),
         "audit_event_count": plan.audit_event_ids.len(),
         "retrieval_failure_count": plan.retrieval_failure_ids.len(),
@@ -3216,6 +3472,9 @@ fn lifecycle_report(
         "refs": {
             "trace_count": plan.trace_ids.len(),
             "package_count": plan.package_ids.len(),
+            "memory_candidate_count": plan.memory_candidate_ids.len(),
+            "memory_card_count": plan.memory_card_ids.len(),
+            "memory_policy_decision_count": plan.memory_policy_decision_ids.len(),
             "retrieval_failure_count": plan.retrieval_failure_ids.len(),
             "governance_task_count": plan.governance_task_ids.len(),
         },
@@ -5888,7 +6147,7 @@ async fn memory_candidate_endpoint(
             Json(json!({
                 "object": "tonglingyu.memory_candidate_admin_read",
                 "candidate": candidate,
-                "read_path_enabled": false,
+                "read_path_enabled": true,
             }))
             .into_response()
         }
@@ -5967,7 +6226,7 @@ async fn memory_candidate_transition_endpoint(
                     "action": payload.action,
                     "reason_sha256": payload.reason.as_deref().map(hash_text),
                     "status": result.get("candidate").and_then(|v| v.get("status")),
-                    "read_path_enabled": false,
+                    "read_path_enabled": true,
                 }),
             ) {
                 tracing::warn!(error = %error, "memory candidate transition audit failed");
@@ -6095,7 +6354,7 @@ async fn memory_card_endpoint(
             Json(json!({
                 "object": "tonglingyu.memory_card_admin_read",
                 "memory_card": memory_card,
-                "read_path_enabled": false,
+                "read_path_enabled": true,
             }))
             .into_response()
         }
@@ -6154,7 +6413,9 @@ async fn memory_card_transition_endpoint(
                     "action": payload.action,
                     "reason_sha256": payload.reason.as_deref().map(hash_text),
                     "status": result.get("memory_card").and_then(|v| v.get("status")),
-                    "read_enabled": false,
+                    "read_enabled": result
+                        .get("memory_card")
+                        .and_then(|v| v.get("read_enabled")),
                 }),
             ) {
                 tracing::warn!(error = %error, "memory card transition audit failed");
@@ -8552,6 +8813,10 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("session_journal");
         map.remove("context_pack");
         map.remove("memory_read_refs");
+        map.remove("memory_summaries");
+        map.remove("memory_policy");
+        map.remove("memory_policy_digest");
+        map.remove("memory_usage_summary");
         map.remove("memory_candidate");
         map.remove("memory_candidate_id");
         map.remove("memory_candidate_ref");
@@ -8560,8 +8825,14 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("memory_card_id");
         map.remove("memory_card_ref");
         map.remove("memory_cards");
+        map.remove("memory_policy_decision");
+        map.remove("memory_policy_decision_id");
+        map.remove("memory_policy_decision_ref");
+        map.remove("memory_policy_decisions");
         map.remove("memory_transition_audit");
         map.remove("llm_extraction");
+        map.remove("llm_filter");
+        map.remove("rule_filter");
         map.remove("read_enabled");
     }
     if let Some(content) = public
@@ -9527,6 +9798,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "session_journal": scoped_context_counts["session_journal"].clone(),
             "memory_candidates": scoped_context_counts["memory_candidates"].clone(),
             "memory_cards": scoped_context_counts["memory_cards"].clone(),
+            "memory_policy_decisions": scoped_context_counts["memory_policy_decisions"].clone(),
             "memory_transition_audit": scoped_context_counts["memory_transition_audit"].clone(),
             "memory_collector_runs": scoped_context_counts["memory_collector_runs"].clone(),
             "evidence_packages": runtime_stats.evidence_packages,
@@ -9611,6 +9883,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         (
             "tonglingyu_memory_cards_total",
             metric_i64(&scoped_context_counts, "memory_cards"),
+        ),
+        (
+            "tonglingyu_memory_policy_decisions_total",
+            metric_i64(&scoped_context_counts, "memory_policy_decisions"),
         ),
         (
             "tonglingyu_memory_transition_audit_total",
@@ -11002,14 +11278,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_admin_endpoints_collect_transition_and_keep_read_disabled() {
+    async fn memory_admin_endpoints_collect_transition_and_enable_read_with_policy() {
         let db_path = temp_gateway_db_path("tonglingyu-admin-memory");
         let state = Arc::new(test_app_state(db_path.clone()));
 
         let conn = open_db(&db_path).expect("db opens");
         let messages = vec![ContextMessage {
             role: "user".to_string(),
-            content: "以后回答时，请用简体中文短句总结。".to_string(),
+            content: "我喜欢回答里多引用原文。".to_string(),
         }];
         let context = create_context_for_request(
             &conn,
@@ -11019,7 +11295,7 @@ mod tests {
                 external_user_ref: "memory-user",
                 external_session_id: "memory-chat",
                 external_message_id: "memory-message-1",
-                question: "以后回答时，请用简体中文短句总结。",
+                question: "我喜欢回答里多引用原文。",
                 messages: &messages,
                 history_over_limit: false,
                 max_messages: 40,
@@ -11049,10 +11325,18 @@ mod tests {
                 dry_run: Some(false),
                 trace_id: Some("trace-admin-memory".to_string()),
                 llm_extraction_probe: Some(json!({
-                    "candidate_type": "user_response_preference",
-                    "summary": "用户回答偏好: 以后回答时用简体短句。",
+                    "schema_version": "scoped-memory-llm-filter-v1",
+                    "is_long_term_memory": true,
+                    "is_temporary_instruction": false,
+                    "is_quoted_or_third_party": false,
+                    "has_contradiction": false,
+                    "scope_type": "user_private",
+                    "candidate_type": "retrieval_preference",
                     "confidence": 0.84,
+                    "sensitivity": "low",
                     "risk_flags": [],
+                    "ttl_hint": "180d",
+                    "exclusion_flags": [],
                 })),
             }),
         )
@@ -11123,6 +11407,47 @@ mod tests {
             .expect("memory card id")
             .to_string();
 
+        let enable = memory_card_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(memory_card_id.clone()),
+            Json(MemoryCardTransitionRequest {
+                action: "enable_read".to_string(),
+                reason: Some("manual review approved read enablement".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enable_body: Value =
+            serde_json::from_str(&response_text(enable).await).expect("enable json");
+        assert_eq!(enable_body["memory_card"]["read_enabled"], json!(true));
+        assert_eq!(enable_body["read_path_enabled"], json!(true));
+
+        let read_context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory-read-enabled",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-2",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context reads manual enabled memory");
+        assert_eq!(
+            read_context.context_pack["memory_read_refs"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
         let unauthorized = memory_cards_endpoint(
             State(state.clone()),
             gateway_headers("memory-user"),
@@ -11132,10 +11457,10 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
         conn.execute(
-            "UPDATE memory_cards SET read_enabled = 1 WHERE memory_card_id = ?1",
+            "DELETE FROM memory_policy_decisions WHERE memory_card_id = ?1",
             params![memory_card_id],
         )
-        .expect("force unsafe read enabled");
+        .expect("remove read policy decision");
         let fail_closed = create_context_for_request(
             &conn,
             ContextRequestInput {
@@ -11154,11 +11479,15 @@ mod tests {
             },
         )
         .expect_err("read_enabled cards must fail closed");
-        assert!(fail_closed.to_string().contains("read_enabled cards exist"));
+        assert!(fail_closed.to_string().contains("without policy decision"));
         assert_eq!(audit_event_count(&db_path, "memory_collector_admin_run"), 1);
         assert_eq!(
             audit_event_count(&db_path, "memory_candidate_admin_transition"),
             2
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "memory_card_admin_transition"),
+            1
         );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -12574,9 +12903,17 @@ USER: 介绍尤三姐
         value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
         value["session_journal"] = json!([{"entry_type": "user_message"}]);
         value["memory_read_refs"] = json!(["memory:forbidden"]);
+        value["memory_summaries"] = json!([{"summary": "internal memory"}]);
+        value["memory_policy_digest"] = json!("memory-policy-digest");
+        value["memory_usage_summary"] = json!({"read_ref_count": 1});
         value["memory_candidate_id"] = json!("memory-candidate-public-rqa-test");
         value["memory_card_id"] = json!("memory-card-public-rqa-test");
+        value["memory_policy_decision_id"] = json!("memory-policy-decision-public-rqa-test");
+        value["memory_policy_decision_ref"] =
+            json!("memory-policy-decision://tonglingyu/public-rqa/test");
         value["llm_extraction"] = json!({"summary": "internal"});
+        value["llm_filter"] = json!({"schema_version": "scoped-memory-llm-filter-v1"});
+        value["rule_filter"] = json!({"schema_version": "scoped-memory-rule-filter-v1"});
         value["read_enabled"] = json!(true);
 
         let rendered =
@@ -12597,9 +12934,16 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("interaction_context_id"));
         assert!(!rendered.contains("session_journal"));
         assert!(!rendered.contains("memory_read_refs"));
+        assert!(!rendered.contains("memory_summaries"));
+        assert!(!rendered.contains("memory_policy_digest"));
+        assert!(!rendered.contains("memory_usage_summary"));
         assert!(!rendered.contains("memory_candidate_id"));
         assert!(!rendered.contains("memory_card_id"));
+        assert!(!rendered.contains("memory_policy_decision_id"));
+        assert!(!rendered.contains("memory_policy_decision_ref"));
         assert!(!rendered.contains("llm_extraction"));
+        assert!(!rendered.contains("llm_filter"));
+        assert!(!rendered.contains("rule_filter"));
         assert!(!rendered.contains("read_enabled"));
     }
 

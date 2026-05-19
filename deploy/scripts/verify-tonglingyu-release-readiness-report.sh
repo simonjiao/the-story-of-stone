@@ -2120,6 +2120,8 @@ def validate_restore_drill_gate_stdout():
         "package_replay_readable",
         "rqa_quality_gate_reran",
         "saved_report_validator_reran",
+        "scoped_memory_backup_restored",
+        "scoped_memory_read_path_restored",
     }
     if not isinstance(checks, dict):
         errors.append("rqa_backup_restore_drill_checks_missing")
@@ -2134,6 +2136,7 @@ def validate_restore_drill_gate_stdout():
         "package_sha256",
         "failure_sha256",
         "governance_task_sha256",
+        "memory_read_trace_sha256",
     )
     if not isinstance(refs, dict):
         errors.append("rqa_backup_restore_drill_refs_missing")
@@ -2147,6 +2150,7 @@ def validate_restore_drill_gate_stdout():
         "rqa_quality_gate_sha256",
         "saved_release_report_sha256",
         "saved_report_validator_sha256",
+        "restored_memory_read_sha256",
     )
     if not isinstance(artifacts, dict):
         errors.append("rqa_backup_restore_drill_artifacts_missing")
@@ -3215,6 +3219,7 @@ def validate_user_lifecycle_gate_stdout():
     required_checks = (
         "export_audited_and_redacted",
         "export_manifest_redacted",
+        "scoped_memory_lifecycle_counts_present",
         "legal_hold_blocks_anonymize",
         "legal_hold_can_be_released",
         "anonymize_completed",
@@ -3222,6 +3227,8 @@ def validate_user_lifecycle_gate_stdout():
         "tombstones_recorded",
         "lifecycle_audit_events_recorded",
         "rqa_traceability_preserved",
+        "scoped_memory_traceability_preserved",
+        "scoped_memory_anonymize_disabled_reads",
     )
     if not isinstance(checks, dict):
         errors.append("rqa_user_lifecycle_checks_missing")

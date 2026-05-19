@@ -49,6 +49,8 @@ CONTAINER_DB_PATH="${TONGLINGYU_RQA_RESTORE_DRILL_CONTAINER_DB_PATH:-${TONGLINGY
 CONTAINER_GATEWAY_BIN="${TONGLINGYU_RQA_RESTORE_DRILL_CONTAINER_GATEWAY_BIN:-tonglingyu-gateway}"
 RESTORED_DB="${WORK_DIR}/restored.db"
 META_JSON="${WORK_DIR}/restore-drill-meta.json"
+MEMORY_SEED_JSON="${WORK_DIR}/restore-memory-seed.json"
+RESTORED_MEMORY_READ_JSON="${WORK_DIR}/restored-memory-read.json"
 BACKUP_EXECUTION_MODE="host"
 
 is_true() {
@@ -305,6 +307,185 @@ print(meta["trace_id"], meta["package_id"], meta["failure_id"], meta["task_id"])
 PY
 )
 
+seed_scoped_memory_fixture() {
+  local seed_port seed_gateway_key seed_admin_key seed_user_ref seed_chat_ref health_ok
+  seed_port="$(
+    python3 - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+  )"
+  seed_gateway_key="restore-memory-gateway-${seed_port}"
+  seed_admin_key="restore-memory-admin-${seed_port}"
+  seed_user_ref="restore-memory-user-${seed_port}"
+  seed_chat_ref="restore-memory-chat-${seed_port}"
+
+  TONGLINGYU_AGENT_RUNTIME_MODE=minimal \
+  TONGLINGYU_GATEWAY_API_KEY="${seed_gateway_key}" \
+  TONGLINGYU_ADMIN_API_KEY="${seed_admin_key}" \
+  TONGLINGYU_RATE_LIMIT_PER_MINUTE=0 \
+  "${GATEWAY_BIN}" serve \
+    --db "${PRIMARY_DB}" \
+    --bind "127.0.0.1:${seed_port}" \
+    >"${WORK_DIR}/memory-seed-gateway.stdout" \
+    2>"${WORK_DIR}/memory-seed-gateway.stderr" &
+  SERVER_PID="$!"
+
+  health_ok="false"
+  for _ in $(seq 1 100); do
+    if curl -fsS "http://127.0.0.1:${seed_port}/healthz" \
+      >"${WORK_DIR}/memory-seed-health.json" \
+      2>"${WORK_DIR}/memory-seed-health.stderr"; then
+      health_ok="true"
+      break
+    fi
+    if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+      emit_failure "memory_seed_gateway_exited" "${STARTED_MS}"
+    fi
+    sleep 0.1
+  done
+  if [[ "${health_ok}" != "true" ]]; then
+    emit_failure "memory_seed_gateway_health_failed" "${STARTED_MS}"
+  fi
+
+  if ! python3 - \
+    "http://127.0.0.1:${seed_port}" \
+    "${seed_gateway_key}" \
+    "${seed_admin_key}" \
+    "${seed_user_ref}" \
+    "${seed_chat_ref}" \
+    "${PRIMARY_DB}" \
+    "${MEMORY_SEED_JSON}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+from urllib import request
+
+base_url, gateway_key, admin_key, user_ref, chat_ref, db_path, output_path = sys.argv[1:8]
+timeout_seconds = 15
+
+
+def post_chat(content, message_id):
+    req = request.Request(
+        f"{base_url}/v1/chat/completions",
+        data=json.dumps({
+            "model": "tonglingyu",
+            "messages": [{"role": "user", "content": content}],
+        }).encode("utf-8"),
+        method="POST",
+        headers={
+            "authorization": f"Bearer {gateway_key}",
+            "content-type": "application/json",
+            "x-tonglingyu-user-id": user_ref,
+            "x-tonglingyu-chat-id": chat_ref,
+            "x-tonglingyu-message-id": message_id,
+        },
+    )
+    with request.urlopen(req, timeout=timeout_seconds) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    for forbidden in ("trace_id", "evidence_package_id", "session_id", "memory_read_refs"):
+        if forbidden in payload:
+            raise SystemExit(f"public chat leaked {forbidden}")
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT trace_id, package_id
+            FROM session_journal
+            WHERE external_message_id = ?
+              AND entry_type = 'final_response'
+            ORDER BY created_at DESC, journal_id DESC
+            """,
+            (message_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if len(rows) != 1:
+        raise SystemExit(f"expected one final response for {message_id}, got {len(rows)}")
+    trace_id, package_id = rows[0]
+    return {"trace_id": trace_id, "package_id": package_id, "message_id": message_id}
+
+
+memory_seed = post_chat(
+    "恢复演练 memory：以后回答《红楼梦》问题时，请用简体中文短句总结。现在介绍贾宝玉。",
+    "restore-memory-seed",
+)
+collector_req = request.Request(
+    f"{base_url}/v1/admin/memory/collector/run",
+    data=json.dumps({
+        "trigger": "admin_manual",
+        "limit": 100,
+        "dry_run": False,
+        "trace_id": memory_seed["trace_id"],
+        "llm_extraction_probe": {
+            "schema_version": "scoped-memory-llm-filter-v1",
+            "is_long_term_memory": True,
+            "is_temporary_instruction": False,
+            "is_quoted_or_third_party": False,
+            "has_contradiction": False,
+            "scope_type": "user_private",
+            "candidate_type": "language_preference",
+            "confidence": 0.86,
+            "sensitivity": "low",
+            "risk_flags": [],
+            "ttl_hint": "180d",
+            "exclusion_flags": [],
+        },
+    }).encode("utf-8"),
+    method="POST",
+    headers={
+        "authorization": f"Bearer {admin_key}",
+        "content-type": "application/json",
+    },
+)
+with request.urlopen(collector_req, timeout=timeout_seconds) as response:
+    collector = json.loads(response.read().decode("utf-8"))
+if collector.get("status") != "ok":
+    raise SystemExit("memory collector failed during restore drill seed")
+if int(collector.get("candidate_count") or 0) < 1:
+    raise SystemExit("restore drill memory seed created no candidate")
+if int(collector.get("auto_enabled_count") or 0) < 1:
+    raise SystemExit("restore drill memory seed was not auto-enabled")
+memory_read = post_chat("恢复演练 memory read：介绍林黛玉。", "restore-memory-read-before-backup")
+conn = sqlite3.connect(db_path)
+try:
+    counts = {
+        "memory_candidate_count": conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0],
+        "memory_card_count": conn.execute("SELECT COUNT(*) FROM memory_cards").fetchone()[0],
+        "memory_policy_decision_count": conn.execute("SELECT COUNT(*) FROM memory_policy_decisions").fetchone()[0],
+        "memory_transition_audit_count": conn.execute("SELECT COUNT(*) FROM memory_transition_audit").fetchone()[0],
+        "memory_read_enabled_count": conn.execute("SELECT COUNT(*) FROM memory_cards WHERE read_enabled = 1").fetchone()[0],
+    }
+finally:
+    conn.close()
+payload = {
+    "status": "ok",
+    "user_ref_sha256": __import__("hashlib").sha256(user_ref.encode("utf-8")).hexdigest(),
+    "chat_ref_sha256": __import__("hashlib").sha256(chat_ref.encode("utf-8")).hexdigest(),
+    "seed": memory_seed,
+    "read": memory_read,
+    "counts": counts,
+    "secret_values_printed": False,
+}
+Path(output_path).write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  then
+    emit_failure "memory_seed_failed" "${STARTED_MS}"
+  fi
+
+  kill "${SERVER_PID}" 2>/dev/null || true
+  wait "${SERVER_PID}" 2>/dev/null || true
+  SERVER_PID=""
+}
+
+if [[ "${refs_provided}" != "true" ]]; then
+  seed_scoped_memory_fixture
+fi
+
 BACKUP_STARTED_MS="$(now_ms)"
 backup_primary_db() {
   "${GATEWAY_BIN}" backup-db \
@@ -431,6 +612,122 @@ if missing:
 PY
 then
   emit_failure "restored_rqa_reference_missing" "${STARTED_MS}"
+fi
+
+if ! python3 - \
+  "http://127.0.0.1:${RESTORE_PORT}" \
+  "${GATEWAY_KEY}" \
+  "${ADMIN_KEY}" \
+  "${RESTORED_DB}" \
+  "${RESTORED_MEMORY_READ_JSON}" <<'PY'
+import hashlib
+import json
+import sqlite3
+import sys
+from pathlib import Path
+from urllib import request
+
+base_url, gateway_key, admin_key, db_path, output_path = sys.argv[1:6]
+timeout_seconds = 15
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(
+        """
+        SELECT sessions.external_user_ref, sessions.external_session_id
+        FROM memory_cards AS cards
+        JOIN memory_candidates AS candidates
+          ON candidates.candidate_id = cards.source_candidate_id
+        JOIN user_sessions AS sessions
+          ON sessions.user_session_id = candidates.user_session_id
+        WHERE cards.status = 'active'
+          AND cards.read_enabled = 1
+        ORDER BY cards.promoted_at DESC, cards.memory_card_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+finally:
+    conn.close()
+if row is None:
+    raise SystemExit("no active read-enabled memory available after restore")
+user_ref, chat_ref = row
+message_id = "restore-memory-read-after-restore"
+chat_req = request.Request(
+    f"{base_url}/v1/chat/completions",
+    data=json.dumps({
+        "model": "tonglingyu",
+        "messages": [{"role": "user", "content": "恢复后读取 memory：介绍林黛玉。"}],
+    }).encode("utf-8"),
+    method="POST",
+    headers={
+        "authorization": f"Bearer {gateway_key}",
+        "content-type": "application/json",
+        "x-tonglingyu-user-id": user_ref,
+        "x-tonglingyu-chat-id": chat_ref,
+        "x-tonglingyu-message-id": message_id,
+    },
+)
+with request.urlopen(chat_req, timeout=timeout_seconds) as response:
+    public_payload = json.loads(response.read().decode("utf-8"))
+for forbidden in ("trace_id", "evidence_package_id", "session_id", "memory_read_refs", "memory_summaries"):
+    if forbidden in public_payload:
+        raise SystemExit(f"public restore memory read leaked {forbidden}")
+conn = sqlite3.connect(db_path)
+try:
+    row = conn.execute(
+        """
+        SELECT trace_id, package_id
+        FROM session_journal
+        WHERE external_message_id = ?
+          AND entry_type = 'final_response'
+        ORDER BY created_at DESC, journal_id DESC
+        LIMIT 1
+        """,
+        (message_id,),
+    ).fetchone()
+finally:
+    conn.close()
+if row is None:
+    raise SystemExit("restored memory read final response not journaled")
+trace_id, package_id = row
+trace_req = request.Request(
+    f"{base_url}/v1/admin/traces/{trace_id}",
+    method="GET",
+    headers={"authorization": f"Bearer {admin_key}"},
+)
+with request.urlopen(trace_req, timeout=timeout_seconds) as response:
+    trace = json.loads(response.read().decode("utf-8"))
+context = trace.get("scoped_context") or {}
+packs = context.get("context_packs") or []
+projections = context.get("context_projections") or []
+read_refs_ok = any(pack.get("memory_read_refs") for pack in packs)
+main_projection_ok = any(
+    item.get("consumer_name") == "honglou-main"
+    and (item.get("projection_payload_summary") or {}).get("memory_read_ref_count", 0) >= 1
+    for item in projections
+)
+reviewer_no_content = not any(
+    item.get("consumer_name") == "honglou-reviewer"
+    and (item.get("projection_payload_summary") or {}).get("memory_summary_count", 0) > 0
+    for item in projections
+)
+payload = {
+    "status": "ok" if read_refs_ok and main_projection_ok and reviewer_no_content else "failed",
+    "trace_sha256": hashlib.sha256(trace_id.encode("utf-8")).hexdigest(),
+    "package_sha256": hashlib.sha256((package_id or "").encode("utf-8")).hexdigest(),
+    "user_ref_sha256": hashlib.sha256(user_ref.encode("utf-8")).hexdigest(),
+    "checks": {
+        "context_pack_memory_read_refs": read_refs_ok,
+        "main_projection_memory_ref": main_projection_ok,
+        "reviewer_memory_content_blocked": reviewer_no_content,
+    },
+    "secret_values_printed": False,
+}
+Path(output_path).write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
+if payload["status"] != "ok":
+    raise SystemExit("restored scoped memory read path failed")
+PY
+then
+  emit_failure "restored_scoped_memory_read_failed" "${STARTED_MS}"
 fi
 
 ADMIN_HEADER=(-H "Authorization: Bearer ${ADMIN_KEY}")
@@ -597,11 +894,13 @@ if ! python3 - "${REPORT_PATH}" "${META_JSON}" "${SOURCE_MODE}" "${PRIMARY_DB}" 
   "${BACKUP_DB}" "${RESTORED_DB}" "${WORK_DIR}/restore-rqa-quality-gate.json" \
   "${WORK_DIR}/restore-release-readiness-report.json" \
   "${WORK_DIR}/restore-release-report-validator.json" \
+  "${RESTORED_MEMORY_READ_JSON}" \
   "${STARTED_MS}" "${BACKUP_STARTED_MS}" "${BACKUP_FINISHED_MS}" \
   "${RESTORE_STARTED_MS}" "${FINISHED_MS}" "${RTO_TARGET_SECONDS}" \
   "${RPO_TARGET_SECONDS}" "${OPERATOR}" "${ENVIRONMENT}" "${BACKUP_EXECUTION_MODE}" <<'PY'
 import hashlib
 import json
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -616,6 +915,7 @@ from pathlib import Path
     rqa_gate_path,
     release_report_path,
     validator_path,
+    restored_memory_read_path,
     started_raw,
     backup_started_raw,
     backup_finished_raw,
@@ -626,7 +926,7 @@ from pathlib import Path
     operator,
     environment,
     backup_execution_mode,
-) = sys.argv[1:20]
+) = sys.argv[1:21]
 
 started_ms = int(started_raw)
 backup_started_ms = int(backup_started_raw)
@@ -655,6 +955,20 @@ with open(rqa_gate_path, "r", encoding="utf-8") as handle:
     rqa_gate = json.load(handle)
 with open(validator_path, "r", encoding="utf-8") as handle:
     validator = json.load(handle)
+with open(restored_memory_read_path, "r", encoding="utf-8") as handle:
+    restored_memory_read = json.load(handle)
+
+conn = sqlite3.connect(restored_db)
+try:
+    restored_memory_counts = {
+        "memory_candidate_count": conn.execute("SELECT COUNT(*) FROM memory_candidates").fetchone()[0],
+        "memory_card_count": conn.execute("SELECT COUNT(*) FROM memory_cards").fetchone()[0],
+        "memory_policy_decision_count": conn.execute("SELECT COUNT(*) FROM memory_policy_decisions").fetchone()[0],
+        "memory_transition_audit_count": conn.execute("SELECT COUNT(*) FROM memory_transition_audit").fetchone()[0],
+        "memory_read_enabled_count": conn.execute("SELECT COUNT(*) FROM memory_cards WHERE read_enabled = 1").fetchone()[0],
+    }
+finally:
+    conn.close()
 
 backup_path = str(Path(backup_db).resolve())
 artifact_dir = str(Path(backup_db).resolve().parent)
@@ -670,6 +984,17 @@ checks = {
     "package_replay_readable": True,
     "rqa_quality_gate_reran": rqa_gate.get("status") == "ok",
     "saved_report_validator_reran": validator.get("status") == "ok",
+    "scoped_memory_backup_restored": (
+        restored_memory_counts["memory_candidate_count"] >= 1
+        and restored_memory_counts["memory_card_count"] >= 1
+        and restored_memory_counts["memory_policy_decision_count"] >= 3
+        and restored_memory_counts["memory_transition_audit_count"] >= 3
+        and restored_memory_counts["memory_read_enabled_count"] >= 1
+    ),
+    "scoped_memory_read_path_restored": (
+        restored_memory_read.get("status") == "ok"
+        and all((restored_memory_read.get("checks") or {}).values())
+    ),
 }
 result_ok = rto_met and rpo_met and all(checks.values())
 payload = {
@@ -719,12 +1044,15 @@ payload = {
         "package_sha256": hash_text(meta["package_id"]),
         "failure_sha256": hash_text(meta["failure_id"]),
         "governance_task_sha256": hash_text(meta["task_id"]),
+        "memory_read_trace_sha256": restored_memory_read.get("trace_sha256"),
     },
     "artifacts": {
         "rqa_quality_gate_sha256": file_sha256(rqa_gate_path),
         "saved_release_report_sha256": file_sha256(release_report_path),
         "saved_report_validator_sha256": file_sha256(validator_path),
+        "restored_memory_read_sha256": file_sha256(restored_memory_read_path),
     },
+    "scoped_memory_counts": restored_memory_counts,
     "errors": [] if result_ok else ["rto_or_rpo_or_post_restore_check_failed"],
     "secret_values_printed": False,
 }

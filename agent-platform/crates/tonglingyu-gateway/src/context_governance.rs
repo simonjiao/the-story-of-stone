@@ -17,7 +17,10 @@ pub(crate) const MEMORY_CARD_SCHEMA_VERSION: &str = "tonglingyu-memory-card-v1";
 pub(crate) const MEMORY_TRANSITION_AUDIT_SCHEMA_VERSION: &str =
     "tonglingyu-memory-transition-audit-v1";
 pub(crate) const MEMORY_COLLECTOR_POLICY_VERSION: &str = "tonglingyu-memory-collector-policy-v1";
-pub(crate) const MEMORY_PROMOTION_POLICY_VERSION: &str = "tonglingyu-memory-promotion-policy-v1";
+pub(crate) const MEMORY_POLICY_DECISION_SCHEMA_VERSION: &str =
+    "tonglingyu-memory-policy-decision-v1";
+pub(crate) const SCOPED_MEMORY_POLICY_VERSION: &str = "scoped-memory-policy-v1";
+pub(crate) const SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION: &str = "scoped-memory-llm-filter-v1";
 
 const SESSION_SUMMARY_MAX_CHARS: usize = 600;
 const JOURNAL_SUMMARY_MAX_CHARS: usize = 240;
@@ -25,7 +28,18 @@ const MEMORY_SUMMARY_MAX_CHARS: usize = 220;
 const MEMORY_RAW_EXCERPT_MAX_CHARS: usize = 420;
 const MEMORY_COLLECTOR_LEASE_NAME: &str = "memory-collector";
 const MEMORY_COLLECTOR_LEASE_TTL_SECS: i64 = 300;
-const MEMORY_PHASE3_READ_DISABLED_REASON: &str = "phase3_read_path_not_enabled";
+const MEMORY_POLICY_ACTOR: &str = "memory_policy:auto:scoped-memory-policy-v1";
+const MEMORY_POLICY_MODE_ENV: &str = "TONGLINGYU_MEMORY_POLICY_MODE";
+const MEMORY_POLICY_MODE_AUTO: &str = "auto_policy";
+const MEMORY_POLICY_MODE_MANUAL: &str = "manual_required";
+const MEMORY_POLICY_MODE_SHADOW: &str = "shadow_only";
+const MEMORY_READ_BUDGET_TOTAL: usize = 8;
+const MEMORY_READ_BUDGET_USER_PRIVATE: usize = 4;
+const MEMORY_READ_BUDGET_SHARED: usize = 4;
+const MEMORY_READ_BUDGET_TOOL_PROFILE: usize = 2;
+const PROFILE_COMMON_SCOPE_REF: &str = "profile:honglou-main";
+const KNOWLEDGE_SPACE_SCOPE_REF: &str = "knowledge_space:tonglingyu-honglou";
+const SOURCE_COLLECTION_SCOPE_REF: &str = "source_collection:wikisource-honglou";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContextMessage {
@@ -83,6 +97,9 @@ pub(crate) struct ContextPackProfileView {
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) forbidden_context: Vec<String>,
     pub(crate) memory_read_refs: Vec<String>,
+    pub(crate) memory_summaries: Vec<Value>,
+    pub(crate) memory_policy_digest: String,
+    pub(crate) memory_usage_summary: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -328,6 +345,31 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             schema_version TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS memory_policy_decisions (
+            policy_decision_id TEXT PRIMARY KEY,
+            policy_decision_ref TEXT NOT NULL UNIQUE,
+            policy_version TEXT NOT NULL,
+            policy_mode TEXT NOT NULL,
+            candidate_id TEXT NOT NULL REFERENCES memory_candidates(candidate_id),
+            memory_card_id TEXT REFERENCES memory_cards(memory_card_id),
+            scope_type TEXT NOT NULL,
+            scope_ref TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            rule_filter_json TEXT NOT NULL,
+            llm_filter_json TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            sensitivity TEXT NOT NULL,
+            risk_flags_json TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            decision_reason TEXT NOT NULL,
+            ttl_policy_ref TEXT NOT NULL,
+            expires_at TEXT,
+            actor TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            audit_ref TEXT NOT NULL,
+            schema_version TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS memory_collector_runs (
             run_id TEXT PRIMARY KEY,
             trigger_type TEXT NOT NULL,
@@ -400,6 +442,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             ON memory_cards(source_candidate_id);
         CREATE INDEX IF NOT EXISTS idx_memory_transition_audit_entity
             ON memory_transition_audit(entity_type, entity_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_policy_decisions_candidate
+            ON memory_policy_decisions(candidate_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_policy_decisions_card
+            ON memory_policy_decisions(memory_card_id, decision, created_at);
+        CREATE INDEX IF NOT EXISTS idx_memory_policy_decisions_scope
+            ON memory_policy_decisions(scope_type, scope_ref, decision);
         CREATE INDEX IF NOT EXISTS idx_memory_collector_runs_started
             ON memory_collector_runs(started_at);
         "#,
@@ -426,6 +474,10 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
+        params![MEMORY_POLICY_DECISION_SCHEMA_VERSION, now_rfc3339()],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params![CONTEXT_SCHEMA_VERSION, now_rfc3339()],
     )?;
     Ok(())
@@ -442,17 +494,34 @@ pub(crate) fn create_context_for_request(
         input.model_id,
     )?;
     let interaction_context_id = get_or_create_interaction_context(conn, &user_session_id)?;
-    assert_memory_reads_disabled(conn)?;
+    assert_read_enabled_memory_has_policy_decisions(conn)?;
     let prior_subject = latest_subject_from_journal(conn, &user_session_id)?;
     let session_summary = session_summary(input.messages, prior_subject.as_deref());
     let resolver = resolve_question(input.question, input.messages, prior_subject.as_deref());
     let context_pack_id = format!("context-pack-{}", uuid::Uuid::now_v7().simple());
     let context_pack_ref = context_pack_ref(input.trace_id, &context_pack_id);
-    let active_scopes = vec![json!({
-        "scope_type": "session",
-        "scope_id": &input.external_session_id,
-        "relation_type": "primary",
-    })];
+    let active_scopes = vec![
+        json!({
+            "scope_type": "session",
+            "scope_id": &input.external_session_id,
+            "relation_type": "primary",
+        }),
+        json!({
+            "scope_type": "profile_common",
+            "scope_id": PROFILE_COMMON_SCOPE_REF,
+            "relation_type": "default_runtime_profile",
+        }),
+        json!({
+            "scope_type": "knowledge_space",
+            "scope_id": KNOWLEDGE_SPACE_SCOPE_REF,
+            "relation_type": "default_knowledge_space",
+        }),
+        json!({
+            "scope_type": "source_collection",
+            "scope_id": SOURCE_COLLECTION_SCOPE_REF,
+            "relation_type": "default_source_collection",
+        }),
+    ];
     let candidate_scopes = resolver
         .referent_bindings
         .iter()
@@ -465,7 +534,25 @@ pub(crate) fn create_context_for_request(
             })
         })
         .collect::<Vec<_>>();
-    let profile_views = profile_views(&resolver.resolved_question, &session_summary);
+    let memory_read_set = load_authorized_memory_reads(
+        conn,
+        input.external_user_ref,
+        &active_scopes,
+        &candidate_scopes,
+    )?;
+    let profile_views = profile_views(
+        &resolver.resolved_question,
+        &session_summary,
+        &memory_read_set.reads,
+    );
+    let memory_read_refs = memory_read_set
+        .reads
+        .iter()
+        .map(|read| read.memory_read_ref.clone())
+        .collect::<Vec<_>>();
+    let memory_read_policy_digest = memory_read_policy_digest(&memory_read_set.reads);
+    let memory_usage_summary =
+        memory_usage_summary(&memory_read_set.reads, memory_read_set.truncated_count);
     let mut context_pack = json!({
         "context_pack_id": &context_pack_id,
         "context_pack_ref": &context_pack_ref,
@@ -478,7 +565,9 @@ pub(crate) fn create_context_for_request(
         "candidate_scopes": &candidate_scopes,
         "allowed_tools": ["tonglingyu.text.search", "tonglingyu.commentary.search"],
         "forbidden_tools": [],
-        "memory_read_refs": [],
+        "memory_read_refs": &memory_read_refs,
+        "memory_read_policy_digest": &memory_read_policy_digest,
+        "memory_usage_summary": &memory_usage_summary,
         "forbidden_context": [
             "complete_user_history",
             "unauthorized_memory",
@@ -497,6 +586,8 @@ pub(crate) fn create_context_for_request(
             "context_policy": CONTEXT_POLICY_VERSION,
             "resolver": RESOLVER_SCHEMA_VERSION,
             "journal_retention": JOURNAL_RETENTION_POLICY_VERSION,
+            "scoped_memory_policy": SCOPED_MEMORY_POLICY_VERSION,
+            "scoped_memory_llm_filter": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
         },
         "resolver": resolver.audit_json(),
     });
@@ -509,6 +600,7 @@ pub(crate) fn create_context_for_request(
         &context_pack_ref,
         &resolver.resolved_question,
         &session_summary,
+        &memory_read_set.reads,
     );
     conn.execute(
         "INSERT INTO context_packs (
@@ -532,7 +624,7 @@ pub(crate) fn create_context_for_request(
                 "tonglingyu.commentary.search"
             ]))?,
             serde_json::to_string(&json!([]))?,
-            serde_json::to_string(&json!([]))?,
+            serde_json::to_string(&memory_read_refs)?,
             serde_json::to_string(&json!([
                 "complete_user_history",
                 "unauthorized_memory",
@@ -599,6 +691,35 @@ pub(crate) fn create_context_for_request(
                 "resolver": resolver.audit_json(),
                 "session_summary_sha256": hash_text(&session_summary),
                 "context_projection_count": context_projections.len(),
+                "memory_read_ref_count": memory_read_refs.len(),
+                "memory_read_policy_digest": &memory_read_policy_digest,
+            }),
+        },
+    )?;
+    append_journal_entry(
+        conn,
+        JournalEntryInput {
+            trace_id: input.trace_id,
+            user_session_id: &user_session_id,
+            interaction_context_id: &interaction_context_id,
+            context_pack_id: Some(&context_pack_id),
+            package_id: None,
+            external_message_id: Some(input.external_message_id),
+            entry_type: "memory_read_decision",
+            content: None,
+            summary: "scoped memory read decision recorded",
+            retention_policy: JOURNAL_RETENTION_POLICY_VERSION,
+            sensitivity: "internal_memory_read_policy",
+            metadata: json!({
+                "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                "policy_mode": memory_policy_mode(),
+                "read_budget": memory_read_budget_json(),
+                "memory_read_refs": &memory_read_refs,
+                "memory_read_policy_digest": &memory_read_policy_digest,
+                "memory_usage_summary": &memory_usage_summary,
+                "truncated_count": memory_read_set.truncated_count,
+                "candidate_count_before_budget": memory_read_set.candidate_count_before_budget,
+                "raw_memory_content_included": false,
             }),
         },
     )?;
@@ -826,6 +947,7 @@ pub(crate) fn table_counts(conn: &Connection) -> Result<Value> {
         "session_journal": table_count(conn, "session_journal")?,
         "memory_candidates": table_count(conn, "memory_candidates")?,
         "memory_cards": table_count(conn, "memory_cards")?,
+        "memory_policy_decisions": table_count(conn, "memory_policy_decisions")?,
         "memory_transition_audit": table_count(conn, "memory_transition_audit")?,
         "memory_collector_runs": table_count(conn, "memory_collector_runs")?,
     }))
@@ -872,6 +994,8 @@ pub(crate) fn run_memory_collector(
     let error_count = 0_i64;
     let mut watermark_journal_id = None::<String>;
     let mut candidate_summaries = Vec::new();
+    let mut policy_decision_summaries = Vec::new();
+    let mut auto_enabled_count = 0_i64;
     let mut suppressed = Vec::new();
     let sources = load_collectable_journal_rows(conn, limit, input.trace_id)?;
     for source in sources {
@@ -924,7 +1048,23 @@ pub(crate) fn run_memory_collector(
                 };
                 if inserted {
                     candidate_count += 1;
-                    candidate_summaries.push(memory_candidate_summary_json(draft.as_ref()));
+                    let mut summary = memory_candidate_summary_json(draft.as_ref());
+                    if !input.dry_run {
+                        let policy_result =
+                            apply_scoped_memory_policy_for_candidate(conn, draft.as_ref(), actor)?;
+                        if policy_result.auto_read_enabled {
+                            auto_enabled_count += 1;
+                        }
+                        summary["policy_result"] = policy_result.public_summary.clone();
+                        policy_decision_summaries.extend(policy_result.policy_decision_summaries);
+                    } else {
+                        summary["policy_result"] = json!({
+                            "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                            "policy_mode": memory_policy_mode(),
+                            "dry_run": true,
+                        });
+                    }
+                    candidate_summaries.push(summary);
                     if !input.dry_run {
                         record_memory_collector_journal_status(
                             conn,
@@ -1027,11 +1167,14 @@ pub(crate) fn run_memory_collector(
         "suppressed_count": suppressed_count,
         "denied_count": denied_count,
         "duplicate_count": duplicate_count,
+        "auto_enabled_count": auto_enabled_count,
         "error_count": error_count,
         "watermark_journal_id": watermark_journal_id,
         "started_at": started_at,
         "completed_at": completed_at,
         "llm_boundary": llm_boundary_contract_json(),
+        "memory_policy": scoped_memory_policy_public_contract(),
+        "policy_decisions": policy_decision_summaries,
         "candidates": candidate_summaries,
         "suppressed": suppressed,
         "secret_values_printed": false,
@@ -1085,7 +1228,7 @@ pub(crate) fn list_memory_candidates(
         "items": candidates,
         "limit": limit,
         "offset": offset,
-        "read_path_enabled": false,
+        "read_path_enabled": true,
     }))
 }
 
@@ -1134,7 +1277,7 @@ pub(crate) fn list_memory_cards(
         "items": cards,
         "limit": limit,
         "offset": offset,
-        "read_path_enabled": false,
+        "read_path_enabled": true,
     }))
 }
 
@@ -1151,26 +1294,14 @@ pub(crate) fn transition_memory_candidate(
     match input.action {
         "approve" => {
             require_status(&current.status, &["pending"])?;
-            update_candidate_status(
+            approve_memory_candidate(
                 conn,
                 &current.candidate_id,
-                "approved",
-                None,
+                &current.status,
+                actor,
+                reason,
+                Some(json!({"candidate_ref": &current.candidate_ref})),
                 input.expires_at,
-                &now,
-            )?;
-            append_memory_transition_audit(
-                conn,
-                MemoryTransitionAuditInput {
-                    entity_type: "memory_candidate",
-                    entity_id: Some(&current.candidate_id),
-                    action: "approve",
-                    from_status: Some(&current.status),
-                    to_status: Some("approved"),
-                    actor,
-                    reason: Some(reason),
-                    metadata: json!({"candidate_ref": &current.candidate_ref}),
-                },
             )?;
         }
         "reject" => {
@@ -1323,7 +1454,7 @@ pub(crate) fn transition_memory_candidate(
         "status": "ok",
         "action": input.action,
         "candidate": refreshed,
-        "read_path_enabled": false,
+        "read_path_enabled": true,
     }))
 }
 
@@ -1338,44 +1469,76 @@ pub(crate) fn transition_memory_card(
     let actor = require_non_empty(input.actor, "operator identity is required")?;
     let reason = require_required_reason(input.reason)?;
     let now = now_rfc3339();
-    let to_status = match input.action {
-        "revoke" => "revoked",
-        "expire" => "expired",
+    match input.action {
+        "enable_read" => {
+            let policy =
+                manual_read_enable_policy_decision(conn, &current, actor, "enable_read", reason)?;
+            set_memory_card_read_enabled(conn, &current, true, actor, reason, Some(&policy))?;
+        }
+        "disable_read" => {
+            let policy =
+                manual_read_enable_policy_decision(conn, &current, actor, "disable_read", reason)?;
+            set_memory_card_read_enabled(conn, &current, false, actor, reason, Some(&policy))?;
+        }
+        "revoke" | "expire" => {
+            let to_status = if input.action == "revoke" {
+                "revoked"
+            } else {
+                "expired"
+            };
+            let mut acl = current.acl.clone();
+            if let Some(object) = acl.as_object_mut() {
+                object.insert("read_enabled".to_string(), json!(false));
+            }
+            conn.execute(
+                "UPDATE memory_cards
+                 SET status = ?1, revoked_by = ?2, revoked_at = ?3,
+                     expires_at = COALESCE(expires_at, ?4), read_enabled = 0,
+                     acl_json = ?5
+                 WHERE memory_card_id = ?6",
+                params![
+                    to_status,
+                    actor,
+                    &now,
+                    &now,
+                    serde_json::to_string(&acl)?,
+                    &current.memory_card_id
+                ],
+            )?;
+            append_memory_transition_audit(
+                conn,
+                MemoryTransitionAuditInput {
+                    entity_type: "memory_card",
+                    entity_id: Some(&current.memory_card_id),
+                    action: input.action,
+                    from_status: Some(&current.status),
+                    to_status: Some(to_status),
+                    actor,
+                    reason: Some(reason),
+                    metadata: json!({
+                    "memory_card_ref": &current.memory_card_ref,
+                    "source_candidate_id": &current.source_candidate_id,
+                    "read_enabled": false,
+                    "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                    }),
+                },
+            )?;
+        }
         _ => unreachable!("validated memory card action"),
-    };
-    conn.execute(
-        "UPDATE memory_cards
-         SET status = ?1, revoked_by = ?2, revoked_at = ?3,
-             expires_at = COALESCE(expires_at, ?4), read_enabled = 0
-         WHERE memory_card_id = ?5",
-        params![to_status, actor, &now, &now, &current.memory_card_id],
-    )?;
-    append_memory_transition_audit(
-        conn,
-        MemoryTransitionAuditInput {
-            entity_type: "memory_card",
-            entity_id: Some(&current.memory_card_id),
-            action: input.action,
-            from_status: Some(&current.status),
-            to_status: Some(to_status),
-            actor,
-            reason: Some(reason),
-            metadata: json!({
-            "memory_card_ref": &current.memory_card_ref,
-            "source_candidate_id": &current.source_candidate_id,
-            "read_enabled": false,
-            }),
-        },
-    )?;
+    }
     let refreshed = read_memory_card(conn, input.memory_card_id)?
         .ok_or_else(|| anyhow!("memory card not found after transition"))?;
+    let read_path_enabled = refreshed
+        .get("read_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Ok(json!({
         "object": "tonglingyu.memory_card_transition",
         "schema_version": MEMORY_TRANSITION_AUDIT_SCHEMA_VERSION,
         "status": "ok",
         "action": input.action,
         "memory_card": refreshed,
-        "read_path_enabled": false,
+        "read_path_enabled": read_path_enabled,
     }))
 }
 
@@ -1412,15 +1575,24 @@ pub(crate) fn read_memory_card(conn: &Connection, memory_card_id: &str) -> Resul
     .map_err(Into::into)
 }
 
-pub(crate) fn assert_memory_reads_disabled(conn: &Connection) -> Result<()> {
+pub(crate) fn assert_read_enabled_memory_has_policy_decisions(conn: &Connection) -> Result<()> {
     let count = conn.query_row(
-        "SELECT COUNT(*) FROM memory_cards WHERE read_enabled <> 0",
-        [],
+        "SELECT COUNT(*)
+         FROM memory_cards AS card
+         WHERE card.status = 'active'
+           AND card.read_enabled <> 0
+           AND NOT EXISTS (
+             SELECT 1 FROM memory_policy_decisions AS decision
+             WHERE decision.memory_card_id = card.memory_card_id
+               AND decision.decision = 'enable_read'
+               AND decision.policy_version = ?1
+           )",
+        params![SCOPED_MEMORY_POLICY_VERSION],
         |row| row.get::<_, i64>(0),
     )?;
     if count > 0 {
         return Err(anyhow!(
-            "memory read path is disabled for Phase3 but read_enabled cards exist"
+            "read-enabled memory cards without policy decision exist"
         ));
     }
     Ok(())
@@ -1503,6 +1675,7 @@ struct MemoryCandidateCore {
     summary_sha256: String,
     sensitivity: String,
     risk_flags: Value,
+    confidence: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1511,6 +1684,68 @@ struct MemoryCardCore {
     memory_card_ref: String,
     source_candidate_id: String,
     status: String,
+    scope_type: String,
+    scope_ref: String,
+    sensitivity: String,
+    acl: Value,
+    read_enabled: bool,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryPolicyDecisionDraft {
+    candidate_id: String,
+    memory_card_id: Option<String>,
+    scope_type: String,
+    scope_ref: String,
+    candidate_type: String,
+    rule_filter: Value,
+    llm_filter: Value,
+    confidence: f64,
+    sensitivity: String,
+    risk_flags: Value,
+    decision: String,
+    decision_reason: String,
+    ttl_policy_ref: String,
+    expires_at: Option<String>,
+    actor: String,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryPolicyDecisionRecord {
+    policy_decision_id: String,
+    policy_decision_ref: String,
+    summary: Value,
+}
+
+#[derive(Debug, Clone)]
+struct MemoryPolicyApplication {
+    auto_read_enabled: bool,
+    public_summary: Value,
+    policy_decision_summaries: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedMemoryRead {
+    memory_card_ref: String,
+    memory_read_ref: String,
+    policy_decision_ref: String,
+    policy_version: String,
+    policy_mode: String,
+    scope_type: String,
+    candidate_type: String,
+    summary: String,
+    sensitivity: String,
+    confidence: f64,
+    expires_at: Option<String>,
+    allowed_consumers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedMemoryReadSet {
+    reads: Vec<ScopedMemoryRead>,
+    candidate_count_before_budget: usize,
+    truncated_count: usize,
 }
 
 struct MemoryTransitionAuditInput<'a> {
@@ -1759,13 +1994,543 @@ fn insert_memory_candidate(
     Ok(true)
 }
 
+fn apply_scoped_memory_policy_for_candidate(
+    conn: &Connection,
+    draft: &MemoryCandidateDraft,
+    collector_actor: &str,
+) -> Result<MemoryPolicyApplication> {
+    let policy_mode = memory_policy_mode();
+    let policy_actor = if policy_mode == MEMORY_POLICY_MODE_AUTO {
+        MEMORY_POLICY_ACTOR
+    } else {
+        collector_actor
+    };
+    let rule_filter = scoped_memory_rule_filter(draft);
+    let llm_filter = scoped_memory_semantic_filter(draft, &rule_filter);
+    let ttl = ttl_days_for_candidate_type(&draft.candidate_type)
+        .unwrap_or_else(|| ttl_days_for_decision("pending_manual_review"));
+    let expires_at = Some(rfc3339_after_days(ttl));
+    let mut decisions = Vec::new();
+    let mut auto_read_enabled = false;
+    let reason = scoped_memory_policy_reason(draft, &rule_filter, &llm_filter, &policy_mode);
+
+    if reason.auto_enable {
+        let approve = record_memory_policy_decision(
+            conn,
+            MemoryPolicyDecisionDraft {
+                candidate_id: draft.candidate_id.clone(),
+                memory_card_id: None,
+                scope_type: draft.scope_type.clone(),
+                scope_ref: draft.scope_ref.clone(),
+                candidate_type: draft.candidate_type.clone(),
+                rule_filter: rule_filter.clone(),
+                llm_filter: llm_filter.clone(),
+                confidence: draft.confidence,
+                sensitivity: draft.sensitivity.clone(),
+                risk_flags: draft.risk_flags.clone(),
+                decision: "auto_approve".to_string(),
+                decision_reason: reason.reason.clone(),
+                ttl_policy_ref: ttl_policy_ref(&draft.candidate_type, ttl),
+                expires_at: expires_at.clone(),
+                actor: policy_actor.to_string(),
+            },
+        )?;
+        decisions.push(approve.summary.clone());
+        approve_memory_candidate(
+            conn,
+            &draft.candidate_id,
+            "pending",
+            policy_actor,
+            "scoped memory policy auto approve",
+            Some(json!({
+                "policy_decision_id": &approve.policy_decision_id,
+                "policy_decision_ref": &approve.policy_decision_ref,
+                "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+            })),
+            expires_at.as_deref(),
+        )?;
+        let current = load_memory_candidate_core(conn, &draft.candidate_id)?
+            .ok_or_else(|| anyhow!("auto-approved candidate not found"))?;
+        let promote = record_memory_policy_decision(
+            conn,
+            MemoryPolicyDecisionDraft {
+                candidate_id: draft.candidate_id.clone(),
+                memory_card_id: None,
+                scope_type: draft.scope_type.clone(),
+                scope_ref: draft.scope_ref.clone(),
+                candidate_type: draft.candidate_type.clone(),
+                rule_filter: rule_filter.clone(),
+                llm_filter: llm_filter.clone(),
+                confidence: draft.confidence,
+                sensitivity: draft.sensitivity.clone(),
+                risk_flags: draft.risk_flags.clone(),
+                decision: "auto_promote".to_string(),
+                decision_reason: reason.reason.clone(),
+                ttl_policy_ref: ttl_policy_ref(&draft.candidate_type, ttl),
+                expires_at: expires_at.clone(),
+                actor: policy_actor.to_string(),
+            },
+        )?;
+        decisions.push(promote.summary.clone());
+        let card = promote_memory_candidate_with_options(
+            conn,
+            &current,
+            policy_actor,
+            "scoped memory policy auto promote",
+            expires_at.as_deref(),
+            false,
+            Some(&promote),
+        )?;
+        let enable = record_memory_policy_decision(
+            conn,
+            MemoryPolicyDecisionDraft {
+                candidate_id: draft.candidate_id.clone(),
+                memory_card_id: Some(card.memory_card_id.clone()),
+                scope_type: draft.scope_type.clone(),
+                scope_ref: draft.scope_ref.clone(),
+                candidate_type: draft.candidate_type.clone(),
+                rule_filter: rule_filter.clone(),
+                llm_filter: llm_filter.clone(),
+                confidence: draft.confidence,
+                sensitivity: draft.sensitivity.clone(),
+                risk_flags: draft.risk_flags.clone(),
+                decision: "enable_read".to_string(),
+                decision_reason: reason.reason.clone(),
+                ttl_policy_ref: ttl_policy_ref(&draft.candidate_type, ttl),
+                expires_at: expires_at.clone(),
+                actor: policy_actor.to_string(),
+            },
+        )?;
+        decisions.push(enable.summary.clone());
+        set_memory_card_read_enabled(
+            conn,
+            &card,
+            true,
+            policy_actor,
+            "scoped memory policy enable read",
+            Some(&enable),
+        )?;
+        auto_read_enabled = true;
+    } else {
+        let decision = if reason.suppress {
+            "suppress"
+        } else {
+            "pending_manual_review"
+        };
+        let ttl_days = if decision == "pending_manual_review" {
+            ttl_days_for_decision("pending_manual_review")
+        } else {
+            ttl
+        };
+        let policy = record_memory_policy_decision(
+            conn,
+            MemoryPolicyDecisionDraft {
+                candidate_id: draft.candidate_id.clone(),
+                memory_card_id: None,
+                scope_type: draft.scope_type.clone(),
+                scope_ref: draft.scope_ref.clone(),
+                candidate_type: draft.candidate_type.clone(),
+                rule_filter: rule_filter.clone(),
+                llm_filter: llm_filter.clone(),
+                confidence: draft.confidence,
+                sensitivity: draft.sensitivity.clone(),
+                risk_flags: draft.risk_flags.clone(),
+                decision: decision.to_string(),
+                decision_reason: reason.reason.clone(),
+                ttl_policy_ref: ttl_policy_ref(decision, ttl_days),
+                expires_at: Some(rfc3339_after_days(ttl_days)),
+                actor: policy_actor.to_string(),
+            },
+        )?;
+        decisions.push(policy.summary.clone());
+        if reason.suppress {
+            update_candidate_status(
+                conn,
+                &draft.candidate_id,
+                "rejected",
+                None,
+                Some(&rfc3339_after_days(ttl_days)),
+                &now_rfc3339(),
+            )?;
+            append_memory_transition_audit(
+                conn,
+                MemoryTransitionAuditInput {
+                    entity_type: "memory_candidate",
+                    entity_id: Some(&draft.candidate_id),
+                    action: "policy_suppress",
+                    from_status: Some("pending"),
+                    to_status: Some("rejected"),
+                    actor: policy_actor,
+                    reason: Some(&reason.reason),
+                    metadata: json!({
+                        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                        "policy_decision_id": &policy.policy_decision_id,
+                        "policy_decision_ref": &policy.policy_decision_ref,
+                    }),
+                },
+            )?;
+        } else {
+            update_candidate_status(
+                conn,
+                &draft.candidate_id,
+                "pending",
+                None,
+                Some(&rfc3339_after_days(ttl_days)),
+                &now_rfc3339(),
+            )?;
+            append_memory_transition_audit(
+                conn,
+                MemoryTransitionAuditInput {
+                    entity_type: "memory_candidate",
+                    entity_id: Some(&draft.candidate_id),
+                    action: "policy_pending_manual_review",
+                    from_status: Some("pending"),
+                    to_status: Some("pending"),
+                    actor: policy_actor,
+                    reason: Some(&reason.reason),
+                    metadata: json!({
+                        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                        "policy_decision_id": &policy.policy_decision_id,
+                        "policy_decision_ref": &policy.policy_decision_ref,
+                    }),
+                },
+            )?;
+        }
+    }
+
+    Ok(MemoryPolicyApplication {
+        auto_read_enabled,
+        public_summary: json!({
+            "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+            "policy_mode": policy_mode,
+            "decision": if auto_read_enabled { "enable_read" } else { reason.public_decision.as_str() },
+            "decision_reason": reason.reason,
+            "auto_read_enabled": auto_read_enabled,
+            "policy_decision_count": decisions.len(),
+        }),
+        policy_decision_summaries: decisions,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ScopedMemoryPolicyReason {
+    auto_enable: bool,
+    suppress: bool,
+    public_decision: String,
+    reason: String,
+}
+
+fn scoped_memory_policy_reason(
+    draft: &MemoryCandidateDraft,
+    rule_filter: &Value,
+    llm_filter: &Value,
+    policy_mode: &str,
+) -> ScopedMemoryPolicyReason {
+    let scope = scope_policy_config(&draft.scope_type);
+    let threshold = scope.map_or(1.0, |scope| scope.threshold);
+    let disallowed_type =
+        !is_auto_candidate_type_allowed_for_scope(&draft.scope_type, &draft.candidate_type);
+    let exclusion_flags = llm_filter
+        .get("exclusion_flags")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let llm_allows = llm_filter
+        .get("is_long_term_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !llm_filter
+            .get("is_temporary_instruction")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && !llm_filter
+            .get("is_quoted_or_third_party")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && !llm_filter
+            .get("has_contradiction")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && exclusion_flags == 0;
+    let rule_suppressed = rule_filter
+        .get("suppress")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if rule_suppressed || !llm_allows || disallowed_type || scope.is_none() {
+        return ScopedMemoryPolicyReason {
+            auto_enable: false,
+            suppress: rule_suppressed || disallowed_type,
+            public_decision: if rule_suppressed || disallowed_type {
+                "suppress".to_string()
+            } else {
+                "pending_manual_review".to_string()
+            },
+            reason: if rule_suppressed {
+                "rule_filter_suppressed".to_string()
+            } else if disallowed_type {
+                "candidate_type_not_allowed_for_scope".to_string()
+            } else if scope.is_none() {
+                "scope_not_supported".to_string()
+            } else {
+                "semantic_filter_requires_manual_review".to_string()
+            },
+        };
+    }
+    if policy_mode == MEMORY_POLICY_MODE_SHADOW {
+        return ScopedMemoryPolicyReason {
+            auto_enable: false,
+            suppress: false,
+            public_decision: "pending_manual_review".to_string(),
+            reason: "policy_mode_shadow_only".to_string(),
+        };
+    }
+    if policy_mode == MEMORY_POLICY_MODE_MANUAL {
+        return ScopedMemoryPolicyReason {
+            auto_enable: false,
+            suppress: false,
+            public_decision: "pending_manual_review".to_string(),
+            reason: "policy_mode_manual_required".to_string(),
+        };
+    }
+    let Some(scope) = scope else {
+        unreachable!("scope none handled above");
+    };
+    if !scope.auto_read {
+        return ScopedMemoryPolicyReason {
+            auto_enable: false,
+            suppress: false,
+            public_decision: "pending_manual_review".to_string(),
+            reason: "scope_requires_manual_enable".to_string(),
+        };
+    }
+    if draft.confidence < threshold {
+        return ScopedMemoryPolicyReason {
+            auto_enable: false,
+            suppress: false,
+            public_decision: "pending_manual_review".to_string(),
+            reason: "confidence_below_scope_threshold".to_string(),
+        };
+    }
+    ScopedMemoryPolicyReason {
+        auto_enable: true,
+        suppress: false,
+        public_decision: "enable_read".to_string(),
+        reason: "scope_policy_auto_enable_conditions_met".to_string(),
+    }
+}
+
+fn scoped_memory_rule_filter(draft: &MemoryCandidateDraft) -> Value {
+    let temporary_instruction = is_temporary_memory_instruction(&draft.raw_excerpt_redacted);
+    let forbidden_candidate_type = is_forbidden_memory_candidate_type(&draft.candidate_type);
+    let scope_supported = validate_memory_scope_type(&draft.scope_type).is_ok();
+    let context_pack_bound = draft.context_pack_id.is_some();
+    json!({
+        "schema_version": "scoped-memory-rule-filter-v1",
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "hard_deny_filter_passed": true,
+        "source_entry_type_allowed": draft.source_entry_type == "user_message",
+        "context_pack_bound": context_pack_bound,
+        "scope_supported": scope_supported,
+        "temporary_instruction": temporary_instruction,
+        "forbidden_candidate_type": forbidden_candidate_type,
+        "scope_automation": scope_policy_config(&draft.scope_type).map(|scope| scope.automation),
+        "threshold": scope_policy_config(&draft.scope_type).map(|scope| scope.threshold),
+        "suppress": !context_pack_bound || temporary_instruction || forbidden_candidate_type || !scope_supported,
+        "input_digest": {
+            "summary_sha256": &draft.summary_sha256,
+            "raw_excerpt_sha256": &draft.raw_excerpt_sha256,
+        },
+        "llm_called": false,
+    })
+}
+
+fn scoped_memory_semantic_filter(draft: &MemoryCandidateDraft, rule_filter: &Value) -> Value {
+    let temporary = rule_filter
+        .get("temporary_instruction")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let forbidden = rule_filter
+        .get("forbidden_candidate_type")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let ttl = ttl_days_for_candidate_type(&draft.candidate_type)
+        .unwrap_or_else(|| ttl_days_for_decision("pending_manual_review"));
+    let mut exclusion_flags = Vec::new();
+    if temporary {
+        exclusion_flags.push(json!("temporary_instruction"));
+    }
+    if forbidden {
+        exclusion_flags.push(json!("forbidden_candidate_type"));
+    }
+    json!({
+        "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "semantic_filter": "deterministic_schema_bound_filter",
+        "llm_called": false,
+        "is_long_term_memory": !temporary && !forbidden,
+        "is_temporary_instruction": temporary,
+        "is_quoted_or_third_party": looks_like_quoted_or_third_party(&draft.raw_excerpt_redacted),
+        "has_contradiction": false,
+        "scope_type": &draft.scope_type,
+        "candidate_type": &draft.candidate_type,
+        "confidence": draft.confidence,
+        "sensitivity": "low",
+        "risk_flags": &draft.risk_flags,
+        "ttl_hint": format!("{ttl}d"),
+        "exclusion_flags": exclusion_flags,
+        "input_digest": {
+            "candidate_summary_sha256": &draft.summary_sha256,
+            "redacted_excerpt_sha256": &draft.raw_excerpt_sha256,
+        },
+    })
+}
+
+fn record_memory_policy_decision(
+    conn: &Connection,
+    draft: MemoryPolicyDecisionDraft,
+) -> Result<MemoryPolicyDecisionRecord> {
+    validate_memory_scope_type(&draft.scope_type)?;
+    validate_memory_candidate_type(&draft.candidate_type)?;
+    validate_memory_policy_mode(&memory_policy_mode())?;
+    validate_memory_policy_decision(&draft.decision)?;
+    let policy_decision_id = format!("memory-policy-decision-{}", uuid::Uuid::now_v7().simple());
+    let policy_decision_ref = format!(
+        "memory-policy-decision://tonglingyu/{}/{}",
+        &hash_text(&draft.scope_ref)[..16],
+        &policy_decision_id
+    );
+    let audit_ref = memory_audit_ref("policy-decision", &policy_decision_id);
+    let created_at = now_rfc3339();
+    conn.execute(
+        "INSERT INTO memory_policy_decisions (
+            policy_decision_id, policy_decision_ref, policy_version, policy_mode,
+            candidate_id, memory_card_id, scope_type, scope_ref, candidate_type,
+            rule_filter_json, llm_filter_json, confidence, sensitivity, risk_flags_json,
+            decision, decision_reason, ttl_policy_ref, expires_at, actor, created_at,
+            audit_ref, schema_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        params![
+            &policy_decision_id,
+            &policy_decision_ref,
+            SCOPED_MEMORY_POLICY_VERSION,
+            memory_policy_mode(),
+            &draft.candidate_id,
+            draft.memory_card_id.as_deref(),
+            &draft.scope_type,
+            &draft.scope_ref,
+            &draft.candidate_type,
+            serde_json::to_string(&draft.rule_filter)?,
+            serde_json::to_string(&draft.llm_filter)?,
+            draft.confidence,
+            &draft.sensitivity,
+            serde_json::to_string(&draft.risk_flags)?,
+            &draft.decision,
+            &draft.decision_reason,
+            &draft.ttl_policy_ref,
+            draft.expires_at.as_deref(),
+            &draft.actor,
+            &created_at,
+            &audit_ref,
+            MEMORY_POLICY_DECISION_SCHEMA_VERSION,
+        ],
+    )?;
+    append_memory_transition_audit(
+        conn,
+        MemoryTransitionAuditInput {
+            entity_type: "memory_policy_decision",
+            entity_id: Some(&policy_decision_id),
+            action: &draft.decision,
+            from_status: None,
+            to_status: Some(&draft.decision),
+            actor: &draft.actor,
+            reason: Some(&draft.decision_reason),
+            metadata: json!({
+                "policy_decision_ref": &policy_decision_ref,
+                "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                "policy_mode": memory_policy_mode(),
+                "candidate_id": &draft.candidate_id,
+                "memory_card_id": draft.memory_card_id,
+                "scope_type": &draft.scope_type,
+                "scope_ref_sha256": hash_text(&draft.scope_ref),
+                "candidate_type": &draft.candidate_type,
+                "decision": &draft.decision,
+                "ttl_policy_ref": &draft.ttl_policy_ref,
+                "expires_at": &draft.expires_at,
+                "llm_schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+            }),
+        },
+    )?;
+    Ok(MemoryPolicyDecisionRecord {
+        policy_decision_id: policy_decision_id.clone(),
+        policy_decision_ref: policy_decision_ref.clone(),
+        summary: json!({
+            "policy_decision_id": policy_decision_id,
+            "policy_decision_ref": policy_decision_ref,
+            "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+            "policy_mode": memory_policy_mode(),
+            "decision": draft.decision,
+            "candidate_id": draft.candidate_id,
+            "memory_card_id": draft.memory_card_id,
+            "confidence": draft.confidence,
+            "risk_flags": draft.risk_flags,
+            "expires_at": draft.expires_at,
+            "audit_ref": audit_ref,
+        }),
+    })
+}
+
+fn approve_memory_candidate(
+    conn: &Connection,
+    candidate_id: &str,
+    from_status: &str,
+    actor: &str,
+    reason: &str,
+    metadata_extra: Option<Value>,
+    expires_at: Option<&str>,
+) -> Result<()> {
+    let now = now_rfc3339();
+    update_candidate_status(conn, candidate_id, "approved", None, expires_at, &now)?;
+    let mut metadata = json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+    });
+    merge_json_object(&mut metadata, metadata_extra);
+    append_memory_transition_audit(
+        conn,
+        MemoryTransitionAuditInput {
+            entity_type: "memory_candidate",
+            entity_id: Some(candidate_id),
+            action: "approve",
+            from_status: Some(from_status),
+            to_status: Some("approved"),
+            actor,
+            reason: Some(reason),
+            metadata,
+        },
+    )?;
+    Ok(())
+}
+
 fn promote_memory_candidate(
     conn: &Connection,
     candidate: &MemoryCandidateCore,
     actor: &str,
     reason: &str,
 ) -> Result<()> {
+    promote_memory_candidate_with_options(conn, candidate, actor, reason, None, false, None)?;
+    Ok(())
+}
+
+fn promote_memory_candidate_with_options(
+    conn: &Connection,
+    candidate: &MemoryCandidateCore,
+    actor: &str,
+    reason: &str,
+    expires_at: Option<&str>,
+    read_enabled: bool,
+    policy_decision: Option<&MemoryPolicyDecisionRecord>,
+) -> Result<MemoryCardCore> {
     validate_memory_scope_type(&candidate.scope_type)?;
+    validate_memory_promotable_candidate_type(&candidate.scope_type, &candidate.candidate_type)?;
     if let Some(existing) = conn
         .query_row(
             "SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1",
@@ -1790,11 +2555,11 @@ fn promote_memory_candidate(
                     metadata: json!({
                     "candidate_ref": &candidate.candidate_ref,
                     "existing_memory_card_id": existing,
-                    "read_enabled": false,
+                    "read_enabled": existing_card.read_enabled,
                     }),
                 },
             )?;
-            return Ok(());
+            return Ok(existing_card);
         }
         return Err(anyhow!(
             "source candidate already has non-active memory card"
@@ -1810,12 +2575,15 @@ fn promote_memory_candidate(
     let now = now_rfc3339();
     let audit_ref = memory_audit_ref("card-promote", &memory_card_id);
     let acl = json!({
-        "schema_version": "tonglingyu-memory-acl-phase3-v1",
+        "schema_version": "tonglingyu-memory-acl-v1",
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
         "scope_type": &candidate.scope_type,
         "scope_ref_sha256": hash_text(&candidate.scope_ref),
-        "read_enabled": false,
-        "allowed_readers": [],
-        "phase3_read_disable_reason": MEMORY_PHASE3_READ_DISABLED_REASON,
+        "read_enabled": read_enabled,
+        "allowed_consumers": allowed_memory_consumers(&candidate.scope_type, &candidate.candidate_type),
+        "allowed_readers": allowed_memory_consumers(&candidate.scope_type, &candidate.candidate_type),
+        "evidence_package_allowed": false,
+        "reviewer_content_allowed": false,
     });
     conn.execute(
         "INSERT INTO memory_cards (
@@ -1824,7 +2592,7 @@ fn promote_memory_candidate(
             promotion_policy_version, promoted_by, promoted_at, revoked_by, revoked_at,
             expires_at, read_enabled, audit_ref, schema_version
         ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                  NULL, NULL, NULL, 0, ?13, ?14)",
+                  NULL, NULL, ?13, ?14, ?15, ?16)",
         params![
             &memory_card_id,
             &memory_card_ref,
@@ -1835,9 +2603,11 @@ fn promote_memory_candidate(
             &candidate.summary_sha256,
             serde_json::to_string(&acl)?,
             &candidate.sensitivity,
-            MEMORY_PROMOTION_POLICY_VERSION,
+            SCOPED_MEMORY_POLICY_VERSION,
             actor,
             &now,
+            expires_at,
+            if read_enabled { 1_i64 } else { 0_i64 },
             &audit_ref,
             MEMORY_CARD_SCHEMA_VERSION,
         ],
@@ -1856,8 +2626,10 @@ fn promote_memory_candidate(
             "memory_card_ref": &memory_card_ref,
             "source_candidate_id": &candidate.candidate_id,
             "candidate_ref": &candidate.candidate_ref,
-            "read_enabled": false,
-            "phase3_read_disable_reason": MEMORY_PHASE3_READ_DISABLED_REASON,
+            "read_enabled": read_enabled,
+            "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+            "policy_decision_id": policy_decision.map(|decision| decision.policy_decision_id.as_str()),
+            "policy_decision_ref": policy_decision.map(|decision| decision.policy_decision_ref.as_str()),
             }),
         },
     )?;
@@ -1875,12 +2647,157 @@ fn promote_memory_candidate(
             "candidate_ref": &candidate.candidate_ref,
             "memory_card_id": &memory_card_id,
             "memory_card_ref": &memory_card_ref,
-            "read_enabled": false,
+            "read_enabled": read_enabled,
+            "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+            "policy_decision_id": policy_decision.map(|decision| decision.policy_decision_id.as_str()),
+            "policy_decision_ref": policy_decision.map(|decision| decision.policy_decision_ref.as_str()),
             }),
         },
     )?;
-    assert_memory_reads_disabled(conn)?;
+    load_memory_card_core(conn, &memory_card_id)?
+        .ok_or_else(|| anyhow!("promoted memory card not found"))
+}
+
+fn set_memory_card_read_enabled(
+    conn: &Connection,
+    card: &MemoryCardCore,
+    read_enabled: bool,
+    actor: &str,
+    reason: &str,
+    policy_decision: Option<&MemoryPolicyDecisionRecord>,
+) -> Result<()> {
+    require_status(&card.status, &["active"])?;
+    if read_enabled {
+        ensure_memory_card_enable_read_policy(conn, card, policy_decision)?;
+    }
+    let mut acl = card.acl.clone();
+    if let Some(object) = acl.as_object_mut() {
+        object.insert("read_enabled".to_string(), json!(read_enabled));
+        object.insert(
+            "policy_version".to_string(),
+            json!(SCOPED_MEMORY_POLICY_VERSION),
+        );
+    }
+    conn.execute(
+        "UPDATE memory_cards
+         SET read_enabled = ?1, acl_json = ?2
+         WHERE memory_card_id = ?3",
+        params![
+            if read_enabled { 1_i64 } else { 0_i64 },
+            serde_json::to_string(&acl)?,
+            &card.memory_card_id,
+        ],
+    )?;
+    append_memory_transition_audit(
+        conn,
+        MemoryTransitionAuditInput {
+            entity_type: "memory_card",
+            entity_id: Some(&card.memory_card_id),
+            action: if read_enabled {
+                "enable_read"
+            } else {
+                "disable_read"
+            },
+            from_status: Some(&card.status),
+            to_status: Some(&card.status),
+            actor,
+            reason: Some(reason),
+            metadata: json!({
+                "memory_card_ref": &card.memory_card_ref,
+                "source_candidate_id": &card.source_candidate_id,
+                "read_enabled": read_enabled,
+                "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+                "policy_decision_id": policy_decision.map(|decision| decision.policy_decision_id.as_str()),
+                "policy_decision_ref": policy_decision.map(|decision| decision.policy_decision_ref.as_str()),
+            }),
+        },
+    )?;
     Ok(())
+}
+
+fn ensure_memory_card_enable_read_policy(
+    conn: &Connection,
+    card: &MemoryCardCore,
+    policy_decision: Option<&MemoryPolicyDecisionRecord>,
+) -> Result<()> {
+    if let Some(policy_decision) = policy_decision {
+        if policy_decision.policy_decision_id.trim().is_empty() {
+            return Err(anyhow!("policy decision missing for read enablement"));
+        }
+        return Ok(());
+    }
+    let existing = conn.query_row(
+        "SELECT COUNT(*) FROM memory_policy_decisions
+             WHERE memory_card_id = ?1
+               AND decision = 'enable_read'
+               AND policy_version = ?2",
+        params![&card.memory_card_id, SCOPED_MEMORY_POLICY_VERSION],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if existing <= 0 {
+        return Err(anyhow!("policy decision missing for read enablement"));
+    }
+    Ok(())
+}
+
+fn manual_read_enable_policy_decision(
+    conn: &Connection,
+    card: &MemoryCardCore,
+    actor: &str,
+    decision: &str,
+    reason: &str,
+) -> Result<MemoryPolicyDecisionRecord> {
+    let candidate = load_memory_candidate_core(conn, &card.source_candidate_id)?
+        .ok_or_else(|| anyhow!("source memory candidate not found"))?;
+    let rule_filter = json!({
+        "schema_version": "scoped-memory-rule-filter-v1",
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "manual_review": true,
+        "scope_supported": validate_memory_scope_type(&card.scope_type).is_ok(),
+        "suppress": false,
+    });
+    let ttl = ttl_days_for_candidate_type(&candidate.candidate_type)
+        .unwrap_or_else(|| ttl_days_for_decision("pending_manual_review"));
+    let llm_filter = json!({
+        "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "semantic_filter": "manual_review_record",
+        "llm_called": false,
+        "is_long_term_memory": true,
+        "is_temporary_instruction": false,
+        "is_quoted_or_third_party": false,
+        "has_contradiction": false,
+        "scope_type": &card.scope_type,
+        "candidate_type": &candidate.candidate_type,
+        "confidence": candidate.confidence,
+        "sensitivity": "low",
+        "risk_flags": &candidate.risk_flags,
+        "ttl_hint": format!("{ttl}d"),
+        "exclusion_flags": [],
+    });
+    record_memory_policy_decision(
+        conn,
+        MemoryPolicyDecisionDraft {
+            candidate_id: candidate.candidate_id,
+            memory_card_id: Some(card.memory_card_id.clone()),
+            scope_type: card.scope_type.clone(),
+            scope_ref: card.scope_ref.clone(),
+            candidate_type: candidate.candidate_type,
+            rule_filter,
+            llm_filter,
+            confidence: candidate.confidence,
+            sensitivity: card.sensitivity.clone(),
+            risk_flags: candidate.risk_flags,
+            decision: decision.to_string(),
+            decision_reason: reason.to_string(),
+            ttl_policy_ref: ttl_policy_ref(decision, ttl),
+            expires_at: card
+                .expires_at
+                .clone()
+                .or_else(|| Some(rfc3339_after_days(ttl))),
+            actor: actor.to_string(),
+        },
+    )
 }
 
 fn update_candidate_status(
@@ -1913,7 +2830,8 @@ fn load_memory_candidate_core(
 ) -> Result<Option<MemoryCandidateCore>> {
     conn.query_row(
         "SELECT candidate_id, candidate_ref, status, scope_type, scope_ref,
-                candidate_type, summary, summary_sha256, sensitivity, risk_flags_json
+                candidate_type, summary, summary_sha256, sensitivity, risk_flags_json,
+                confidence
          FROM memory_candidates WHERE candidate_id = ?1",
         params![candidate_id],
         |row| {
@@ -1928,6 +2846,7 @@ fn load_memory_candidate_core(
                 summary_sha256: row.get(7)?,
                 sensitivity: row.get(8)?,
                 risk_flags: parse_json_column(row.get::<_, String>(9)?),
+                confidence: row.get(10)?,
             })
         },
     )
@@ -1940,7 +2859,9 @@ fn load_memory_card_core(
     memory_card_id: &str,
 ) -> Result<Option<MemoryCardCore>> {
     conn.query_row(
-        "SELECT memory_card_id, memory_card_ref, source_candidate_id, status
+        "SELECT memory_card_id, memory_card_ref, source_candidate_id, status,
+                scope_type, scope_ref, sensitivity, acl_json,
+                read_enabled, expires_at
          FROM memory_cards WHERE memory_card_id = ?1",
         params![memory_card_id],
         |row| {
@@ -1949,6 +2870,12 @@ fn load_memory_card_core(
                 memory_card_ref: row.get(1)?,
                 source_candidate_id: row.get(2)?,
                 status: row.get(3)?,
+                scope_type: row.get(4)?,
+                scope_ref: row.get(5)?,
+                sensitivity: row.get(6)?,
+                acl: parse_json_column(row.get::<_, String>(7)?),
+                read_enabled: row.get::<_, i64>(8)? != 0,
+                expires_at: row.get(9)?,
             })
         },
     )
@@ -2132,25 +3059,52 @@ pub(crate) fn validate_llm_memory_extraction_output(output: &Value) -> Result<Va
             forbidden_paths.join(",")
         ));
     }
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("LLM memory extraction missing schema_version"))?;
+    if schema_version != SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION {
+        return Err(anyhow!("unsupported LLM memory filter schema_version"));
+    }
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "candidate_type" | "summary" | "confidence" | "risk_flags" | "scope_hint"
+            "schema_version"
+                | "is_long_term_memory"
+                | "is_temporary_instruction"
+                | "is_quoted_or_third_party"
+                | "has_contradiction"
+                | "scope_type"
+                | "candidate_type"
+                | "confidence"
+                | "sensitivity"
+                | "risk_flags"
+                | "ttl_hint"
+                | "exclusion_flags"
         ) {
             return Err(anyhow!("unsupported LLM memory extraction field"));
         }
     }
+    for key in [
+        "is_long_term_memory",
+        "is_temporary_instruction",
+        "is_quoted_or_third_party",
+        "has_contradiction",
+    ] {
+        if object.get(key).and_then(Value::as_bool).is_none() {
+            return Err(anyhow!("LLM memory extraction boolean field invalid"));
+        }
+    }
+    let scope_type = object
+        .get("scope_type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("LLM memory extraction missing scope_type"))?;
+    validate_memory_scope_type(scope_type)?;
     let candidate_type = object
         .get("candidate_type")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("LLM memory extraction missing candidate_type"))?;
     validate_memory_candidate_type(candidate_type)?;
-    let summary = object
-        .get("summary")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("LLM memory extraction missing summary"))?;
     let confidence = object
         .get("confidence")
         .and_then(Value::as_f64)
@@ -2158,12 +3112,68 @@ pub(crate) fn validate_llm_memory_extraction_output(output: &Value) -> Result<Va
     if !(0.0..=1.0).contains(&confidence) {
         return Err(anyhow!("LLM memory extraction confidence out of range"));
     }
+    let sensitivity = object
+        .get("sensitivity")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("LLM memory extraction missing sensitivity"))?;
+    let ttl_hint = object
+        .get("ttl_hint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("LLM memory extraction missing ttl_hint"))?;
+    let risk_flags = object
+        .get("risk_flags")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("LLM memory extraction risk_flags must be an array"))?;
+    let exclusion_flags = object
+        .get("exclusion_flags")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("LLM memory extraction exclusion_flags must be an array"))?;
+    let is_long_term = object
+        .get("is_long_term_memory")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let temporary = object
+        .get("is_temporary_instruction")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let quoted = object
+        .get("is_quoted_or_third_party")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let contradiction = object
+        .get("has_contradiction")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let status = if is_long_term
+        && !temporary
+        && !quoted
+        && !contradiction
+        && exclusion_flags.is_empty()
+        && confidence >= 0.45
+    {
+        "pending"
+    } else {
+        "suppressed"
+    };
     Ok(json!({
+        "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "is_long_term_memory": is_long_term,
+        "is_temporary_instruction": temporary,
+        "is_quoted_or_third_party": quoted,
+        "has_contradiction": contradiction,
+        "scope_type": scope_type,
         "candidate_type": candidate_type,
-        "summary": bounded_summary(summary, MEMORY_SUMMARY_MAX_CHARS),
         "confidence": confidence,
-        "risk_flags": object.get("risk_flags").cloned().unwrap_or_else(|| json!([])),
-        "status": if confidence >= 0.45 { "pending" } else { "suppressed" },
+        "sensitivity": sensitivity,
+        "risk_flags": Value::Array(risk_flags.clone()),
+        "ttl_hint": ttl_hint,
+        "exclusion_flags": Value::Array(exclusion_flags.clone()),
+        "status": status,
         "confidence_rule": confidence_rule(confidence),
         "promotion_allowed": false,
         "acl_allowed": false,
@@ -2190,6 +3200,11 @@ fn collect_forbidden_llm_memory_fields(prefix: &str, value: &Value, found: &mut 
         "memory_card_id",
         "retention",
         "tool_policy",
+        "reviewer_decision",
+        "task_status",
+        "source_fact",
+        "tool_permission",
+        "system_prompt",
     ];
     match value {
         Value::Object(object) => {
@@ -2242,23 +3257,34 @@ fn classify_memory_candidate_type(text: &str) -> String {
         .iter()
         .any(|marker| text.contains(marker))
     {
-        "user_identity_preference".to_string()
-    } else if [
-        "简体",
-        "繁体",
-        "短句",
-        "详细",
-        "回答时",
-        "以后回答",
-        "请用",
-        "引用原文",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
+        "stable_user_background".to_string()
+    } else if ["简体", "繁体", "中文", "英文"]
+        .iter()
+        .any(|marker| text.contains(marker))
     {
-        "user_response_preference".to_string()
+        "language_preference".to_string()
+    } else if ["短句", "简洁", "详细", "太长", "更短", "更长"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        "verbosity_preference".to_string()
+    } else if ["引用原文", "检索", "证据", "优先查", "搜索"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        "retrieval_preference".to_string()
+    } else if ["流程", "工作流", "先", "再", "每次"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        "workflow_preference".to_string()
+    } else if ["研究", "课题", "专题"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        "research_interest".to_string()
     } else {
-        "user_preference".to_string()
+        "answer_style_preference".to_string()
     }
 }
 
@@ -2268,14 +3294,41 @@ fn user_private_scope_ref(external_user_ref: &str) -> String {
 
 fn memory_candidate_summary(candidate_type: &str, text: &str) -> String {
     let prefix = match candidate_type {
-        "user_identity_preference" => "用户称呼偏好",
-        "user_response_preference" => "用户回答偏好",
-        _ => "用户偏好",
+        "stable_user_background" => "用户长期背景",
+        "language_preference" => "用户语言偏好",
+        "verbosity_preference" => "用户详略偏好",
+        "retrieval_preference" => "用户检索偏好",
+        "workflow_preference" => "用户工作流偏好",
+        "research_interest" => "用户研究兴趣",
+        "research_topic_context" => "用户研究主题上下文",
+        "source_collection_usage_preference" => "用户来源集合使用偏好",
+        _ => "用户回答风格偏好",
     };
     bounded_summary(
         &format!("{prefix}: {}", text.trim()),
         MEMORY_SUMMARY_MAX_CHARS,
     )
+}
+
+fn is_temporary_memory_instruction(text: &str) -> bool {
+    ["这次", "本轮", "临时", "暂时", "先不用记", "不要长期记"]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn looks_like_quoted_or_third_party(text: &str) -> bool {
+    ["他说", "她说", "别人说", "引号里", "原文说", "书里说"]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn merge_json_object(target: &mut Value, extra: Option<Value>) {
+    let Some(Value::Object(extra)) = extra else {
+        return;
+    };
+    if let Value::Object(target) = target {
+        target.extend(extra);
+    }
 }
 
 fn redact_sensitive_text(value: &str) -> (String, bool) {
@@ -2315,16 +3368,19 @@ fn llm_boundary_contract_json() -> Value {
     json!({
         "allowed": true,
         "used": false,
+        "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
         "position": "after_hard_deny_and_redaction_only",
         "input_contract": [
             "redacted_journal_summary",
             "scope_hint",
+            "candidate_summary",
             "json_schema"
         ],
-        "allowed_decisions": ["structured_candidate_extraction"],
+        "allowed_decisions": ["semantic_filter", "classification", "ttl_hint", "risk_flags"],
         "forbidden_decisions": [
             "approve",
             "promote",
+            "read_enabled",
             "acl",
             "retention",
             "reviewer_verdict",
@@ -2386,7 +3442,7 @@ fn validate_memory_candidate_action(action: &str) -> Result<()> {
 }
 
 fn validate_memory_card_action(action: &str) -> Result<()> {
-    if matches!(action, "revoke" | "expire") {
+    if matches!(action, "enable_read" | "disable_read" | "revoke" | "expire") {
         Ok(())
     } else {
         Err(anyhow!("invalid memory card action"))
@@ -2394,13 +3450,21 @@ fn validate_memory_card_action(action: &str) -> Result<()> {
 }
 
 fn validate_memory_candidate_type(candidate_type: &str) -> Result<()> {
-    if matches!(
-        candidate_type,
-        "user_preference" | "user_response_preference" | "user_identity_preference"
-    ) {
+    if allowed_memory_candidate_types().contains(&candidate_type)
+        || forbidden_memory_candidate_types().contains(&candidate_type)
+    {
         Ok(())
     } else {
         Err(anyhow!("invalid memory candidate type"))
+    }
+}
+
+fn validate_memory_promotable_candidate_type(scope_type: &str, candidate_type: &str) -> Result<()> {
+    validate_memory_candidate_type(candidate_type)?;
+    if is_auto_candidate_type_allowed_for_scope(scope_type, candidate_type) {
+        Ok(())
+    } else {
+        Err(anyhow!("memory candidate type is not promotable for scope"))
     }
 }
 
@@ -2441,6 +3505,227 @@ fn allowed_memory_scope_types() -> &'static [&'static str] {
         "research_topic",
         "source_collection",
     ]
+}
+
+fn allowed_memory_candidate_types() -> &'static [&'static str] {
+    &[
+        "answer_style_preference",
+        "verbosity_preference",
+        "language_preference",
+        "workflow_preference",
+        "retrieval_preference",
+        "stable_user_background",
+        "research_interest",
+        "research_topic_context",
+        "source_collection_usage_preference",
+    ]
+}
+
+fn forbidden_memory_candidate_types() -> &'static [&'static str] {
+    &[
+        "source_fact",
+        "literary_claim",
+        "reviewer_decision",
+        "task_status",
+        "action_result",
+        "credential",
+        "legal_or_identity_assertion",
+        "permission_or_acl_request",
+        "temporary_instruction",
+        "system_or_prompt_instruction",
+    ]
+}
+
+fn is_forbidden_memory_candidate_type(candidate_type: &str) -> bool {
+    forbidden_memory_candidate_types().contains(&candidate_type)
+}
+
+fn validate_memory_policy_decision(decision: &str) -> Result<()> {
+    if matches!(
+        decision,
+        "suppress"
+            | "pending_manual_review"
+            | "auto_approve"
+            | "auto_promote"
+            | "enable_read"
+            | "disable_read"
+    ) {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid memory policy decision"))
+    }
+}
+
+fn validate_memory_policy_mode(mode: &str) -> Result<()> {
+    if matches!(
+        mode,
+        MEMORY_POLICY_MODE_AUTO | MEMORY_POLICY_MODE_MANUAL | MEMORY_POLICY_MODE_SHADOW
+    ) {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid memory policy mode"))
+    }
+}
+
+fn memory_policy_mode() -> String {
+    let mode = std::env::var(MEMORY_POLICY_MODE_ENV)
+        .unwrap_or_else(|_| MEMORY_POLICY_MODE_AUTO.to_string());
+    let mode = mode.trim();
+    if validate_memory_policy_mode(mode).is_ok() {
+        mode.to_string()
+    } else {
+        MEMORY_POLICY_MODE_MANUAL.to_string()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScopePolicyConfig {
+    automation: &'static str,
+    threshold: f64,
+    auto_read: bool,
+}
+
+fn scope_policy_config(scope_type: &str) -> Option<ScopePolicyConfig> {
+    match scope_type {
+        "user_private" => Some(ScopePolicyConfig {
+            automation: "auto_enable",
+            threshold: 0.85,
+            auto_read: true,
+        }),
+        "profile_common" => Some(ScopePolicyConfig {
+            automation: "auto_enable_limited",
+            threshold: 0.92,
+            auto_read: true,
+        }),
+        "knowledge_space" => Some(ScopePolicyConfig {
+            automation: "auto_enable_limited",
+            threshold: 0.94,
+            auto_read: true,
+        }),
+        "research_topic" => Some(ScopePolicyConfig {
+            automation: "auto_enable_limited",
+            threshold: 0.94,
+            auto_read: true,
+        }),
+        "source_collection" => Some(ScopePolicyConfig {
+            automation: "manual_first_with_shadow",
+            threshold: 1.0,
+            auto_read: false,
+        }),
+        _ => None,
+    }
+}
+
+fn is_auto_candidate_type_allowed_for_scope(scope_type: &str, candidate_type: &str) -> bool {
+    match scope_type {
+        "user_private" => matches!(
+            candidate_type,
+            "answer_style_preference"
+                | "verbosity_preference"
+                | "language_preference"
+                | "workflow_preference"
+                | "retrieval_preference"
+                | "stable_user_background"
+                | "research_interest"
+        ),
+        "profile_common" => matches!(
+            candidate_type,
+            "answer_style_preference"
+                | "verbosity_preference"
+                | "language_preference"
+                | "workflow_preference"
+                | "retrieval_preference"
+        ),
+        "knowledge_space" => matches!(
+            candidate_type,
+            "workflow_preference" | "retrieval_preference" | "research_interest"
+        ),
+        "research_topic" => matches!(
+            candidate_type,
+            "research_interest"
+                | "research_topic_context"
+                | "workflow_preference"
+                | "retrieval_preference"
+        ),
+        "source_collection" => candidate_type == "source_collection_usage_preference",
+        _ => false,
+    }
+}
+
+fn ttl_days_for_candidate_type(candidate_type: &str) -> Option<i64> {
+    match candidate_type {
+        "answer_style_preference" => Some(90),
+        "verbosity_preference" => Some(90),
+        "language_preference" => Some(180),
+        "workflow_preference" => Some(180),
+        "retrieval_preference" => Some(180),
+        "stable_user_background" => Some(365),
+        "research_interest" => Some(180),
+        "research_topic_context" => Some(90),
+        "source_collection_usage_preference" => Some(90),
+        _ => None,
+    }
+}
+
+fn ttl_days_for_decision(decision: &str) -> i64 {
+    if decision == "pending_manual_review" {
+        30
+    } else {
+        90
+    }
+}
+
+fn ttl_policy_ref(kind: &str, ttl_days: i64) -> String {
+    format!("{SCOPED_MEMORY_POLICY_VERSION}:ttl:{kind}:{ttl_days}d")
+}
+
+fn rfc3339_after_days(days: i64) -> String {
+    OffsetDateTime::now_utc()
+        .checked_add(TimeDuration::days(days))
+        .unwrap_or_else(OffsetDateTime::now_utc)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| now_rfc3339())
+}
+
+fn allowed_memory_consumers(scope_type: &str, candidate_type: &str) -> Vec<String> {
+    match (scope_type, candidate_type) {
+        ("user_private", _) => vec!["honglou-main".to_string()],
+        (_, "retrieval_preference") | (_, "source_collection_usage_preference") => vec![
+            "honglou-main".to_string(),
+            "honglou-text".to_string(),
+            "honglou-commentary".to_string(),
+        ],
+        (_, _) => vec!["honglou-main".to_string()],
+    }
+}
+
+fn memory_read_budget_json() -> Value {
+    json!({
+        "schema_version": "scoped-memory-read-budget-v1",
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "context_pack_max": MEMORY_READ_BUDGET_TOTAL,
+        "user_private_max": MEMORY_READ_BUDGET_USER_PRIVATE,
+        "shared_scope_total_max": MEMORY_READ_BUDGET_SHARED,
+        "tool_profile_non_private_max": MEMORY_READ_BUDGET_TOOL_PROFILE,
+    })
+}
+
+fn scoped_memory_policy_public_contract() -> Value {
+    json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "policy_mode": memory_policy_mode(),
+        "policy_mode_env": MEMORY_POLICY_MODE_ENV,
+        "llm_schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+        "policy_actor": MEMORY_POLICY_ACTOR,
+        "read_budget": memory_read_budget_json(),
+        "scope_automation": {
+            "user_private": {"automation": "auto_enable", "threshold": 0.85},
+            "profile_common": {"automation": "auto_enable_limited", "threshold": 0.92},
+            "knowledge_space": {"automation": "auto_enable_limited", "threshold": 0.94},
+            "research_topic": {"automation": "auto_enable_limited", "threshold": 0.94},
+            "source_collection": {"automation": "manual_first_with_shadow", "threshold": 1.0},
+        },
+    })
 }
 
 fn require_status(status: &str, allowed: &[&str]) -> Result<()> {
@@ -2580,7 +3865,7 @@ fn get_or_create_interaction_context(conn: &Connection, user_session_id: &str) -
             "session",
             RESOLVER_SCHEMA_VERSION,
             CONTEXT_POLICY_VERSION,
-            "memory-disabled-phase1",
+            SCOPED_MEMORY_POLICY_VERSION,
             &now,
             &now,
         ],
@@ -2704,7 +3989,268 @@ fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> 
     }
 }
 
-fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextPackProfileView> {
+fn load_authorized_memory_reads(
+    conn: &Connection,
+    external_user_ref: &str,
+    active_scopes: &[Value],
+    candidate_scopes: &[Value],
+) -> Result<ScopedMemoryReadSet> {
+    let user_scope_ref = user_private_scope_ref(external_user_ref);
+    let now = now_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT card.memory_card_ref, card.source_candidate_id, card.scope_type,
+                card.scope_ref, card.summary, card.summary_sha256, card.acl_json,
+                card.sensitivity, card.expires_at, candidate.candidate_type,
+                decision.policy_decision_ref, decision.policy_version,
+                decision.policy_mode, decision.confidence
+         FROM memory_cards AS card
+         JOIN memory_candidates AS candidate
+           ON candidate.candidate_id = card.source_candidate_id
+         JOIN memory_policy_decisions AS decision
+           ON decision.memory_card_id = card.memory_card_id
+          AND decision.decision = 'enable_read'
+          AND decision.policy_version = ?1
+         WHERE card.status = 'active'
+           AND card.read_enabled <> 0
+           AND (card.expires_at IS NULL OR card.expires_at > ?2)
+         ORDER BY decision.confidence DESC, card.promoted_at DESC, card.memory_card_id DESC",
+    )?;
+    let rows = stmt.query_map(params![SCOPED_MEMORY_POLICY_VERSION, &now], |row| {
+        let memory_card_ref: String = row.get(0)?;
+        let summary_sha256: String = row.get(5)?;
+        let acl = parse_json_column(row.get::<_, String>(6)?);
+        Ok((
+            memory_card_ref.clone(),
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            summary_sha256.clone(),
+            acl,
+            row.get::<_, String>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?,
+            row.get::<_, String>(12)?,
+            row.get::<_, f64>(13)?,
+        ))
+    })?;
+    let mut eligible = Vec::<ScopedMemoryRead>::new();
+    for row in rows {
+        let (
+            memory_card_ref,
+            _source_candidate_id,
+            scope_type,
+            scope_ref,
+            summary,
+            summary_sha256,
+            acl,
+            sensitivity,
+            expires_at,
+            candidate_type,
+            policy_decision_ref,
+            policy_version,
+            policy_mode,
+            confidence,
+        ) = row?;
+        if !memory_scope_matches_context(
+            &scope_type,
+            &scope_ref,
+            &user_scope_ref,
+            active_scopes,
+            candidate_scopes,
+        ) {
+            continue;
+        }
+        let allowed_consumers = acl_allowed_consumers(&acl);
+        if allowed_consumers.is_empty() {
+            return Err(anyhow!("memory ACL has no allowed consumers"));
+        }
+        eligible.push(ScopedMemoryRead {
+            memory_read_ref: format!(
+                "memory-summary://tonglingyu/{}/{}",
+                &hash_text(&memory_card_ref)[..16],
+                &summary_sha256[..16]
+            ),
+            memory_card_ref,
+            policy_decision_ref,
+            policy_version,
+            policy_mode,
+            scope_type,
+            candidate_type,
+            summary,
+            sensitivity,
+            confidence,
+            expires_at,
+            allowed_consumers,
+        });
+    }
+    let candidate_count_before_budget = eligible.len();
+    let mut user_private = Vec::new();
+    let mut shared = Vec::new();
+    for read in eligible {
+        if read.scope_type == "user_private" {
+            user_private.push(read);
+        } else {
+            shared.push(read);
+        }
+    }
+    let mut reads = user_private
+        .into_iter()
+        .take(MEMORY_READ_BUDGET_USER_PRIVATE)
+        .collect::<Vec<_>>();
+    reads.extend(shared.into_iter().take(MEMORY_READ_BUDGET_SHARED));
+    reads.truncate(MEMORY_READ_BUDGET_TOTAL);
+    let truncated_count = candidate_count_before_budget.saturating_sub(reads.len());
+    Ok(ScopedMemoryReadSet {
+        reads,
+        candidate_count_before_budget,
+        truncated_count,
+    })
+}
+
+fn memory_scope_matches_context(
+    scope_type: &str,
+    scope_ref: &str,
+    user_scope_ref: &str,
+    active_scopes: &[Value],
+    candidate_scopes: &[Value],
+) -> bool {
+    match scope_type {
+        "user_private" => scope_ref == user_scope_ref,
+        "research_topic" => candidate_scopes.iter().any(|scope| {
+            scope
+                .get("scope_id")
+                .and_then(Value::as_str)
+                .is_some_and(|scope_id| scope_id == scope_ref)
+        }),
+        "profile_common" | "knowledge_space" | "source_collection" => {
+            active_scopes.iter().any(|scope| {
+                scope
+                    .get("scope_type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|active_type| active_type == scope_type)
+                    && scope
+                        .get("scope_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|active_ref| active_ref == scope_ref)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn acl_allowed_consumers(acl: &Value) -> Vec<String> {
+    acl.get("allowed_consumers")
+        .or_else(|| acl.get("allowed_readers"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn memory_reads_for_consumer(
+    memory_reads: &[ScopedMemoryRead],
+    consumer: &str,
+    limit: usize,
+) -> Vec<ScopedMemoryRead> {
+    memory_reads
+        .iter()
+        .filter(|read| read.allowed_consumers.iter().any(|item| item == consumer))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+fn tool_profile_memory_reads(
+    memory_reads: &[ScopedMemoryRead],
+    consumer: &str,
+) -> Vec<ScopedMemoryRead> {
+    memory_reads
+        .iter()
+        .filter(|read| {
+            read.scope_type != "user_private"
+                && matches!(
+                    read.candidate_type.as_str(),
+                    "retrieval_preference" | "source_collection_usage_preference"
+                )
+                && read.allowed_consumers.iter().any(|item| item == consumer)
+        })
+        .take(MEMORY_READ_BUDGET_TOOL_PROFILE)
+        .cloned()
+        .collect()
+}
+
+fn memory_read_summary_payload(read: &ScopedMemoryRead) -> Value {
+    json!({
+        "memory_read_ref": &read.memory_read_ref,
+        "summary": &read.summary,
+        "scope_type": &read.scope_type,
+        "candidate_type": &read.candidate_type,
+        "sensitivity": &read.sensitivity,
+        "policy_version": &read.policy_version,
+        "policy_mode": &read.policy_mode,
+        "confidence": read.confidence,
+        "expires_at": &read.expires_at,
+    })
+}
+
+fn memory_read_policy_digest(memory_reads: &[ScopedMemoryRead]) -> String {
+    digest_json(&json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "read_refs": memory_reads
+            .iter()
+            .map(|read| json!({
+                "memory_read_ref": &read.memory_read_ref,
+                "policy_decision_ref": &read.policy_decision_ref,
+                "memory_card_ref_sha256": hash_text(&read.memory_card_ref),
+                "policy_version": &read.policy_version,
+                "policy_mode": &read.policy_mode,
+                "scope_type": &read.scope_type,
+                "candidate_type": &read.candidate_type,
+                "confidence": read.confidence,
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn memory_usage_summary(memory_reads: &[ScopedMemoryRead], truncated_count: usize) -> Value {
+    json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "read_ref_count": memory_reads.len(),
+        "truncated_count": truncated_count,
+        "user_private_count": memory_reads.iter().filter(|read| read.scope_type == "user_private").count(),
+        "shared_scope_count": memory_reads.iter().filter(|read| read.scope_type != "user_private").count(),
+        "memory_content_visible": true,
+    })
+}
+
+fn reviewer_memory_usage_summary(memory_reads: &[ScopedMemoryRead]) -> Value {
+    json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "read_ref_count": memory_reads.len(),
+        "memory_content_visible": false,
+        "reviewer_can_use_memory_as_evidence": false,
+        "memory_policy_digest": memory_read_policy_digest(memory_reads),
+    })
+}
+
+fn profile_views(
+    resolved_question: &str,
+    session_summary: &str,
+    memory_reads: &[ScopedMemoryRead],
+) -> Vec<ContextPackProfileView> {
+    let main_reads =
+        memory_reads_for_consumer(memory_reads, "honglou-main", MEMORY_READ_BUDGET_TOTAL);
+    let text_reads = tool_profile_memory_reads(memory_reads, "honglou-text");
+    let commentary_reads = tool_profile_memory_reads(memory_reads, "honglou-commentary");
+    let reviewer_usage = reviewer_memory_usage_summary(memory_reads);
     vec![
         ContextPackProfileView {
             profile_name: "honglou-main".to_string(),
@@ -2720,7 +4266,13 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
                 "system_prompt".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: Vec::new(),
+            memory_read_refs: main_reads
+                .iter()
+                .map(|read| read.memory_read_ref.clone())
+                .collect(),
+            memory_summaries: main_reads.iter().map(memory_read_summary_payload).collect(),
+            memory_policy_digest: memory_read_policy_digest(&main_reads),
+            memory_usage_summary: memory_usage_summary(&main_reads, 0),
         },
         ContextPackProfileView {
             profile_name: "honglou-text".to_string(),
@@ -2733,7 +4285,13 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
                 "unauthorized_scoped_memory".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: Vec::new(),
+            memory_read_refs: text_reads
+                .iter()
+                .map(|read| read.memory_read_ref.clone())
+                .collect(),
+            memory_summaries: text_reads.iter().map(memory_read_summary_payload).collect(),
+            memory_policy_digest: memory_read_policy_digest(&text_reads),
+            memory_usage_summary: memory_usage_summary(&text_reads, 0),
         },
         ContextPackProfileView {
             profile_name: "honglou-commentary".to_string(),
@@ -2745,7 +4303,16 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
                 "full_base_text_corpus".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: Vec::new(),
+            memory_read_refs: commentary_reads
+                .iter()
+                .map(|read| read.memory_read_ref.clone())
+                .collect(),
+            memory_summaries: commentary_reads
+                .iter()
+                .map(memory_read_summary_payload)
+                .collect(),
+            memory_policy_digest: memory_read_policy_digest(&commentary_reads),
+            memory_usage_summary: memory_usage_summary(&commentary_reads, 0),
         },
         ContextPackProfileView {
             profile_name: "honglou-reviewer".to_string(),
@@ -2758,6 +4325,9 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
                 "hermes_private_transcript".to_string(),
             ],
             memory_read_refs: Vec::new(),
+            memory_summaries: Vec::new(),
+            memory_policy_digest: memory_read_policy_digest(memory_reads),
+            memory_usage_summary: reviewer_usage,
         },
     ]
 }
@@ -2769,8 +4339,9 @@ fn build_context_projections(
     context_pack_ref: &str,
     resolved_question: &str,
     session_summary: &str,
+    memory_reads: &[ScopedMemoryRead],
 ) -> Vec<ContextProjection> {
-    profile_views(resolved_question, session_summary)
+    profile_views(resolved_question, session_summary, memory_reads)
         .into_iter()
         .map(|view| {
             build_context_projection(
@@ -2802,6 +4373,9 @@ fn build_context_projection(
         "session_summary": &view.session_summary,
         "forbidden_context": &view.forbidden_context,
         "memory_read_refs": &view.memory_read_refs,
+        "memory_summaries": &view.memory_summaries,
+        "memory_policy_digest": &view.memory_policy_digest,
+        "memory_usage_summary": &view.memory_usage_summary,
         "consumer_name": &view.profile_name,
     });
     let tool_policy = json!({
@@ -3160,6 +4734,14 @@ fn projection_payload_summary(value: &Value) -> Value {
             .get("memory_read_refs")
             .and_then(Value::as_array)
             .map_or(0, Vec::len),
+        "memory_summary_count": value
+            .get("memory_summaries")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        "memory_policy_digest": value
+            .get("memory_policy_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -3232,6 +4814,132 @@ mod tests {
         .expect("schema migration table");
         init_schema(&conn).expect("context schema");
         conn
+    }
+
+    struct TestMemoryDraftInput<'a> {
+        trace_id: &'a str,
+        context: &'a ContextResolution,
+        scope_type: &'a str,
+        scope_ref: &'a str,
+        candidate_type: &'a str,
+        summary: &'a str,
+        confidence: f64,
+    }
+
+    fn test_memory_draft(
+        conn: &Connection,
+        input: TestMemoryDraftInput<'_>,
+    ) -> MemoryCandidateDraft {
+        let journal_id = conn
+            .query_row(
+                "SELECT journal_id FROM session_journal
+                 WHERE trace_id = ?1 AND entry_type = 'user_message'
+                 ORDER BY created_at DESC, journal_id DESC LIMIT 1",
+                params![input.trace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("user journal id");
+        let candidate_id = format!(
+            "memory-candidate-test-{}",
+            &hash_text(&format!(
+                "{}:{}:{}",
+                input.scope_type, input.scope_ref, input.candidate_type
+            ))[..16]
+        );
+        let summary = input.summary.to_string();
+        MemoryCandidateDraft {
+            candidate_id: candidate_id.clone(),
+            candidate_ref: format!(
+                "memory-candidate://tonglingyu/{}/{candidate_id}",
+                input.trace_id
+            ),
+            journal_id,
+            trace_id: input.trace_id.to_string(),
+            user_session_id: input.context.user_session_id.clone(),
+            interaction_context_id: input.context.interaction_context_id.clone(),
+            context_pack_id: Some(input.context.context_pack_id.clone()),
+            source_entry_type: "user_message".to_string(),
+            scope_type: input.scope_type.to_string(),
+            scope_ref: input.scope_ref.to_string(),
+            candidate_type: input.candidate_type.to_string(),
+            summary_sha256: hash_text(&summary),
+            raw_excerpt_sha256: hash_text(&summary),
+            raw_excerpt_redacted: summary.clone(),
+            summary,
+            sensitivity: "low".to_string(),
+            risk_flags: json!([]),
+            llm_extraction: json!({
+                "schema_version": "tonglingyu-memory-extraction-v1",
+                "policy_version": MEMORY_COLLECTOR_POLICY_VERSION,
+                "extractor": "test_fixture",
+                "hard_deny_filter_passed": true,
+                "redaction_applied": false,
+                "confidence": input.confidence,
+                "llm_participation": llm_boundary_contract_json(),
+                "input_digest": {
+                    "summary_sha256": hash_text(input.summary),
+                },
+            }),
+            confidence: input.confidence,
+            audit_ref: memory_audit_ref("candidate-create", &candidate_id),
+        }
+    }
+
+    fn insert_and_apply_test_memory(conn: &Connection, draft: &MemoryCandidateDraft) {
+        assert!(
+            insert_memory_candidate(conn, draft, "test-admin").expect("insert memory candidate"),
+            "test candidate should be inserted"
+        );
+        apply_scoped_memory_policy_for_candidate(conn, draft, "test-admin")
+            .expect("apply scoped memory policy");
+    }
+
+    fn manually_enable_test_memory(conn: &Connection, candidate_id: &str) {
+        transition_memory_candidate(
+            conn,
+            MemoryCandidateTransitionInput {
+                candidate_id,
+                action: "approve",
+                actor: "test-admin",
+                reason: Some("manual approve shared scoped memory"),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect("manual approve");
+        transition_memory_candidate(
+            conn,
+            MemoryCandidateTransitionInput {
+                candidate_id,
+                action: "promote",
+                actor: "test-admin",
+                reason: Some("manual promote shared scoped memory"),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect("manual promote");
+        let card_id = conn
+            .query_row(
+                "SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1",
+                params![candidate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("memory card id");
+        transition_memory_card(
+            conn,
+            MemoryCardTransitionInput {
+                memory_card_id: &card_id,
+                action: "enable_read",
+                actor: "test-admin",
+                reason: Some("manual enable source collection scoped memory"),
+            },
+        )
+        .expect("manual enable read");
     }
 
     #[test]
@@ -3338,11 +5046,11 @@ mod tests {
     }
 
     #[test]
-    fn memory_collector_creates_pending_candidate_and_promotes_read_disabled_card() {
+    fn memory_collector_auto_enables_policy_approved_memory_and_context_reads_it() {
         let conn = conn();
         let messages = vec![ContextMessage {
             role: "user".to_string(),
-            content: "以后回答时，请用简体中文短句总结。".to_string(),
+            content: "我喜欢回答里多引用原文。".to_string(),
         }];
         let context = create_context_for_request(
             &conn,
@@ -3387,10 +5095,11 @@ mod tests {
 
         assert_eq!(report["status"], json!("ok"));
         assert_eq!(report["candidate_count"], json!(1));
+        assert_eq!(report["auto_enabled_count"], json!(1));
         let candidates = list_memory_candidates(
             &conn,
             MemoryCandidateListInput {
-                status: Some("pending"),
+                status: Some("approved"),
                 scope_type: None,
                 scope_ref: None,
                 limit: 10,
@@ -3399,10 +5108,8 @@ mod tests {
         )
         .expect("candidate list");
         let candidate = candidates["items"][0].clone();
-        assert_eq!(
-            candidate["candidate_type"],
-            json!("user_response_preference")
-        );
+        assert_eq!(candidate["candidate_type"], json!("language_preference"));
+        assert_eq!(candidate["status"], json!("approved"));
         assert_eq!(candidate["source_entry_type"], json!("user_message"));
         assert_eq!(candidate["scope_type"], json!("user_private"));
         assert!(
@@ -3419,36 +5126,6 @@ mod tests {
             candidate["llm_extraction"]["llm_participation"]["used"],
             json!(false)
         );
-        let candidate_id = candidate["candidate_id"].as_str().expect("candidate id");
-
-        transition_memory_candidate(
-            &conn,
-            MemoryCandidateTransitionInput {
-                candidate_id,
-                action: "approve",
-                actor: "test-admin",
-                reason: Some("approved in test"),
-                candidate_type: None,
-                sensitivity: None,
-                merge_target_candidate_id: None,
-                expires_at: None,
-            },
-        )
-        .expect("approve candidate");
-        transition_memory_candidate(
-            &conn,
-            MemoryCandidateTransitionInput {
-                candidate_id,
-                action: "promote",
-                actor: "test-admin",
-                reason: Some("promote in test"),
-                candidate_type: None,
-                sensitivity: None,
-                merge_target_candidate_id: None,
-                expires_at: None,
-            },
-        )
-        .expect("promote candidate");
 
         let cards = list_memory_cards(
             &conn,
@@ -3463,12 +5140,67 @@ mod tests {
         .expect("memory card list");
         let card = cards["items"][0].clone();
         assert_eq!(card["status"], json!("active"));
-        assert_eq!(card["read_enabled"], json!(false));
+        assert_eq!(card["read_enabled"], json!(true));
         assert_eq!(
-            card["acl"]["phase3_read_disable_reason"],
-            json!(MEMORY_PHASE3_READ_DISABLED_REASON)
+            card["acl"]["policy_version"],
+            json!(SCOPED_MEMORY_POLICY_VERSION)
         );
-        assert_memory_reads_disabled(&conn).expect("read path remains disabled");
+        let next_context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-candidate-followup",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-2",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context reads enabled memory");
+        let refs = next_context.context_pack["memory_read_refs"]
+            .as_array()
+            .expect("memory read refs");
+        assert_eq!(refs.len(), 1);
+        let main_projection = next_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-main")
+            .expect("main projection");
+        assert_eq!(
+            main_projection.projection_payload["memory_summaries"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let reviewer_projection = next_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-reviewer")
+            .expect("reviewer projection");
+        assert_eq!(
+            reviewer_projection.projection_payload["memory_summaries"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+        let persisted_trace =
+            load_trace_context(&conn, "trace-memory-candidate-followup").expect("trace context");
+        assert_eq!(
+            persisted_trace["context_packs"][0]["memory_read_refs"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            persisted_trace["context_packs"][0]["forbidden_tools"],
+            json!([])
+        );
 
         transition_memory_card(
             &conn,
@@ -3480,6 +5212,25 @@ mod tests {
             },
         )
         .expect("revoke memory card");
+        let after_revoke = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-candidate-after-revoke",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-3",
+                question: "介绍林黛玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍林黛玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created after revoke");
+        assert_eq!(after_revoke.context_pack["memory_read_refs"], json!([]));
         let audit_count = table_count(&conn, "memory_transition_audit").expect("audit count");
         assert!(audit_count >= 4, "audit_count={audit_count}");
     }
@@ -3624,6 +5375,259 @@ mod tests {
     }
 
     #[test]
+    fn memory_context_read_budget_truncates_and_audits() {
+        let conn = conn();
+        for index in 0..6 {
+            let question = format!("以后回答时，请用简体中文短句总结。偏好编号{index}。");
+            let messages = vec![ContextMessage {
+                role: "user".to_string(),
+                content: question.clone(),
+            }];
+            let context = create_context_for_request(
+                &conn,
+                ContextRequestInput {
+                    trace_id: &format!("trace-memory-budget-{index}"),
+                    model_id: "tonglingyu",
+                    external_user_ref: "memory-budget-user",
+                    external_session_id: "memory-budget-chat",
+                    external_message_id: &format!("memory-budget-message-{index}"),
+                    question: &question,
+                    messages: &messages,
+                    history_over_limit: false,
+                    max_messages: 40,
+                },
+            )
+            .expect("context created");
+            append_final_response(
+                &conn,
+                FinalResponseJournalInput {
+                    trace_id: &format!("trace-memory-budget-{index}"),
+                    user_session_id: &context.user_session_id,
+                    interaction_context_id: &context.interaction_context_id,
+                    context_pack_id: &context.context_pack_id,
+                    external_message_id: &format!("memory-budget-message-{index}"),
+                    package_id: Some("pkg-memory-budget"),
+                    response: &json!({"status": "ok"}),
+                },
+            )
+            .expect("final response journal");
+        }
+        let report = run_memory_collector(
+            &conn,
+            MemoryCollectorRunInput {
+                trigger_type: "admin_manual",
+                actor: "test-admin",
+                limit: 20,
+                dry_run: false,
+                trace_id: None,
+            },
+        )
+        .expect("collector run");
+        assert_eq!(report["candidate_count"], json!(6));
+        assert_eq!(report["auto_enabled_count"], json!(6));
+
+        let context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-budget-read",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-budget-user",
+                external_session_id: "memory-budget-chat",
+                external_message_id: "memory-budget-read-message",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context reads budgeted memory");
+        assert_eq!(
+            context.context_pack["memory_read_refs"]
+                .as_array()
+                .map(Vec::len),
+            Some(MEMORY_READ_BUDGET_USER_PRIVATE)
+        );
+        assert_eq!(
+            context.context_pack["memory_usage_summary"]["truncated_count"],
+            json!(2)
+        );
+        let audit = load_rows_json_for_test(
+            &conn,
+            "SELECT entry_type, metadata_json FROM session_journal WHERE entry_type = 'memory_read_decision'",
+        );
+        let rendered = serde_json::to_string(&audit).expect("audit json");
+        assert!(rendered.contains("truncated_count"));
+        assert!(rendered.contains("scoped-memory-policy-v1"));
+    }
+
+    #[test]
+    fn shared_scope_memory_reads_follow_policy_acl_and_context_scope() {
+        let conn = conn();
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "介绍林黛玉".to_string(),
+        }];
+        let context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-shared-scope-seed",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-shared-seed-user",
+                external_session_id: "memory-shared-seed-chat",
+                external_message_id: "memory-shared-seed-message",
+                question: "介绍林黛玉",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-memory-shared-scope-seed",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-shared-seed-message",
+                package_id: Some("pkg-memory-shared"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
+
+        for draft in [
+            test_memory_draft(
+                &conn,
+                TestMemoryDraftInput {
+                    trace_id: "trace-memory-shared-scope-seed",
+                    context: &context,
+                    scope_type: "profile_common",
+                    scope_ref: PROFILE_COMMON_SCOPE_REF,
+                    candidate_type: "retrieval_preference",
+                    summary: "profile common retrieval preference",
+                    confidence: 0.96,
+                },
+            ),
+            test_memory_draft(
+                &conn,
+                TestMemoryDraftInput {
+                    trace_id: "trace-memory-shared-scope-seed",
+                    context: &context,
+                    scope_type: "knowledge_space",
+                    scope_ref: KNOWLEDGE_SPACE_SCOPE_REF,
+                    candidate_type: "retrieval_preference",
+                    summary: "knowledge space retrieval preference",
+                    confidence: 0.96,
+                },
+            ),
+            test_memory_draft(
+                &conn,
+                TestMemoryDraftInput {
+                    trace_id: "trace-memory-shared-scope-seed",
+                    context: &context,
+                    scope_type: "research_topic",
+                    scope_ref: &format!("topic:{}", hash_text("林黛玉")),
+                    candidate_type: "research_topic_context",
+                    summary: "research topic context",
+                    confidence: 0.96,
+                },
+            ),
+            test_memory_draft(
+                &conn,
+                TestMemoryDraftInput {
+                    trace_id: "trace-memory-shared-scope-seed",
+                    context: &context,
+                    scope_type: "knowledge_space",
+                    scope_ref: "knowledge_space:other",
+                    candidate_type: "retrieval_preference",
+                    summary: "unmatched knowledge scope preference",
+                    confidence: 0.96,
+                },
+            ),
+        ] {
+            insert_and_apply_test_memory(&conn, &draft);
+        }
+
+        let source_collection = test_memory_draft(
+            &conn,
+            TestMemoryDraftInput {
+                trace_id: "trace-memory-shared-scope-seed",
+                context: &context,
+                scope_type: "source_collection",
+                scope_ref: SOURCE_COLLECTION_SCOPE_REF,
+                candidate_type: "source_collection_usage_preference",
+                summary: "source collection usage preference",
+                confidence: 1.0,
+            },
+        );
+        let source_collection_id = source_collection.candidate_id.clone();
+        insert_and_apply_test_memory(&conn, &source_collection);
+        manually_enable_test_memory(&conn, &source_collection_id);
+
+        let read_context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-shared-scope-read",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-shared-reader",
+                external_session_id: "memory-shared-reader-chat",
+                external_message_id: "memory-shared-read-message",
+                question: "介绍林黛玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍林黛玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("shared memory context read");
+        assert_eq!(
+            read_context.context_pack["memory_read_refs"]
+                .as_array()
+                .map(Vec::len),
+            Some(4)
+        );
+        let main_projection = read_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-main")
+            .expect("main projection");
+        assert_eq!(
+            main_projection.projection_payload["memory_summaries"]
+                .as_array()
+                .map(Vec::len),
+            Some(4)
+        );
+        let text_projection = read_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-text")
+            .expect("text projection");
+        assert_eq!(
+            text_projection.projection_payload["memory_summaries"]
+                .as_array()
+                .map(Vec::len),
+            Some(MEMORY_READ_BUDGET_TOOL_PROFILE)
+        );
+        let reviewer_projection = read_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-reviewer")
+            .expect("reviewer projection");
+        assert_eq!(
+            reviewer_projection.projection_payload["memory_summaries"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn memory_candidate_state_machine_reclassifies_merges_and_rejects() {
         let conn = conn();
         for (trace_id, message_id, question) in [
@@ -3720,7 +5724,7 @@ mod tests {
                 action: "reclassify",
                 actor: "test-admin",
                 reason: Some("classify as response preference"),
-                candidate_type: Some("user_response_preference"),
+                candidate_type: Some("retrieval_preference"),
                 sensitivity: None,
                 merge_target_candidate_id: None,
                 expires_at: None,
@@ -3731,10 +5735,7 @@ mod tests {
             .expect("read candidate")
             .expect("candidate exists");
         assert_eq!(first_after["status"], json!("pending"));
-        assert_eq!(
-            first_after["candidate_type"],
-            json!("user_response_preference")
-        );
+        assert_eq!(first_after["candidate_type"], json!("retrieval_preference"));
 
         transition_memory_candidate(
             &conn,
@@ -3802,7 +5803,7 @@ mod tests {
                 external_user_ref: "memory-required-user",
                 external_session_id: "memory-required-chat",
                 external_message_id: "memory-required-message",
-                question: "以后回答时，请用简体中文短句总结。",
+                question: "我喜欢回答里多引用原文。",
                 messages: &messages,
                 history_over_limit: false,
                 max_messages: 40,
@@ -3899,19 +5900,36 @@ mod tests {
     #[test]
     fn llm_memory_extraction_contract_rejects_overreach() {
         let valid = validate_llm_memory_extraction_output(&json!({
-            "candidate_type": "user_response_preference",
-            "summary": "用户回答偏好: 以后回答时用简体短句。",
+            "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+            "is_long_term_memory": true,
+            "is_temporary_instruction": false,
+            "is_quoted_or_third_party": false,
+            "has_contradiction": false,
+            "scope_type": "user_private",
+            "candidate_type": "language_preference",
             "confidence": 0.82,
+            "sensitivity": "low",
             "risk_flags": [],
+            "ttl_hint": "180d",
+            "exclusion_flags": [],
         }))
         .expect("valid llm output");
         assert_eq!(valid["status"], json!("pending"));
         assert_eq!(valid["promotion_allowed"], json!(false));
 
         let invalid = validate_llm_memory_extraction_output(&json!({
-            "candidate_type": "user_response_preference",
-            "summary": "用户回答偏好",
+            "schema_version": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+            "is_long_term_memory": true,
+            "is_temporary_instruction": false,
+            "is_quoted_or_third_party": false,
+            "has_contradiction": false,
+            "scope_type": "user_private",
+            "candidate_type": "language_preference",
             "confidence": 0.91,
+            "sensitivity": "low",
+            "risk_flags": [],
+            "ttl_hint": "180d",
+            "exclusion_flags": [],
             "promotion": "approve",
             "acl": {"read_enabled": true},
         }))

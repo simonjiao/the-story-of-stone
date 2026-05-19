@@ -381,71 +381,89 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 ### P4A Policy Schema 与配置
 
-- [ ] 新增或复用 policy decision 记录。
-- [ ] 定义 policy mode：`shadow_only`、`auto_policy`、`manual_required`。
-- [ ] 实现 `scoped-memory-policy-v1`。
-- [ ] 实现 scope automation matrix。
-- [ ] 实现 policy threshold、TTL、risk flag 和 LLM schema version。
-- [ ] 实现 read budget 和截断 audit。
-- [ ] 配置和 metrics 暴露有效 policy mode，但不暴露敏感 payload。
+- [x] 新增或复用 policy decision 记录。
+- [x] 定义 policy mode：`shadow_only`、`auto_policy`、`manual_required`。
+- [x] 实现 `scoped-memory-policy-v1`。
+- [x] 实现 scope automation matrix。
+- [x] 实现 policy threshold、TTL、risk flag 和 LLM schema version。
+- [x] 实现 read budget 和截断 audit。
+- [x] 配置和 metrics 暴露有效 policy mode，但不暴露敏感 payload。
 
 ### P4B Rule + LLM Filter
 
-- [ ] 规则 hard deny 先于 LLM。
-- [ ] LLM 输入 redaction 和 digest 完整记录。
-- [ ] LLM 输出 schema-bound JSON。
-- [ ] LLM 越权字段 fail-closed。
-- [ ] 低置信、未知 scope、临时指令、引用他人或矛盾内容不得自动可用。
+- [x] 规则 hard deny 先于 LLM。
+- [x] LLM 输入 redaction 和 digest 完整记录。
+- [x] LLM 输出 schema-bound JSON。
+- [x] LLM 越权字段 fail-closed。
+- [x] 低置信、未知 scope、临时指令、引用他人或矛盾内容不得自动可用。
 
 ### P4C Auto Policy Transition
 
-- [ ] 自动路径写 `pending -> approved` audit。
-- [ ] 自动路径写 `approved -> active memory_card` audit。
-- [ ] 自动路径写 `read_enabled=false -> true` audit。
-- [ ] 自动 actor 固定为 `memory_policy:auto` 或带 policy version 的等价身份。
-- [ ] manual review 与 auto policy 使用同一 service 和状态机。
+- [x] 自动路径写 `pending -> approved` audit。
+- [x] 自动路径写 `approved -> active memory_card` audit。
+- [x] 自动路径写 `read_enabled=false -> true` audit。
+- [x] 自动 actor 固定为 `memory_policy:auto` 或带 policy version 的等价身份。
+- [x] manual review 与 auto policy 使用同一 service 和状态机。
 
 ### P4D Context Build Read Path
 
-- [ ] ContextPackBuilder 读取 active/read-enabled memory。
-- [ ] `memory_read_refs` 只包含授权摘要 ref。
-- [ ] ACL 不匹配 fail-closed。
-- [ ] revoked/expired/disabled memory 不进入新 context pack。
-- [ ] context replay 可复现 memory read refs。
+- [x] ContextPackBuilder 读取 active/read-enabled memory。
+- [x] `memory_read_refs` 只包含授权摘要 ref。
+- [x] ACL 不匹配 fail-closed。
+- [x] revoked/expired/disabled memory 不进入新 context pack。
+- [x] context replay 可复现 memory read refs。
 
 ### P4E Runtime Projection 与回答边界
 
-- [ ] memory 只进入授权 consumer projection。
-- [ ] `honglou-main` 仅把 memory 用作偏好、背景和工作方法。
-- [ ] `honglou-text`、`honglou-commentary`、`honglou-reviewer` 的 memory 可见性按规则
+- [x] memory 只进入授权 consumer projection。
+- [x] `honglou-main` 仅把 memory 用作偏好、背景和工作方法。
+- [x] `honglou-text`、`honglou-commentary`、`honglou-reviewer` 的 memory 可见性按规则
       fail-closed。
-- [ ] evidence package 不包含 memory。
-- [ ] reviewer 裁决不受 memory 改写。
-- [ ] public response/SSE 不泄露 memory 内部字段。
+- [x] evidence package 不包含 memory。
+- [x] reviewer 裁决不受 memory 改写。
+- [x] public response/SSE 不泄露 memory 内部字段。
 
 ### P4F Lifecycle 与运维
 
-- [ ] export 覆盖 candidate、policy decision、card、read enablement 和 audit。
-- [ ] anonymize 覆盖 user_private memory 和关联 ref。
-- [ ] legal hold 阻止删除/匿名化但不扩大读取权限。
-- [ ] retention pruning 不破坏 audit 链。
-- [ ] backup/restore 后 memory/context/journal/package/reviewer 链可恢复。
+- [x] export 覆盖 candidate、policy decision、card、read enablement 和 audit。
+- [x] anonymize 覆盖 user_private memory 和关联 ref。
+- [x] legal hold 阻止删除/匿名化但不扩大读取权限。
+- [x] retention pruning 不破坏 audit 链。
+- [x] backup/restore 后 memory/context/journal/package/reviewer 链可恢复。
 
 ### P4G Gate 与发布
 
-- [ ] 本地 cargo check/test/clippy 通过。
-- [ ] collector -> policy -> card -> context build contract smoke 通过。
-- [ ] auto policy 与 manual review contract smoke 通过。
-- [ ] `scoped-memory-policy-v1` replay gate 通过。
-- [ ] LLM schema overreach fail-closed gate 通过。
-- [ ] read budget / truncation audit gate 通过。
-- [ ] ACL/scope fail-closed matrix 通过。
-- [ ] revoke/expire/disable read path smoke 通过。
-- [ ] export/anonymize/legal hold/restore gate 通过。
+- [x] 本地 cargo check/test/clippy 通过。
+- [x] collector -> policy -> card -> context build contract smoke 通过。
+- [x] auto policy 与 manual review contract smoke 通过。
+- [x] `scoped-memory-policy-v1` replay gate 通过。
+- [x] LLM schema overreach fail-closed gate 通过。
+- [x] read budget / truncation audit gate 通过。
+- [x] ACL/scope fail-closed matrix 通过。
+- [x] revoke/expire/disable read path smoke 通过。
+- [x] export/anonymize/legal hold/restore gate 通过。
 - [ ] hhost live gate 通过。
 - [ ] full remote release automation 通过。
 - [ ] release readiness 记录 scoped memory production 证据，且 p95、错误率和
       post-release monitor 不恶化。
+
+### 本地实现证据
+
+- 2026-05-19 本地实现已覆盖 `memory_policy_decisions`、`scoped-memory-policy-v1`、
+  `scoped-memory-llm-filter-v1`、自动 `approve/promote/enable_read`、manual
+  review 保留、read budget、projection 隔离、public sanitizer、metrics、lifecycle
+  export/anonymize/legal hold 和 backup/restore memory read path。
+- 2026-05-19 LLM 参与边界为 schema-bound semantic filter contract：规则过滤和
+  redaction/digest 已实现，LLM probe 输出按 `scoped-memory-llm-filter-v1` 校验；
+  当前未接外部 LLM 调用，`llm_participation.used=false`，不得把它描述成外部 LLM
+  已在线参与授权。
+- 2026-05-19 本地验证通过：`cargo test --workspace`、`cargo clippy --workspace
+  --all-targets -- -D warnings`、`agent-platform/scripts/tonglingyu-gateway-smoke.sh`、
+  `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh`、
+  `deploy/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh`、
+  `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
+- hhost live gate、full remote release automation、release readiness 和
+  post-release monitor 尚未在本实现轮次完成，因此不能声明 Phase 4 production-ready。
 
 ## Fail-closed Matrix
 

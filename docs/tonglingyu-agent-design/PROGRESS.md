@@ -107,6 +107,17 @@
   context read budget 均已写入 checklist。实现不得临场硬编码阈值或以补丁绕过
   policy contract；任何生产策略调整都必须形成新 policy version 并重新通过 release
   gate。
+- 2026-05-19 Phase 4 本地实现已完成并通过本地 gates：Gateway 已新增
+  `memory_policy_decisions`、自动 policy decision、自动 `approve/promote/enable_read`、
+  active/read-enabled memory 读取、`context_pack.memory_read_refs` 持久化、
+  projection 级 memory 可见性隔离、public response/SSE/metrics 内部字段过滤、
+  `profile_common`/`knowledge_space`/`research_topic`/`source_collection` scope matrix、
+  lifecycle export/anonymize/legal hold 覆盖 memory，以及 backup/restore 后 scoped
+  memory read path 验证。已通过 `cargo test --workspace`、`cargo clippy --workspace
+  --all-targets -- -D warnings`、本地 gateway smoke、RQA user lifecycle gate、
+  RQA backup/restore drill 和 release readiness contract。该结论仍只是本地
+  Phase 4 closure；hhost live gate、full remote release automation、release
+  readiness 和 post-release monitor 尚未通过前，不声明 scoped memory production-ready。
 
 ## 已确认
 
