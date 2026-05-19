@@ -11011,7 +11011,7 @@ mod tests {
             role: "user".to_string(),
             content: "以后回答时，请用简体中文短句总结。".to_string(),
         }];
-        create_context_for_request(
+        let context = create_context_for_request(
             &conn,
             ContextRequestInput {
                 trace_id: "trace-admin-memory",
@@ -11026,6 +11026,19 @@ mod tests {
             },
         )
         .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-admin-memory",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-message-1",
+                package_id: Some("pkg-admin-memory"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
 
         let collector = memory_collector_run_endpoint(
             State(state.clone()),

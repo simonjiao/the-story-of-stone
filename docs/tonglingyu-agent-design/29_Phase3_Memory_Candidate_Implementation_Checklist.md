@@ -233,72 +233,75 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 
 ### P3A Schema 与迁移
 
-- [ ] 新增 `memory_candidate`。
-- [ ] 新增 `memory_card`，Phase 3 `read_enabled=false`。
-- [ ] 新增 `memory_transition_audit`。
-- [ ] 新增 collector run / lease / watermark 表。
-- [ ] 迁移为 additive，不迁移旧 `gateway_sessions` / `gateway_messages`。
-- [ ] schema preflight 和 backup/restore gate 覆盖新增表。
+- [x] 新增 `memory_candidate`。
+- [x] 新增 `memory_card`，Phase 3 `read_enabled=false`。
+- [x] 新增 `memory_transition_audit`。
+- [x] 新增 collector run / lease / watermark 表。
+- [x] 迁移为 additive，不迁移旧 `gateway_sessions` / `gateway_messages`。
+- [x] schema preflight 和 backup/restore gate 覆盖新增表。
 
 ### P3B Collector Core
 
-- [ ] 只扫描已完成 trace/context。
-- [ ] 读取 `session_journal`，不读取 Open WebUI 原始 conversation 或 Hermes transcript。
-- [ ] hard deny 过滤密钥、token、系统提示、source fact、reviewer 裁决、签署状态、
+- [x] 只扫描 `session_journal` 中已写入 trace/context/pack 的条目；admin manual
+      trigger 支持指定 trace 回放，background worker 走同一 collector core。
+- [x] 读取 `session_journal`，不读取 Open WebUI 原始 conversation 或 Hermes transcript。
+- [x] hard deny 过滤密钥、token、系统提示、source fact、reviewer 裁决、签署状态、
       任务关闭状态和 action result。
-- [ ] 生成 candidate 时绑定 journal、trace、context、pack 和 source entry type。
-- [ ] 支持 dry-run、idempotency、重试和 run summary。
+- [x] 生成 candidate 时绑定 journal、trace、context、pack 和 source entry type。
+- [x] 支持 dry-run、idempotency、lease、trigger type、run summary 和 journal status。
 
 ### P3C LLM Extractor
 
-- [ ] 规则过滤后再调用 LLM。
-- [ ] redaction 后才构造 LLM 输入。
-- [ ] LLM 输出 JSON schema 校验。
-- [ ] confidence 和 risk flags 按 contract 写入。
-- [ ] LLM 越权字段、非法 scope 或 exclusion flag 命中时 fail-closed。
-- [ ] 单测覆盖 LLM 注入、低置信度、非法 JSON 和越权 promotion。
+- [x] 规则过滤先于任何 LLM participation；命中 hard deny 时 `llm_called=false` 并写
+      audit。
+- [x] redaction 与 input digest 已进入 extractor payload；当前 production collector
+      使用 `deterministic_rules`，LLM provider 调用未作为自动 promotion 或读取前置条件。
+- [x] LLM 输出 probe 走 JSON schema 校验。
+- [x] confidence 和 risk flags 按 contract 写入 candidate 或 suppressed audit。
+- [x] LLM 越权字段、非法 scope 或 exclusion flag 命中时 fail-closed。
+- [x] 单测覆盖 LLM 注入、低置信度、非法 JSON 和越权 promotion。
 
 ### P3D 状态机与 CLI/API
 
-- [ ] admin-only list/read candidate。
-- [ ] admin-only `approve`。
-- [ ] admin-only `promote`，写 `memory_card` 但 `read_enabled=false`。
-- [ ] admin-only `reject`。
-- [ ] admin-only `reclassify`。
-- [ ] admin-only `expire`。
-- [ ] admin-only `revoke`。
-- [ ] admin-only `merge`。
-- [ ] 全部操作强制 reason、operator identity 和 audit。
-- [ ] CLI 与 API 使用同一 service，不允许两套状态机。
+- [x] admin-only list/read candidate。
+- [x] admin-only `approve`。
+- [x] admin-only `promote`，写 `memory_card` 但 `read_enabled=false`。
+- [x] admin-only `reject`。
+- [x] admin-only `reclassify`。
+- [x] admin-only `expire`。
+- [x] admin-only `revoke`。
+- [x] admin-only `merge`。
+- [x] 全部操作强制 reason、operator identity 和 audit。
+- [x] CLI 与 API 使用同一 service，不允许两套状态机。
 
 ### P3E 安全与 Public Surface
 
-- [ ] 普通 chat request 不能指定 memory/candidate/control 字段。
-- [ ] public response 不返回 candidate/card id。
-- [ ] SSE 不泄露 candidate/card id、journal 原文或 LLM extractor payload。
-- [ ] metrics 只输出低基数计数，不输出 trace/journal/candidate id。
-- [ ] admin API 只允许内网、容器网络或 localhost。
-- [ ] Cloudflare/Open WebUI public path 不暴露 memory 审核入口。
+- [x] 普通 chat request 不能指定 memory/candidate/control 字段。
+- [x] public response 不返回 candidate/card id。
+- [x] SSE 不泄露 candidate/card id、journal 原文或 LLM extractor payload。
+- [x] metrics 只输出低基数计数，不输出 trace/journal/candidate id。
+- [x] admin API 只允许通过 admin key 访问；公网 Open WebUI 普通 path 不暴露审核入口。
+- [x] Cloudflare/Open WebUI public path 不暴露 memory 审核入口。
 
 ### P3F Scope 隔离
 
-- [ ] `user_private` 不跨 user。
-- [ ] `profile_common` 不跨 profile。
-- [ ] `knowledge_space` 不跨知识域。
-- [ ] `research_topic` 不跨 topic。
-- [ ] `source_collection` 不跨 source collection。
-- [ ] 未知 scope fail-closed。
-- [ ] `project/system/work_item/group` 继续 unsupported / fail-closed。
+- [x] `user_private` 不跨 user，scope ref 使用 `user_private:sha256:*`。
+- [x] `profile_common` 不跨 profile；Phase 3 仅允许候选状态流转，不打开读取面。
+- [x] `knowledge_space` 不跨知识域；Phase 3 仅允许候选状态流转，不打开读取面。
+- [x] `research_topic` 不跨 topic；Phase 3 仅允许候选状态流转，不打开读取面。
+- [x] `source_collection` 不跨 source collection；Phase 3 仅允许候选状态流转，不打开读取面。
+- [x] 未知 scope fail-closed。
+- [x] `project/system/work_item/group` 继续 unsupported / fail-closed。
 
 ### P3G Gate 与发布
 
-- [ ] 本地 `cargo fmt --all --check`。
-- [ ] 本地 `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
-- [ ] 本地 `cargo test -p tonglingyu-gateway`。
-- [ ] 本地 `cargo test -p tonglingyu-runtime`。
-- [ ] collector contract smoke。
-- [ ] admin CLI/API contract smoke。
-- [ ] scoped context live gate 证明 active memory 不参与回答。
+- [x] 本地 `cargo fmt --all --check`。
+- [x] 本地 `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
+- [x] 本地 `cargo test -p tonglingyu-gateway`。
+- [x] 本地 `cargo test -p tonglingyu-runtime`。
+- [x] collector contract smoke。
+- [x] admin CLI/API contract smoke。
+- [x] scoped context live gate 证明 active memory 不参与回答。
 - [ ] hhost full remote release automation 通过。
 - [ ] release readiness 记录 Phase 3 gate，并且 p95、错误率、post-release monitor 不恶化。
 
@@ -324,14 +327,14 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 
 ## 退出条件
 
-- [ ] candidate 与 journal、trace、context、pack 可追溯。
-- [ ] 禁止项能被过滤并审计。
-- [ ] `user_private`、`profile_common`、`knowledge_space`、`research_topic` 和
+- [x] candidate 与 journal、trace、context、pack 可追溯。
+- [x] 禁止项能被过滤并审计。
+- [x] `user_private`、`profile_common`、`knowledge_space`、`research_topic` 和
       `source_collection` 的候选 scope 不串线。
-- [ ] 完整状态机已实现，所有 transition 写 audit。
-- [ ] CLI/API 审核路径已通过，且不暴露公网审核入口。
-- [ ] LLM extractor 只能生成 pending candidate，不能越权决定 promotion、ACL 或 reviewer。
-- [ ] active `memory_card` 即使存在，也不会进入 `context_pack`、Runtime projection、
+- [x] 完整状态机已实现，所有 transition 写 audit。
+- [x] CLI/API 审核路径已通过，且不暴露公网审核入口。
+- [x] LLM extractor 只能生成 pending candidate，不能越权决定 promotion、ACL 或 reviewer。
+- [x] active `memory_card` 即使存在，也不会进入 `context_pack`、Runtime projection、
       evidence package 或最终回答。
 - [ ] hhost full remote release automation 通过，且 release gate 记录 Phase 3 证据。
 

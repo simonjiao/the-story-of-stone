@@ -1538,6 +1538,14 @@ fn load_collectable_journal_rows(
          FROM session_journal
          JOIN user_sessions ON user_sessions.user_session_id = session_journal.user_session_id
          WHERE (?1 IS NULL OR trace_id = ?1)
+           AND session_journal.entry_type = 'user_message'
+           AND session_journal.context_pack_id IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM session_journal AS completed
+             WHERE completed.trace_id = session_journal.trace_id
+               AND completed.context_pack_id = session_journal.context_pack_id
+               AND completed.entry_type = 'final_response'
+           )
            AND NOT EXISTS (
              SELECT 1 FROM memory_collector_journal_status AS status
              WHERE status.journal_id = session_journal.journal_id
@@ -3336,7 +3344,7 @@ mod tests {
             role: "user".to_string(),
             content: "以后回答时，请用简体中文短句总结。".to_string(),
         }];
-        create_context_for_request(
+        let context = create_context_for_request(
             &conn,
             ContextRequestInput {
                 trace_id: "trace-memory-candidate",
@@ -3351,6 +3359,19 @@ mod tests {
             },
         )
         .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-memory-candidate",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-message-1",
+                package_id: Some("pkg-memory-candidate"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
 
         let report = run_memory_collector(
             &conn,
@@ -3366,10 +3387,6 @@ mod tests {
 
         assert_eq!(report["status"], json!("ok"));
         assert_eq!(report["candidate_count"], json!(1));
-        assert!(
-            report["denied_count"].as_i64().unwrap_or_default() >= 1,
-            "{report}"
-        );
         let candidates = list_memory_candidates(
             &conn,
             MemoryCandidateListInput {
@@ -3474,7 +3491,7 @@ mod tests {
             role: "user".to_string(),
             content: "请记住 token=sk-test-secret-value".to_string(),
         }];
-        create_context_for_request(
+        let context = create_context_for_request(
             &conn,
             ContextRequestInput {
                 trace_id: "trace-memory-secret",
@@ -3489,6 +3506,19 @@ mod tests {
             },
         )
         .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-memory-secret",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-secret-message",
+                package_id: Some("pkg-memory-secret"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
 
         let report = run_memory_collector(
             &conn,
@@ -3530,6 +3560,70 @@ mod tests {
     }
 
     #[test]
+    fn memory_collector_skips_unfinished_trace_until_final_response() {
+        let conn = conn();
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "以后回答时，请用简体中文短句总结。".to_string(),
+        }];
+        let context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-unfinished",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-unfinished-user",
+                external_session_id: "memory-unfinished-chat",
+                external_message_id: "memory-unfinished-message",
+                question: "以后回答时，请用简体中文短句总结。",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+        let unfinished_report = run_memory_collector(
+            &conn,
+            MemoryCollectorRunInput {
+                trigger_type: "background_worker",
+                actor: "test-worker",
+                limit: 20,
+                dry_run: false,
+                trace_id: Some("trace-memory-unfinished"),
+            },
+        )
+        .expect("collector run");
+        assert_eq!(unfinished_report["processed_count"], json!(0));
+        assert_eq!(unfinished_report["candidate_count"], json!(0));
+
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-memory-unfinished",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-unfinished-message",
+                package_id: Some("pkg-memory-unfinished"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
+        let completed_report = run_memory_collector(
+            &conn,
+            MemoryCollectorRunInput {
+                trigger_type: "background_worker",
+                actor: "test-worker",
+                limit: 20,
+                dry_run: false,
+                trace_id: Some("trace-memory-unfinished"),
+            },
+        )
+        .expect("collector run");
+        assert_eq!(completed_report["processed_count"], json!(1));
+        assert_eq!(completed_report["candidate_count"], json!(1));
+    }
+
+    #[test]
     fn memory_candidate_state_machine_reclassifies_merges_and_rejects() {
         let conn = conn();
         for (trace_id, message_id, question) in [
@@ -3553,7 +3647,7 @@ mod tests {
                 role: "user".to_string(),
                 content: question.to_string(),
             }];
-            create_context_for_request(
+            let context = create_context_for_request(
                 &conn,
                 ContextRequestInput {
                     trace_id,
@@ -3568,6 +3662,19 @@ mod tests {
                 },
             )
             .expect("context created");
+            append_final_response(
+                &conn,
+                FinalResponseJournalInput {
+                    trace_id,
+                    user_session_id: &context.user_session_id,
+                    interaction_context_id: &context.interaction_context_id,
+                    context_pack_id: &context.context_pack_id,
+                    external_message_id: message_id,
+                    package_id: Some("pkg-memory-state"),
+                    response: &json!({"status": "ok"}),
+                },
+            )
+            .expect("final response journal");
         }
         run_memory_collector(
             &conn,
@@ -3687,7 +3794,7 @@ mod tests {
             role: "user".to_string(),
             content: "以后回答时，请用简体中文短句总结。".to_string(),
         }];
-        create_context_for_request(
+        let context = create_context_for_request(
             &conn,
             ContextRequestInput {
                 trace_id: "trace-memory-required-reason",
@@ -3702,6 +3809,19 @@ mod tests {
             },
         )
         .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-memory-required-reason",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-required-message",
+                package_id: Some("pkg-memory-required"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
         run_memory_collector(
             &conn,
             MemoryCollectorRunInput {
