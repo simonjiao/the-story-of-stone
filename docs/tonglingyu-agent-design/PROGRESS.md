@@ -100,6 +100,13 @@
   `session_journal -> Memory Collector -> memory_candidate -> policy decision ->
   memory_card -> read enablement -> context_pack.memory_read_refs -> context_projection ->
   Runtime answer`。该更新只是设计冻结，不声明 scoped memory production-ready。
+- 2026-05-19 Phase 4 policy contract 已冻结为 `scoped-memory-policy-v1`：默认
+  `policy_mode=auto_policy`，保留 `shadow_only` 和 `manual_required` 降级；
+  scope automation matrix、confidence threshold、TTL、candidate type allowlist、
+  LLM schema `scoped-memory-llm-filter-v1`、LLM overreach fail-closed 字段和
+  context read budget 均已写入 checklist。实现不得临场硬编码阈值或以补丁绕过
+  policy contract；任何生产策略调整都必须形成新 policy version 并重新通过 release
+  gate。
 
 ## 已确认
 

@@ -65,7 +65,7 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 7. 不通过手工 SQL 直接跳过状态机；
 8. 不把非 Hermes external agent memory 接入纳入本 Phase。
 
-## Policy 模型
+## Policy Contract
 
 Phase 4 必须新增或复用结构化 policy decision 记录。最低字段：
 
@@ -95,6 +95,150 @@ Policy 配置必须版本化。阈值、TTL、scope 允许列表、risk flag 规
 版本不得作为无文档硬编码存在。具体数值由 policy version 定义，production gate
 验证每条自动可读 memory 都能回放到对应 policy decision。
 
+## `scoped-memory-policy-v1`
+
+Phase 4 默认 policy version 固定为 `scoped-memory-policy-v1`。任何阈值、TTL、scope
+自动化规则或 LLM schema 的生产变更，都必须形成新的 policy version，并重新通过
+hhost release gate。实现不得在代码里临时改阈值来绕过 policy contract。
+
+默认配置：
+
+1. `TONGLINGYU_MEMORY_POLICY_MODE=auto_policy`；
+2. `shadow_only` 可用于发布前观测和策略回滚；
+3. `manual_required` 可用于事故降级、租户级降级或高风险 scope；
+4. policy actor 使用 `memory_policy:auto:scoped-memory-policy-v1`；
+5. LLM schema version 使用 `scoped-memory-llm-filter-v1`；
+6. 所有自动可读 memory 必须带 `policy_decision_id`、`policy_version`、
+   `policy_mode`、`confidence`、`risk_flags`、`expires_at` 和 audit ref。
+
+### Scope Automation Matrix
+
+| Scope | 默认自动化 | 自动可读条件 | 默认降级 |
+| --- | --- | --- | --- |
+| `user_private` | `auto_enable` | 低风险偏好、背景或工作方法，`confidence >= 0.85` | `manual_required` |
+| `profile_common` | `auto_enable_limited` | 明确绑定 profile 的低风险运行偏好，`confidence >= 0.92` | `manual_required` |
+| `knowledge_space` | `auto_enable_limited` | 非事实类检索偏好或工作方法，`confidence >= 0.94` | `manual_required` |
+| `research_topic` | `auto_enable_limited` | 主题上下文摘要、问题偏好或方法偏好，`confidence >= 0.94` | `manual_required` |
+| `source_collection` | `manual_first_with_shadow` | 默认不自动读；只能 shadow 观测来源使用边界和检索偏好 | `manual_required` |
+
+`auto_enable_limited` 表示 policy 可以自动 approve、promote 和 enable read，但只允许
+allowlist 中的 candidate type，且 scope ref 必须精确绑定。`manual_first_with_shadow`
+表示生产读取必须人工 enable，自动策略只能生成 policy decision 和候选证据。
+
+### 自动可用最低条件
+
+自动 `enable_read` 必须同时满足：
+
+1. 来源是已完成 trace/context 的 `user_message`；
+2. journal 已绑定 `context_pack_id`；
+3. hard deny 未命中；
+4. LLM semantic filter 返回 `is_long_term_memory=true`；
+5. LLM semantic filter 返回 `is_temporary_instruction=false`；
+6. LLM semantic filter 返回 `is_quoted_or_third_party=false`；
+7. LLM semantic filter 返回 `has_contradiction=false`；
+8. scope 明确且 ACL 可验证；
+9. candidate type 在当前 scope allowlist 内；
+10. sensitivity 不高于当前 scope policy 允许值；
+11. 不涉及 source fact、reviewer 裁决、action result、任务状态、签署状态或权限变更；
+12. confidence 达到当前 scope 阈值；
+13. TTL 可计算；
+14. revoke、expire、disable 和 anonymize 路径可用。
+
+不满足任一条件时，policy 只能输出 `suppress`、`shadow_only` 或
+`pending_manual_review`，不得输出 `enable_read`。
+
+### TTL Policy
+
+| Candidate type | 默认 TTL |
+| --- | --- |
+| `answer_style_preference` | 90 天 |
+| `verbosity_preference` | 90 天 |
+| `language_preference` | 180 天 |
+| `workflow_preference` | 180 天 |
+| `retrieval_preference` | 180 天 |
+| `stable_user_background` | 365 天，仅限 `user_private` |
+| `research_interest` | 180 天 |
+| `research_topic_context` | 90 天 |
+| `source_collection_usage_preference` | 90 天，默认 manual enable |
+| `pending_manual_review` | 30 天后过期 |
+
+TTL 到期不得删除审计链。到期行为是 `read_enabled=false` 或 card/candidate
+`expired`，并写 transition audit。legal hold 可以阻止删除和匿名化，但不得延长读取权限。
+
+### Candidate Type Allowlist
+
+允许自动化的 candidate type：
+
+1. `answer_style_preference`；
+2. `verbosity_preference`；
+3. `language_preference`；
+4. `workflow_preference`；
+5. `retrieval_preference`；
+6. `stable_user_background`，仅限 `user_private`；
+7. `research_interest`；
+8. `research_topic_context`；
+9. `source_collection_usage_preference`，默认只允许 shadow 或 manual enable。
+
+禁止自动化的 candidate type：
+
+1. `source_fact`；
+2. `literary_claim`；
+3. `reviewer_decision`；
+4. `task_status`；
+5. `action_result`；
+6. `credential`；
+7. `legal_or_identity_assertion`；
+8. `permission_or_acl_request`；
+9. `temporary_instruction`；
+10. `system_or_prompt_instruction`。
+
+### LLM Schema `scoped-memory-llm-filter-v1`
+
+LLM semantic filter 的输出必须匹配以下语义字段：
+
+```json
+{
+  "schema_version": "scoped-memory-llm-filter-v1",
+  "is_long_term_memory": true,
+  "is_temporary_instruction": false,
+  "is_quoted_or_third_party": false,
+  "has_contradiction": false,
+  "scope_type": "user_private",
+  "candidate_type": "answer_style_preference",
+  "confidence": 0.91,
+  "sensitivity": "low",
+  "risk_flags": [],
+  "ttl_hint": "90d",
+  "exclusion_flags": []
+}
+```
+
+LLM 输出包含以下任一字段时 fail-closed：
+
+1. `approve`；
+2. `promote`；
+3. `read_enabled`；
+4. `acl`；
+5. `reviewer_decision`；
+6. `evidence_package`；
+7. `task_status`；
+8. `source_fact`；
+9. `tool_permission`；
+10. `system_prompt`。
+
+### Read Budget
+
+ContextPackBuilder 必须限制 memory 读取量，防止 context bloat 和 scope 泄露：
+
+1. 每个 `context_pack` 最多读取 8 条 memory ref；
+2. `user_private` 最多 4 条；
+3. shared scope 总计最多 4 条；
+4. `honglou-main` 最多接收 8 条摘要；
+5. `honglou-text` 和 `honglou-commentary` 最多接收 2 条非隐私检索偏好；
+6. `honglou-reviewer` 不接收 memory 内容，只接收 memory policy digest 和使用摘要；
+7. 超出预算时按 confidence、recency、scope specificity 和 policy priority 排序截断；
+8. 截断必须写 read decision audit，不得静默丢弃。
+
 ## 自动策略分层
 
 自动策略不是单一开关。Phase 4 必须按 scope 和风险分层：
@@ -107,8 +251,8 @@ Policy 配置必须版本化。阈值、TTL、scope 允许列表、risk flag 规
    source fact 或校勘结论；不满足 policy allowlist 时进入 manual review；
 4. `research_topic`：只能保存当前研究主题的长期上下文摘要、问题偏好和方法偏好；
    不能把未证实研究结论变成 memory fact；
-5. `source_collection`：只能保存来源集合的使用边界、检索偏好或审校提示；不能替代
-   source snapshot、license metadata 或证据登记。
+5. `source_collection`：只能保存来源集合的使用边界、检索偏好或审校提示；默认必须
+   manual enable，不能替代 source snapshot、license metadata 或证据登记。
 
 所有 scope 都必须支持 `manual_required` 降级。所有自动策略都必须支持
 `shadow_only`，用于发布前观测和策略回滚。
@@ -239,8 +383,10 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 - [ ] 新增或复用 policy decision 记录。
 - [ ] 定义 policy mode：`shadow_only`、`auto_policy`、`manual_required`。
-- [ ] 定义 scope automation matrix。
-- [ ] 定义 policy version、threshold、TTL、risk flag 和 LLM schema 版本来源。
+- [ ] 实现 `scoped-memory-policy-v1`。
+- [ ] 实现 scope automation matrix。
+- [ ] 实现 policy threshold、TTL、risk flag 和 LLM schema version。
+- [ ] 实现 read budget 和截断 audit。
 - [ ] 配置和 metrics 暴露有效 policy mode，但不暴露敏感 payload。
 
 ### P4B Rule + LLM Filter
@@ -290,6 +436,9 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [ ] 本地 cargo check/test/clippy 通过。
 - [ ] collector -> policy -> card -> context build contract smoke 通过。
 - [ ] auto policy 与 manual review contract smoke 通过。
+- [ ] `scoped-memory-policy-v1` replay gate 通过。
+- [ ] LLM schema overreach fail-closed gate 通过。
+- [ ] read budget / truncation audit gate 通过。
 - [ ] ACL/scope fail-closed matrix 通过。
 - [ ] revoke/expire/disable read path smoke 通过。
 - [ ] export/anonymize/legal hold/restore gate 通过。
@@ -340,6 +489,10 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 ## 待确认项
 
-无。上述决策按当前讨论冻结：Phase 4 保持 Scoped Memory Production 目标，自动策略
+无产品/架构方向待确认项。Phase 4 保持 Scoped Memory Production 目标，自动策略
 作为主生产路径，人工审核流程保留但可被策略跳过，LLM 只做语义过滤，最终授权由
 versioned policy engine 决定。
+
+实现参数已在 `scoped-memory-policy-v1` 中冻结。后续如需调整阈值、TTL、scope
+automation matrix、LLM schema 或 read budget，必须形成新的 policy version，并重新
+通过 release gate；不得在实现中临场硬编码或以补丁方式绕过 policy contract。
