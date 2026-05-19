@@ -8,9 +8,15 @@ Runtime 可见上下文从请求级 `context_pack` 收敛为面向 consumer 的
 `context_projection`，最终通过本地验证、strict Gateway gate、scoped context live
 gate 和 `hhost` full remote release automation。
 
-当前状态：Phase 2 本地实现已完成第一轮闭环，并通过本地 Runtime/Gateway 单测、
-clippy、gateway smoke 和 quick QA；`hhost` 目标环境 gate 尚未执行，尚不能声明
-Phase 2 production-ready 或 scoped context 全量 production-ready。
+当前状态：Phase 2 已实现并通过目标环境 production gate。`hhost` 当前部署版本为
+`0.1.7`，Gateway 运行 image id 为
+`sha256:93df2e2555669a77097590eda1bb4b63e6cc709b58604f741fbf04ce1c6845ab`；
+live gate artifact 为
+`data/tonglingyu/remote-live-gates/remote-live-20260519T013236Z-78446/remote-live-gates.json`，
+full remote release automation artifact 为
+`data/tonglingyu/remote-release-automation/remote-release-20260519T013318Z-78823/remote-release-automation.json`。
+该结论只覆盖 Phase 2 Context-aware Runtime，不覆盖长期 memory、Memory Collector、
+审核页面或非 Hermes external agent 接入。
 
 Phase 2 只覆盖 Context-aware Runtime。它不实现长期 memory、Memory Collector、
 memory 审核页面或 Context Governance 独立服务拆分。
@@ -341,16 +347,18 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ### P2I hhost production gate
 
-- [ ] 按版本规则 bump deploy patch version。
-- [ ] 同步 release tools 到 `hhost`。
-- [ ] 重建并部署 `tonglingyu-gateway` 镜像。
-- [ ] 运行 strict Gateway live gate。
-- [ ] 运行 scoped context live gate，覆盖多轮追问、consumer projection 隔离和
+- [x] 按版本规则 bump deploy patch version：`0.1.6` -> `0.1.7`。
+- [x] 同步 release tools 到 `hhost`。
+- [x] 重建并部署 `tonglingyu-gateway` 镜像。
+- [x] 运行 strict Gateway live gate。
+- [x] 运行 scoped context live gate，覆盖多轮追问、consumer projection 隔离和
       fail-closed。
-- [ ] 运行 full remote release automation。
-- [ ] release readiness 为 `production_release_ready=true`。
-- [ ] saved validator 为 `status=ok`、`errors=[]`。
-- [ ] open P0 retrieval failures / governance tasks 均为 `0`。
+- [x] 运行 full remote release automation：
+      `remote-release-20260519T013318Z-78823`。
+- [x] release readiness 为 `production_release_ready=true`，
+      `required_failures=[]`，`release_blockers=[]`。
+- [x] saved validator 为 `status=ok`、`errors=[]`。
+- [x] open P0 retrieval failures / governance tasks 均为 `0`。
 
 ## Fail-closed Matrix
 
@@ -375,19 +383,19 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ## 退出条件
 
-- [ ] consumer 间未授权上下文不可见。
-- [ ] Runtime profile 只能读取自己的 `context_projection`，不能读取完整
+- [x] consumer 间未授权上下文不可见。
+- [x] Runtime profile 只能读取自己的 `context_projection`，不能读取完整
       `context_pack`。
-- [ ] Hermes transcript 不替代业务 session。
-- [ ] pack/projection schema 或 digest 不匹配时 workflow fail-closed。
-- [ ] 未知 consumer、未知 runtime adapter 和 `external_agent` 在 Phase 2
+- [x] Hermes transcript 不替代业务 session。
+- [x] pack/projection schema 或 digest 不匹配时 workflow fail-closed。
+- [x] 未知 consumer、未知 runtime adapter 和 `external_agent` 在 Phase 2
       fail-closed。
-- [ ] replay 能重建 context pack、context projection、Runtime step、package 和
+- [x] replay 能重建 context pack、context projection、Runtime step、package 和
       review 链。
-- [ ] 普通用户不能传入 context、scope、memory、consumer、tool、runtime adapter 或
+- [x] 普通用户不能传入 context、scope、memory、consumer、tool、runtime adapter 或
       reviewer 控制字段。
-- [ ] public response、SSE、metrics 和普通日志不泄露 context/journal/memory 内部字段。
-- [ ] hhost full remote release automation 通过。
+- [x] public response、SSE、metrics 和普通日志不泄露 context/journal/memory 内部字段。
+- [x] hhost full remote release automation 通过。
 
 ## 待确认项
 

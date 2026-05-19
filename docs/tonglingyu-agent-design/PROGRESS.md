@@ -49,7 +49,21 @@
   tool policy digest、Runtime audit、replay 和 hhost production gate；不做 Memory
   Collector、`memory_candidate`、active `memory_card`、审核页面或非 Hermes
   external agent 接入。目标是 Phase 2 production-ready，不是本地代码切片完成；
-  当前状态是“可进入 production-ready 实现阶段”，不是“Phase 2 已完成”。
+  当前已完成实现和 hhost production gate。
+- 2026-05-19 Phase 2 Context-aware Runtime 已部署为 `0.1.7` 并通过 `hhost`
+  production-ready gate：`tonglingyu-gateway` 运行 image id 为
+  `sha256:93df2e2555669a77097590eda1bb4b63e6cc709b58604f741fbf04ce1c6845ab`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T013236Z-78446/remote-live-gates.json`，
+  其中 model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway
+  和 scoped context gate 均通过。完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T013318Z-78823/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`；release readiness 为
+  `status=passed`、`production_release_ready=true`、`required_failures=[]`、
+  `release_blockers=[]`，saved validator 为 `status=ok`、`errors=[]`，open P0
+  retrieval failures / governance tasks 均为 0。该结论只覆盖 Phase 2
+  Context-aware Runtime，仍不覆盖长期 memory、Memory Collector、审核页面、
+  Context Governance 独立服务或非 Hermes external agent 接入。
 
 ## 已确认
 
