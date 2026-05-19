@@ -2207,6 +2207,34 @@ fn validate_step_projection_binding(
     Ok(())
 }
 
+fn validate_runtime_context_pack_digest(
+    conn: &Connection,
+    context: &RuntimeContextContract,
+) -> Result<()> {
+    if !sqlite_table_exists(conn, "context_packs")? {
+        return Ok(());
+    }
+    let stored_digest = conn
+        .query_row(
+            "SELECT COALESCE(digest, '') FROM context_packs WHERE context_pack_ref = ?1 LIMIT 1",
+            params![&context.context_pack_ref],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    match stored_digest {
+        Some(digest) if digest == context.context_pack_digest => Ok(()),
+        Some(_) => Err(anyhow!("runtime context_pack_digest mismatch")),
+        None if context.context_pack_ref.ends_with("/local")
+            || context.context_pack_ref.ends_with("/test") =>
+        {
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "runtime context_pack_ref not found in context store"
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRuntimePlanGateReport {
     pub status: String,
@@ -3091,6 +3119,7 @@ pub fn execute_runtime_workflow(
         profiles: input.profiles.clone(),
     });
     validate_runtime_context_contract(&input, &workflow_plan)?;
+    validate_runtime_context_pack_digest(conn, &input.context)?;
     let mut steps = Vec::new();
     let mut cards = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
@@ -21927,6 +21956,32 @@ mod tests {
                 .to_string()
                 .contains("context_projection_digest mismatch")
         );
+    }
+
+    #[test]
+    fn runtime_workflow_rejects_context_pack_digest_mismatch() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        conn.execute(
+            "CREATE TABLE context_packs (context_pack_ref TEXT PRIMARY KEY, digest TEXT)",
+            [],
+        )
+        .expect("context pack table");
+        let input = test_workflow_input(
+            "trace-runtime-pack-digest-test",
+            "脂批如何评价通灵玉？",
+            2,
+            vec!["base_text".to_string()],
+        );
+        conn.execute(
+            "INSERT INTO context_packs (context_pack_ref, digest) VALUES (?1, ?2)",
+            params![&input.context.context_pack_ref, "wrong-digest"],
+        )
+        .expect("context pack row");
+
+        let error = execute_runtime_workflow(&conn, input)
+            .expect_err("context pack digest mismatch must fail closed");
+
+        assert!(error.to_string().contains("context_pack_digest mismatch"));
     }
 
     #[tokio::test]

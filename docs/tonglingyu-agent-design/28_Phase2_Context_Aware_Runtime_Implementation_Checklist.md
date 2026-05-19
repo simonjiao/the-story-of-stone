@@ -8,8 +8,9 @@ Runtime 可见上下文从请求级 `context_pack` 收敛为面向 consumer 的
 `context_projection`，最终通过本地验证、strict Gateway gate、scoped context live
 gate 和 `hhost` full remote release automation。
 
-当前状态：Phase 2 设计已细化，可以进入 production-ready 实现阶段；尚未开始编码，
-尚不能声明 Phase 2 完成或 scoped context 全量 production-ready。
+当前状态：Phase 2 本地实现已完成第一轮闭环，并通过本地 Runtime/Gateway 单测、
+clippy、gateway smoke 和 quick QA；`hhost` 目标环境 gate 尚未执行，尚不能声明
+Phase 2 production-ready 或 scoped context 全量 production-ready。
 
 Phase 2 只覆盖 Context-aware Runtime。它不实现长期 memory、Memory Collector、
 memory 审核页面或 Context Governance 独立服务拆分。
@@ -266,77 +267,77 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ### P2A Contract 与 schema
 
-- [ ] 定义请求级 `context_pack` schema。
-- [ ] 定义 consumer 级 `context_projection` schema。
-- [ ] 定义 Runtime context input 结构。
-- [ ] 为 pack ref、projection ref、schema version、digest、consumer、runtime
+- [x] 定义请求级 `context_pack` schema。
+- [x] 定义 consumer 级 `context_projection` schema。
+- [x] 定义 Runtime context input 结构。
+- [x] 为 pack ref、projection ref、schema version、digest、consumer、runtime
       adapter、tool policy 和 output contract 增加校验函数。
-- [ ] 为不支持 schema version、pack digest mismatch、projection digest
+- [x] 为不支持 schema version、pack digest mismatch、projection digest
       mismatch、consumer mismatch、tool policy mismatch 和 output contract
       mismatch 增加错误类别。
 
 ### P2B Context Governance 到 Runtime 的传递链
 
-- [ ] Context Governance 为每次 trace 生成请求级 `context_pack`。
-- [ ] Context Governance 为每个已登记 consumer 生成独立 `context_projection`。
-- [ ] Gateway Runtime step plan 携带 `context_projection_ref` 和父级
+- [x] Context Governance 为每次 trace 生成请求级 `context_pack`。
+- [x] Context Governance 为每个已登记 consumer 生成独立 `context_projection`。
+- [x] Gateway Runtime step plan 携带 `context_projection_ref` 和父级
       `context_pack_ref`。
-- [ ] Gateway 不把完整 context pack 或 projection 塞进 public response、SSE 或
+- [x] Gateway 不把完整 context pack 或 projection 塞进 public response、SSE 或
       普通日志。
-- [ ] 去重 replay 请求必须复用原 trace 的 pack/projection ref，不重新解析用户历史。
+- [x] 去重 replay 请求必须复用原 trace 的 pack/projection ref，不重新解析用户历史。
 
 ### P2C Runtime Adapter projection enforcement
 
-- [ ] Runtime workflow input 从 `question` 单字段升级为 question +
+- [x] Runtime workflow input 从 `question` 单字段升级为 question +
       `context_projection_ref` + `context_pack_ref`。
-- [ ] Runtime Adapter 只按 projection ref 读取 Runtime 可见上下文。
-- [ ] Runtime Adapter 不向 profile step message 注入完整 context pack。
-- [ ] 未知 `consumer_type`、`consumer_name` 或 `runtime_adapter` fail-closed。
-- [ ] `external_agent` consumer 类型保留但默认 unsupported / fail-closed。
+- [x] Runtime Adapter 只按 projection ref 读取 Runtime 可见上下文。
+- [x] Runtime Adapter 不向 profile step message 注入完整 context pack。
+- [x] 未知 `consumer_type`、`consumer_name` 或 `runtime_adapter` fail-closed。
+- [x] `external_agent` consumer 类型保留但默认 unsupported / fail-closed。
 
 ### P2D Consumer projection isolation
 
-- [ ] Runtime 在进入每个 consumer 前读取并校验对应 projection。
-- [ ] profile step message 只包含该 consumer projection。
-- [ ] `honglou-text` / `honglou-commentary` 测试证明看不到完整 session summary。
-- [ ] `honglou-reviewer` 测试证明看不到未审核 memory/candidate 和 Hermes transcript。
+- [x] Runtime 在进入每个 consumer 前读取并校验对应 projection。
+- [x] profile step message 只包含该 consumer projection。
+- [x] `honglou-text` / `honglou-commentary` 测试证明看不到完整 session summary。
+- [x] `honglou-reviewer` 测试证明看不到未审核 memory/candidate 和 Hermes transcript。
 
 ### P2E Tool policy binding
 
-- [ ] Runtime allowed tools 必须来自 context projection 和 step plan 的交集。
-- [ ] 任一 consumer 请求未授权 tool 时 fail-closed。
-- [ ] `tool_policy_digest` 与 projection 或 step plan 不一致时 fail-closed。
-- [ ] 负面测试覆盖用户伪造 `allowed_tools`、`forbidden_tools` 和
+- [x] Runtime allowed tools 必须来自 context projection 和 step plan 的交集。
+- [x] 任一 consumer 请求未授权 tool 时 fail-closed。
+- [x] `tool_policy_digest` 与 projection 或 step plan 不一致时 fail-closed。
+- [x] 负面测试覆盖用户伪造 `allowed_tools`、`forbidden_tools` 和
       `runtime_step_plan`。
 
 ### P2F Audit、admin trace 与 replay
 
-- [ ] Runtime audit 记录 pack ref、projection ref、consumer、runtime adapter、tool
+- [x] Runtime audit 记录 pack ref、projection ref、consumer、runtime adapter、tool
       policy digest、output ref 和 schema version。
-- [ ] admin trace 只展示 context 摘要、hash、ref、consumer、runtime adapter 和校验
+- [x] admin trace 只展示 context 摘要、hash、ref、consumer、runtime adapter 和校验
       状态。
-- [ ] replay 可以重建 context pack、context projection、Runtime step、package 和
+- [x] replay 可以重建 context pack、context projection、Runtime step、package 和
       review 链。
-- [ ] replay 不读取当前 journal 来替代历史 pack/projection。
+- [x] replay 不读取当前 journal 来替代历史 pack/projection。
 
 ### P2G Public surface 与隐私
 
-- [ ] public chat response 不返回 context/journal/memory 内部 ID。
-- [ ] SSE chunk 不泄露 context projection、context pack 或 journal 原文。
-- [ ] metrics 不包含用户原文、高基数 context id、projection id 或 journal id。
-- [ ] 普通用户不能提交 context、scope、memory、consumer、tool、runtime adapter 或
+- [x] public chat response 不返回 context/journal/memory 内部 ID。
+- [x] SSE chunk 不泄露 context projection、context pack 或 journal 原文。
+- [x] metrics 不包含用户原文、高基数 context id、projection id 或 journal id。
+- [x] 普通用户不能提交 context、scope、memory、consumer、tool、runtime adapter 或
       reviewer 控制字段。
 
 ### P2H 本地验证
 
-- [ ] `cargo fmt --all --check`。
-- [ ] `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
-- [ ] `cargo test -p tonglingyu-gateway`。
-- [ ] `cargo test -p tonglingyu-runtime`。
-- [ ] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`。
-- [ ] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Phase2
+- [x] `cargo fmt --all --check`。
+- [x] `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
+- [x] `cargo test -p tonglingyu-gateway`。
+- [x] `cargo test -p tonglingyu-runtime`。
+- [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`。
+- [x] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Phase2
       projection gate。
-- [ ] `scripts/qa.sh --quick`。
+- [x] `scripts/qa.sh --quick`。
 
 ### P2I hhost production gate
 
