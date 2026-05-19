@@ -496,6 +496,24 @@ struct ServeArgs {
     rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
+        default_value_t = true
+    )]
+    memory_collector_background_enabled: bool,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    memory_collector_interval_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_BATCH_SIZE",
+        default_value_t = 100
+    )]
+    memory_collector_batch_size: usize,
     #[arg(long, env = "TONGLINGYU_PROFILE_MAIN", default_value = "honglou-main")]
     profile_main: String,
     #[arg(long, env = "TONGLINGYU_PROFILE_TEXT", default_value = "honglou-text")]
@@ -1646,6 +1664,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         },
         started_at: now_rfc3339(),
     });
+    if args.memory_collector_background_enabled {
+        spawn_memory_collector_background_worker(
+            args.db.clone(),
+            args.memory_collector_interval_secs,
+            args.memory_collector_batch_size,
+        );
+    }
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
@@ -1741,6 +1766,76 @@ async fn serve(args: ServeArgs) -> Result<()> {
     tracing::info!(bind = %args.bind, "tonglingyu gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn spawn_memory_collector_background_worker(db: PathBuf, interval_secs: u64, batch_size: usize) {
+    let interval_secs = interval_secs.max(30);
+    let limit = batch_size.clamp(1, 100);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let db = db.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let conn = open_db(&db)?;
+                run_memory_collector(
+                    &conn,
+                    MemoryCollectorRunInput {
+                        trigger_type: "background_worker",
+                        actor: "gateway-memory-collector-worker",
+                        limit,
+                        dry_run: false,
+                        trace_id: None,
+                    },
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(report)) => {
+                    let run_id = report
+                        .get("run_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let processed_count = report
+                        .get("processed_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let candidate_count = report
+                        .get("candidate_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let denied_count = report
+                        .get("denied_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let suppressed_count = report
+                        .get("suppressed_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let duplicate_count = report
+                        .get("duplicate_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    tracing::info!(
+                        %run_id,
+                        processed_count,
+                        candidate_count,
+                        denied_count,
+                        suppressed_count,
+                        duplicate_count,
+                        "memory collector background worker completed"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "memory collector background worker failed");
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "memory collector background worker panicked");
+                }
+            }
+        }
+    });
 }
 
 fn build_kb(args: &BuildKbArgs) -> Result<()> {
