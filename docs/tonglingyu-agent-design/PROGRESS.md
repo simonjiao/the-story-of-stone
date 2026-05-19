@@ -64,6 +64,18 @@
   retrieval failures / governance tasks 均为 0。该结论只覆盖 Phase 2
   Context-aware Runtime，仍不覆盖长期 memory、Memory Collector、审核页面、
   Context Governance 独立服务或非 Hermes external agent 接入。
+- 2026-05-19 Phase 3 已按 5 项决策冻结为独立实现 checklist：
+  `29_Phase3_Memory_Candidate_Implementation_Checklist.md`。Phase 3 实现 Memory
+  Collector、`memory_candidate`、完整状态机、admin-only CLI/API、三种触发方式和
+  LLM 辅助抽取；状态机包含 `approve/promote/reject/reclassify/expire/revoke/merge`。
+  自动 promotion 和 active memory 读取路径仍放在 Phase 4；Phase 3 即使可以写出
+  active `memory_card` 状态，也必须保持 `read_enabled=false`，不得让 memory 进入
+  `context_pack`、Runtime projection、evidence package、reviewer 裁决或最终回答。
+  触发方式冻结为 background worker 主路径，scheduled job 和 admin manual trigger
+  作为辅助路径，并共享 lease、水位、幂等、重试和 audit。LLM 只允许做 redacted、
+  schema-bound 候选抽取辅助，不能决定 promotion、ACL、reviewer 裁决或 evidence
+  package 内容。当前状态是 Phase 3 可进入实现；不能声明 scoped memory
+  production-ready。
 
 ## 已确认
 

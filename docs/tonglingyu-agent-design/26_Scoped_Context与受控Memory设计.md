@@ -30,7 +30,9 @@
 6. Runtime 接入边界以 `20_Runtime接入设计与实施计划.md` 为准；
 7. Phase 2 实现细化以
    `28_Phase2_Context_Aware_Runtime_Implementation_Checklist.md` 为准；
-8. 生产目标和禁止过早声明以 `21_实现目标与落地计划.md` 为准。
+8. Phase 3 实现细化以
+   `29_Phase3_Memory_Candidate_Implementation_Checklist.md` 为准；
+9. 生产目标和禁止过早声明以 `21_实现目标与落地计划.md` 为准。
 
 ## 架构结论
 
@@ -410,7 +412,8 @@ journal 原文永不进入 public response、metrics、普通日志或 release r
 ## Memory Collector 工作流
 
 Memory Collector 冻结为异步 collector + `memory_candidate` 队列 +
-admin-only CLI/API 审核。
+admin-only CLI/API 审核。Phase 3 细化见
+`29_Phase3_Memory_Candidate_Implementation_Checklist.md`。
 
 Phase 1/2/3 不做审核页面。Phase 4 之后若候选量稳定存在，可以在同一套 admin-only
 API 之上增加页面，但页面不得绕过状态机。
@@ -422,7 +425,8 @@ API 之上增加页面，但页面不得绕过状态机。
 3. Collector 过滤密钥、token、系统提示、source fact、reviewer 裁决、签署状态、
    任务关闭状态和绕过证据链的请求；
 4. Collector 只生成 `memory_candidate`；
-5. 低风险 `user_private` 偏好可以由 Promotion Policy 自动 active；
+5. 低风险 `user_private` 偏好可以由 Promotion Policy 自动 active，但自动 promotion
+   只能在 Phase 4 打开；
 6. 其他 candidate 必须进入审核队列；
 7. 未审核 candidate 不参与正式回答；
 8. ContextPackBuilder 只读取当前 scope 和 ACL 授权的 active memory 摘要。
@@ -576,7 +580,9 @@ surface 和目标 `hhost` live release 证据。
 
 ## Phase 3 实现规格
 
-Phase 3 实现 Memory Candidate。它不让长期 memory 参与正式回答。
+Phase 3 实现 Memory Candidate、完整状态机、admin-only CLI/API 和 LLM 辅助抽取。
+它不让长期 memory 参与正式回答。完整 implementation checklist 见
+`29_Phase3_Memory_Candidate_Implementation_Checklist.md`。
 
 允许实现：
 
@@ -586,6 +592,13 @@ Phase 3 实现 Memory Candidate。它不让长期 memory 参与正式回答。
 3. candidate 默认 `pending`；
 4. candidate 不进入 context pack；
 5. 禁止把 source fact、reviewer 裁决、签署状态或 action result 生成为普通 memory。
+6. 状态机完整实现：`approve`、`promote`、`reject`、`reclassify`、`expire`、
+   `revoke`、`merge` 都必须写 audit；
+7. `promote` 可以写出 active `memory_card` 状态，但 Phase 3 必须保持读取面关闭；
+8. Collector 主路径是 background worker；scheduled job 和 admin manual trigger 是
+   辅助路径，三者共享 lease、水位、幂等、重试和 audit；
+9. LLM 只能做 redacted、schema-bound 的候选抽取辅助，不能决定 promotion、ACL、
+   reviewer 裁决或 evidence package 内容。
 
 退出条件：
 
@@ -593,7 +606,9 @@ Phase 3 实现 Memory Candidate。它不让长期 memory 参与正式回答。
 2. 禁止项能被过滤并审计；
 3. user_private、profile_common、knowledge_space、research_topic 和 source_collection
    的候选 scope 不串线；
-4. 没有 active memory 读取路径。
+4. 完整状态机已实现，所有 transition 写 audit；
+5. CLI/API 审核路径已通过，且不暴露公网审核入口；
+6. 没有 active memory 读取路径。
 
 ## Phase 4 实现规格
 
