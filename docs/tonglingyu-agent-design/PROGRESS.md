@@ -115,9 +115,25 @@
   lifecycle export/anonymize/legal hold 覆盖 memory，以及 backup/restore 后 scoped
   memory read path 验证。已通过 `cargo test --workspace`、`cargo clippy --workspace
   --all-targets -- -D warnings`、本地 gateway smoke、RQA user lifecycle gate、
-  RQA backup/restore drill 和 release readiness contract。该结论仍只是本地
-  Phase 4 closure；hhost live gate、full remote release automation、release
-  readiness 和 post-release monitor 尚未通过前，不声明 scoped memory production-ready。
+  RQA backup/restore drill 和 release readiness contract。
+- 2026-05-19 Phase 4 Scoped Memory Production 已部署为 `0.1.12` 并通过 hhost
+  production-ready gate：`tonglingyu-gateway` 运行 image id 为
+  `sha256:1e1e53ef3d079166a8c3eb1fd2df088a9535d76b7c3efd495aa69d9ef4e6a17f`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T143702Z-79221/remote-live-gates.json`，
+  其中 model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway
+  和 scoped context gate 均通过。完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T184551Z-93162/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`；release readiness 为
+  `status=passed`、`production_release_ready=true`，saved validator 为 `status=ok`、
+  `production_release_ready=true`、`errors=[]`。同一 release 绑定
+  `environment=hhost`、`target=tonglingyu-rqa`、git commit
+  `cbba91bb73dd6e3004975eecc0326c32e5c661dd`、`tracked_dirty=false`，16 个
+  required gates 全部通过。容量 gate 为 `rqa_write_p95_ms=4618`、
+  `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、`release_gate_ms=26759`；
+  post-release monitor 60 分钟窗口 `sample_count=13`、`failed_sample_count=0`。
+  因此 Phase 4 scoped memory production-ready gate 已在当前 run 中闭合。
 
 ## 已确认
 

@@ -442,9 +442,9 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] ACL/scope fail-closed matrix 通过。
 - [x] revoke/expire/disable read path smoke 通过。
 - [x] export/anonymize/legal hold/restore gate 通过。
-- [ ] hhost live gate 通过。
-- [ ] full remote release automation 通过。
-- [ ] release readiness 记录 scoped memory production 证据，且 p95、错误率和
+- [x] hhost live gate 通过。
+- [x] full remote release automation 通过。
+- [x] release readiness 记录 scoped memory production 证据，且 p95、错误率和
       post-release monitor 不恶化。
 
 ### 本地实现证据
@@ -462,8 +462,28 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
   `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh`、
   `deploy/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh`、
   `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
-- hhost live gate、full remote release automation、release readiness 和
-  post-release monitor 尚未在本实现轮次完成，因此不能声明 Phase 4 production-ready。
+- 2026-05-19 已部署到 hhost 为 `tonglingyu-gateway:0.1.12`，运行 image id 为
+  `sha256:1e1e53ef3d079166a8c3eb1fd2df088a9535d76b7c3efd495aa69d9ef4e6a17f`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T143702Z-79221/remote-live-gates.json`，
+  model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway 和
+  scoped context gate 均通过。
+- 2026-05-19 完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T184551Z-93162/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`。release readiness 为
+  `status=passed`、`production_release_ready=true`；saved validator 为
+  `status=ok`、`production_release_ready=true`、`errors=[]`。
+- 2026-05-19 同一 release 绑定 `environment=hhost`、`target=tonglingyu-rqa`、
+  git commit `cbba91bb73dd6e3004975eecc0326c32e5c661dd`、`tracked_dirty=false`。
+  所有 16 个 required gate 均为 `passed`，包括 `rqa_user_lifecycle`、
+  `rqa_backup_restore_drill`、`security_scan`、`release_ops_readiness`、
+  `rqa_incident_capacity`、`strict_gateway`、`openwebui_function`、
+  `openwebui_admin_action` 和 `openwebui_browser_review`。
+- 2026-05-19 容量与值守证据通过：`rqa_write_p95_ms=4618`、
+  `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、
+  `release_gate_ms=26759`；post-release monitor 为 60 分钟窗口、
+  `sample_count=13`、`failed_sample_count=0`。
 
 ## Fail-closed Matrix
 
@@ -490,19 +510,19 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 ## 退出条件
 
-- [ ] `session_journal -> collector -> candidate -> policy -> memory_card -> context_pack`
+- [x] `session_journal -> collector -> candidate -> policy -> memory_card -> context_pack`
       主链路在本地和 hhost 均通过。
-- [ ] 自动策略可让符合 policy 的 scoped memory 进入可用状态。
-- [ ] 人工审核流程完整保留，且可处理自动 memory 的复核、撤销和回滚。
-- [ ] 所有 read-enabled memory 都可追溯到 policy decision、source journal、candidate、
+- [x] 自动策略可让符合 policy 的 scoped memory 进入可用状态。
+- [x] 人工审核流程完整保留，且可处理自动 memory 的复核、撤销和回滚。
+- [x] 所有 read-enabled memory 都可追溯到 policy decision、source journal、candidate、
       card 和 transition audit。
-- [ ] `user_private`、`profile_common`、`knowledge_space`、`research_topic` 和
+- [x] `user_private`、`profile_common`、`knowledge_space`、`research_topic` 和
       `source_collection` 都有明确 ACL、读取策略和 fail-closed gate。
-- [ ] memory 只作为偏好、背景、工作方法或长期上下文摘要进入授权 projection。
-- [ ] memory 不进入 evidence package，不替代证据，不改变 reviewer 裁决。
-- [ ] revoke、expire、disable、anonymize 和 legal hold 对新 context build 立即生效。
-- [ ] public response、SSE、metrics 和普通日志不泄露 memory 内部字段。
-- [ ] hhost full remote release automation 通过，release readiness 记录 scoped memory
+- [x] memory 只作为偏好、背景、工作方法或长期上下文摘要进入授权 projection。
+- [x] memory 不进入 evidence package，不替代证据，不改变 reviewer 裁决。
+- [x] revoke、expire、disable、anonymize 和 legal hold 对新 context build 立即生效。
+- [x] public response、SSE、metrics 和普通日志不泄露 memory 内部字段。
+- [x] hhost full remote release automation 通过，release readiness 记录 scoped memory
       production 证据。
 
 ## 待确认项
