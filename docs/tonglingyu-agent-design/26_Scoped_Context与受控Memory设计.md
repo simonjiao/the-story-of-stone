@@ -8,7 +8,7 @@
 当前结论：
 
 1. Phase 1 Scoped Context 最小闭环已实现，并已通过当次 `hhost` production gate；
-2. 可以进入 **Phase 2 Context-aware Runtime 实现**；
+2. 可以进入 **Phase 2 Context-aware Runtime production-ready 实现阶段**；
 3. 不能声明 scoped memory production-ready；
 4. 不能声明长期 memory、Memory Collector、审核流或 memory lifecycle 已闭合。
 
@@ -538,7 +538,9 @@ Phase 1 退出条件：
 
 ## Phase 2 实现规格
 
-Phase 2 实现 Context-aware Runtime。
+Phase 2 目标是 production-ready Context-aware Runtime，不是本地代码切片完成。
+完成口径必须同时覆盖实现、测试、projection 隔离、fail-closed、replay、public
+surface 和目标 `hhost` live release 证据。
 
 详细实现 checklist、work package、fail-closed matrix 和 hhost gate 见
 `28_Phase2_Context_Aware_Runtime_Implementation_Checklist.md`。本文只保留核心规格。
@@ -566,7 +568,9 @@ Phase 2 实现 Context-aware Runtime。
 4. Runtime profile 不能读取完整 `context_pack`；
 5. 未知 consumer、未知 Runtime Adapter 和 `external_agent` 在 Phase 2 fail-closed；
 6. replay 能重建 context pack、context projection、Runtime step、package 和
-   review 链。
+   review 链；
+7. strict Gateway gate、scoped context live gate、saved validator、release readiness
+   和 `hhost` full remote release automation 全部通过。
 
 ## Phase 3 实现规格
 
@@ -659,7 +663,7 @@ Scoped memory production-ready 还需要：
 
 1. 设计决策已冻结；
 2. Phase 1 Scoped Context 已实现并通过当次 `hhost` production gate；
-3. Phase 2 已达到进入实现条件；
+3. Phase 2 已达到进入 production-ready 实现阶段的设计条件；
 4. Phase 2 Context-aware Runtime 尚未实现；
 5. scoped memory 仍未实现；
 6. 长期 memory、Memory Collector、审核页面、独立 Context Governance 服务和 memory

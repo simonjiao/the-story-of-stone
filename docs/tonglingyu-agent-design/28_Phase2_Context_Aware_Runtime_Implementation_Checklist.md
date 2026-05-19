@@ -2,15 +2,38 @@
 
 ## 状态口径
 
-目标：把 Phase 1 生成的 scoped context 真正接入 Runtime 执行链，并把 Runtime
-可见上下文从请求级 `context_pack` 收敛为面向 consumer 的
-`context_projection`。
+目标：把 Phase 2 做到目标环境 production-ready，而不是只完成本地代码切片或文档
+闭环。具体目标是把 Phase 1 生成的 scoped context 真正接入 Runtime 执行链，并把
+Runtime 可见上下文从请求级 `context_pack` 收敛为面向 consumer 的
+`context_projection`，最终通过本地验证、strict Gateway gate、scoped context live
+gate 和 `hhost` full remote release automation。
 
-当前状态：Phase 2 设计已细化，可以进入实现准备；尚未开始编码，尚不能声明
-Phase 2 完成或 scoped context 全量 production-ready。
+当前状态：Phase 2 设计已细化，可以进入 production-ready 实现阶段；尚未开始编码，
+尚不能声明 Phase 2 完成或 scoped context 全量 production-ready。
 
 Phase 2 只覆盖 Context-aware Runtime。它不实现长期 memory、Memory Collector、
 memory 审核页面或 Context Governance 独立服务拆分。
+
+## 防过早声明规则
+
+Phase 2 允许声明的状态只能按证据逐级推进：
+
+1. 设计已对齐：只表示文档、contract、验收和边界一致；
+2. 本地实现已完成：只表示代码和本地测试通过；
+3. 目标环境已验证：只表示 `hhost` live gate 通过；
+4. production-ready：必须同时满足本地验证、strict Gateway gate、scoped context
+   live gate、full remote release automation、saved validator 和 release readiness。
+
+以下情况一律不能声明 Phase 2 production-ready：
+
+1. 只完成文档或 checklist；
+2. 只完成本地单元测试、smoke 或 clippy；
+3. 只证明 Phase 1 scoped context production-ready；
+4. 只新增 `context_projection` schema，但 Runtime 仍能读取完整 `context_pack`；
+5. 只预留 `external_agent` schema，但没有独立实现和 gate；
+6. hhost gate 未覆盖 consumer projection 隔离、fail-closed、replay 和 public
+   surface 泄露检查；
+7. saved validator、release readiness 或 open P0 retrieval/governance 检查缺失。
 
 ## 进入条件
 

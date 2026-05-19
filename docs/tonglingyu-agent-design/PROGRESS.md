@@ -48,7 +48,8 @@
   `context_projection`、projection ref/digest contract、consumer projection 隔离、
   tool policy digest、Runtime audit、replay 和 hhost production gate；不做 Memory
   Collector、`memory_candidate`、active `memory_card`、审核页面或非 Hermes
-  external agent 接入。当前状态是“可进入 Phase 2 实现”，不是“Phase 2 已完成”。
+  external agent 接入。目标是 Phase 2 production-ready，不是本地代码切片完成；
+  当前状态是“可进入 production-ready 实现阶段”，不是“Phase 2 已完成”。
 
 ## 已确认
 
