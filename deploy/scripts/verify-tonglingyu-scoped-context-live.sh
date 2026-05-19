@@ -608,8 +608,10 @@ if not candidate:
 else:
     if candidate.get("source_entry_type") != "user_message":
         errors.append("memory_candidate_source_invalid")
-    if candidate.get("scope_type") != "user_session":
+    if candidate.get("scope_type") != "user_private":
         errors.append("memory_candidate_scope_invalid")
+    if not str(candidate.get("scope_ref") or "").startswith("user_private:sha256:"):
+        errors.append("memory_candidate_scope_ref_invalid")
     if candidate.get("candidate_type") != "user_response_preference":
         errors.append("memory_candidate_type_invalid")
     extraction = candidate.get("llm_extraction") or {}

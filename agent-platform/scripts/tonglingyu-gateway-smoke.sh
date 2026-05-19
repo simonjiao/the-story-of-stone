@@ -515,7 +515,8 @@ assert memory_candidates["items"], memory_candidates
 assert all(item["status"] == "pending" for item in memory_candidates["items"]), memory_candidates
 candidate = memory_candidates["items"][0]
 assert candidate["source_entry_type"] == "user_message", candidate
-assert candidate["scope_type"] == "user_session", candidate
+assert candidate["scope_type"] == "user_private", candidate
+assert candidate["scope_ref"].startswith("user_private:sha256:"), candidate
 assert candidate["candidate_type"] == "user_response_preference", candidate
 assert candidate["llm_extraction"]["llm_participation"]["allowed"] is True, candidate
 assert candidate["llm_extraction"]["llm_participation"]["used"] is False, candidate

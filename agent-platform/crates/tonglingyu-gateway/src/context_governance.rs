@@ -1047,6 +1047,11 @@ pub(crate) fn list_memory_candidates(
         "candidate status",
         allowed_memory_candidate_statuses(),
     )?;
+    validate_optional_filter(
+        input.scope_type,
+        "candidate scope",
+        allowed_memory_scope_types(),
+    )?;
     let limit = clamp_list_limit(input.limit, 100) as i64;
     let offset = input.offset.min(10_000) as i64;
     let mut stmt = conn.prepare(
@@ -1093,6 +1098,11 @@ pub(crate) fn list_memory_cards(
         "memory card status",
         allowed_memory_card_statuses(),
     )?;
+    validate_optional_filter(
+        input.scope_type,
+        "memory card scope",
+        allowed_memory_scope_types(),
+    )?;
     let limit = clamp_list_limit(input.limit, 100) as i64;
     let offset = input.offset.min(10_000) as i64;
     let mut stmt = conn.prepare(
@@ -1135,8 +1145,8 @@ pub(crate) fn transition_memory_candidate(
     validate_memory_candidate_action(input.action)?;
     let current = load_memory_candidate_core(conn, input.candidate_id)?
         .ok_or_else(|| anyhow!("memory candidate not found"))?;
-    let actor = non_empty_or(input.actor, "admin");
-    let reason = input.reason.unwrap_or(input.action);
+    let actor = require_non_empty(input.actor, "operator identity is required")?;
+    let reason = require_required_reason(input.reason)?;
     let now = now_rfc3339();
     match input.action {
         "approve" => {
@@ -1325,8 +1335,8 @@ pub(crate) fn transition_memory_card(
     let current = load_memory_card_core(conn, input.memory_card_id)?
         .ok_or_else(|| anyhow!("memory card not found"))?;
     require_status(&current.status, &["active"])?;
-    let actor = non_empty_or(input.actor, "admin");
-    let reason = input.reason.unwrap_or(input.action);
+    let actor = require_non_empty(input.actor, "operator identity is required")?;
+    let reason = require_required_reason(input.reason)?;
     let now = now_rfc3339();
     let to_status = match input.action {
         "revoke" => "revoked",
@@ -1436,6 +1446,7 @@ struct MemorySourceRow {
     journal_id: String,
     trace_id: String,
     user_session_id: String,
+    external_user_ref: String,
     interaction_context_id: String,
     context_pack_id: Option<String>,
     entry_type: String,
@@ -1519,15 +1530,19 @@ fn load_collectable_journal_rows(
     trace_id: Option<&str>,
 ) -> Result<Vec<MemorySourceRow>> {
     let mut stmt = conn.prepare(
-        "SELECT journal_id, trace_id, user_session_id, interaction_context_id, context_pack_id,
-                entry_type, content, summary, content_sha256, sensitivity, metadata_json, created_at
+        "SELECT session_journal.journal_id, session_journal.trace_id, session_journal.user_session_id,
+                user_sessions.external_user_ref, session_journal.interaction_context_id,
+                session_journal.context_pack_id, session_journal.entry_type, session_journal.content,
+                session_journal.summary, session_journal.content_sha256, session_journal.sensitivity,
+                session_journal.metadata_json, session_journal.created_at
          FROM session_journal
+         JOIN user_sessions ON user_sessions.user_session_id = session_journal.user_session_id
          WHERE (?1 IS NULL OR trace_id = ?1)
            AND NOT EXISTS (
              SELECT 1 FROM memory_collector_journal_status AS status
              WHERE status.journal_id = session_journal.journal_id
          )
-         ORDER BY created_at, journal_id
+         ORDER BY session_journal.created_at, session_journal.journal_id
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(
@@ -1537,15 +1552,16 @@ fn load_collectable_journal_rows(
                 journal_id: row.get(0)?,
                 trace_id: row.get(1)?,
                 user_session_id: row.get(2)?,
-                interaction_context_id: row.get(3)?,
-                context_pack_id: row.get(4)?,
-                entry_type: row.get(5)?,
-                content: row.get(6)?,
-                summary: row.get(7)?,
-                content_sha256: row.get(8)?,
-                sensitivity: row.get(9)?,
-                metadata: parse_json_column(row.get::<_, String>(10)?),
-                created_at: row.get(11)?,
+                external_user_ref: row.get(3)?,
+                interaction_context_id: row.get(4)?,
+                context_pack_id: row.get(5)?,
+                entry_type: row.get(6)?,
+                content: row.get(7)?,
+                summary: row.get(8)?,
+                content_sha256: row.get(9)?,
+                sensitivity: row.get(10)?,
+                metadata: parse_json_column(row.get::<_, String>(11)?),
+                created_at: row.get(12)?,
             })
         },
     )?;
@@ -1647,8 +1663,8 @@ fn extract_memory_candidate(source: &MemorySourceRow) -> MemoryExtractionOutcome
         interaction_context_id: source.interaction_context_id.clone(),
         context_pack_id: source.context_pack_id.clone(),
         source_entry_type: source.entry_type.clone(),
-        scope_type: "user_session".to_string(),
-        scope_ref: source.user_session_id.clone(),
+        scope_type: "user_private".to_string(),
+        scope_ref: user_private_scope_ref(&source.external_user_ref),
         candidate_type,
         summary_sha256: hash_text(&summary),
         raw_excerpt_sha256: hash_text(&redacted),
@@ -1667,6 +1683,7 @@ fn insert_memory_candidate(
     draft: &MemoryCandidateDraft,
     actor: &str,
 ) -> Result<bool> {
+    validate_memory_scope_type(&draft.scope_type)?;
     let now = now_rfc3339();
     let rows = conn.execute(
         "INSERT OR IGNORE INTO memory_candidates (
@@ -1740,6 +1757,7 @@ fn promote_memory_candidate(
     actor: &str,
     reason: &str,
 ) -> Result<()> {
+    validate_memory_scope_type(&candidate.scope_type)?;
     if let Some(existing) = conn
         .query_row(
             "SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1",
@@ -2236,6 +2254,10 @@ fn classify_memory_candidate_type(text: &str) -> String {
     }
 }
 
+fn user_private_scope_ref(external_user_ref: &str) -> String {
+    format!("user_private:sha256:{}", hash_text(external_user_ref))
+}
+
 fn memory_candidate_summary(candidate_type: &str, text: &str) -> String {
     let prefix = match candidate_type {
         "user_identity_preference" => "用户称呼偏好",
@@ -2374,6 +2396,14 @@ fn validate_memory_candidate_type(candidate_type: &str) -> Result<()> {
     }
 }
 
+fn validate_memory_scope_type(scope_type: &str) -> Result<()> {
+    if allowed_memory_scope_types().contains(&scope_type) {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid memory scope type"))
+    }
+}
+
 fn validate_optional_filter(
     value: Option<&str>,
     name: &str,
@@ -2395,6 +2425,16 @@ fn allowed_memory_card_statuses() -> &'static [&'static str] {
     &["active", "revoked", "expired"]
 }
 
+fn allowed_memory_scope_types() -> &'static [&'static str] {
+    &[
+        "user_private",
+        "profile_common",
+        "knowledge_space",
+        "research_topic",
+        "source_collection",
+    ]
+}
+
 fn require_status(status: &str, allowed: &[&str]) -> Result<()> {
     if allowed.contains(&status) {
         Ok(())
@@ -2405,6 +2445,22 @@ fn require_status(status: &str, allowed: &[&str]) -> Result<()> {
 
 fn clamp_list_limit(limit: usize, max: usize) -> usize {
     limit.clamp(1, max)
+}
+
+fn require_non_empty<'a>(value: &'a str, message: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(anyhow!("{message}"))
+    } else {
+        Ok(value)
+    }
+}
+
+fn require_required_reason(reason: Option<&str>) -> Result<&str> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("transition reason is required"))
 }
 
 fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
@@ -3331,7 +3387,13 @@ mod tests {
             json!("user_response_preference")
         );
         assert_eq!(candidate["source_entry_type"], json!("user_message"));
-        assert_eq!(candidate["scope_type"], json!("user_session"));
+        assert_eq!(candidate["scope_type"], json!("user_private"));
+        assert!(
+            candidate["scope_ref"]
+                .as_str()
+                .expect("scope ref")
+                .starts_with("user_private:sha256:")
+        );
         assert_eq!(
             candidate["llm_extraction"]["llm_participation"]["allowed"],
             json!(true)
@@ -3607,7 +3669,7 @@ mod tests {
                 candidate_id: &third,
                 action: "approve",
                 actor: "test-admin",
-                reason: None,
+                reason: Some("invalid retry"),
                 candidate_type: None,
                 sensitivity: None,
                 merge_target_candidate_id: None,
@@ -3616,6 +3678,102 @@ mod tests {
         )
         .expect_err("rejected candidate cannot be approved");
         assert!(err.to_string().contains("invalid memory state transition"));
+    }
+
+    #[test]
+    fn memory_transitions_require_operator_reason_and_supported_scope() {
+        let conn = conn();
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "以后回答时，请用简体中文短句总结。".to_string(),
+        }];
+        create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-required-reason",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-required-user",
+                external_session_id: "memory-required-chat",
+                external_message_id: "memory-required-message",
+                question: "以后回答时，请用简体中文短句总结。",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+        run_memory_collector(
+            &conn,
+            MemoryCollectorRunInput {
+                trigger_type: "admin_manual",
+                actor: "test-admin",
+                limit: 20,
+                dry_run: false,
+                trace_id: Some("trace-memory-required-reason"),
+            },
+        )
+        .expect("collector run");
+        let candidates = list_memory_candidates(
+            &conn,
+            MemoryCandidateListInput {
+                status: Some("pending"),
+                scope_type: None,
+                scope_ref: None,
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("candidate list");
+        let candidate_id = candidates["items"][0]["candidate_id"]
+            .as_str()
+            .expect("candidate id")
+            .to_string();
+        let missing_reason = transition_memory_candidate(
+            &conn,
+            MemoryCandidateTransitionInput {
+                candidate_id: &candidate_id,
+                action: "approve",
+                actor: "test-admin",
+                reason: None,
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect_err("reason is required");
+        assert!(missing_reason.to_string().contains("reason is required"));
+        let missing_actor = transition_memory_candidate(
+            &conn,
+            MemoryCandidateTransitionInput {
+                candidate_id: &candidate_id,
+                action: "approve",
+                actor: " ",
+                reason: Some("approved in test"),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect_err("operator identity is required");
+        assert!(missing_actor.to_string().contains("operator identity"));
+        let invalid_scope = list_memory_candidates(
+            &conn,
+            MemoryCandidateListInput {
+                status: None,
+                scope_type: Some("project"),
+                scope_ref: None,
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect_err("unsupported memory scope must fail closed");
+        assert!(
+            invalid_scope
+                .to_string()
+                .contains("invalid candidate scope")
+        );
     }
 
     #[test]
