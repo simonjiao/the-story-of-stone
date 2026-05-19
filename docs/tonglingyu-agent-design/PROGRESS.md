@@ -76,6 +76,12 @@
   schema-bound 候选抽取辅助，不能决定 promotion、ACL、reviewer 裁决或 evidence
   package 内容。当前状态是 Phase 3 可进入实现；不能声明 scoped memory
   production-ready。
+- 2026-05-19 Phase 3 设计反思后已把 memory lifecycle 重构为三层：candidate
+  lifecycle、card lifecycle 和 read enablement lifecycle。`reclassify` 是
+  `pending -> pending` 的 action，不再作为独立状态；人工 `promote` 是
+  `approved candidate -> active memory_card` 的跨对象 transition，但 Phase 3 固定
+  `read_enabled=false`。Phase 4 不再重新定义候选/卡片状态机，只负责打开 ACL 约束下
+  的读取面、自动 promotion 和完整 scoped memory production gate。
 
 ## 已确认
 

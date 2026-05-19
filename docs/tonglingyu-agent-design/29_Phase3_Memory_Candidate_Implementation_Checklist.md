@@ -152,22 +152,36 @@ Phase 3 可以实现 `memory_card` 状态机承载表，但读取面必须关闭
 
 ## 状态机
 
-允许 transition：
+Phase 3 状态机分为三层：candidate lifecycle、card lifecycle 和 read enablement
+lifecycle。实现时不得把这三层混成一个 `status` 字段。
+
+允许 candidate transition：
 
 1. `pending -> approved`；
 2. `pending -> rejected`；
 3. `pending -> expired`；
 4. `pending -> merged`；
-5. `pending -> pending`，仅限 `reclassify`，必须写 before/after audit；
-6. `approved -> active`，通过 `promote` 写入 `memory_card`；
-7. `active -> revoked`；
-8. `active -> expired`。
+5. `pending -> pending`，仅限 `reclassify`，必须写 before/after audit。
+
+允许 card transition：
+
+1. `approved candidate -> active memory_card`，通过人工 `promote` 写入
+   `memory_card`，且 `read_enabled=false`；
+2. `active -> revoked`；
+3. `active -> expired`。
+
+Phase 3 read enablement：
+
+1. 所有 `memory_card.read_enabled` 必须为 `false`；
+2. ContextPackBuilder、Runtime projection、evidence package 和 final answer 都不得读取
+   `memory_card`；
+3. 任何把 `read_enabled` 打开的操作都属于 Phase 4，Phase 3 必须 fail-closed。
 
 禁止 transition：
 
-1. `rejected -> active`；
-2. `expired -> active`；
-3. `merged -> active`；
+1. `rejected candidate -> active memory_card`；
+2. `expired candidate -> active memory_card`；
+3. `merged candidate -> active memory_card`；
 4. 未写 reason 的人工状态变化；
 5. 缺 operator identity 的远程操作；
 6. 通过 SQL 直接改状态；
