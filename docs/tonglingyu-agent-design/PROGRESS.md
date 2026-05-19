@@ -92,6 +92,14 @@
   `approved candidate -> active memory_card` 的跨对象 transition，但 Phase 3 固定
   `read_enabled=false`。Phase 4 不再重新定义候选/卡片状态机，只负责打开 ACL 约束下
   的读取面、自动 promotion 和完整 scoped memory production gate。
+- 2026-05-19 Phase 4 已按最新讨论重构为 Scoped Memory Production 设计，不再把目标
+  降为最小 user_private 闭环或 collector smoke。`30_Phase4_Scoped_Memory_Production_Checklist.md`
+  已冻结 Phase 4 口径：自动策略是一等生产主路径，人工审核流程保留但可被策略跳过；
+  LLM 只做 semantic filter，最终 auto approve / promote / read enablement 由
+  versioned policy engine 决定；主链路必须覆盖
+  `session_journal -> Memory Collector -> memory_candidate -> policy decision ->
+  memory_card -> read enablement -> context_pack.memory_read_refs -> context_projection ->
+  Runtime answer`。该更新只是设计冻结，不声明 scoped memory production-ready。
 
 ## 已确认
 
