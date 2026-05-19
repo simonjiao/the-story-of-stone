@@ -331,9 +331,10 @@ curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
   -d '{"model":"tonglingyu","messages":[{"role":"user","content":"以后回答《红楼梦》问题时，请用简体中文短句总结。现在介绍贾宝玉。"}]}' \
   "${BASE_URL}/v1/chat/completions" >"${MEMORY_CHAT_JSON}"
 message_metadata_from_db "smoke-message-memory" >"${MEMORY_META_JSON}"
+MEMORY_TRACE_ID="$(cat "${MEMORY_META_JSON}" | json_get "trace_id")"
 curl -fsS "${admin_auth[@]}" "${json_headers[@]}" \
   -X POST \
-  -d '{"trigger":"admin_manual","limit":100,"dry_run":false,"llm_extraction_probe":{"candidate_type":"user_response_preference","summary":"用户回答偏好: 以后回答时用简体中文短句。","confidence":0.84,"risk_flags":[]}}' \
+  -d '{"trigger":"admin_manual","limit":100,"dry_run":false,"trace_id":"'"${MEMORY_TRACE_ID}"'","llm_extraction_probe":{"candidate_type":"user_response_preference","summary":"用户回答偏好: 以后回答时用简体中文短句。","confidence":0.84,"risk_flags":[]}}' \
   "${BASE_URL}/v1/admin/memory/collector/run" >"${MEMORY_COLLECTOR_JSON}"
 curl -fsS "${admin_auth[@]}" \
   "${BASE_URL}/v1/admin/memory/candidates?status=pending&limit=10" >"${MEMORY_CANDIDATES_JSON}"

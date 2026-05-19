@@ -332,6 +332,8 @@ struct MemoryCollectorRunArgs {
     limit: usize,
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+    #[arg(long)]
+    trace_id: Option<String>,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -918,6 +920,7 @@ struct MemoryCollectorRunRequest {
     trigger: Option<String>,
     limit: Option<usize>,
     dry_run: Option<bool>,
+    trace_id: Option<String>,
     llm_extraction_probe: Option<Value>,
 }
 
@@ -2337,6 +2340,11 @@ fn memory_collector_run_command(args: &MemoryCollectorRunArgs) -> Result<Value> 
             actor: args.actor.trim(),
             limit: args.limit,
             dry_run: args.dry_run,
+            trace_id: args
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
         },
     )
 }
@@ -5631,6 +5639,11 @@ async fn memory_collector_run_endpoint(
             actor: &actor,
             limit: payload.limit.unwrap_or(50),
             dry_run: payload.dry_run.unwrap_or(false),
+            trace_id: payload
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
         },
     ) {
         Ok(mut report) => {
@@ -10926,6 +10939,7 @@ mod tests {
                 trigger: Some("admin_manual".to_string()),
                 limit: Some(20),
                 dry_run: Some(false),
+                trace_id: Some("trace-admin-memory".to_string()),
                 llm_extraction_probe: Some(json!({
                     "candidate_type": "user_response_preference",
                     "summary": "用户回答偏好: 以后回答时用简体短句。",

@@ -254,6 +254,14 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
     print(json.load(handle)["trace_id"])
 PY
 )"
+MEMORY_TRACE_ID="$(
+  python3 - "${MEMORY_REF_JSON}" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    print(json.load(handle)["trace_id"])
+PY
+)"
 
 docker compose exec -T -e TLY_ADMIN_KEY="${TONGLINGYU_ADMIN_API_KEY:-}" open-webui sh -lc '
 test -n "${TLY_ADMIN_KEY}"
@@ -270,7 +278,7 @@ test -n "${TLY_ADMIN_KEY}"
 curl -fsS \
   -H "Authorization: Bearer ${TLY_ADMIN_KEY}" \
   -H "content-type: application/json" \
-  --data-binary "{\"trigger\":\"admin_manual\",\"limit\":100,\"dry_run\":false,\"llm_extraction_probe\":{\"candidate_type\":\"user_response_preference\",\"summary\":\"用户回答偏好: 以后回答时用简体短句。\",\"confidence\":0.84,\"risk_flags\":[]}}" \
+  --data-binary "{\"trigger\":\"admin_manual\",\"limit\":100,\"dry_run\":false,\"trace_id\":\"'"${MEMORY_TRACE_ID}"'\",\"llm_extraction_probe\":{\"candidate_type\":\"user_response_preference\",\"summary\":\"用户回答偏好: 以后回答时用简体短句。\",\"confidence\":0.84,\"risk_flags\":[]}}" \
   http://tonglingyu-gateway:8090/v1/admin/memory/collector/run
 ' >"${MEMORY_COLLECTOR_JSON}"
 

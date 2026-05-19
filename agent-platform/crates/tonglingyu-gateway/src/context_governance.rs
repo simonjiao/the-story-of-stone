@@ -113,6 +113,7 @@ pub(crate) struct MemoryCollectorRunInput<'a> {
     pub(crate) actor: &'a str,
     pub(crate) limit: usize,
     pub(crate) dry_run: bool,
+    pub(crate) trace_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -872,7 +873,7 @@ pub(crate) fn run_memory_collector(
     let mut watermark_journal_id = None::<String>;
     let mut candidate_summaries = Vec::new();
     let mut suppressed = Vec::new();
-    let sources = load_collectable_journal_rows(conn, limit)?;
+    let sources = load_collectable_journal_rows(conn, limit, input.trace_id)?;
     for source in sources {
         processed_count += 1;
         watermark_journal_id = Some(source.journal_id.clone());
@@ -1020,6 +1021,7 @@ pub(crate) fn run_memory_collector(
         "run_id": run_id,
         "trigger_type": input.trigger_type,
         "dry_run": input.dry_run,
+        "trace_id": input.trace_id,
         "processed_count": processed_count,
         "candidate_count": candidate_count,
         "suppressed_count": suppressed_count,
@@ -1511,34 +1513,42 @@ struct MemoryTransitionAuditInput<'a> {
     metadata: Value,
 }
 
-fn load_collectable_journal_rows(conn: &Connection, limit: usize) -> Result<Vec<MemorySourceRow>> {
+fn load_collectable_journal_rows(
+    conn: &Connection,
+    limit: usize,
+    trace_id: Option<&str>,
+) -> Result<Vec<MemorySourceRow>> {
     let mut stmt = conn.prepare(
         "SELECT journal_id, trace_id, user_session_id, interaction_context_id, context_pack_id,
                 entry_type, content, summary, content_sha256, sensitivity, metadata_json, created_at
          FROM session_journal
-         WHERE NOT EXISTS (
+         WHERE (?1 IS NULL OR trace_id = ?1)
+           AND NOT EXISTS (
              SELECT 1 FROM memory_collector_journal_status AS status
              WHERE status.journal_id = session_journal.journal_id
          )
          ORDER BY created_at, journal_id
-         LIMIT ?1",
+         LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![clamp_list_limit(limit, 100) as i64], |row| {
-        Ok(MemorySourceRow {
-            journal_id: row.get(0)?,
-            trace_id: row.get(1)?,
-            user_session_id: row.get(2)?,
-            interaction_context_id: row.get(3)?,
-            context_pack_id: row.get(4)?,
-            entry_type: row.get(5)?,
-            content: row.get(6)?,
-            summary: row.get(7)?,
-            content_sha256: row.get(8)?,
-            sensitivity: row.get(9)?,
-            metadata: parse_json_column(row.get::<_, String>(10)?),
-            created_at: row.get(11)?,
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![trace_id, clamp_list_limit(limit, 100) as i64],
+        |row| {
+            Ok(MemorySourceRow {
+                journal_id: row.get(0)?,
+                trace_id: row.get(1)?,
+                user_session_id: row.get(2)?,
+                interaction_context_id: row.get(3)?,
+                context_pack_id: row.get(4)?,
+                entry_type: row.get(5)?,
+                content: row.get(6)?,
+                summary: row.get(7)?,
+                content_sha256: row.get(8)?,
+                sensitivity: row.get(9)?,
+                metadata: parse_json_column(row.get::<_, String>(10)?),
+                created_at: row.get(11)?,
+            })
+        },
+    )?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -3293,6 +3303,7 @@ mod tests {
                 actor: "test-admin",
                 limit: 20,
                 dry_run: false,
+                trace_id: None,
             },
         )
         .expect("memory collector run");
@@ -3424,6 +3435,7 @@ mod tests {
                 actor: "test-admin",
                 limit: 20,
                 dry_run: false,
+                trace_id: None,
             },
         )
         .expect("memory collector run");
@@ -3502,6 +3514,7 @@ mod tests {
                 actor: "test-admin",
                 limit: 50,
                 dry_run: false,
+                trace_id: None,
             },
         )
         .expect("collector run");
