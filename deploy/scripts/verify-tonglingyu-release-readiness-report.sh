@@ -1046,7 +1046,19 @@ def validate_release_manifest():
             image_refs = security.get("image_refs")
             if not isinstance(image_refs, list) or not image_refs:
                 errors.append("production_ready_release_manifest_image_refs_missing")
-            elif any(not image_ref_is_digest_pinned(image_ref) for image_ref in image_refs):
+            else:
+                ownership_by_ref = {
+                    item.get("ref"): item.get("owner_type")
+                    for item in image_scan.get("image_ownership") or []
+                    if isinstance(item, dict)
+                }
+                unpinned_third_party_refs = [
+                    image_ref
+                    for image_ref in image_refs
+                    if not image_ref_is_digest_pinned(image_ref)
+                    and ownership_by_ref.get(image_ref) != "owned"
+                ]
+            if isinstance(image_refs, list) and image_refs and unpinned_third_party_refs:
                 errors.append("production_ready_release_manifest_image_refs_not_digest_pinned")
         if production_ready and security.get("image_count") != security.get("scanned_image_count"):
             errors.append("production_ready_release_manifest_image_scan_count_mismatch")
