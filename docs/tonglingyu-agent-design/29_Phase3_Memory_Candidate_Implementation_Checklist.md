@@ -302,8 +302,57 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] collector contract smoke。
 - [x] admin CLI/API contract smoke。
 - [x] scoped context live gate 证明 active memory 不参与回答。
-- [ ] hhost full remote release automation 通过。
-- [ ] release readiness 记录 Phase 3 gate，并且 p95、错误率、post-release monitor 不恶化。
+- [x] hhost full remote release automation 通过。
+- [x] release readiness 记录 Phase 3 gate，并且 p95、错误率、post-release monitor 不恶化。
+
+## Phase 3 实现证据（2026-05-19）
+
+Phase 3 已实现并部署为 `0.1.11`，覆盖 Memory Collector、`memory_candidate`、
+`memory_card`、三层状态机、admin-only CLI/API、collector 后台 worker / scheduled /
+manual 三种触发路径，以及 LLM participation 的 fail-closed contract。该结论只覆盖
+memory candidate/card 工作流；active memory 读取路径、自动 promotion 和完整 scoped
+memory production gate 仍属于 Phase 4。
+
+目标环境证据：
+
+1. `hhost` 运行的 `tonglingyu-gateway` image id 为
+   `sha256:8fddab2d2d4213641cba382721844374af4ea09265a1b389f36ff6f788bc0109`；
+2. live gate artifact：
+   `data/tonglingyu/remote-live-gates/remote-live-20260519T082735Z-42867/remote-live-gates.json`；
+3. full release automation artifact：
+   `data/tonglingyu/remote-release-automation/remote-release-20260519T084157Z-43947/remote-release-automation.stdout`；
+4. copied remote release report：
+   `data/tonglingyu/remote-release-automation/remote-release-20260519T084157Z-43947/remote-artifacts/release-readiness.json`；
+5. copied release automation report：
+   `data/tonglingyu/remote-release-automation/remote-release-20260519T084157Z-43947/remote-artifacts/release-automation.json`。
+
+Release 结果：
+
+1. full release automation `status=ok`、`production_ready=true`；
+2. wrapper `production_ready_proven=true`、`release_blockers=[]`、
+   `required_failures=[]`；
+3. release readiness `status=passed`、`production_release_ready=true`；
+4. saved validator `status=ok`、`errors=[]`；
+5. open P0 retrieval failures / governance tasks 均为 0。
+
+容量与长窗口监控：
+
+1. live capacity load smoke `status=ok`、`errors=[]`；
+2. `rqa_write_p95_ms=4553`、`admin_read_p95_ms=382`、
+   `metrics_read_p95_ms=162`、`release_gate_ms=26672`；
+3. post-release monitor 60 分钟窗口 `sample_count=13`、
+   `failed_sample_count=0`、`status=ok`。
+
+Collector 运行边界：
+
+1. background worker 已在 hhost 完成自动运行，最终日志显示
+   `processed_count=60`、`candidate_count=0`、`denied_count=0`、
+   `suppressed_count=60`；
+2. collector SQL gate 只扫描 `user_message`、已绑定 `context_pack_id` 且同一
+   trace/context 已存在 `final_response` 的 journal；
+3. 当前 production collector 使用 `deterministic_rules`，LLM provider 调用不作为
+   自动 promotion、ACL 或读取路径前置条件；LLM contract/probe 只证明 schema、
+   越权字段和 fail-closed 边界。
 
 ## Fail-closed Matrix
 
@@ -336,7 +385,7 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] LLM extractor 只能生成 pending candidate，不能越权决定 promotion、ACL 或 reviewer。
 - [x] active `memory_card` 即使存在，也不会进入 `context_pack`、Runtime projection、
       evidence package 或最终回答。
-- [ ] hhost full remote release automation 通过，且 release gate 记录 Phase 3 证据。
+- [x] hhost full remote release automation 通过，且 release gate 记录 Phase 3 证据。
 
 ## 待确认项
 

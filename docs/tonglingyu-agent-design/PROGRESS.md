@@ -64,18 +64,28 @@
   retrieval failures / governance tasks 均为 0。该结论只覆盖 Phase 2
   Context-aware Runtime，仍不覆盖长期 memory、Memory Collector、审核页面、
   Context Governance 独立服务或非 Hermes external agent 接入。
-- 2026-05-19 Phase 3 已按 5 项决策冻结为独立实现 checklist：
-  `29_Phase3_Memory_Candidate_Implementation_Checklist.md`。Phase 3 实现 Memory
-  Collector、`memory_candidate`、完整状态机、admin-only CLI/API、三种触发方式和
-  LLM 辅助抽取；状态机包含 `approve/promote/reject/reclassify/expire/revoke/merge`。
-  自动 promotion 和 active memory 读取路径仍放在 Phase 4；Phase 3 即使可以写出
-  active `memory_card` 状态，也必须保持 `read_enabled=false`，不得让 memory 进入
-  `context_pack`、Runtime projection、evidence package、reviewer 裁决或最终回答。
-  触发方式冻结为 background worker 主路径，scheduled job 和 admin manual trigger
-  作为辅助路径，并共享 lease、水位、幂等、重试和 audit。LLM 只允许做 redacted、
-  schema-bound 候选抽取辅助，不能决定 promotion、ACL、reviewer 裁决或 evidence
-  package 内容。当前状态是 Phase 3 可进入实现；不能声明 scoped memory
-  production-ready。
+- 2026-05-19 Phase 3 Memory Candidate workflow 已实现并部署为 `0.1.11`：
+  `29_Phase3_Memory_Candidate_Implementation_Checklist.md` 已记录实现证据。
+  Phase 3 覆盖 Memory Collector、`memory_candidate`、`memory_card`、完整状态机、
+  admin-only CLI/API、background worker / scheduled / admin manual 三种触发方式和
+  LLM participation fail-closed contract；状态机包含
+  `approve/promote/reject/reclassify/expire/revoke/merge`。`hhost` 运行的
+  `tonglingyu-gateway` image id 为
+  `sha256:8fddab2d2d4213641cba382721844374af4ea09265a1b389f36ff6f788bc0109`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T082735Z-42867/remote-live-gates.json`。
+  完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T084157Z-43947/remote-release-automation.stdout`，
+  `status=ok`、`production_ready=true`；wrapper 为
+  `production_ready_proven=true`、`release_blockers=[]`、`required_failures=[]`；
+  release readiness 为 `status=passed`、`production_release_ready=true`。容量 gate
+  为 `rqa_write_p95_ms=4553`、`admin_read_p95_ms=382`、
+  `metrics_read_p95_ms=162`，post-release monitor 60 分钟窗口
+  `sample_count=13`、`failed_sample_count=0`。background worker 已在 hhost
+  自动运行，最终日志为 `processed_count=60`、`candidate_count=0`、
+  `denied_count=0`、`suppressed_count=60`。该结论只覆盖 Phase 3
+  candidate/card 工作流；自动 promotion 和 active memory 读取路径仍放在 Phase 4，
+  不声明 scoped memory production-ready。
 - 2026-05-19 Phase 3 设计反思后已把 memory lifecycle 重构为三层：candidate
   lifecycle、card lifecycle 和 read enablement lifecycle。`reclassify` 是
   `pending -> pending` 的 action，不再作为独立状态；人工 `promote` 是
