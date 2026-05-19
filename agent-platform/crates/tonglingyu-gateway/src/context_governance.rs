@@ -6,9 +6,12 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "tonglingyu-scoped-context-v1";
+pub(crate) const CONTEXT_PROJECTION_SCHEMA_VERSION: &str = "tonglingyu-context-projection-v1";
 pub(crate) const CONTEXT_POLICY_VERSION: &str = "tonglingyu-context-policy-v1";
 pub(crate) const JOURNAL_RETENTION_POLICY_VERSION: &str = "tonglingyu-session-journal-retention-v1";
 pub(crate) const RESOLVER_SCHEMA_VERSION: &str = "tonglingyu-question-resolver-v1";
+pub(crate) const RUNTIME_CONSUMER_TYPE: &str = "runtime_profile";
+pub(crate) const RUNTIME_ADAPTER: &str = "tonglingyu-runtime-adapter-v1";
 
 const SESSION_SUMMARY_MAX_CHARS: usize = 600;
 const JOURNAL_SUMMARY_MAX_CHARS: usize = 240;
@@ -48,6 +51,8 @@ pub(crate) struct ContextResolution {
     pub(crate) user_session_id: String,
     pub(crate) interaction_context_id: String,
     pub(crate) context_pack_id: String,
+    pub(crate) context_pack_ref: String,
+    pub(crate) context_pack_digest: String,
     pub(crate) resolved_question: String,
     pub(crate) session_summary: String,
     pub(crate) needs_clarification: bool,
@@ -56,6 +61,7 @@ pub(crate) struct ContextResolution {
     pub(crate) confidence: f64,
     pub(crate) used_context_refs: Vec<String>,
     pub(crate) context_pack: Value,
+    pub(crate) context_projections: Vec<ContextProjection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +72,28 @@ pub(crate) struct ContextPackProfileView {
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) forbidden_context: Vec<String>,
     pub(crate) memory_read_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ContextProjection {
+    pub(crate) context_projection_id: String,
+    pub(crate) context_projection_ref: String,
+    pub(crate) context_pack_id: String,
+    pub(crate) context_pack_ref: String,
+    pub(crate) trace_id: String,
+    pub(crate) interaction_context_id: String,
+    pub(crate) consumer_type: String,
+    pub(crate) consumer_name: String,
+    pub(crate) runtime_adapter: String,
+    pub(crate) projection_payload: Value,
+    pub(crate) allowed_tools: Vec<String>,
+    pub(crate) forbidden_tools: Vec<String>,
+    pub(crate) output_contract: Value,
+    pub(crate) tool_policy_digest: String,
+    pub(crate) output_contract_digest: String,
+    pub(crate) schema_version: String,
+    pub(crate) digest: String,
+    pub(crate) status: String,
 }
 
 pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
@@ -111,6 +139,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS context_packs (
             context_pack_id TEXT PRIMARY KEY,
+            context_pack_ref TEXT,
             trace_id TEXT NOT NULL,
             interaction_context_id TEXT NOT NULL REFERENCES interaction_contexts(interaction_context_id),
             profile_name TEXT NOT NULL,
@@ -124,8 +153,33 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             forbidden_context_json TEXT NOT NULL,
             output_contract_json TEXT NOT NULL,
             profile_views_json TEXT NOT NULL,
+            policy_versions_json TEXT,
             schema_version TEXT NOT NULL,
+            digest TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS context_projections (
+            context_projection_id TEXT PRIMARY KEY,
+            context_projection_ref TEXT NOT NULL UNIQUE,
+            context_pack_id TEXT NOT NULL REFERENCES context_packs(context_pack_id),
+            context_pack_ref TEXT NOT NULL,
+            trace_id TEXT NOT NULL,
+            interaction_context_id TEXT NOT NULL REFERENCES interaction_contexts(interaction_context_id),
+            consumer_type TEXT NOT NULL,
+            consumer_name TEXT NOT NULL,
+            runtime_adapter TEXT NOT NULL,
+            projection_payload_json TEXT NOT NULL,
+            allowed_tools_json TEXT NOT NULL,
+            forbidden_tools_json TEXT NOT NULL,
+            output_contract_json TEXT NOT NULL,
+            tool_policy_digest TEXT NOT NULL,
+            output_contract_digest TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(context_pack_id, consumer_type, consumer_name, runtime_adapter)
         );
 
         CREATE TABLE IF NOT EXISTS session_journal (
@@ -155,6 +209,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             ON context_packs(trace_id);
         CREATE INDEX IF NOT EXISTS idx_context_packs_context
             ON context_packs(interaction_context_id);
+        CREATE INDEX IF NOT EXISTS idx_context_projections_trace
+            ON context_projections(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_context_projections_pack
+            ON context_projections(context_pack_id);
+        CREATE INDEX IF NOT EXISTS idx_context_projections_consumer
+            ON context_projections(consumer_type, consumer_name, runtime_adapter);
         CREATE INDEX IF NOT EXISTS idx_session_journal_trace
             ON session_journal(trace_id);
         CREATE INDEX IF NOT EXISTS idx_session_journal_session
@@ -163,6 +223,9 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             ON session_journal(user_session_id, external_message_id, entry_type);
         "#,
     )?;
+    ensure_column(conn, "context_packs", "context_pack_ref", "TEXT")?;
+    ensure_column(conn, "context_packs", "policy_versions_json", "TEXT")?;
+    ensure_column(conn, "context_packs", "digest", "TEXT")?;
     ensure_column(conn, "session_journal", "package_id", "TEXT")?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_session_journal_package ON session_journal(package_id)",
@@ -190,6 +253,7 @@ pub(crate) fn create_context_for_request(
     let session_summary = session_summary(input.messages, prior_subject.as_deref());
     let resolver = resolve_question(input.question, input.messages, prior_subject.as_deref());
     let context_pack_id = format!("context-pack-{}", uuid::Uuid::now_v7().simple());
+    let context_pack_ref = context_pack_ref(input.trace_id, &context_pack_id);
     let active_scopes = vec![json!({
         "scope_type": "session",
         "scope_id": &input.external_session_id,
@@ -208,8 +272,9 @@ pub(crate) fn create_context_for_request(
         })
         .collect::<Vec<_>>();
     let profile_views = profile_views(&resolver.resolved_question, &session_summary);
-    let context_pack = json!({
+    let mut context_pack = json!({
         "context_pack_id": &context_pack_id,
+        "context_pack_ref": &context_pack_ref,
         "trace_id": input.trace_id,
         "interaction_context_id": &interaction_context_id,
         "profile_name": "all",
@@ -234,17 +299,33 @@ pub(crate) fn create_context_for_request(
         "profile_views": &profile_views,
         "schema_version": CONTEXT_SCHEMA_VERSION,
         "policy_version": CONTEXT_POLICY_VERSION,
+        "policy_versions": {
+            "context_policy": CONTEXT_POLICY_VERSION,
+            "resolver": RESOLVER_SCHEMA_VERSION,
+            "journal_retention": JOURNAL_RETENTION_POLICY_VERSION,
+        },
         "resolver": resolver.audit_json(),
     });
+    let context_pack_digest = digest_json(&context_pack);
+    context_pack["digest"] = json!(&context_pack_digest);
+    let context_projections = build_context_projections(
+        input.trace_id,
+        &interaction_context_id,
+        &context_pack_id,
+        &context_pack_ref,
+        &resolver.resolved_question,
+        &session_summary,
+    );
     conn.execute(
         "INSERT INTO context_packs (
-            context_pack_id, trace_id, interaction_context_id, profile_name, resolved_question,
+            context_pack_id, context_pack_ref, trace_id, interaction_context_id, profile_name, resolved_question,
             session_summary, active_scopes_json, candidate_scopes_json, allowed_tools_json,
             forbidden_tools_json, memory_read_refs_json, forbidden_context_json,
-            output_contract_json, profile_views_json, schema_version, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            output_contract_json, profile_views_json, policy_versions_json, schema_version, digest, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             &context_pack_id,
+            &context_pack_ref,
             input.trace_id,
             &interaction_context_id,
             "all",
@@ -266,10 +347,15 @@ pub(crate) fn create_context_for_request(
             ]))?,
             serde_json::to_string(&context_pack["output_contract"])?,
             serde_json::to_string(&profile_views)?,
+            serde_json::to_string(&context_pack["policy_versions"])?,
             CONTEXT_SCHEMA_VERSION,
+            &context_pack_digest,
             now_rfc3339(),
         ],
     )?;
+    for projection in &context_projections {
+        insert_context_projection(conn, projection)?;
+    }
     append_journal_entry(
         conn,
         JournalEntryInput {
@@ -313,16 +399,55 @@ pub(crate) fn create_context_for_request(
             sensitivity: "internal_context",
             metadata: json!({
                 "context_pack_id": &context_pack_id,
+                "context_pack_ref": &context_pack_ref,
+                "context_pack_digest": &context_pack_digest,
                 "resolved_question": &resolver.resolved_question,
                 "resolver": resolver.audit_json(),
                 "session_summary_sha256": hash_text(&session_summary),
+                "context_projection_count": context_projections.len(),
             }),
         },
     )?;
+    for projection in &context_projections {
+        append_journal_entry(
+            conn,
+            JournalEntryInput {
+                trace_id: input.trace_id,
+                user_session_id: &user_session_id,
+                interaction_context_id: &interaction_context_id,
+                context_pack_id: Some(&context_pack_id),
+                package_id: None,
+                external_message_id: Some(input.external_message_id),
+                entry_type: "context_projection",
+                content: None,
+                summary: &format!(
+                    "context projection created for {}",
+                    projection.consumer_name
+                ),
+                retention_policy: JOURNAL_RETENTION_POLICY_VERSION,
+                sensitivity: "internal_context_projection",
+                metadata: json!({
+                    "context_pack_id": &context_pack_id,
+                    "context_pack_ref": &context_pack_ref,
+                    "context_projection_id": &projection.context_projection_id,
+                    "context_projection_ref": &projection.context_projection_ref,
+                    "context_projection_digest": &projection.digest,
+                    "consumer_type": &projection.consumer_type,
+                    "consumer_name": &projection.consumer_name,
+                    "runtime_adapter": &projection.runtime_adapter,
+                    "tool_policy_digest": &projection.tool_policy_digest,
+                    "output_contract_digest": &projection.output_contract_digest,
+                    "projection_payload_sha256": digest_json(&projection.projection_payload),
+                }),
+            },
+        )?;
+    }
     Ok(ContextResolution {
         user_session_id,
         interaction_context_id,
         context_pack_id,
+        context_pack_ref,
+        context_pack_digest,
         resolved_question: resolver.resolved_question,
         session_summary,
         needs_clarification: resolver.needs_clarification,
@@ -331,6 +456,7 @@ pub(crate) fn create_context_for_request(
         confidence: resolver.confidence,
         used_context_refs: resolver.used_context_refs,
         context_pack,
+        context_projections,
     })
 }
 
@@ -448,12 +574,14 @@ pub(crate) fn append_review_journal(
 
 pub(crate) fn load_trace_context(conn: &Connection, trace_id: &str) -> Result<Value> {
     let context_packs = load_context_packs(conn, trace_id)?;
+    let context_projections = load_context_projections(conn, trace_id)?;
     let journal = load_journal_summaries_for_trace(conn, trace_id)?;
     Ok(json!({
         "object": "tonglingyu.scoped_context_trace",
         "schema_version": CONTEXT_SCHEMA_VERSION,
         "trace_id": trace_id,
         "context_packs": context_packs,
+        "context_projections": context_projections,
         "session_journal": journal,
         "raw_content_included": false,
     }))
@@ -500,6 +628,7 @@ pub(crate) fn table_counts(conn: &Connection) -> Result<Value> {
         "user_sessions": table_count(conn, "user_sessions")?,
         "interaction_contexts": table_count(conn, "interaction_contexts")?,
         "context_packs": table_count(conn, "context_packs")?,
+        "context_projections": table_count(conn, "context_projections")?,
         "session_journal": table_count(conn, "session_journal")?,
     }))
 }
@@ -749,7 +878,10 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
             profile_name: "honglou-main".to_string(),
             visible_question: resolved_question.to_string(),
             session_summary: Some(session_summary.to_string()),
-            allowed_tools: Vec::new(),
+            allowed_tools: vec![
+                "tonglingyu.evidence.package.create".to_string(),
+                "tonglingyu.evidence.package.read".to_string(),
+            ],
             forbidden_context: vec![
                 "complete_user_history".to_string(),
                 "unauthorized_memory".to_string(),
@@ -784,7 +916,7 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
             profile_name: "honglou-reviewer".to_string(),
             visible_question: resolved_question.to_string(),
             session_summary: None,
-            allowed_tools: Vec::new(),
+            allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
             forbidden_context: vec![
                 "user_private_memory".to_string(),
                 "unreviewed_memory_candidate".to_string(),
@@ -793,6 +925,151 @@ fn profile_views(resolved_question: &str, session_summary: &str) -> Vec<ContextP
             memory_read_refs: Vec::new(),
         },
     ]
+}
+
+fn build_context_projections(
+    trace_id: &str,
+    interaction_context_id: &str,
+    context_pack_id: &str,
+    context_pack_ref: &str,
+    resolved_question: &str,
+    session_summary: &str,
+) -> Vec<ContextProjection> {
+    profile_views(resolved_question, session_summary)
+        .into_iter()
+        .map(|view| {
+            build_context_projection(
+                trace_id,
+                interaction_context_id,
+                context_pack_id,
+                context_pack_ref,
+                view,
+            )
+        })
+        .collect()
+}
+
+fn build_context_projection(
+    trace_id: &str,
+    interaction_context_id: &str,
+    context_pack_id: &str,
+    context_pack_ref: &str,
+    view: ContextPackProfileView,
+) -> ContextProjection {
+    let context_projection_id = format!("context-projection-{}", uuid::Uuid::now_v7().simple());
+    let context_projection_ref =
+        format!("context-projection://tonglingyu/{trace_id}/{context_projection_id}");
+    let output_contract = projection_output_contract(&view.profile_name);
+    let forbidden_tools = Vec::<String>::new();
+    let projection_payload = json!({
+        "object": "tonglingyu.context_projection_payload",
+        "visible_question": &view.visible_question,
+        "session_summary": &view.session_summary,
+        "forbidden_context": &view.forbidden_context,
+        "memory_read_refs": &view.memory_read_refs,
+        "consumer_name": &view.profile_name,
+    });
+    let tool_policy = json!({
+        "allowed_tools": &view.allowed_tools,
+        "forbidden_tools": &forbidden_tools,
+    });
+    let tool_policy_digest = digest_json(&tool_policy);
+    let output_contract_digest = digest_json(&output_contract);
+    let unsigned_projection = json!({
+        "context_projection_id": &context_projection_id,
+        "context_projection_ref": &context_projection_ref,
+        "context_pack_id": context_pack_id,
+        "context_pack_ref": context_pack_ref,
+        "trace_id": trace_id,
+        "interaction_context_id": interaction_context_id,
+        "consumer_type": RUNTIME_CONSUMER_TYPE,
+        "consumer_name": &view.profile_name,
+        "runtime_adapter": RUNTIME_ADAPTER,
+        "projection_payload": &projection_payload,
+        "allowed_tools": &view.allowed_tools,
+        "forbidden_tools": &forbidden_tools,
+        "output_contract": &output_contract,
+        "tool_policy_digest": &tool_policy_digest,
+        "output_contract_digest": &output_contract_digest,
+        "schema_version": CONTEXT_PROJECTION_SCHEMA_VERSION,
+        "status": "active",
+    });
+    let digest = digest_json(&unsigned_projection);
+    ContextProjection {
+        context_projection_id,
+        context_projection_ref,
+        context_pack_id: context_pack_id.to_string(),
+        context_pack_ref: context_pack_ref.to_string(),
+        trace_id: trace_id.to_string(),
+        interaction_context_id: interaction_context_id.to_string(),
+        consumer_type: RUNTIME_CONSUMER_TYPE.to_string(),
+        consumer_name: view.profile_name,
+        runtime_adapter: RUNTIME_ADAPTER.to_string(),
+        projection_payload,
+        allowed_tools: view.allowed_tools,
+        forbidden_tools,
+        output_contract,
+        tool_policy_digest,
+        output_contract_digest,
+        schema_version: CONTEXT_PROJECTION_SCHEMA_VERSION.to_string(),
+        digest,
+        status: "active".to_string(),
+    }
+}
+
+fn projection_output_contract(consumer_name: &str) -> Value {
+    match consumer_name {
+        "honglou-text" | "honglou-commentary" => json!({
+            "object": "tonglingyu.evidence_analysis",
+            "must_not_write_final_answer": true,
+            "must_return_output_ref": true,
+        }),
+        "honglou-reviewer" => json!({
+            "object": "tonglingyu.review_observation",
+            "reviewer_is_observational": true,
+            "local_review_enforcement_remains_authoritative": true,
+            "must_return_output_ref": true,
+        }),
+        _ => json!({
+            "object": "tonglingyu.main_runtime_projection",
+            "must_return_output_ref": true,
+            "evidence_package_allows_memory": false,
+        }),
+    }
+}
+
+fn insert_context_projection(conn: &Connection, projection: &ContextProjection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO context_projections (
+            context_projection_id, context_projection_ref, context_pack_id, context_pack_ref,
+            trace_id, interaction_context_id, consumer_type, consumer_name, runtime_adapter,
+            projection_payload_json, allowed_tools_json, forbidden_tools_json,
+            output_contract_json, tool_policy_digest, output_contract_digest, schema_version,
+            digest, status, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        params![
+            &projection.context_projection_id,
+            &projection.context_projection_ref,
+            &projection.context_pack_id,
+            &projection.context_pack_ref,
+            &projection.trace_id,
+            &projection.interaction_context_id,
+            &projection.consumer_type,
+            &projection.consumer_name,
+            &projection.runtime_adapter,
+            serde_json::to_string(&projection.projection_payload)?,
+            serde_json::to_string(&projection.allowed_tools)?,
+            serde_json::to_string(&projection.forbidden_tools)?,
+            serde_json::to_string(&projection.output_contract)?,
+            &projection.tool_policy_digest,
+            &projection.output_contract_digest,
+            &projection.schema_version,
+            &projection.digest,
+            &projection.status,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn latest_subject_from_journal(conn: &Connection, user_session_id: &str) -> Result<Option<String>> {
@@ -876,29 +1153,72 @@ fn known_subjects() -> &'static [&'static str] {
 
 fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT context_pack_id, interaction_context_id, profile_name, resolved_question,
+        "SELECT context_pack_id, COALESCE(context_pack_ref, context_pack_id),
+                interaction_context_id, profile_name, resolved_question,
                 session_summary, active_scopes_json, candidate_scopes_json, allowed_tools_json,
                 forbidden_tools_json, memory_read_refs_json, forbidden_context_json,
-                output_contract_json, profile_views_json, schema_version, created_at
+                output_contract_json, profile_views_json, COALESCE(policy_versions_json, '{}'),
+                schema_version, COALESCE(digest, ''), created_at
          FROM context_packs WHERE trace_id = ?1 ORDER BY created_at, context_pack_id",
     )?;
     let rows = stmt.query_map(params![trace_id], |row| {
         Ok(json!({
             "context_pack_id": row.get::<_, String>(0)?,
-            "interaction_context_id": row.get::<_, String>(1)?,
-            "profile_name": row.get::<_, String>(2)?,
-            "resolved_question": row.get::<_, String>(3)?,
-            "session_summary": row.get::<_, String>(4)?,
-            "active_scopes": parse_json_column(row.get::<_, String>(5)?),
-            "candidate_scopes": parse_json_column(row.get::<_, String>(6)?),
-            "allowed_tools": parse_json_column(row.get::<_, String>(7)?),
-            "forbidden_tools": parse_json_column(row.get::<_, String>(8)?),
-            "memory_read_refs": parse_json_column(row.get::<_, String>(9)?),
-            "forbidden_context": parse_json_column(row.get::<_, String>(10)?),
+            "context_pack_ref": row.get::<_, String>(1)?,
+            "interaction_context_id": row.get::<_, String>(2)?,
+            "profile_name": row.get::<_, String>(3)?,
+            "resolved_question": row.get::<_, String>(4)?,
+            "session_summary": row.get::<_, String>(5)?,
+            "active_scopes": parse_json_column(row.get::<_, String>(6)?),
+            "candidate_scopes": parse_json_column(row.get::<_, String>(7)?),
+            "allowed_tools": parse_json_column(row.get::<_, String>(8)?),
+            "forbidden_tools": parse_json_column(row.get::<_, String>(9)?),
+            "memory_read_refs": parse_json_column(row.get::<_, String>(10)?),
+            "forbidden_context": parse_json_column(row.get::<_, String>(11)?),
+            "output_contract": parse_json_column(row.get::<_, String>(12)?),
+            "profile_views": parse_json_column(row.get::<_, String>(13)?),
+            "policy_versions": parse_json_column(row.get::<_, String>(14)?),
+            "schema_version": row.get::<_, String>(15)?,
+            "digest": row.get::<_, String>(16)?,
+            "created_at": row.get::<_, String>(17)?,
+        }))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn load_context_projections(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT context_projection_id, context_projection_ref, context_pack_id,
+                context_pack_ref, interaction_context_id, consumer_type, consumer_name,
+                runtime_adapter, projection_payload_json, allowed_tools_json,
+                forbidden_tools_json, output_contract_json, tool_policy_digest,
+                output_contract_digest, schema_version, digest, status, created_at
+         FROM context_projections WHERE trace_id = ?1
+         ORDER BY created_at, context_projection_id",
+    )?;
+    let rows = stmt.query_map(params![trace_id], |row| {
+        let projection_payload = parse_json_column(row.get::<_, String>(8)?);
+        Ok(json!({
+            "context_projection_id": row.get::<_, String>(0)?,
+            "context_projection_ref": row.get::<_, String>(1)?,
+            "context_pack_id": row.get::<_, String>(2)?,
+            "context_pack_ref": row.get::<_, String>(3)?,
+            "interaction_context_id": row.get::<_, String>(4)?,
+            "consumer_type": row.get::<_, String>(5)?,
+            "consumer_name": row.get::<_, String>(6)?,
+            "runtime_adapter": row.get::<_, String>(7)?,
+            "projection_payload_summary": projection_payload_summary(&projection_payload),
+            "projection_payload_sha256": digest_json(&projection_payload),
+            "allowed_tools": parse_json_column(row.get::<_, String>(9)?),
+            "forbidden_tools": parse_json_column(row.get::<_, String>(10)?),
             "output_contract": parse_json_column(row.get::<_, String>(11)?),
-            "profile_views": parse_json_column(row.get::<_, String>(12)?),
-            "schema_version": row.get::<_, String>(13)?,
-            "created_at": row.get::<_, String>(14)?,
+            "tool_policy_digest": row.get::<_, String>(12)?,
+            "output_contract_digest": row.get::<_, String>(13)?,
+            "schema_version": row.get::<_, String>(14)?,
+            "digest": row.get::<_, String>(15)?,
+            "status": row.get::<_, String>(16)?,
+            "created_at": row.get::<_, String>(17)?,
         }))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -994,6 +1314,24 @@ fn parse_json_column(value: String) -> Value {
     serde_json::from_str(&value).unwrap_or(Value::Null)
 }
 
+fn projection_payload_summary(value: &Value) -> Value {
+    json!({
+        "visible_question_sha256": value
+            .get("visible_question")
+            .and_then(Value::as_str)
+            .map(hash_text),
+        "has_session_summary": value.get("session_summary").is_some_and(|item| !item.is_null()),
+        "forbidden_context_count": value
+            .get("forbidden_context")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        "memory_read_ref_count": value
+            .get("memory_read_refs")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+    })
+}
+
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
     conn.query_row(&sql, [], |row| row.get(0))
@@ -1034,6 +1372,14 @@ fn hash_text(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn digest_json(value: &Value) -> String {
+    hash_text(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()))
+}
+
+fn context_pack_ref(trace_id: &str, context_pack_id: &str) -> String {
+    format!("context-pack://tonglingyu/{trace_id}/{context_pack_id}")
 }
 
 fn now_rfc3339() -> String {
@@ -1117,10 +1463,46 @@ mod tests {
         .expect("context created");
 
         assert!(context.user_session_id.starts_with("user-session-"));
+        assert_eq!(context.context_projections.len(), 4);
+        let main_projection = context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-main")
+            .expect("main projection");
+        assert!(
+            main_projection
+                .allowed_tools
+                .contains(&"tonglingyu.evidence.package.create".to_string())
+        );
+        assert_eq!(main_projection.consumer_type, "runtime_profile");
+        assert_eq!(
+            main_projection.runtime_adapter,
+            "tonglingyu-runtime-adapter-v1"
+        );
+        assert!(
+            main_projection
+                .context_projection_ref
+                .starts_with("context-projection://tonglingyu/trace-test/")
+        );
         let trace = load_trace_context(&conn, "trace-test").expect("trace context");
         let rendered = serde_json::to_string(&trace).expect("trace json");
 
         assert!(!rendered.contains("\"content\":\"介绍尤三姐\""));
+        assert!(!rendered.contains("\"projection_payload\":"));
         assert!(rendered.contains("raw_content_included"));
+        assert_eq!(
+            trace["context_projections"]
+                .as_array()
+                .expect("trace projections")
+                .len(),
+            4
+        );
+        assert!(
+            trace["context_projections"]
+                .as_array()
+                .expect("trace projections")
+                .iter()
+                .all(|projection| projection["projection_payload_summary"].is_object())
+        );
     }
 }

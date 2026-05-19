@@ -303,6 +303,10 @@ pub const KNOWLEDGE_CALIBRATION_JOB_SCHEMA_VERSION: &str =
 pub const KNOWLEDGE_CALIBRATION_PROFILE_ID: &str = "honglou-knowledge-calibrator";
 pub const KNOWLEDGE_CALIBRATION_PROFILE_CONTRACT_VERSION: &str =
     "tonglingyu-knowledge-calibration-profile-v1";
+pub const RUNTIME_CONTEXT_PACK_SCHEMA_VERSION: &str = "tonglingyu-scoped-context-v1";
+pub const RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION: &str = "tonglingyu-context-projection-v1";
+pub const RUNTIME_CONTEXT_CONSUMER_TYPE: &str = "runtime_profile";
+pub const TONGLINGYU_RUNTIME_ADAPTER: &str = "tonglingyu-runtime-adapter-v1";
 pub const KNOWLEDGE_RUNTIME_POLICY_VERSION: &str = "tonglingyu-knowledge-runtime-policy-v1";
 pub const KNOWLEDGE_RUNTIME_POLICY_SCHEMA_VERSION: &str =
     "tonglingyu-knowledge-runtime-policy-schema-v1";
@@ -1216,8 +1220,14 @@ impl TonglingyuRuntimeStore {
             let conn = self.open_connection()?;
             execute_runtime_workflow(&conn, input.clone())?
         };
-        if let Err(error) =
-            attach_agent_runtime_step_execution(&mut workflow, &input.profiles, mode, runtime).await
+        if let Err(error) = attach_agent_runtime_step_execution(
+            &mut workflow,
+            &input.profiles,
+            &input.context,
+            mode,
+            runtime,
+        )
+        .await
         {
             self.record_agent_runtime_rejection(
                 &workflow,
@@ -1971,6 +1981,7 @@ pub struct RuntimeWorkflowInput {
     #[serde(default)]
     pub required_evidence_types: Vec<String>,
     pub profiles: RuntimeWorkflowProfiles,
+    pub context: RuntimeContextContract,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1980,6 +1991,197 @@ pub struct AgentRuntimePlanGateInput {
     #[serde(default)]
     pub required_evidence_types: Vec<String>,
     pub profiles: RuntimeWorkflowProfiles,
+    pub context: RuntimeContextContract,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeContextContract {
+    pub trace_id: String,
+    pub interaction_context_id: String,
+    pub context_pack_ref: String,
+    pub context_pack_schema_version: String,
+    pub context_pack_digest: String,
+    #[serde(default)]
+    pub projections: Vec<RuntimeContextProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeContextProjection {
+    pub context_projection_id: String,
+    pub context_projection_ref: String,
+    pub context_pack_ref: String,
+    pub context_projection_schema_version: String,
+    pub context_projection_digest: String,
+    pub consumer_type: String,
+    pub consumer_name: String,
+    pub runtime_adapter: String,
+    #[serde(default)]
+    pub projection_payload: Value,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub forbidden_tools: Vec<String>,
+    #[serde(default)]
+    pub output_contract: Value,
+    pub tool_policy_digest: String,
+    pub output_contract_digest: String,
+}
+
+impl RuntimeContextContract {
+    fn projection_for_consumer(&self, consumer_name: &str) -> Result<&RuntimeContextProjection> {
+        self.projections
+            .iter()
+            .find(|projection| projection.consumer_name == consumer_name)
+            .ok_or_else(|| anyhow!("context projection missing for consumer {consumer_name}"))
+    }
+}
+
+impl RuntimeContextProjection {
+    fn tool_policy_value(&self) -> Value {
+        json!({
+            "allowed_tools": &self.allowed_tools,
+            "forbidden_tools": &self.forbidden_tools,
+        })
+    }
+
+    fn audit_contract(&self) -> Value {
+        json!({
+            "context_projection_id": &self.context_projection_id,
+            "context_projection_ref": &self.context_projection_ref,
+            "context_projection_schema_version": &self.context_projection_schema_version,
+            "context_projection_digest": &self.context_projection_digest,
+            "consumer_type": &self.consumer_type,
+            "consumer_name": &self.consumer_name,
+            "runtime_adapter": &self.runtime_adapter,
+            "tool_policy_digest": &self.tool_policy_digest,
+            "output_contract_digest": &self.output_contract_digest,
+            "allowed_tools": &self.allowed_tools,
+            "forbidden_tools": &self.forbidden_tools,
+            "projection_payload_sha256": hash_json(&self.projection_payload),
+        })
+    }
+}
+
+fn validate_runtime_context_contract(
+    input: &RuntimeWorkflowInput,
+    plan: &RuntimeWorkflowPlan,
+) -> Result<()> {
+    let context = &input.context;
+    if context.trace_id != input.trace_id {
+        return Err(anyhow!(
+            "runtime context trace_id does not match workflow trace"
+        ));
+    }
+    if context.context_pack_ref.trim().is_empty() {
+        return Err(anyhow!("runtime context missing context_pack_ref"));
+    }
+    if context.context_pack_schema_version != RUNTIME_CONTEXT_PACK_SCHEMA_VERSION {
+        return Err(anyhow!("unsupported context pack schema version"));
+    }
+    if context.context_pack_digest.trim().is_empty() {
+        return Err(anyhow!("runtime context missing context_pack_digest"));
+    }
+    if context.projections.is_empty() {
+        return Err(anyhow!("runtime context missing context projections"));
+    }
+    let valid_consumers = [
+        input.profiles.main.as_str(),
+        input.profiles.text.as_str(),
+        input.profiles.commentary.as_str(),
+        input.profiles.reviewer.as_str(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    for projection in &context.projections {
+        validate_runtime_projection_contract(context, projection, &valid_consumers)?;
+    }
+    for step in &plan.steps {
+        let projection = context.projection_for_consumer(&step.profile)?;
+        validate_step_projection_binding(step, projection)?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_projection_contract(
+    context: &RuntimeContextContract,
+    projection: &RuntimeContextProjection,
+    valid_consumers: &BTreeSet<&str>,
+) -> Result<()> {
+    if projection.context_projection_ref.trim().is_empty() {
+        return Err(anyhow!("runtime projection missing context_projection_ref"));
+    }
+    if projection.context_pack_ref != context.context_pack_ref {
+        return Err(anyhow!(
+            "context projection {} does not belong to current context pack",
+            projection.context_projection_ref
+        ));
+    }
+    if projection.context_projection_schema_version != RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION {
+        return Err(anyhow!("unsupported context projection schema version"));
+    }
+    if projection.context_projection_digest.trim().is_empty() {
+        return Err(anyhow!("runtime projection missing digest"));
+    }
+    if projection.consumer_type != RUNTIME_CONTEXT_CONSUMER_TYPE {
+        return Err(anyhow!("unsupported runtime context consumer_type"));
+    }
+    if projection.runtime_adapter != TONGLINGYU_RUNTIME_ADAPTER {
+        return Err(anyhow!("unsupported runtime adapter"));
+    }
+    if !valid_consumers.contains(projection.consumer_name.as_str()) {
+        return Err(anyhow!(
+            "unknown runtime context consumer {}",
+            projection.consumer_name
+        ));
+    }
+    if hash_json(&projection.tool_policy_value()) != projection.tool_policy_digest {
+        return Err(anyhow!("runtime projection tool_policy_digest mismatch"));
+    }
+    if hash_json(&projection.output_contract) != projection.output_contract_digest {
+        return Err(anyhow!(
+            "runtime projection output_contract_digest mismatch"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_step_projection_binding(
+    step: &RuntimeWorkflowPlanStep,
+    projection: &RuntimeContextProjection,
+) -> Result<()> {
+    if projection.consumer_name != step.profile {
+        return Err(anyhow!(
+            "runtime step {} consumer projection mismatch",
+            step.step_id
+        ));
+    }
+    let allowed = projection
+        .allowed_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let forbidden = projection
+        .forbidden_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for tool in &step.allowed_tools {
+        if forbidden.contains(tool.as_str()) {
+            return Err(anyhow!(
+                "runtime step {} requested forbidden tool {}",
+                step.step_id,
+                tool
+            ));
+        }
+        if !allowed.contains(tool.as_str()) {
+            return Err(anyhow!(
+                "runtime step {} requested tool outside context projection: {}",
+                step.step_id,
+                tool
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2569,11 +2771,18 @@ pub fn agent_runtime_step_plan(input: &AgentRuntimePlanGateInput) -> AgentRuntim
                 .collect(),
             _ => Vec::new(),
         };
-        let runtime_step = agent_runtime_step_from_plan_step(
+        let mut runtime_step = agent_runtime_step_from_plan_step(
             plan_step,
             depends_on,
             descriptors.get(&plan_step.profile),
         );
+        if let Ok(projection) = input.context.projection_for_consumer(&plan_step.profile) {
+            runtime_step.input_ref = Some(projection.context_projection_ref.clone());
+            runtime_step.metadata["context_contract"] = projection.audit_contract();
+            runtime_step.metadata["context_pack_ref"] = json!(&input.context.context_pack_ref);
+            runtime_step.metadata["context_pack_digest"] =
+                json!(&input.context.context_pack_digest);
+        }
         match plan_step.operation.as_str() {
             "text_evidence_search" | "commentary_evidence_search" => {
                 evidence_dependencies.push(runtime_step.step_id.clone());
@@ -2594,6 +2803,10 @@ pub fn agent_runtime_step_plan(input: &AgentRuntimePlanGateInput) -> AgentRuntim
     plan.metadata = json!({
         "runtime": "tonglingyu",
         "profile_contract_version": PROFILE_CONTRACT_VERSION,
+        "context_pack_ref": &input.context.context_pack_ref,
+        "context_pack_schema_version": &input.context.context_pack_schema_version,
+        "context_pack_digest": &input.context.context_pack_digest,
+        "context_projection_count": input.context.projections.len(),
         "question_chars": input.question.chars().count(),
         "question_sha256": hash_text(&input.question),
         "required_evidence_types": &input.required_evidence_types,
@@ -2605,6 +2818,23 @@ pub fn agent_runtime_step_plan(input: &AgentRuntimePlanGateInput) -> AgentRuntim
 pub async fn execute_agent_runtime_plan_gate(
     input: AgentRuntimePlanGateInput,
 ) -> Result<AgentRuntimePlanGateReport> {
+    let validation_plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
+        question_type: "agent_runtime_plan_gate".to_string(),
+        required_evidence_types: input.required_evidence_types.clone(),
+        blocked_controls: Vec::new(),
+        profiles: input.profiles.clone(),
+    });
+    validate_runtime_context_contract(
+        &RuntimeWorkflowInput {
+            trace_id: input.trace_id.clone(),
+            question: input.question.clone(),
+            limit: 1,
+            required_evidence_types: input.required_evidence_types.clone(),
+            profiles: input.profiles.clone(),
+            context: input.context.clone(),
+        },
+        &validation_plan,
+    )?;
     let contracts = agent_runtime_profile_contracts(&input.profiles);
     let requested_tools_by_profile = contracts
         .iter()
@@ -2837,6 +3067,7 @@ pub fn execute_runtime_workflow(
         blocked_controls: Vec::new(),
         profiles: input.profiles.clone(),
     });
+    validate_runtime_context_contract(&input, &workflow_plan)?;
     let mut steps = Vec::new();
     let mut cards = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
@@ -2879,6 +3110,7 @@ pub fn execute_runtime_workflow(
             "evidence_types": evidence_types(&text_cards),
             "quality_report": &text_quality_report,
             }),
+            context: &input.context,
         },
     )?);
 
@@ -2929,6 +3161,7 @@ pub fn execute_runtime_workflow(
                 "base_text_limits": "commentary evidence cannot prove base text facts alone",
                 "quality_report": &commentary_quality_report,
                 }),
+                context: &input.context,
             },
         )?);
     }
@@ -2978,6 +3211,7 @@ pub fn execute_runtime_workflow(
             "claim_count": package.claims.len(),
             "review_status": &package.review.status,
             }),
+            context: &input.context,
         },
     )?);
     let draft_started = Instant::now();
@@ -3002,6 +3236,7 @@ pub fn execute_runtime_workflow(
             "claim_statements": &package.claims,
             "answer_source": "runtime_local_profile",
             }),
+            context: &input.context,
         },
     )?);
     let review_started = Instant::now();
@@ -3028,6 +3263,7 @@ pub fn execute_runtime_workflow(
             "review": &package.review,
             "revision_applied": package.review.status != "passed",
             }),
+            context: &input.context,
         },
     )?);
     let stream_events = workflow_stream_events(
@@ -3053,6 +3289,7 @@ pub fn execute_runtime_workflow(
 async fn attach_agent_runtime_step_execution(
     workflow: &mut RuntimeWorkflowOutput,
     profiles: &RuntimeWorkflowProfiles,
+    context: &RuntimeContextContract,
     mode: TonglingyuAgentRuntimeMode,
     runtime: Arc<dyn RuntimeClient>,
 ) -> Result<()> {
@@ -3062,7 +3299,6 @@ async fn attach_agent_runtime_step_execution(
         .map(|contract| (contract.profile_id.clone(), contract))
         .collect::<BTreeMap<_, _>>();
     let trace_id = workflow.trace_id.clone();
-    let question = workflow.question.clone();
     let mut executions = Vec::with_capacity(workflow.steps.len());
     for (index, step) in workflow.steps.iter().cloned().enumerate() {
         let result_summary_contract = agent_runtime_result_summary_contract(&step);
@@ -3070,13 +3306,15 @@ async fn attach_agent_runtime_step_execution(
             .get(&step.profile)
             .cloned()
             .ok_or_else(|| anyhow!("runtime profile contract missing for {}", step.profile))?;
+        let projection = context.projection_for_consumer(&step.profile)?.clone();
         executions.push(execute_agent_runtime_profile_step(
             index,
             step,
             trace_id.clone(),
-            question.clone(),
             result_summary_contract.to_owned(),
             contract,
+            projection,
+            context.clone(),
             mode,
             runtime.clone(),
         ));
@@ -3097,20 +3335,26 @@ async fn execute_agent_runtime_profile_step(
     index: usize,
     step: RuntimeWorkflowStepReport,
     trace_id: String,
-    question: String,
     result_summary_contract: String,
     contract: AgentProfileContract,
+    projection: RuntimeContextProjection,
+    context: RuntimeContextContract,
     mode: TonglingyuAgentRuntimeMode,
     runtime: Arc<dyn RuntimeClient>,
 ) -> Result<AgentRuntimeStepExecution> {
     let runtime_step = agent_runtime_step_from_workflow_step(&step);
+    let visible_question = projection
+        .projection_payload
+        .get("visible_question")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let output = runtime
         .execute_profile_step(RuntimeProfileInput {
             profile_id: step.profile.clone(),
             messages: vec![agent_runtime_profile_step_message(
                 &trace_id,
-                &question,
                 &step,
+                &projection,
                 &result_summary_contract,
             )],
             metadata: json!({
@@ -3119,10 +3363,14 @@ async fn execute_agent_runtime_profile_step(
                 "operation": &step.operation,
                 "input_ref": &step.input_ref,
                 "output_ref": &step.output_ref,
+                "context_pack_ref": &context.context_pack_ref,
+                "context_pack_schema_version": &context.context_pack_schema_version,
+                "context_pack_digest": &context.context_pack_digest,
+                "context_projection": projection.audit_contract(),
                 "step_output": &step.output,
                 "result_summary_contract": &result_summary_contract,
-                "question_chars": question.chars().count(),
-                "question_sha256": hash_text(&question),
+                "question_chars": visible_question.chars().count(),
+                "question_sha256": hash_text(visible_question),
                 "content_source": "tonglingyu-deterministic-workflow",
             }),
             profile_contract: Some(contract),
@@ -3501,8 +3749,8 @@ fn tonglingyu_agent_runtime_client(
 
 fn agent_runtime_profile_step_message(
     trace_id: &str,
-    question: &str,
     step: &RuntimeWorkflowStepReport,
+    projection: &RuntimeContextProjection,
     result_summary_contract: &str,
 ) -> RuntimeProfileMessage {
     RuntimeProfileMessage::new(
@@ -3513,7 +3761,9 @@ fn agent_runtime_profile_step_message(
                 "trace_id: {trace_id}\n",
                 "profile: {profile}\n",
                 "operation: {operation}\n",
-                "question: {question}\n",
+                "context_projection_ref: {context_projection_ref}\n",
+                "context_projection_digest: {context_projection_digest}\n",
+                "context_projection_payload_json: {context_projection_payload}\n",
                 "input_ref: {input_ref}\n",
                 "output_ref: {output_ref}\n",
                 "allowed_tools: {allowed_tools}\n",
@@ -3523,7 +3773,10 @@ fn agent_runtime_profile_step_message(
             trace_id = trace_id,
             profile = &step.profile,
             operation = &step.operation,
-            question = question,
+            context_projection_ref = &projection.context_projection_ref,
+            context_projection_digest = &projection.context_projection_digest,
+            context_projection_payload = serde_json::to_string(&projection.projection_payload)
+                .unwrap_or_else(|_| "{}".to_string()),
             input_ref = step.input_ref.as_deref().unwrap_or("none"),
             output_ref = &step.output_ref,
             allowed_tools = step.allowed_tools.join(","),
@@ -4519,6 +4772,10 @@ fn agent_runtime_step_from_workflow_step(step: &RuntimeWorkflowStepReport) -> Ag
             "operation": &step.operation,
             "input_ref": &step.input_ref,
             "output_ref": &step.output_ref,
+            "context_contract": step.output
+                .get("context_contract")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
             "content_source": "tonglingyu-deterministic-workflow",
         }),
     );
@@ -4551,12 +4808,14 @@ struct WorkflowStepReportInput<'a> {
     input_ref: Option<String>,
     duration_ms: u128,
     output: Value,
+    context: &'a RuntimeContextContract,
 }
 
 fn workflow_step_report(
     conn: &Connection,
     input: WorkflowStepReportInput<'_>,
 ) -> Result<RuntimeWorkflowStepReport> {
+    let projection = input.context.projection_for_consumer(input.profile)?;
     let report = RuntimeWorkflowStepReport {
         step_id: input.step_id.to_string(),
         profile: input.profile.to_string(),
@@ -4570,7 +4829,7 @@ fn workflow_step_report(
         output_ref: workflow_output_ref(input.trace_id, input.step_id),
         duration_ms: input.duration_ms,
         trace_id: input.trace_id.to_string(),
-        output: input.output,
+        output: output_with_context_contract(input.output, input.context, projection),
         agent_runtime: None,
     };
     append_runtime_audit_event(
@@ -4587,9 +4846,35 @@ fn workflow_step_report(
             "input_ref": &report.input_ref,
             "output_ref": &report.output_ref,
             "duration_ms": report.duration_ms,
+            "context_pack_ref": &input.context.context_pack_ref,
+            "context_pack_schema_version": &input.context.context_pack_schema_version,
+            "context_pack_digest": &input.context.context_pack_digest,
+            "context_projection": projection.audit_contract(),
         }),
     )?;
     Ok(report)
+}
+
+fn output_with_context_contract(
+    mut output: Value,
+    context: &RuntimeContextContract,
+    projection: &RuntimeContextProjection,
+) -> Value {
+    let contract = json!({
+        "context_pack_ref": &context.context_pack_ref,
+        "context_pack_schema_version": &context.context_pack_schema_version,
+        "context_pack_digest": &context.context_pack_digest,
+        "context_projection": projection.audit_contract(),
+    });
+    if let Some(object) = output.as_object_mut() {
+        object.insert("context_contract".to_string(), contract);
+        output
+    } else {
+        json!({
+            "value": output,
+            "context_contract": contract,
+        })
+    }
 }
 
 fn workflow_output_ref(trace_id: &str, step_id: &str) -> String {
@@ -12454,6 +12739,10 @@ fn hash_text(input: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn hash_json(input: &Value) -> String {
+    hash_text(&serde_json::to_string(input).unwrap_or_else(|_| "null".to_string()))
+}
+
 fn table_count(conn: &Connection, table: &str) -> Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
     conn.query_row(&sql, [], |row| row.get(0))
@@ -15205,6 +15494,146 @@ mod tests {
             max_active: Arc<std::sync::atomic::AtomicUsize>,
         ) -> Self {
             Self { active, max_active }
+        }
+    }
+
+    fn test_runtime_context(
+        trace_id: &str,
+        question: &str,
+        profiles: &RuntimeWorkflowProfiles,
+    ) -> RuntimeContextContract {
+        let interaction_context_id = format!("test-interaction-context-{trace_id}");
+        let context_pack_ref = format!("context-pack://tonglingyu/{trace_id}/test");
+        let pack_payload = json!({
+            "trace_id": trace_id,
+            "interaction_context_id": &interaction_context_id,
+            "resolved_question": question,
+            "schema_version": RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
+            "source": "runtime-test",
+        });
+        RuntimeContextContract {
+            trace_id: trace_id.to_string(),
+            interaction_context_id,
+            context_pack_ref: context_pack_ref.clone(),
+            context_pack_schema_version: RUNTIME_CONTEXT_PACK_SCHEMA_VERSION.to_string(),
+            context_pack_digest: hash_json(&pack_payload),
+            projections: vec![
+                test_runtime_projection(
+                    trace_id,
+                    &context_pack_ref,
+                    &profiles.text,
+                    question,
+                    None,
+                    vec!["tonglingyu.text.search".to_string()],
+                ),
+                test_runtime_projection(
+                    trace_id,
+                    &context_pack_ref,
+                    &profiles.commentary,
+                    question,
+                    None,
+                    vec!["tonglingyu.commentary.search".to_string()],
+                ),
+                test_runtime_projection(
+                    trace_id,
+                    &context_pack_ref,
+                    &profiles.main,
+                    question,
+                    Some("test session summary".to_string()),
+                    vec![
+                        "tonglingyu.evidence.package.create".to_string(),
+                        "tonglingyu.evidence.package.read".to_string(),
+                    ],
+                ),
+                test_runtime_projection(
+                    trace_id,
+                    &context_pack_ref,
+                    &profiles.reviewer,
+                    question,
+                    None,
+                    vec!["tonglingyu.evidence.package.read".to_string()],
+                ),
+            ],
+        }
+    }
+
+    fn test_runtime_projection(
+        trace_id: &str,
+        context_pack_ref: &str,
+        consumer_name: &str,
+        question: &str,
+        session_summary: Option<String>,
+        allowed_tools: Vec<String>,
+    ) -> RuntimeContextProjection {
+        let context_projection_id = format!("test-context-projection-{trace_id}-{consumer_name}");
+        let context_projection_ref =
+            format!("context-projection://tonglingyu/{trace_id}/{consumer_name}");
+        let forbidden_tools = Vec::<String>::new();
+        let projection_payload = json!({
+            "object": "tonglingyu.context_projection_payload",
+            "visible_question": question,
+            "session_summary": session_summary,
+            "forbidden_context": ["complete_user_history", "unauthorized_memory"],
+            "memory_read_refs": [],
+            "consumer_name": consumer_name,
+        });
+        let output_contract = json!({
+            "object": "tonglingyu.test_runtime_projection",
+            "must_return_output_ref": true,
+        });
+        let tool_policy_digest = hash_json(&json!({
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+        }));
+        let output_contract_digest = hash_json(&output_contract);
+        let unsigned_projection = json!({
+            "context_projection_id": &context_projection_id,
+            "context_projection_ref": &context_projection_ref,
+            "context_pack_ref": context_pack_ref,
+            "consumer_type": RUNTIME_CONTEXT_CONSUMER_TYPE,
+            "consumer_name": consumer_name,
+            "runtime_adapter": TONGLINGYU_RUNTIME_ADAPTER,
+            "projection_payload": &projection_payload,
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+            "output_contract": &output_contract,
+            "tool_policy_digest": &tool_policy_digest,
+            "output_contract_digest": &output_contract_digest,
+            "schema_version": RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION,
+        });
+        RuntimeContextProjection {
+            context_projection_id,
+            context_projection_ref,
+            context_pack_ref: context_pack_ref.to_string(),
+            context_projection_schema_version: RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION
+                .to_string(),
+            context_projection_digest: hash_json(&unsigned_projection),
+            consumer_type: RUNTIME_CONTEXT_CONSUMER_TYPE.to_string(),
+            consumer_name: consumer_name.to_string(),
+            runtime_adapter: TONGLINGYU_RUNTIME_ADAPTER.to_string(),
+            projection_payload,
+            allowed_tools,
+            forbidden_tools,
+            output_contract,
+            tool_policy_digest,
+            output_contract_digest,
+        }
+    }
+
+    fn test_workflow_input(
+        trace_id: &str,
+        question: &str,
+        limit: usize,
+        required_evidence_types: Vec<String>,
+    ) -> RuntimeWorkflowInput {
+        let profiles = RuntimeWorkflowProfiles::default();
+        RuntimeWorkflowInput {
+            trace_id: trace_id.to_string(),
+            question: question.to_string(),
+            limit,
+            required_evidence_types,
+            context: test_runtime_context(trace_id, question, &profiles),
+            profiles,
         }
     }
 
@@ -18706,13 +19135,12 @@ mod tests {
 
         let workflow = execute_runtime_workflow(
             &conn,
-            RuntimeWorkflowInput {
-                trace_id: "trace-retrieval-failure-test".to_string(),
-                question: question.to_string(),
-                limit: 2,
-                required_evidence_types: vec!["base_text".to_string()],
-                profiles: RuntimeWorkflowProfiles::default(),
-            },
+            test_workflow_input(
+                "trace-retrieval-failure-test",
+                question,
+                2,
+                vec!["base_text".to_string()],
+            ),
         )
         .expect("workflow executes");
 
@@ -19850,13 +20278,12 @@ mod tests {
 
         let workflow = execute_runtime_workflow(
             &conn,
-            RuntimeWorkflowInput {
-                trace_id: "trace-reviewer-failure-test".to_string(),
-                question: "不存在的检索目标".to_string(),
-                limit: 2,
-                required_evidence_types: vec!["base_text".to_string()],
-                profiles: RuntimeWorkflowProfiles::default(),
-            },
+            test_workflow_input(
+                "trace-reviewer-failure-test",
+                "不存在的检索目标",
+                2,
+                vec!["base_text".to_string()],
+            ),
         )
         .expect("workflow executes");
 
@@ -20032,13 +20459,12 @@ mod tests {
         init_knowledge_base_schema(&conn).expect("kb schema");
         let workflow = execute_runtime_workflow(
             &conn,
-            RuntimeWorkflowInput {
-                trace_id: "trace-workflow-test".to_string(),
-                question: "量子红学理论如何解释通灵玉？".to_string(),
-                limit: 3,
-                required_evidence_types: vec!["base_text".to_string()],
-                profiles: RuntimeWorkflowProfiles::default(),
-            },
+            test_workflow_input(
+                "trace-workflow-test",
+                "量子红学理论如何解释通灵玉？",
+                3,
+                vec!["base_text".to_string()],
+            ),
         )
         .expect("workflow executes");
 
@@ -20663,13 +21089,12 @@ mod tests {
         }
         let workflow = store
             .execute_workflow_with_agent_runtime_mode(
-                RuntimeWorkflowInput {
-                    trace_id: "trace-agent-runtime-step-test".to_string(),
-                    question: "量子红学理论如何解释通灵玉？".to_string(),
-                    limit: 3,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(
+                    "trace-agent-runtime-step-test",
+                    "量子红学理论如何解释通灵玉？",
+                    3,
+                    vec!["base_text".to_string()],
+                ),
                 TonglingyuAgentRuntimeMode::Minimal,
             )
             .await
@@ -20764,13 +21189,12 @@ mod tests {
         }
         let workflow = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: "trace-hermes-draft-workflow-test".to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(
+                    "trace-hermes-draft-workflow-test",
+                    "通灵玉是什么？",
+                    2,
+                    vec!["base_text".to_string()],
+                ),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(DraftRuntimeClient),
             )
@@ -20951,13 +21375,12 @@ mod tests {
         }
         let workflow = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: "trace-hermes-required-tools-test".to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(
+                    "trace-hermes-required-tools-test",
+                    "通灵玉是什么？",
+                    2,
+                    vec!["base_text".to_string()],
+                ),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(NoToolRuntimeClient),
             )
@@ -21006,13 +21429,12 @@ mod tests {
         }
         let error = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: "trace-hermes-output-ref-test".to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(
+                    "trace-hermes-output-ref-test",
+                    "通灵玉是什么？",
+                    2,
+                    vec!["base_text".to_string()],
+                ),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(BadOutputRefRuntimeClient),
             )
@@ -21041,13 +21463,12 @@ mod tests {
         }
         let error = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: "trace-hermes-evidence-output-ref-test".to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(
+                    "trace-hermes-evidence-output-ref-test",
+                    "通灵玉是什么？",
+                    2,
+                    vec!["base_text".to_string()],
+                ),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(WrongEvidenceOutputRefRuntimeClient),
             )
@@ -21078,13 +21499,7 @@ mod tests {
         let trace_id = "trace-hermes-incomplete-content-test";
         let error = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: trace_id.to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(IncompleteHermesContentRuntimeClient),
             )
@@ -21133,13 +21548,7 @@ mod tests {
         let trace_id = "trace-hermes-profile-failure-test";
         let error = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: trace_id.to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(FailingProfileRuntimeClient),
             )
@@ -21176,13 +21585,7 @@ mod tests {
         let trace_id = "trace-hermes-missing-tool-audit-test";
         let error = store
             .execute_workflow_with_agent_runtime_client(
-                RuntimeWorkflowInput {
-                    trace_id: trace_id.to_string(),
-                    question: "通灵玉是什么？".to_string(),
-                    limit: 2,
-                    required_evidence_types: vec!["base_text".to_string()],
-                    profiles: RuntimeWorkflowProfiles::default(),
-                },
+                test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
                 TonglingyuAgentRuntimeMode::Hermes,
                 Arc::new(MissingToolAuditRuntimeClient),
             )
@@ -21225,14 +21628,19 @@ mod tests {
             init_knowledge_base_schema(&conn).expect("kb schema");
         }
         let mut workflow = store
-            .execute_workflow(RuntimeWorkflowInput {
-                trace_id: "trace-agent-runtime-step-concurrency-test".to_string(),
-                question: "脂批如何评价通灵玉？".to_string(),
-                limit: 3,
-                required_evidence_types: vec!["base_text".to_string()],
-                profiles: RuntimeWorkflowProfiles::default(),
-            })
+            .execute_workflow(test_workflow_input(
+                "trace-agent-runtime-step-concurrency-test",
+                "脂批如何评价通灵玉？",
+                3,
+                vec!["base_text".to_string()],
+            ))
             .expect("workflow executes");
+        let profiles = RuntimeWorkflowProfiles::default();
+        let context = test_runtime_context(
+            "trace-agent-runtime-step-concurrency-test",
+            "脂批如何评价通灵玉？",
+            &profiles,
+        );
         let expected_step_ids = workflow
             .steps
             .iter()
@@ -21243,7 +21651,8 @@ mod tests {
 
         attach_agent_runtime_step_execution(
             &mut workflow,
-            &RuntimeWorkflowProfiles::default(),
+            &profiles,
+            &context,
             TonglingyuAgentRuntimeMode::Hermes,
             Arc::new(SlowDraftRuntimeClient::new(
                 Arc::clone(&active),
@@ -21378,11 +21787,18 @@ mod tests {
 
     #[tokio::test]
     async fn agent_runtime_plan_gate_executes_profile_contracts() {
+        let profiles = RuntimeWorkflowProfiles::default();
+        let context = test_runtime_context(
+            "trace-agent-runtime-gate-test",
+            "脂批如何评价通灵玉？",
+            &profiles,
+        );
         let report = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
             trace_id: "trace-agent-runtime-gate-test".to_string(),
             question: "脂批如何评价通灵玉？".to_string(),
             required_evidence_types: vec!["base_text".to_string(), "commentary".to_string()],
-            profiles: RuntimeWorkflowProfiles::default(),
+            profiles,
+            context,
         })
         .await
         .expect("agent-runtime plan gate executes");

@@ -32,10 +32,13 @@ use tonglingyu_runtime::{
     KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
-    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
-    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
-    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    RUNTIME_CONTEXT_CONSUMER_TYPE, RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
+    RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
+    RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
+    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
+    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode,
     TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
     execute_agent_runtime_plan_gate, package_json,
 };
@@ -45,9 +48,10 @@ mod context_governance;
 mod plan;
 
 use crate::context_governance::{
-    ContextMessage, ContextRequestInput, FinalResponseJournalInput, append_final_response,
-    append_review_journal, append_runtime_step_journal, create_context_for_request,
-    load_deduped_final_response, table_counts as context_table_counts,
+    ContextMessage, ContextProjection, ContextRequestInput, ContextResolution,
+    FinalResponseJournalInput, append_final_response, append_review_journal,
+    append_runtime_step_journal, create_context_for_request, load_deduped_final_response,
+    table_counts as context_table_counts,
 };
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
@@ -517,6 +521,151 @@ fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProf
         commentary: profiles.commentary.clone(),
         reviewer: profiles.reviewer.clone(),
     }
+}
+
+fn runtime_context_contract(scoped_context: &ContextResolution) -> RuntimeContextContract {
+    RuntimeContextContract {
+        trace_id: scoped_context
+            .context_pack
+            .get("trace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        interaction_context_id: scoped_context.interaction_context_id.clone(),
+        context_pack_ref: scoped_context.context_pack_ref.clone(),
+        context_pack_schema_version: context_governance::CONTEXT_SCHEMA_VERSION.to_string(),
+        context_pack_digest: scoped_context.context_pack_digest.clone(),
+        projections: scoped_context
+            .context_projections
+            .iter()
+            .map(runtime_context_projection)
+            .collect(),
+    }
+}
+
+fn runtime_context_projection(projection: &ContextProjection) -> RuntimeContextProjection {
+    RuntimeContextProjection {
+        context_projection_id: projection.context_projection_id.clone(),
+        context_projection_ref: projection.context_projection_ref.clone(),
+        context_pack_ref: projection.context_pack_ref.clone(),
+        context_projection_schema_version: projection.schema_version.clone(),
+        context_projection_digest: projection.digest.clone(),
+        consumer_type: projection.consumer_type.clone(),
+        consumer_name: projection.consumer_name.clone(),
+        runtime_adapter: projection.runtime_adapter.clone(),
+        projection_payload: projection.projection_payload.clone(),
+        allowed_tools: projection.allowed_tools.clone(),
+        forbidden_tools: projection.forbidden_tools.clone(),
+        output_contract: projection.output_contract.clone(),
+        tool_policy_digest: projection.tool_policy_digest.clone(),
+        output_contract_digest: projection.output_contract_digest.clone(),
+    }
+}
+
+fn local_runtime_context_contract(
+    trace_id: &str,
+    question: &str,
+    profiles: &RuntimeWorkflowProfiles,
+) -> Result<RuntimeContextContract> {
+    let interaction_context_id = format!("local-interaction-context-{trace_id}");
+    let context_pack_ref = format!("context-pack://tonglingyu/{trace_id}/local");
+    let pack_payload = json!({
+        "trace_id": trace_id,
+        "interaction_context_id": &interaction_context_id,
+        "resolved_question": question,
+        "schema_version": RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
+        "source": "local_runtime_gate",
+    });
+    let context_pack_digest = hash_value(&pack_payload)?;
+    let projection_specs = [
+        (
+            profiles.main.as_str(),
+            vec![
+                "tonglingyu.evidence.package.create".to_string(),
+                "tonglingyu.evidence.package.read".to_string(),
+            ],
+            Some("local runtime context".to_string()),
+        ),
+        (
+            profiles.text.as_str(),
+            vec!["tonglingyu.text.search".to_string()],
+            None,
+        ),
+        (
+            profiles.commentary.as_str(),
+            vec!["tonglingyu.commentary.search".to_string()],
+            None,
+        ),
+        (
+            profiles.reviewer.as_str(),
+            vec!["tonglingyu.evidence.package.read".to_string()],
+            None,
+        ),
+    ];
+    let mut projections = Vec::new();
+    for (consumer_name, allowed_tools, session_summary) in projection_specs {
+        let context_projection_id = format!("local-context-projection-{consumer_name}");
+        let context_projection_ref =
+            format!("context-projection://tonglingyu/{trace_id}/{consumer_name}");
+        let forbidden_tools = Vec::<String>::new();
+        let projection_payload = json!({
+            "object": "tonglingyu.context_projection_payload",
+            "visible_question": question,
+            "session_summary": session_summary,
+            "forbidden_context": ["complete_user_history", "unauthorized_memory"],
+            "memory_read_refs": [],
+            "consumer_name": consumer_name,
+        });
+        let output_contract = json!({
+            "object": "tonglingyu.local_runtime_projection",
+            "must_return_output_ref": true,
+        });
+        let tool_policy_digest = hash_value(&json!({
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+        }))?;
+        let output_contract_digest = hash_value(&output_contract)?;
+        let projection_unsigned = json!({
+            "context_projection_id": &context_projection_id,
+            "context_projection_ref": &context_projection_ref,
+            "context_pack_ref": &context_pack_ref,
+            "consumer_type": RUNTIME_CONTEXT_CONSUMER_TYPE,
+            "consumer_name": consumer_name,
+            "runtime_adapter": TONGLINGYU_RUNTIME_ADAPTER,
+            "projection_payload": &projection_payload,
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+            "output_contract": &output_contract,
+            "tool_policy_digest": &tool_policy_digest,
+            "output_contract_digest": &output_contract_digest,
+            "schema_version": RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION,
+        });
+        projections.push(RuntimeContextProjection {
+            context_projection_id,
+            context_projection_ref,
+            context_pack_ref: context_pack_ref.clone(),
+            context_projection_schema_version: RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION
+                .to_string(),
+            context_projection_digest: hash_value(&projection_unsigned)?,
+            consumer_type: RUNTIME_CONTEXT_CONSUMER_TYPE.to_string(),
+            consumer_name: consumer_name.to_string(),
+            runtime_adapter: TONGLINGYU_RUNTIME_ADAPTER.to_string(),
+            projection_payload,
+            allowed_tools,
+            forbidden_tools,
+            output_contract,
+            tool_policy_digest,
+            output_contract_digest,
+        });
+    }
+    Ok(RuntimeContextContract {
+        trace_id: trace_id.to_string(),
+        interaction_context_id,
+        context_pack_ref,
+        context_pack_schema_version: RUNTIME_CONTEXT_PACK_SCHEMA_VERSION.to_string(),
+        context_pack_digest,
+        projections,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -993,6 +1142,12 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "internal_config",
         "interaction_context_id",
         "context_pack_id",
+        "context_pack_ref",
+        "context_projection_id",
+        "context_projection_ref",
+        "consumer_type",
+        "consumer_name",
+        "runtime_adapter",
         "context_scope_binding",
         "scope_id",
         "scope_graph",
@@ -2955,11 +3110,15 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     let mut policy = search_policy(&args.question);
     policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
+    let runtime_profiles = runtime_workflow_profiles(&profiles);
+    let runtime_context =
+        local_runtime_context_contract(&trace_id, &args.question, &runtime_profiles)?;
     let agent_runtime_plan_gate = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
         question: args.question.clone(),
         required_evidence_types: policy.required_evidence_types.clone(),
-        profiles: runtime_workflow_profiles(&profiles),
+        profiles: runtime_profiles.clone(),
+        context: runtime_context.clone(),
     })
     .await?;
     let workflow = runtime_store
@@ -2968,7 +3127,8 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             question: args.question.clone(),
             limit: args.limit,
             required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: runtime_workflow_profiles(&profiles),
+            profiles: runtime_profiles,
+            context: runtime_context,
         })
         .await?;
     let package = workflow.package;
@@ -3090,12 +3250,15 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     for case in cases {
         let trace_id = format!("eval-{}", new_trace_id());
         let policy = search_policy(case.question);
+        let profiles = RuntimeWorkflowProfiles::default();
+        let runtime_context = local_runtime_context_contract(&trace_id, case.question, &profiles)?;
         let workflow = runtime_store.execute_workflow(RuntimeWorkflowInput {
             trace_id: trace_id.clone(),
             question: case.question.to_string(),
             limit: case.limit.unwrap_or(args.limit),
             required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: RuntimeWorkflowProfiles::default(),
+            profiles,
+            context: runtime_context,
         })?;
         let package = &workflow.package;
         let replay = runtime_store
@@ -6940,6 +7103,35 @@ async fn chat_completions(
             "used_context_refs": &scoped_context.used_context_refs,
         }),
     );
+    let runtime_context = runtime_context_contract(&scoped_context);
+    let projection_audit = runtime_context
+        .projections
+        .iter()
+        .map(|projection| {
+            json!({
+                "context_projection_ref": &projection.context_projection_ref,
+                "context_projection_digest": &projection.context_projection_digest,
+                "consumer_type": &projection.consumer_type,
+                "consumer_name": &projection.consumer_name,
+                "runtime_adapter": &projection.runtime_adapter,
+                "tool_policy_digest": &projection.tool_policy_digest,
+                "output_contract_digest": &projection.output_contract_digest,
+            })
+        })
+        .collect::<Vec<_>>();
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "context_projections_created",
+        &json!({
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "context_pack_digest": &scoped_context.context_pack_digest,
+            "context_projections": projection_audit,
+        }),
+    );
 
     if question.trim().is_empty() {
         let value = completion_value(
@@ -7085,6 +7277,7 @@ async fn chat_completions(
         question: scoped_context.resolved_question.clone(),
         required_evidence_types: policy.required_evidence_types.clone(),
         profiles: runtime_workflow_profiles(&state.profiles),
+        context: runtime_context.clone(),
     })
     .await
     {
@@ -7158,6 +7351,7 @@ async fn chat_completions(
             limit: state.max_evidence,
             required_evidence_types: policy.required_evidence_types.clone(),
             profiles: runtime_workflow_profiles(&state.profiles),
+            context: runtime_context.clone(),
         })
         .await
     {
@@ -7422,6 +7616,10 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("user_session_id");
         map.remove("interaction_context_id");
         map.remove("context_pack_id");
+        map.remove("context_pack_ref");
+        map.remove("context_projection_id");
+        map.remove("context_projection_ref");
+        map.remove("context_projections");
         map.remove("session_journal");
         map.remove("context_pack");
         map.remove("memory_read_refs");
@@ -8313,6 +8511,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "user_sessions": scoped_context_counts["user_sessions"].clone(),
             "interaction_contexts": scoped_context_counts["interaction_contexts"].clone(),
             "context_packs": scoped_context_counts["context_packs"].clone(),
+            "context_projections": scoped_context_counts["context_projections"].clone(),
             "session_journal": scoped_context_counts["session_journal"].clone(),
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
@@ -8380,6 +8579,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         (
             "tonglingyu_context_packs_total",
             metric_i64(&scoped_context_counts, "context_packs"),
+        ),
+        (
+            "tonglingyu_context_projections_total",
+            metric_i64(&scoped_context_counts, "context_projections"),
         ),
         (
             "tonglingyu_session_journal_entries_total",
@@ -10769,6 +10972,10 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
             1
         );
         assert_eq!(
+            table_count(&conn, "context_projections").expect("context projection count"),
+            4
+        );
+        assert_eq!(
             table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
             0
         );
@@ -10862,6 +11069,10 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
         assert_eq!(
             table_count(&conn, "context_packs").expect("context pack count"),
             1
+        );
+        assert_eq!(
+            table_count(&conn, "context_projections").expect("context projection count"),
+            4
         );
         assert_eq!(
             table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
@@ -10996,6 +11207,10 @@ USER: 介绍尤三姐
         let body: Value =
             serde_json::from_str(&response_text(second).await).expect("response json");
         assert!(body.get("context_pack_id").is_none());
+        assert!(body.get("context_pack_ref").is_none());
+        assert!(body.get("context_projection_id").is_none());
+        assert!(body.get("context_projection_ref").is_none());
+        assert!(body.get("context_projections").is_none());
         assert!(body.get("interaction_context_id").is_none());
         assert!(body.get("session_journal").is_none());
 
@@ -11020,6 +11235,7 @@ USER: 介绍尤三姐
         assert!(!rendered_trace.contains("\"content\":"));
         assert!(!rendered_trace.contains("memory_candidate_created"));
         assert!(!rendered_trace.contains("memory_card"));
+        assert!(!rendered_trace.contains("\"projection_payload\":"));
         let profile_views = trace["scoped_context"]["context_packs"][0]["profile_views"]
             .as_array()
             .expect("profile views");
@@ -11035,6 +11251,49 @@ USER: 介绍尤三姐
                     .contains("介绍尤三姐")
             );
         }
+        let projections = trace["scoped_context"]["context_projections"]
+            .as_array()
+            .expect("context projections");
+        assert_eq!(projections.len(), 4);
+        for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
+            let projection = projections
+                .iter()
+                .find(|projection| projection["consumer_name"] == json!(profile))
+                .expect("profile projection exists");
+            assert_eq!(projection["consumer_type"], json!("runtime_profile"));
+            assert_eq!(
+                projection["runtime_adapter"],
+                json!("tonglingyu-runtime-adapter-v1")
+            );
+            assert!(
+                projection["context_projection_ref"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("context-projection://tonglingyu/"))
+            );
+            assert_eq!(
+                projection["projection_payload_summary"]["has_session_summary"],
+                json!(false)
+            );
+            assert!(
+                !serde_json::to_string(projection)
+                    .expect("projection json")
+                    .contains("介绍尤三姐")
+            );
+        }
+        let main_projection = projections
+            .iter()
+            .find(|projection| projection["consumer_name"] == "honglou-main")
+            .expect("main projection exists");
+        assert_eq!(
+            main_projection["projection_payload_summary"]["has_session_summary"],
+            json!(true)
+        );
+        assert!(
+            main_projection["allowed_tools"]
+                .as_array()
+                .expect("allowed tools")
+                .contains(&json!("tonglingyu.evidence.package.create"))
+        );
 
         remove_sqlite_file_set(&db_path);
     }
@@ -11112,6 +11371,10 @@ USER: 介绍尤三姐
             Some("session-public-rqa-test"),
         );
         value["context_pack_id"] = json!("context-pack-public-rqa-test");
+        value["context_pack_ref"] = json!("context-pack://tonglingyu/public-rqa/test");
+        value["context_projection_id"] = json!("context-projection-public-rqa-test");
+        value["context_projection_ref"] = json!("context-projection://tonglingyu/public-rqa/test");
+        value["context_projections"] = json!([{"consumer_name": "honglou-main"}]);
         value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
         value["session_journal"] = json!([{"entry_type": "user_message"}]);
         value["memory_read_refs"] = json!(["memory:forbidden"]);
@@ -11127,6 +11390,10 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("reviewer"));
         assert!(!rendered.contains("session-public-rqa-test"));
         assert!(!rendered.contains("context_pack_id"));
+        assert!(!rendered.contains("context_pack_ref"));
+        assert!(!rendered.contains("context_projection_id"));
+        assert!(!rendered.contains("context_projection_ref"));
+        assert!(!rendered.contains("context_projections"));
         assert!(!rendered.contains("interaction_context_id"));
         assert!(!rendered.contains("session_journal"));
         assert!(!rendered.contains("memory_read_refs"));
@@ -11239,6 +11506,7 @@ USER: 介绍尤三姐
                 "runtime_step_plan": [],
                 "admin_trace": {"trace_id": "forged"},
                 "interaction_context_id": "forged-context",
+                "runtime_adapter": "forged-runtime",
                 "session_journal": [{"content": "forged"}],
                 "nested": {"agent_runtime": {"mode": "forged"}},
                 "message_id": "open-webui-message",
@@ -11246,6 +11514,7 @@ USER: 介绍尤三姐
             "extra_body": {
                 "allowed_tools": ["tonglingyu.text.search"],
                 "context_pack_id": "forged-pack",
+                "context_projection_ref": "forged-projection",
                 "memory_read_scopes": ["user_private:any"],
                 "layers": [{"runtime_step_outputs": []}],
             },
@@ -11259,11 +11528,13 @@ USER: 介绍尤三姐
                 "agent_runtime_summary",
                 "extra_body.allowed_tools",
                 "extra_body.context_pack_id",
+                "extra_body.context_projection_ref",
                 "extra_body.layers[0].runtime_step_outputs",
                 "extra_body.memory_read_scopes",
                 "metadata.admin_trace",
                 "metadata.interaction_context_id",
                 "metadata.nested.agent_runtime",
+                "metadata.runtime_adapter",
                 "metadata.runtime_step_plan",
                 "metadata.session_journal",
             ]
