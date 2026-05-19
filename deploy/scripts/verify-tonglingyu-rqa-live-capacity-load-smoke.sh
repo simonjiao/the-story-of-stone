@@ -135,6 +135,182 @@ fi
 " </dev/null >"${output_path}"
 }
 
+cleanup_open_live_capacity_records() {
+  local cleanup_dir="${ARTIFACT_DIR}/cleanup"
+  local targets_json="${cleanup_dir}/cleanup-targets.json"
+  local targets_tsv="${cleanup_dir}/cleanup-targets.tsv"
+  local verify_json="${cleanup_dir}/cleanup-verify.json"
+  local previous_errexit="false"
+  case "$-" in
+    *e*) previous_errexit="true"; set +e ;;
+  esac
+  mkdir -p "${cleanup_dir}"
+  python3 - "${HOST_DB_PATH}" "${RUN_ID}" "${targets_json}" "${targets_tsv}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, run_id, targets_json_raw, targets_tsv_raw = sys.argv[1:5]
+message_prefix = f"live-capacity-{run_id}-%"
+payload = {
+    "object": "tonglingyu.rqa_live_capacity_cleanup_targets",
+    "schema_version": 1,
+    "run_id": run_id,
+    "failure_ids": [],
+    "task_ids": [],
+    "secret_values_printed": False,
+}
+conn = sqlite3.connect(db_path)
+try:
+    failure_rows = conn.execute(
+        """
+        SELECT DISTINCT rf.failure_id
+        FROM retrieval_failures rf
+        JOIN session_journal sj
+          ON sj.trace_id = rf.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND rf.human_review_status IN ('open', 'in_review')
+        ORDER BY rf.failure_id
+        """,
+        (message_prefix,),
+    ).fetchall()
+    failure_ids = [row[0] for row in failure_rows if row and row[0]]
+    trace_rows = conn.execute(
+        """
+        SELECT DISTINCT sj.trace_id
+        FROM session_journal sj
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND sj.trace_id IS NOT NULL
+        ORDER BY sj.trace_id
+        """,
+        (message_prefix,),
+    ).fetchall()
+    trace_ids = [row[0] for row in trace_rows if row and row[0]]
+    task_ids = []
+    if failure_ids or trace_ids:
+        failure_placeholders = ",".join("?" for _ in failure_ids)
+        trace_placeholders = ",".join("?" for _ in trace_ids)
+        predicates = []
+        params = []
+        if failure_ids:
+            predicates.append(f"source_failure_id IN ({failure_placeholders})")
+            params.extend(failure_ids)
+        if trace_ids:
+            predicates.append(f"trace_id IN ({trace_placeholders})")
+            params.extend(trace_ids)
+        task_rows = conn.execute(
+            f"""
+            SELECT DISTINCT task_id
+            FROM knowledge_governance_tasks
+            WHERE status IN ('open', 'in_review', 'accepted')
+              AND ({' OR '.join(predicates)})
+            ORDER BY task_id
+            """,
+            params,
+        ).fetchall()
+        task_ids = [row[0] for row in task_rows if row and row[0]]
+finally:
+    conn.close()
+payload["failure_ids"] = failure_ids
+payload["task_ids"] = task_ids
+Path(targets_json_raw).write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+with Path(targets_tsv_raw).open("w", encoding="utf-8") as handle:
+    for task_id in task_ids:
+        handle.write(f"task\t{task_id}\n")
+    for failure_id in failure_ids:
+        handle.write(f"failure\t{failure_id}\n")
+PY
+  if [[ -s "${targets_tsv}" ]]; then
+    local cleanup_index=0
+    while IFS=$'\t' read -r cleanup_kind cleanup_id; do
+      cleanup_index=$((cleanup_index + 1))
+      if [[ "${cleanup_kind}" == "task" ]]; then
+        compose_curl "${cleanup_dir}/admin-task-cleanup-${cleanup_index}.json" PATCH \
+          "/v1/admin/governance/tasks/${cleanup_id}" \
+          '{"status":"closed","reviewer":"live-capacity-smoke","review_note":"live capacity cleanup closed interrupted smoke task","evidence_ref":"live-capacity-load-cleanup"}' \
+          admin || true
+      elif [[ "${cleanup_kind}" == "failure" ]]; then
+        compose_curl "${cleanup_dir}/admin-failure-cleanup-${cleanup_index}.json" PATCH \
+          "/v1/admin/retrieval-failures/${cleanup_id}" \
+          '{"human_review_status":"resolved","reviewer":"live-capacity-smoke","review_note":"live capacity cleanup resolved interrupted smoke failure"}' \
+          admin || true
+      fi
+    done <"${targets_tsv}"
+  fi
+  python3 - "${HOST_DB_PATH}" "${RUN_ID}" "${verify_json}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, run_id, verify_json_raw = sys.argv[1:4]
+message_prefix = f"live-capacity-{run_id}-%"
+conn = sqlite3.connect(db_path)
+try:
+    open_failures = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM retrieval_failures rf
+        JOIN session_journal sj
+          ON sj.trace_id = rf.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND rf.human_review_status IN ('open', 'in_review')
+        """,
+        (message_prefix,),
+    ).fetchone()[0]
+    open_tasks = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM knowledge_governance_tasks kgt
+        JOIN session_journal sj
+          ON sj.trace_id = kgt.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND kgt.status IN ('open', 'in_review', 'accepted')
+        """,
+        (message_prefix,),
+    ).fetchone()[0]
+finally:
+    conn.close()
+payload = {
+    "object": "tonglingyu.rqa_live_capacity_cleanup_verification",
+    "schema_version": 1,
+    "run_id": run_id,
+    "open_failure_count": open_failures,
+    "open_task_count": open_tasks,
+    "status": "ok" if open_failures == 0 and open_tasks == 0 else "failed",
+    "secret_values_printed": False,
+}
+Path(verify_json_raw).write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+raise SystemExit(0 if payload["status"] == "ok" else 1)
+PY
+  local cleanup_status=$?
+  if [[ "${previous_errexit}" == "true" ]]; then
+    set -e
+  fi
+  return "${cleanup_status}"
+}
+
+cleanup_on_exit() {
+  local status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    cleanup_open_live_capacity_records >&2 || true
+  fi
+  exit "${status}"
+}
+
+trap cleanup_on_exit EXIT
+
 STARTED_AT="$(now_iso)"
 STARTED_MS="$(now_epoch_ms)"
 
