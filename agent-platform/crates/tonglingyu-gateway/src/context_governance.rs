@@ -978,10 +978,7 @@ fn build_context_projection(
     let unsigned_projection = json!({
         "context_projection_id": &context_projection_id,
         "context_projection_ref": &context_projection_ref,
-        "context_pack_id": context_pack_id,
         "context_pack_ref": context_pack_ref,
-        "trace_id": trace_id,
-        "interaction_context_id": interaction_context_id,
         "consumer_type": RUNTIME_CONSUMER_TYPE,
         "consumer_name": &view.profile_name,
         "runtime_adapter": RUNTIME_ADAPTER,
@@ -992,7 +989,6 @@ fn build_context_projection(
         "tool_policy_digest": &tool_policy_digest,
         "output_contract_digest": &output_contract_digest,
         "schema_version": CONTEXT_PROJECTION_SCHEMA_VERSION,
-        "status": "active",
     });
     let digest = digest_json(&unsigned_projection);
     ContextProjection {

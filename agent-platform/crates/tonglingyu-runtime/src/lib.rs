@@ -2044,6 +2044,24 @@ impl RuntimeContextProjection {
         })
     }
 
+    fn digest_value(&self) -> Value {
+        json!({
+            "context_projection_id": &self.context_projection_id,
+            "context_projection_ref": &self.context_projection_ref,
+            "context_pack_ref": &self.context_pack_ref,
+            "consumer_type": &self.consumer_type,
+            "consumer_name": &self.consumer_name,
+            "runtime_adapter": &self.runtime_adapter,
+            "projection_payload": &self.projection_payload,
+            "allowed_tools": &self.allowed_tools,
+            "forbidden_tools": &self.forbidden_tools,
+            "output_contract": &self.output_contract,
+            "tool_policy_digest": &self.tool_policy_digest,
+            "output_contract_digest": &self.output_contract_digest,
+            "schema_version": &self.context_projection_schema_version,
+        })
+    }
+
     fn audit_contract(&self) -> Value {
         json!({
             "context_projection_id": &self.context_projection_id,
@@ -2121,6 +2139,11 @@ fn validate_runtime_projection_contract(
     }
     if projection.context_projection_digest.trim().is_empty() {
         return Err(anyhow!("runtime projection missing digest"));
+    }
+    if hash_json(&projection.digest_value()) != projection.context_projection_digest {
+        return Err(anyhow!(
+            "runtime projection context_projection_digest mismatch"
+        ));
     }
     if projection.consumer_type != RUNTIME_CONTEXT_CONSUMER_TYPE {
         return Err(anyhow!("unsupported runtime context consumer_type"));
@@ -21828,6 +21851,67 @@ mod tests {
         assert!(
             report.requested_tools_by_profile["honglou-reviewer"]
                 .contains(&"tonglingyu.evidence.package.read".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_plan_gate_rejects_projection_digest_mismatch() {
+        let profiles = RuntimeWorkflowProfiles::default();
+        let mut context = test_runtime_context(
+            "trace-agent-runtime-gate-bad-digest-test",
+            "脂批如何评价通灵玉？",
+            &profiles,
+        );
+        context.projections[0].context_projection_digest = "bad-digest".to_string();
+
+        let error = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+            trace_id: "trace-agent-runtime-gate-bad-digest-test".to_string(),
+            question: "脂批如何评价通灵玉？".to_string(),
+            required_evidence_types: vec!["base_text".to_string()],
+            profiles,
+            context,
+        })
+        .await
+        .expect_err("projection digest mismatch must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("context_projection_digest mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_runtime_plan_gate_rejects_tools_outside_projection() {
+        let profiles = RuntimeWorkflowProfiles::default();
+        let mut context = test_runtime_context(
+            "trace-agent-runtime-gate-tool-policy-test",
+            "脂批如何评价通灵玉？",
+            &profiles,
+        );
+        let text_projection = context
+            .projections
+            .iter_mut()
+            .find(|projection| projection.consumer_name == profiles.text)
+            .expect("text projection");
+        text_projection.allowed_tools.clear();
+        text_projection.tool_policy_digest = hash_json(&text_projection.tool_policy_value());
+        text_projection.context_projection_digest = hash_json(&text_projection.digest_value());
+
+        let error = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
+            trace_id: "trace-agent-runtime-gate-tool-policy-test".to_string(),
+            question: "脂批如何评价通灵玉？".to_string(),
+            required_evidence_types: vec!["base_text".to_string()],
+            profiles,
+            context,
+        })
+        .await
+        .expect_err("tool outside projection must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requested tool outside context projection")
         );
     }
 }
