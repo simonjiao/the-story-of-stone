@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage the project version across Rust, Python, containers, and scripts."""
+"""Manage the project version across Rust, Python, containers, and local compose."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 
-PROJECT_VERSION_FALLBACK = "0.1.13"
+PROJECT_VERSION_FALLBACK = "latest"
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CRATES = (
     "agent-core",
@@ -21,8 +21,7 @@ CRATES = (
 SCRIPT_FALLBACK_PATHS = (
     "scripts/version.py",
     "scripts/qa.sh",
-    "deploy/scripts/bump-deploy-version.sh",
-    "deploy/scripts/deploy-versioned-stack.sh",
+    "deploy/scripts/start-local-stack.sh",
 )
 TEST_VERSION_PATHS = ("tests/test_version_management.py",)
 
@@ -48,12 +47,31 @@ def read_project_version(repo_dir: Path) -> str:
     version_path = repo_dir / "VERSION"
     if version_path.is_file():
         return validate_version(version_path.read_text(encoding="utf-8").strip())
-    return validate_version(PROJECT_VERSION_FALLBACK)
+    raise VersionError(
+        f"VERSION file missing; fallback sentinel is {PROJECT_VERSION_FALLBACK!r}"
+    )
+
+
+def parse_version(version: str) -> tuple[int, int, int]:
+    major, minor, patch = (int(part) for part in validate_version(version).split("."))
+    return major, minor, patch
+
+
+def bump_version(version: str, part: str) -> str:
+    major, minor, patch = parse_version(version)
+    if part == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    if part == "minor":
+        return f"{major}.{minor + 1}.0"
+    raise VersionError(f"unsupported bump part {part!r}; expected patch or minor")
 
 
 def bump_patch(version: str) -> str:
-    major, minor, patch = (int(part) for part in validate_version(version).split("."))
-    return f"{major}.{minor}.{patch + 1}"
+    return bump_version(version, "patch")
+
+
+def bump_minor(version: str) -> str:
+    return bump_version(version, "minor")
 
 
 def replace_required(text: str, pattern: str, repl: str, label: str) -> str:
@@ -136,11 +154,11 @@ def set_pyproject_version(path: Path, version: str) -> None:
     write_if_changed(path, updated)
 
 
-def set_dockerfile_version(path: Path, version: str) -> None:
+def set_dockerfile_fallback(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     updated, count = re.subn(
-        r"^ARG APP_VERSION=[0-9]+\.[0-9]+\.[0-9]+$",
-        f"ARG APP_VERSION={version}",
+        r"^ARG APP_VERSION=.*$",
+        f"ARG APP_VERSION={PROJECT_VERSION_FALLBACK}",
         text,
         flags=re.MULTILINE,
     )
@@ -149,33 +167,75 @@ def set_dockerfile_version(path: Path, version: str) -> None:
     write_if_changed(path, updated)
 
 
-def set_compose_version(path: Path, version: str) -> None:
+def set_compose_fallback(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
-    updated, image_count = re.subn(
-        r"tonglingyu-gateway:[0-9]+\.[0-9]+\.[0-9]+",
-        f"tonglingyu-gateway:{version}",
+    updated = replace_required(
         text,
+        r'^  image: "\$\{TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:[^"]+\}"$',
+        (
+            '  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:'
+            f'${{TONGLINGYU_VERSION:-{PROJECT_VERSION_FALLBACK}}}}}"'
+        ),
+        str(path),
     )
-    updated, env_count = re.subn(
-        r"TONGLINGYU_VERSION:-[0-9]+\.[0-9]+\.[0-9]+",
-        f"TONGLINGYU_VERSION:-{version}",
+    updated = replace_required(
         updated,
+        r'^      APP_VERSION: "\$\{TONGLINGYU_VERSION:-[^"]+\}"$',
+        f'      APP_VERSION: "${{TONGLINGYU_VERSION:-{PROJECT_VERSION_FALLBACK}}}"',
+        str(path),
     )
-    if image_count < 1 or env_count < 1:
-        raise VersionError(f"{path}: no compose version defaults were updated")
+    updated = replace_required(
+        updated,
+        r'^    org\.opencontainers\.image\.version: "\$\{TONGLINGYU_VERSION:-[^"]+\}"$',
+        (
+            '    org.opencontainers.image.version: '
+            f'"${{TONGLINGYU_VERSION:-{PROJECT_VERSION_FALLBACK}}}"'
+        ),
+        str(path),
+    )
     write_if_changed(path, updated)
 
 
-def set_script_fallback(path: Path, version: str) -> None:
+def set_script_fallback(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".py":
         pattern = r'^PROJECT_VERSION_FALLBACK\s*=\s*"[^"]+"$'
-        repl = f'PROJECT_VERSION_FALLBACK = "{version}"'
+        repl = f'PROJECT_VERSION_FALLBACK = "{PROJECT_VERSION_FALLBACK}"'
     else:
         pattern = r'^PROJECT_VERSION_FALLBACK="[^"]+"$'
-        repl = f'PROJECT_VERSION_FALLBACK="{version}"'
+        repl = f'PROJECT_VERSION_FALLBACK="{PROJECT_VERSION_FALLBACK}"'
     updated = replace_required(text, pattern, repl, str(path))
     write_if_changed(path, updated)
+
+
+def assert_no_semver_fallbacks(path: Path, text: str) -> list[str]:
+    errors: list[str] = []
+    semver_fallbacks = re.findall(
+        r"(?:tonglingyu-gateway:|TONGLINGYU_VERSION:-)"
+        r"([0-9]+\.[0-9]+\.[0-9]+)",
+        text,
+    )
+    if semver_fallbacks:
+        errors.append(
+            f"{path.relative_to(repo_root())} has semantic-version fallback(s): "
+            + ",".join(sorted(set(semver_fallbacks)))
+        )
+    return errors
+
+
+def check_compose_fallback(path: Path) -> list[str]:
+    text = path.read_text(encoding="utf-8")
+    expected_image = (
+        'image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:'
+        f'${{TONGLINGYU_VERSION:-{PROJECT_VERSION_FALLBACK}}}}}"'
+    )
+    expected_version = f'TONGLINGYU_VERSION:-{PROJECT_VERSION_FALLBACK}'
+    errors = assert_no_semver_fallbacks(path, text)
+    if expected_image not in text:
+        errors.append("deploy/docker-compose.yml image fallback must follow TONGLINGYU_VERSION")
+    if text.count(expected_version) < 3:
+        errors.append("deploy/docker-compose.yml version fallback sentinel drift")
+    return errors
 
 
 def set_test_version(path: Path, version: str) -> None:
@@ -198,13 +258,12 @@ def set_version(repo_dir: Path, version: str) -> None:
             repo_dir / f"agent-platform/crates/{crate}/Cargo.toml"
         )
     set_pyproject_version(repo_dir / "pyproject.toml", version)
-    set_dockerfile_version(
-        repo_dir / "agent-platform/crates/tonglingyu-gateway/Dockerfile",
-        version,
+    set_dockerfile_fallback(
+        repo_dir / "agent-platform/crates/tonglingyu-gateway/Dockerfile"
     )
-    set_compose_version(repo_dir / "deploy/docker-compose.yml", version)
+    set_compose_fallback(repo_dir / "deploy/docker-compose.yml")
     for relative in SCRIPT_FALLBACK_PATHS:
-        set_script_fallback(repo_dir / relative, version)
+        set_script_fallback(repo_dir / relative)
     for relative in TEST_VERSION_PATHS:
         set_test_version(repo_dir / relative, version)
 
@@ -264,48 +323,34 @@ def check_version(repo_dir: Path) -> list[str]:
             if package_versions.get(crate) != version:
                 errors.append(f"agent-platform/Cargo.lock {crate} version drift")
 
-    dockerfile_versions = set(
+    dockerfile_fallbacks = set(
         re.findall(
-            r"^ARG APP_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$",
+            r"^ARG APP_VERSION=(.+)$",
             (
                 repo_dir / "agent-platform/crates/tonglingyu-gateway/Dockerfile"
             ).read_text(encoding="utf-8"),
             flags=re.MULTILINE,
         )
     )
-    if dockerfile_versions != {version}:
-        errors.append("tonglingyu-gateway Dockerfile version drift")
+    if dockerfile_fallbacks != {PROJECT_VERSION_FALLBACK}:
+        errors.append("tonglingyu-gateway Dockerfile fallback sentinel drift")
 
-    compose_text = (repo_dir / "deploy/docker-compose.yml").read_text(
-        encoding="utf-8"
-    )
-    compose_versions = set(
-        re.findall(
-            r"(?:tonglingyu-gateway:|TONGLINGYU_VERSION:-)"
-            r"([0-9]+\.[0-9]+\.[0-9]+)",
-            compose_text,
-        )
-    )
-    if compose_versions != {version}:
-        errors.append(
-            "deploy/docker-compose.yml version drift: "
-            + ",".join(sorted(compose_versions))
-        )
+    errors.extend(check_compose_fallback(repo_dir / "deploy/docker-compose.yml"))
 
     for relative in SCRIPT_FALLBACK_PATHS:
         path = repo_dir / relative
         if path.suffix == ".py":
-            script_version = read_regex(
+            script_fallback = read_regex(
                 path,
                 r'^PROJECT_VERSION_FALLBACK\s*=\s*"([^"]+)"$',
             )
         else:
-            script_version = read_regex(
+            script_fallback = read_regex(
                 path,
                 r'^PROJECT_VERSION_FALLBACK="([^"]+)"$',
             )
-        if script_version != version:
-            errors.append(f"{relative} version fallback drift")
+        if script_fallback != PROJECT_VERSION_FALLBACK:
+            errors.append(f"{relative} fallback sentinel drift")
 
     for relative in TEST_VERSION_PATHS:
         test_version = read_regex(
@@ -331,7 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser = subparsers.add_parser("set", help="Set and sync a version.")
     set_parser.add_argument("version")
     bump_parser = subparsers.add_parser("bump", help="Bump and sync a version.")
-    bump_parser.add_argument("part", choices=("patch",))
+    bump_parser.add_argument("part", choices=("patch", "minor"))
     subparsers.add_parser("check", help="Check all managed version surfaces.")
     return parser
 
@@ -352,9 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "bump":
         current = read_project_version(repo_dir)
-        if args.part != "patch":
-            parser.error("only patch deploy bumps are supported")
-        next_version = bump_patch(current)
+        next_version = bump_version(current, args.part)
         set_version(repo_dir, next_version)
         print(next_version)
         return 0

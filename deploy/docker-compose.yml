@@ -1,14 +1,14 @@
 name: tonglingyu-home
 
 x-tonglingyu-gateway-image: &tonglingyu-gateway-image
-  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:0.1.13}"
+  image: "${TONGLINGYU_GATEWAY_IMAGE_REF:-tonglingyu-gateway:${TONGLINGYU_VERSION:-latest}}"
   build:
     context: "${TONGLINGYU_GATEWAY_BUILD_CONTEXT:-../agent-platform}"
     dockerfile: crates/tonglingyu-gateway/Dockerfile
     args:
-      APP_VERSION: "${TONGLINGYU_VERSION:-0.1.13}"
+      APP_VERSION: "${TONGLINGYU_VERSION:-latest}"
   labels:
-    org.opencontainers.image.version: "${TONGLINGYU_VERSION:-0.1.13}"
+    org.opencontainers.image.version: "${TONGLINGYU_VERSION:-latest}"
   restart: unless-stopped
 
 services:
@@ -25,6 +25,7 @@ services:
       API_SERVER_KEY: "${HERMES_API_KEY:?set HERMES_API_KEY in .env}"
       API_SERVER_MODEL_NAME: "${HERMES_API_SERVER_MODEL_NAME:-hermes-agent}"
       API_SERVER_CORS_ORIGINS: "${HERMES_API_SERVER_CORS_ORIGINS:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
@@ -36,7 +37,6 @@ services:
     networks:
       tonglingyu-internal:
         ipv4_address: "${HERMES_AGENT_IP:-172.20.0.2}"
-      local-openai-network: {}
     healthcheck:
       test:
         [
@@ -130,7 +130,7 @@ services:
       RUST_LOG: "${TONGLINGYU_RUST_LOG:-info}"
     volumes:
       - "${TONGLINGYU_SOURCE_ROOT:-../resources/sources/wiki}:/app/resources/sources/wiki:ro"
-      - "${TONGLINGYU_DATA_DIR:-./data/tonglingyu}:/data"
+      - "${TONGLINGYU_DATA_DIR:?set TONGLINGYU_DATA_DIR in .env}:/data"
     expose:
       - "8090"
     networks:
@@ -171,6 +171,3 @@ networks:
     ipam:
       config:
         - subnet: "${HERMES_INTERNAL_SUBNET:-172.20.0.0/16}"
-  local-openai-network:
-    external: true
-    name: "${LOCAL_OPENAI_DOCKER_NETWORK:-sub2api_sub2api-network}"

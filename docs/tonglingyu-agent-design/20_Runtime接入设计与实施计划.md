@@ -379,13 +379,13 @@ summary 和 audit gate fail-closed；事实源、证据包和最终 reviewer 裁
 - [x] Gateway final response 只包含最终回答、trace_id、session/package ref 和
   安全元数据，不暴露内部日志或 prompt。
 - [x] 增加 fake runtime/tools 的本地 dry run。
-- [x] 增加 `deploy/scripts/verify-tonglingyu-runtime-config.sh`，基于 compose
+- [x] 增加 `<deployment>/scripts/verify-tonglingyu-runtime-config.sh`，基于 compose
   渲染结果检查 Tonglingyu/Hermes strict runtime wiring、Open WebUI 默认模型、
   admin/gateway key 隔离和 provider key 不含 admin credential。
 - [x] 生产 compose 显式设置 Gateway `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`
   并注入 `AGENT_RUNTIME_HERMES_*`；release gate 拒绝 Gateway runtime mode
   仍为 `minimal` 的渲染结果。
-- [x] 增加 `deploy/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
+- [x] 增加 `<deployment>/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
   Gateway health/models/admin metrics/Prometheus，确认 `hermes` runtime、单可见
   模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
 - [x] strict Gateway gate 已增加 live chat completion 和 admin trace 校验，
@@ -419,7 +419,7 @@ summary 和 audit gate fail-closed；事实源、证据包和最终 reviewer 裁
   使 admin trace 可以解释 500，而不是只有 Gateway 错误响应。
 - [x] strict Gateway live gate 每次生成唯一 chat/message id，避免固定
   `x-tonglingyu-message-id` 命中旧部署 dedupe 缓存后误判当前 Runtime live 状态。
-- [x] 增加 `deploy/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
+- [x] 增加 `<deployment>/scripts/verify-tonglingyu-release-readiness.sh` 聚合 gate，
   生成 JSON 报告并显式区分必过、失败、`production_release_ready`、
   `browser_review_acknowledged`、optional failures、skipped live gate、release
   blockers 和人工页面复核项；optional gate 失败会把 `status` 标为

@@ -318,7 +318,7 @@ lease/heartbeat、幂等键、重试上限、并发上限、状态历史和 audi
   --all-targets -- -D warnings`
 - `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
   --all-targets -- -D warnings`
-- `bash -n deploy/scripts/verify-tonglingyu-strict-gateway.sh`
+- `bash -n <deployment>/scripts/verify-tonglingyu-strict-gateway.sh`
 
 边界：
 
@@ -384,7 +384,7 @@ cargo clippy \
   --manifest-path agent-platform/Cargo.toml \
   -p tonglingyu-gateway \
   --all-targets -- -D warnings
-bash deploy/scripts/test-openwebui-gateway-admin-action-contract.sh
+bash <deployment>/scripts/test-openwebui-gateway-admin-action-contract.sh
 ```
 
 未提前声明：
@@ -463,7 +463,7 @@ cargo clippy \
   --manifest-path agent-platform/Cargo.toml \
   -p tonglingyu-gateway \
   --all-targets -- -D warnings
-bash deploy/scripts/test-tonglingyu-release-readiness-contract.sh
+bash <deployment>/scripts/test-tonglingyu-release-readiness-contract.sh
 ```
 
 未提前声明：
@@ -527,11 +527,11 @@ saved report validator 和 Open WebUI/Gateway 证据后，才允许声明：
 5. `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 6. `agent-platform/scripts/tonglingyu-knowledge-calibration-run.sh`
 7. `agent-platform/scripts/tonglingyu-calibration-job-smoke.sh`
-8. `deploy/scripts/test-openwebui-gateway-admin-action-contract.sh`
-9. `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
-10. `deploy/scripts/verify-tonglingyu-knowledge-state-release.sh`
-11. `deploy/scripts/verify-tonglingyu-release-readiness.sh`
-12. `deploy/scripts/verify-tonglingyu-release-readiness-report.sh`
+8. `<deployment>/scripts/test-openwebui-gateway-admin-action-contract.sh`
+9. `<deployment>/scripts/test-tonglingyu-release-readiness-contract.sh`
+10. `<deployment>/scripts/verify-tonglingyu-knowledge-state-release.sh`
+11. `<deployment>/scripts/verify-tonglingyu-release-readiness.sh`
+12. `<deployment>/scripts/verify-tonglingyu-release-readiness-report.sh`
 13. `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/*.md`
 
 知识状态专用验收入口已落地并纳入验收：
@@ -542,7 +542,7 @@ saved report validator 和 Open WebUI/Gateway 证据后，才允许声明：
 2. `agent-platform/scripts/tonglingyu-calibration-job-smoke.sh`：固定运行
    calibration job 的 idempotency、lease、heartbeat、retry、audit 和 LLM 配置
    fail-closed 覆盖。
-3. `deploy/scripts/verify-tonglingyu-knowledge-state-release.sh`：串联 release readiness
+3. `<deployment>/scripts/verify-tonglingyu-knowledge-state-release.sh`：串联 release readiness
    与 saved report validator，并单独校验 knowledge state manifest、artifact registry、
    calibration job summary、KB diff digest 和 eval impact digest。
 

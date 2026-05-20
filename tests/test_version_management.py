@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 
-EXPECTED_PROJECT_VERSION = "0.1.13"
+EXPECTED_PROJECT_VERSION = "0.1.14"
+EXPECTED_VERSION_FALLBACK = "latest"
 REPO_DIR = Path(__file__).resolve().parents[1]
 VERSION_SCRIPT = REPO_DIR / "scripts/version.py"
 
@@ -27,12 +28,18 @@ class VersionManagementTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.version_module = load_version_module()
 
-    def test_version_format_and_patch_bump(self) -> None:
+    def test_version_format_and_bumps(self) -> None:
         validate = self.version_module.validate_version
+        bump_version = self.version_module.bump_version
         bump_patch = self.version_module.bump_patch
+        bump_minor = self.version_module.bump_minor
         self.assertEqual(validate("0.1.0"), "0.1.0")
         self.assertEqual(bump_patch("0.1.0"), "0.1.1")
         self.assertEqual(bump_patch("10.200.999"), "10.200.1000")
+        self.assertEqual(bump_minor("0.1.13"), "0.2.0")
+        self.assertEqual(bump_version("10.200.999", "minor"), "10.201.0")
+        with self.assertRaises(Exception):
+            bump_version("0.1.0", "major")
         for invalid in ("", "v0.1.0", "0.1", "0.1.0-rc1", "01.1.0"):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(Exception):
@@ -41,6 +48,10 @@ class VersionManagementTest(unittest.TestCase):
     def test_repository_version_surfaces_are_in_sync(self) -> None:
         errors = self.version_module.check_version(REPO_DIR)
         self.assertEqual(errors, [])
+        self.assertEqual(
+            self.version_module.PROJECT_VERSION_FALLBACK,
+            EXPECTED_VERSION_FALLBACK,
+        )
         self.assertEqual(
             self.version_module.read_project_version(REPO_DIR),
             EXPECTED_PROJECT_VERSION,
@@ -64,18 +75,24 @@ class VersionManagementTest(unittest.TestCase):
                     tmp / "agent-platform/crates/tonglingyu-gateway/Cargo.toml"
                 ).read_text(encoding="utf-8"),
             )
-            self.assertIn(
-                "tonglingyu-gateway:1.2.3",
-                (tmp / "deploy/docker-compose.yml").read_text(encoding="utf-8"),
+            compose_text = (tmp / "deploy/docker-compose.yml").read_text(
+                encoding="utf-8"
             )
+            self.assertIn(
+                (
+                    "tonglingyu-gateway:"
+                    "${TONGLINGYU_VERSION:-latest}"
+                ),
+                compose_text,
+            )
+            self.assertNotIn("tonglingyu-gateway:1.2.3", compose_text)
 
     def test_versioned_scripts_report_project_version(self) -> None:
         expected = f"{EXPECTED_PROJECT_VERSION}\n"
         commands = (
             ["uv", "run", "--no-sync", "python", str(VERSION_SCRIPT), "--version"],
             ["bash", str(REPO_DIR / "scripts/qa.sh"), "--version"],
-            ["bash", str(REPO_DIR / "deploy/scripts/bump-deploy-version.sh"), "--version"],
-            ["bash", str(REPO_DIR / "deploy/scripts/deploy-versioned-stack.sh"), "--version"],
+            ["bash", str(REPO_DIR / "deploy/scripts/start-local-stack.sh"), "--version"],
         )
         for command in commands:
             with self.subTest(command=command):
@@ -103,8 +120,7 @@ class VersionManagementTest(unittest.TestCase):
             "deploy/docker-compose.yml",
             "scripts/version.py",
             "scripts/qa.sh",
-            "deploy/scripts/bump-deploy-version.sh",
-            "deploy/scripts/deploy-versioned-stack.sh",
+            "deploy/scripts/start-local-stack.sh",
             "tests/test_version_management.py",
         ]
         for relative in paths:

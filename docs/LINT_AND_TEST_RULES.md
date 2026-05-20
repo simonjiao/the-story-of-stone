@@ -41,10 +41,17 @@ Version rules are in `docs/VERSIONING_RULES.md`. The minimum local check is:
 uv run --no-sync python scripts/version.py check
 ```
 
-Every real deploy must bump the third version number with:
+Choose the bump type from `docs/VERSIONING_RULES.md`. Small features and
+bugfixes use:
 
 ```bash
-deploy/scripts/bump-deploy-version.sh
+uv run --no-sync python scripts/version.py bump patch
+```
+
+Large features and refactors use:
+
+```bash
+uv run --no-sync python scripts/version.py bump minor
 ```
 
 The project QA wrapper combines version, Python, shell, and Rust format gates:
@@ -70,8 +77,9 @@ bash -n path/to/script.sh
 shellcheck path/to/script.sh
 ```
 
-For deployment config, use dry-runs or render checks first. Back up
-`deploy/.env` before editing it and never output secret values.
+Custom deployment config and production evidence are maintained outside this
+source repository. For this repo's local stack, use dry-runs or render checks
+first and never output secret values.
 
 ## Rust
 

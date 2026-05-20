@@ -64,10 +64,7 @@ memory。
 
 - 部署版本：`tonglingyu-gateway` `0.1.6`。
 - 运行镜像：`sha256:9399f124cc3409a26ae15b373df78ee57fdd430a7b4c11b1b79e9bb08c657cc0`。
-- 最终 remote release automation：
-  `data/tonglingyu/remote-release-automation/remote-release-20260518T181347Z-50849/`。
-- 远端 artifact：
-  `/home/simon/tonglingyu-home-deploy/data/tonglingyu/release-artifacts/remote-release-20260518T181347Z-50849/`。
+- 最终 remote release automation 证据归档在 release artifact 中。
 - automation report：
   `status=ok`、`production_ready_proven=true`、`required_failures=[]`、
   `release_blockers=[]`。

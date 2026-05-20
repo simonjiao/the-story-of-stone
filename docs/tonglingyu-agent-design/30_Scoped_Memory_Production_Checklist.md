@@ -459,9 +459,9 @@ Scoped Memory Production 必须让 export、anonymize、legal hold 和 retention
   已在线参与授权。
 - 2026-05-19 本地验证通过：`cargo test --workspace`、`cargo clippy --workspace
   --all-targets -- -D warnings`、`agent-platform/scripts/tonglingyu-gateway-smoke.sh`、
-  `deploy/scripts/verify-tonglingyu-rqa-user-lifecycle.sh`、
-  `deploy/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh`、
-  `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
+  `<deployment>/scripts/verify-tonglingyu-rqa-user-lifecycle.sh`、
+  `<deployment>/scripts/verify-tonglingyu-rqa-backup-restore-drill.sh`、
+  `<deployment>/scripts/test-tonglingyu-release-readiness-contract.sh`。
 - 2026-05-19 已部署到 hhost 为 `tonglingyu-gateway:0.1.12`，运行 image id 为
   `sha256:1e1e53ef3d079166a8c3eb1fd2df088a9535d76b7c3efd495aa69d9ef4e6a17f`。
   live gate artifact 为

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_VERSION_FALLBACK="0.1.13"
+PROJECT_VERSION_FALLBACK="latest"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -79,9 +79,13 @@ run uv run --no-sync python -m py_compile \
   "${REPO_DIR}/scripts/version.py"
 run uv run --no-sync python -m compileall -q \
   "${REPO_DIR}/scripts" \
+  "${REPO_DIR}/open-webui/functions" \
   "${REPO_DIR}/tests"
 run uv run --no-sync python -m unittest discover \
   -s "${REPO_DIR}/tests" \
+  -p 'test_*.py'
+run uv run --no-sync python -m unittest discover \
+  -s "${REPO_DIR}/open-webui/functions" \
   -p 'test_*.py'
 
 while IFS= read -r -d '' script_path; do

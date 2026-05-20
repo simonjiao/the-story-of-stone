@@ -341,13 +341,13 @@ Context Projection Runtime 允许声明的状态只能按证据逐级推进：
 - [x] `cargo test -p tonglingyu-gateway`。
 - [x] `cargo test -p tonglingyu-runtime`。
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`。
-- [x] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Context Projection Runtime
+- [x] `<deployment>/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Context Projection Runtime
       projection gate。
 - [x] `scripts/qa.sh --quick`。
 
 ### 工作包 I：hhost production gate
 
-- [x] 按版本规则 bump deploy patch version：`0.1.6` -> `0.1.7`。
+- [x] 按当时版本规则完成版本更新：`0.1.6` -> `0.1.7`。
 - [x] 同步 release tools 到 `hhost`。
 - [x] 重建并部署 `tonglingyu-gateway` 镜像。
 - [x] 运行 strict Gateway live gate。
