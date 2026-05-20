@@ -4,17 +4,17 @@
 
 ### LLM Production Readiness
 
-状态：in progress。
+状态：completed for latest live release run。
 
 本轮目标是把 `31_LLM支持点与全路径Eval方案.md` 中的 LLM 接入与全路径 eval
-完善到 production-ready。当前已按设计文档生成
-`32_LLM_Production_Readiness_Checklist.md`，并完成本地 release readiness wiring、contract
-test 和 repo-local 验证。
+完善到 production-ready。当前已完成本地 release readiness wiring、contract
+test、repo-local 验证、目标环境 live gate、saved validator 和 full remote release
+automation。
 
-当前 checklist 已足够指导后续 production-ready 实施：它不只列状态，还固定了本地提交边界、目标环境
+当前 checklist 已关闭本轮真实 LLM Agent 接入要求：它固定了本地提交边界、目标环境
 入口命令、远端 LLM eval/release report 生成要求、live gate/release readiness/saved validator 判定标准、
-证据写回字段和 hard fail 条件。后续执行必须逐项关闭 checklist，不能用本地 report、synthetic report
-或 gate command override 代替目标环境证据。
+证据写回字段和 hard fail 条件。后续 release 必须重新生成当次目标环境证据，不能复用本轮 report、
+synthetic report 或 gate command override。
 
 当前判断：
 
@@ -24,13 +24,15 @@ test 和 repo-local 验证。
 - 正式 release readiness 已把 LLM release report 纳入 required gate、release manifest、artifact registry
   和 saved validator；本地 contract test 已覆盖缺失/失败/过期/raw payload/manifest mismatch/artifact
   registry 缺失等负向场景。
-- 当前目标环境 live gate、目标环境 release readiness 和 saved validator 尚未针对当前 LLM S1-S7 版本运行，
-  因此不能声明 production-ready。
+- 目标环境 live gate、目标环境 release readiness 和 saved validator 已针对当前 LLM S1-S7
+  版本运行，并由 `remote-release-20260520T203350Z-1275` 证明
+  `production_ready_proven=true`。
 
 当前 blocker：
 
-1. 目标环境 live gate 与 release readiness gate 尚未重新通过。
-2. gatekeeper release 工具已提交，仍必须同步/部署到目标环境。
+1. 无当前 release blocker：`release_blockers=[]`，`required_failures=[]`，
+   `skipped_live_gates=[]`。
+2. 后续 release 必须重新跑当次 full remote release automation，不能复用本轮 artifact。
 
 本地验证记录：
 
@@ -1419,3 +1421,23 @@ report 中。
     已闭合，但这仍不是目标 live 环境当次 production-ready release；正式上线仍必须
     重新生成并验证当次 release readiness、KB diff、calibration report、saved report
     validator 和 Open WebUI/Gateway 证据。
+15. 2026-05-20 已完成真实 LLM Agent question/context path release 闭环：
+    `tonglingyu-question-normalizer` 和 `tonglingyu-conversation-state-writer`
+    均通过 Runtime profile 执行，Gateway 主路径为 deterministic pre-resolver ->
+    Runtime profile -> 业务 validator -> deterministic ContextPackBuilder；accepted
+    Agent decision 为 sealed 类型，raw Runtime output 不进入 context pack、projection、
+    evidence package 或 public response。Story commit 为
+    `3df0ff4f42e3244fbbace83097127db19740a9a7`。Gatekeeper 新增并接入
+    LLM Agent live mode matrix gate、Open WebUI browser review gate、saved report
+    validator 和 live capacity bounded retry 证据链。最终目标环境 release run
+    `remote-release-20260520T203350Z-1275` 已通过：
+    `production_ready_proven=true`，`release_blockers=[]`，
+    `required_failures=[]`，`skipped_live_gates=[]`。关键 artifact：
+    `release-automation.json` sha256
+    `c84a6fe6befc159aacfaec605b44f700f51ad3755fc35aec490b058e5ff1d137`，
+    `release-readiness.json` sha256
+    `89a19a0c09eafe115c53c6971d7305ba9fe5c3c9e2a96a0cbe32a6b92c5e128a`，
+    `release-readiness-validation.json` sha256
+    `d5e0b17bfd4030495df0d97d67a0659cbf07af041682051feefd94fa8d66802a`。
+    本节点完成不改变非目标边界：LLM Agent 不是事实来源，不能决定 reviewer
+    裁决、ACL、scope grant、tool policy、memory 读取面或 evidence package 写入。

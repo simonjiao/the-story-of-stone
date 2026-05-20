@@ -5,10 +5,9 @@
 目标：把 `normalized question`、`resolved_question` 和 context 构建前置链路升级为
 真实 LLM Agent 参与的生产路径。
 
-当前状态：repo-local Runtime profile 接入与 validator 主路径已实现；gatekeeper
-release report validator、release-readiness manifest validator 和 synthetic contract tests
-已补齐并本地通过。目标环境真实 provider live gate、saved validator 和 full remote
-automation 尚未执行，不能声明 target ready 或 production-ready。
+当前状态：真实 LLM Agent context path 已完成本轮闭环。repo-local Runtime profile 接入、
+validator 主路径、gatekeeper release validators、目标环境真实 Runtime live gate、Open WebUI
+browser review、saved report validator 和 full remote release automation 均已通过。
 
 已落地的 repo-local 事实：
 
@@ -29,29 +28,46 @@ automation 尚未执行，不能声明 target ready 或 production-ready。
   未嵌入。
 - gatekeeper 新增 `verify-tonglingyu-llm-agent-live-gate.sh`，release readiness 和 remote
   live/release automation 已把 LLM Agent mode matrix live gate 纳入 required live gate。
+- gatekeeper release automation 增加 live capacity bounded retry 记录：失败 attempt 留档，
+  只有完整重跑生成 capacity/incident evidence 且退出 0 才能继续 readiness。
 
-仍不能声明完成：目标环境真实 provider live gate、saved report validator、full remote
-automation、target artifact digest、image/rollback evidence 尚未全部闭合。
+本轮目标环境证据：
+
+- Story commit：`3df0ff4f42e3244fbbace83097127db19740a9a7`。
+- Open WebUI browser review：`browser-review-20260520T184657Z`，
+  `openwebui-browser-review.json` sha256
+  `39183b56a6da8a016dc389f3bb506c029687f408c24c2b80455cee586a1821ce`。
+- Full remote release automation：`remote-release-20260520T203350Z-1275`，
+  `status=ok`，`production_ready_proven=true`，`release_blockers=[]`。
+- Release automation report：
+  `/Users/simon/huixiangdou/tonglingyu-gatekeeper/data/tonglingyu/remote-release-automation/remote-release-20260520T203350Z-1275/remote-artifacts/release-automation.json`
+  sha256 `c84a6fe6befc159aacfaec605b44f700f51ad3755fc35aec490b058e5ff1d137`。
+- Release readiness report：
+  `/Users/simon/huixiangdou/tonglingyu-gatekeeper/data/tonglingyu/remote-release-automation/remote-release-20260520T203350Z-1275/remote-artifacts/release-readiness.json`
+  sha256 `89a19a0c09eafe115c53c6971d7305ba9fe5c3c9e2a96a0cbe32a6b92c5e128a`。
+- Saved report validator：
+  `/Users/simon/huixiangdou/tonglingyu-gatekeeper/data/tonglingyu/remote-release-automation/remote-release-20260520T203350Z-1275/remote-artifacts/release-readiness-validation.json`
+  sha256 `d5e0b17bfd4030495df0d97d67a0659cbf07af041682051feefd94fa8d66802a`。
 
 ## 重构原则
 
 以下原则是硬约束，不是建议：
 
-- [ ] 不接受“先在 Gateway 里临时调用 LLM，后面再迁移”的方案。
-- [ ] 不接受 fake provider 或 fixture 被描述为真实 Agent。
-- [ ] 不接受让 LLM 直接生成 `context_pack`、`context_projection`、scope、ACL、
+- [x] 不接受“先在 Gateway 里临时调用 LLM，后面再迁移”的方案。
+- [x] 不接受 fake provider 或 fixture 被描述为真实 Agent。
+- [x] 不接受让 LLM 直接生成 `context_pack`、`context_projection`、scope、ACL、
       tool policy 或 evidence package。
-- [ ] 不接受通过新增一批 if/else 绕过 Runtime profile、AgentRequest、projection
+- [x] 不接受通过新增一批 if/else 绕过 Runtime profile、AgentRequest、projection
       和 audit contract。
-- [ ] 不接受 shadow/enforced 逻辑分散在多个模块里；必须有统一 mode gate。
-- [ ] 不接受 public response 夹带 trace、context、memory、Agent、provider 或 raw
+- [x] 不接受 shadow/enforced 逻辑分散在多个模块里；必须有统一 mode gate。
+- [x] 不接受 public response 夹带 trace、context、memory、Agent、provider 或 raw
       LLM 输出字段。
-- [ ] 不接受只跑本地测试就声明 production-ready；必须有目标环境真实 Agent live gate。
-- [ ] 不接受把 schema、fixture、fake provider、shadow gate 或 repo-local gate 任一单项
+- [x] 不接受只跑本地测试就声明 production-ready；必须有目标环境真实 Agent live gate。
+- [x] 不接受把 schema、fixture、fake provider、shadow gate 或 repo-local gate 任一单项
       当作真实 Agent 接入完成。
-- [ ] 不接受把实现拆成“这次只接 question normalizer，下次再接 conversation state”；
+- [x] 不接受把实现拆成“这次只接 question normalizer，下次再接 conversation state”；
       两个内部 Agent 必须在同一实施链路里完成接入和验证。
-- [ ] 不接受只靠文档约定或调用顺序保证 Agent 输出安全；必须用类型边界、私有构造器、
+- [x] 不接受只靠文档约定或调用顺序保证 Agent 输出安全；必须用类型边界、私有构造器、
       validator API 和测试让 raw Agent output 无法绕过验收进入 ContextPackBuilder。
 
 重构完成后的结构必须清晰到可以回答三个问题：
@@ -66,18 +82,18 @@ automation、target artifact digest、image/rollback evidence 尚未全部闭合
 部署启用可以按 `disabled -> shadow -> enforced` 做风险门控，但这只是同一 release run 内的
 运行安全顺序，不是把交付拆成多个阶段。
 
-- [ ] 本次实施必须同时完成 `tonglingyu-question-normalizer` 和
+- [x] 本次实施必须同时完成 `tonglingyu-question-normalizer` 和
       `tonglingyu-conversation-state-writer` 两个 Runtime profile。
-- [ ] 本次实施必须同时完成 Gateway 主路径接入、统一 mode gate、schema validator、
+- [x] 本次实施必须同时完成 Gateway 主路径接入、统一 mode gate、schema validator、
       denylist scanner、confidence gate、audit、replay anchor 和 admin digest view。
-- [ ] 本次实施必须完成 Agent 输出控制闭环：raw Runtime output 只能进入 validator，
+- [x] 本次实施必须完成 Agent 输出控制闭环：raw Runtime output 只能进入 validator，
       ContextPackBuilder 的 API 只能接收 validator 产出的 sealed decision 类型。
-- [ ] 本次实施必须同时完成 deterministic fallback、clarification、fail-closed、
+- [x] 本次实施必须同时完成 deterministic fallback、clarification、fail-closed、
       provider-not-called、public leakage scanner 和 saved replay validator。
-- [ ] 本次实施必须让 repo-local tests、LLM eval、Gateway smoke、strict live gate、
+- [x] 本次实施必须让 repo-local tests、LLM eval、Gateway smoke、strict live gate、
       release readiness report 和 saved report validator 全部执行通过，并产出可复核
       artifact；只“接入脚本”不算完成。
-- [ ] 如果 SSH、provider credential、target image 或目标环境权限不可用，状态只能写成
+- [x] 如果 SSH、provider credential、target image 或目标环境权限不可用，状态只能写成
       `BLOCKED: target live gate unavailable`，不能写成 completed、done 或 production-ready。
 
 完成动词必须按以下含义使用：
@@ -88,38 +104,39 @@ automation、target artifact digest、image/rollback evidence 尚未全部闭合
 - `完成`：实现、测试、artifact、release report、saved validator 和 `PROGRESS.md` 状态全部闭合。
 - `blocked`：缺目标权限、凭据、镜像或外部 provider 时的唯一允许状态；不得改名为 done。
 
-## 待确认项
+## 已关闭确认项
 
-以下不是折中空间，而是执行前必须关闭的 blocker。任一项未确认时，可以继续做 repo-local
-实现和 contract tests，但不得声明真实 Agent 接入完成、目标环境 ready 或 production-ready。
+以下不是折中空间，而是执行前必须关闭的 blocker。本轮已通过 repo-local 验证、
+Open WebUI browser review、LLM Agent live gate、saved validator 和 full remote release
+automation 关闭；后续 release 仍必须重新生成当次证据。
 
-- [ ] 目标部署入口：确认真实目标环境使用的 deploy / gatekeeper 仓库、`<deployment>` 根目录、
+- [x] 目标部署入口：确认真实目标环境使用的 deploy / gatekeeper 仓库、`<deployment>` 根目录、
       远端同步路径和最终入口命令；源码树当前只直接包含 `scripts/qa.sh`、
       `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 等本地脚本，`<deployment>/scripts/...`
       必须在目标部署产物中复核。
-- [ ] 真实 provider 能力：确认目标 provider / model 支持严格 JSON 输出、schema repair 后重试、
+- [x] 真实 provider 能力：确认目标 provider / model 支持严格 JSON 输出、schema repair 后重试、
       1500ms 级别 timeout、并发两类内部 profile、错误分类和可观测 latency。
-- [ ] profile model mapping：确认
+- [x] profile model mapping：确认
       `AGENT_RUNTIME_HERMES_PROFILE_MODELS=tonglingyu-question-normalizer=...,tonglingyu-conversation-state-writer=...`
       在目标环境使用的真实模型名、base URL、API key、network route 和失败回滚值。
-- [ ] AgentRequest 对齐方式：确认本次实现是直接复用 `agent_core::AgentRequest`，还是新增
+- [x] AgentRequest 对齐方式：确认本次实现是直接复用 `agent_core::AgentRequest`，还是新增
       `LlmAgentRequestEnvelope` 并逐字段对齐；无论选择哪种，都必须有 serialization /
       migration / replay tests。
-- [ ] sealed decision 测试方式：确认使用 Rust 可见性单元测试、compile-fail test
+- [x] sealed decision 测试方式：确认使用 Rust 可见性单元测试、compile-fail test
       或等价机制，证明 validator 模块外不能构造 accepted decision，且
       ContextPackBuilder 不能接收 raw `serde_json::Value`。
-- [ ] authorized memory summary 策略：确认本次是否支持该字段。默认必须 absent；如果支持，
+- [x] authorized memory summary 策略：确认本次是否支持该字段。默认必须 absent；如果支持，
       必须同一轮完成 pre-resolver authorization、脱敏 digest、二次 policy tests 和泄露负例。
-- [ ] fault injection 路径：确认 provider timeout、5xx、schema invalid、forbidden field、
+- [x] fault injection 路径：确认 provider timeout、5xx、schema invalid、forbidden field、
       unknown context ref、schema repair failure 如何在 repo-local、Gateway smoke 和目标 live gate
       中稳定触发。
-- [ ] release artifact schema：确认 LLM Agent release report、mode matrix、live gate report、
+- [x] release artifact schema：确认 LLM Agent release report、mode matrix、live gate report、
       saved validator report 的字段、digest 规则、case count 规则和 artifact registry 入口。
-- [ ] rollback 命令：确认 `disabled` mode 回滚、profile model mapping 回滚、image 回滚、
+- [x] rollback 命令：确认 `disabled` mode 回滚、profile model mapping 回滚、image 回滚、
       env 回滚和目标服务重启命令，并要求写入 live gate artifact。
-- [ ] raw output 保存策略：确认是否允许 encrypted debug artifact；若没有加密存储、访问控制、
+- [x] raw output 保存策略：确认是否允许 encrypted debug artifact；若没有加密存储、访问控制、
       retention 和清理策略，则 raw Agent output 只能保存 digest，不能保存原文。
-- [ ] Open WebUI 真实用例：确认多轮追问、长 history、streaming、缓存命中、管理员 trace、
+- [x] Open WebUI 真实用例：确认多轮追问、长 history、streaming、缓存命中、管理员 trace、
       普通用户 public response 的目标环境 case 列表和期望输出。
 
 ## 目标架构
@@ -171,7 +188,7 @@ ContextPackBuilder 的内部逻辑。
 - [x] `agent-runtime` / `tonglingyu-runtime` 只负责 Runtime profile contract、profile
       注册、adapter 执行、tool policy、timeout 和模型映射；不得替代 Gateway 业务
       validator 决定 `resolved_question` 是否进入 context pack。
-- [ ] 现有 `llm_resolver.rs::evaluate_resolver_contract(...)` 和
+- [x] 现有 `llm_resolver.rs::evaluate_resolver_contract(...)` 和
       `conversation_state.rs::validate_conversation_state_summary(...)` 只能作为雏形；
       本次重构必须收敛到统一 Agent output validator 层，不能继续分散调用。
 
@@ -229,50 +246,50 @@ memory、evidence 或 context projection。
 - [x] Agent raw input/output 不能进入 public response、evidence package、普通日志或 metrics。
 - [x] Agent accepted result 必须是 validator 产出的 sealed decision，不得直接使用
       provider response、Runtime output 或 schema parser output。
-- [ ] fake provider 只能用于 contract tests；目标环境必须证明真实 provider / runtime
+- [x] fake provider 只能用于 contract tests；目标环境必须证明真实 provider / runtime
       agent 被调用。
 
 ## 非目标和禁止边界
 
-- [ ] 不把 LLM Agent 当事实源。
-- [ ] 不让 LLM Agent 决定 reviewer 裁决。
-- [ ] 不让 LLM Agent 打开 memory 读取面。
-- [ ] 不让 LLM Agent 决定 ACL、scope grant、tool policy 或 Runtime Adapter。
-- [ ] 不让 LLM Agent 写 evidence package。
-- [ ] 不把 `session_summary`、conversation state、memory summary 或用户偏好当 evidence。
-- [ ] 不支持任意外部 Agent。非登记 Runtime profile、未知 consumer、未知 adapter
+- [x] 不把 LLM Agent 当事实源。
+- [x] 不让 LLM Agent 决定 reviewer 裁决。
+- [x] 不让 LLM Agent 打开 memory 读取面。
+- [x] 不让 LLM Agent 决定 ACL、scope grant、tool policy 或 Runtime Adapter。
+- [x] 不让 LLM Agent 写 evidence package。
+- [x] 不把 `session_summary`、conversation state、memory summary 或用户偏好当 evidence。
+- [x] 不支持任意外部 Agent。非登记 Runtime profile、未知 consumer、未知 adapter
       必须 fail-closed。
 
 ## P0 拆旧路径和 Contract 冻结
 
 目标：先把现有 helper 化能力拆清楚，再接真实 Agent。不能在旧路径上继续加分支。
 
-- [ ] 梳理当前 `resolve_question(...)` 的 deterministic 输出，拆成：
+- [x] 梳理当前 `resolve_question(...)` 的 deterministic 输出，拆成：
       `NormalizedQuestionSeed`、`ResolverTrigger`、`ResolverFallbackDecision`。
-- [ ] `ResolverTrigger` 固定为 allowed / forbidden 两组枚举。
-- [ ] allowed trigger 只包括：
+- [x] `ResolverTrigger` 固定为 allowed / forbidden 两组枚举。
+- [x] allowed trigger 只包括：
       `unresolved_referent`、`elliptical_followup`、`multi_candidate_entity`、
       `prior_subject_needed`、`low_confidence_binding`。
-- [ ] forbidden trigger 只包括：
+- [x] forbidden trigger 只包括：
       `prompt_injection_detected`、`forbidden_control_field_detected`、
       `unsupported_domain`、`context_budget_exceeded`、`memory_policy_denied`、
       `schema_or_model_not_allowed`。
-- [ ] 删除或隔离任何会让 LLM 直接影响 scope/tool/context object 的隐式路径。
-- [ ] 定义 `QuestionNormalizationAgentInput`，只允许：
+- [x] 删除或隔离任何会让 LLM 直接影响 scope/tool/context object 的隐式路径。
+- [x] 定义 `QuestionNormalizationAgentInput`，只允许：
       `current_question`、bounded recent user messages、bounded recent assistant messages、
       `prior_subject`、deterministic `session_summary`、trigger、schema version。
-- [ ] `authorized_memory_summary` 不属于默认字段。若本次实现需要该字段，必须同一轮完成
+- [x] `authorized_memory_summary` 不属于默认字段。若本次实现需要该字段，必须同一轮完成
       pre-resolver authorization、脱敏 digest、二次 policy tests 和泄露负例；否则该字段
       必须在 schema、fixture、runtime payload 中全部 absent。
-- [ ] 定义 `QuestionNormalizationAgentOutput`，只允许：
+- [x] 定义 `QuestionNormalizationAgentOutput`，只允许：
       `resolved_question`、`referent_bindings`、`used_context_refs`、`confidence`、
       `needs_clarification`、`clarification_question`、`unsupported_reason`、schema version。
-- [ ] 定义 `ConversationStateAgentInput`，只允许：
+- [x] 定义 `ConversationStateAgentInput`，只允许：
       current question、bounded recent messages、deterministic session summary、上一轮公开
       answer boundary、authorized package refs 摘要。
-- [ ] 定义 `ConversationStateAgentOutput`，沿用
+- [x] 定义 `ConversationStateAgentOutput`，沿用
       `tonglingyu.conversation_state_summary`，禁止新增自由字段。
-- [ ] 定义统一 `LlmAgentRequestEnvelope`，至少包含：
+- [x] 定义统一 `LlmAgentRequestEnvelope`，至少包含：
       `request_id`、`agent_type`、`agent_request_type`、`profile_id`、`mode`、
       `trace_id`、`user_session_id`、`interaction_context_id`、`input_digest`、
       `projection_ref`、`schema_version`、`timeout_ms`。
@@ -293,7 +310,7 @@ memory、evidence 或 context projection。
       `context_pack`、完整 Open WebUI history 或 raw journal。
 - [x] Runtime metadata 必须绑定 `context_projection_ref`、projection digest、
       tool policy digest、output contract digest。
-- [ ] 未知 profile、未知 consumer、未知 Runtime Adapter、digest mismatch 必须
+- [x] 未知 profile、未知 consumer、未知 Runtime Adapter、digest mismatch 必须
       fail-closed。
 
 ## P2 Gateway 主路径重构
@@ -339,39 +356,39 @@ memory、evidence 或 context projection。
 - [x] authorized memory reads 必须二次 policy 校验，不能因 Agent 建议扩权。
 - [x] `context_projection` 必须按 consumer 分离；question normalizer 可见内容不能透传给
       `honglou-text`、`honglou-commentary` 或 `honglou-reviewer`。
-- [ ] context pack / projection digest 必须覆盖 Agent decision digest，保证 replay
+- [x] context pack / projection digest 必须覆盖 Agent decision digest，保证 replay
       不会从当前状态重新推导历史 Agent 输出。
 
 ## P4 Eval 和 Contract Tests
 
 目标：测试必须证明真实边界，而不是只证明 happy path。
 
-- [ ] `question_resolution.jsonl` 覆盖全部 allowed trigger。
-- [ ] `question_resolution.jsonl` 覆盖全部 forbidden trigger。
-- [ ] 每个 allowed trigger 至少覆盖 pass、clarify、fail-closed。
-- [ ] 每个 forbidden trigger 至少覆盖 rejected 和 provider-not-called。
-- [ ] 新增 Agent request envelope fixtures。
-- [ ] 新增 Agent output schema invalid 负例。
-- [ ] 新增 unknown field / forbidden field 负例。
-- [ ] 新增 unknown context ref 负例。
-- [ ] 新增 raw memory / memory card id / ACL / tool policy 夹带负例。
-- [ ] 新增 raw output bypass 负例：直接把 raw provider response、raw runtime output、
+- [x] `question_resolution.jsonl` 覆盖全部 allowed trigger。
+- [x] `question_resolution.jsonl` 覆盖全部 forbidden trigger。
+- [x] 每个 allowed trigger 至少覆盖 pass、clarify、fail-closed。
+- [x] 每个 forbidden trigger 至少覆盖 rejected 和 provider-not-called。
+- [x] 新增 Agent request envelope fixtures。
+- [x] 新增 Agent output schema invalid 负例。
+- [x] 新增 unknown field / forbidden field 负例。
+- [x] 新增 unknown context ref 负例。
+- [x] 新增 raw memory / memory card id / ACL / tool policy 夹带负例。
+- [x] 新增 raw output bypass 负例：直接把 raw provider response、raw runtime output、
       raw `serde_json::Value` 或 raw parser output 传入 ContextPackBuilder 必须无法编译或测试失败。
-- [ ] 新增 sealed decision 负例：validator 模块外无法构造 accepted decision。
-- [ ] 新增 schema repair 负例：repair 后仍含 forbidden field、unknown ref 或低 confidence
+- [x] 新增 sealed decision 负例：validator 模块外无法构造 accepted decision。
+- [x] 新增 schema repair 负例：repair 后仍含 forbidden field、unknown ref 或低 confidence
       时必须 rejected，不能 accepted。
-- [ ] 新增 low confidence / missing clarification question 负例。
-- [ ] 新增 Conversation State hallucination、boundary loss、memory-as-evidence、
+- [x] 新增 low confidence / missing clarification question 负例。
+- [x] 新增 Conversation State hallucination、boundary loss、memory-as-evidence、
       internal ref leakage 负例。
-- [ ] 新增 public response scanner，覆盖非流式、SSE、缓存命中。
-- [ ] 新增 replay validator，证明 Agent decision、context pack、projection digest
+- [x] 新增 public response scanner，覆盖非流式、SSE、缓存命中。
+- [x] 新增 replay validator，证明 Agent decision、context pack、projection digest
       能按 trace 重放。
-- [ ] 所有 fixtures 必须被 runner 枚举并计入 report；孤立 fixture、未挂载 fixture、
+- [x] 所有 fixtures 必须被 runner 枚举并计入 report；孤立 fixture、未挂载 fixture、
       snapshot-only fixture 不算测试。
-- [ ] runner 必须在 hard gate failure、case count 不足、fixture 未覆盖 required trigger、
+- [x] runner 必须在 hard gate failure、case count 不足、fixture 未覆盖 required trigger、
       scanner 未运行或 replay validator 缺失时非 0 退出。
-- [ ] 测试必须包含真实 provider smoke 和 fake provider contract 两类证据；二者互不替代。
-- [ ] fake provider contract tests 必须通过，但不能作为 production-ready 证据。
+- [x] 测试必须包含真实 provider smoke 和 fake provider contract 两类证据；二者互不替代。
+- [x] fake provider contract tests 必须通过，但不能作为 production-ready 证据。
 
 ## P5 目标环境接入
 
@@ -379,22 +396,22 @@ memory、evidence 或 context projection。
 run 内的运行门控，不是分批实现理由。
 
 - [x] 在 compose / env 中注册两个内部 Runtime profile 的 mode 开关。
-- [ ] 配置 profile model mapping，例如：
+- [x] 配置 profile model mapping，例如：
       `AGENT_RUNTIME_HERMES_PROFILE_MODELS=tonglingyu-question-normalizer=hermes-agent,tonglingyu-conversation-state-writer=hermes-agent`。
 - [x] gatekeeper live gate 脚本定义同一目标环境 release run 必须覆盖 baseline disabled、
       two-agent shadow、question normalizer enforced、two-agent enforced 四组 gate。
-- [ ] 同一目标环境 release run 必须实际覆盖 baseline disabled、two-agent shadow、
+- [x] 同一目标环境 release run 必须实际覆盖 baseline disabled、two-agent shadow、
       question normalizer enforced、two-agent enforced 四组 gate。
-- [ ] shadow live gate 必须证明两个 Agent 都调用真实 provider / runtime agent，且主路径未被改变。
-- [ ] question normalizer enforced live gate 必须证明 accepted result 能替换
+- [x] shadow live gate 必须证明两个 Agent 都调用真实 provider / runtime agent，且主路径未被改变。
+- [x] question normalizer enforced live gate 必须证明 accepted result 能替换
       deterministic resolver 输出，rejected result 会安全回退。
-- [ ] two-agent enforced live gate 必须证明 conversation state writer 在 accepted
+- [x] two-agent enforced live gate 必须证明 conversation state writer 在 accepted
       question normalization 之后运行，且不会反向影响 resolver used context refs。
-- [ ] live gate 覆盖真实 Open WebUI 多轮追问。
-- [ ] live gate 覆盖 provider timeout / 5xx / schema invalid。
-- [ ] live gate 覆盖 forbidden trigger provider-not-called。
-- [ ] live gate 覆盖 public response 无内部字段泄露。
-- [ ] live gate 输出 artifact：case id、trace id、mode、Agent request id、decision、
+- [x] live gate 覆盖真实 Open WebUI 多轮追问。
+- [x] live gate 覆盖 provider timeout / 5xx / schema invalid。
+- [x] live gate 覆盖 forbidden trigger provider-not-called。
+- [x] live gate 覆盖 public response 无内部字段泄露。
+- [x] live gate 输出 artifact：case id、trace id、mode、Agent request id、decision、
       input/output digest、latency、error rate、rollback command、image id、commit。
 
 ## P6 Release Readiness
@@ -403,105 +420,107 @@ run 内的运行门控，不是分批实现理由。
 
 - [x] 新增 LLM Agent release report。
 - [x] release report 必须包含 repo-local eval 结果。
-- [ ] release report 必须包含真实 provider live gate 结果。
+- [x] release report 必须包含真实 provider live gate 结果。
 - [x] release report 必须包含 disabled、two-agent shadow、question normalizer enforced、
       two-agent enforced 的 required mode matrix contract。
-- [ ] target artifact 必须包含 disabled、two-agent shadow、question normalizer enforced、
+- [x] target artifact 必须包含 disabled、two-agent shadow、question normalizer enforced、
       two-agent enforced 的实际 mode matrix 证据。
-- [ ] release report 必须包含 provider-not-called 负例证据。
+- [x] release report 必须包含 provider-not-called 负例证据。
 - [x] release report 必须确认无 raw prompt、raw response、raw memory、tool payload、
       ACL 或 secret。
 - [x] release readiness validator 必须消费 LLM Agent release report。
 - [x] release readiness validator 必须把 LLM Agent live gate 作为 required live gate。
-- [ ] saved validator 必须能按 trace 重放 Agent request、Agent decision、
+- [x] saved validator 必须能按 trace 重放 Agent request、Agent decision、
       context pack 和 projection digest。
-- [ ] `hhost` full remote release automation 必须通过。
-- [ ] `PROGRESS.md` 必须写入版本、commit、image、artifact、case counts、validator
+- [x] `hhost` full remote release automation 必须通过。
+- [x] `PROGRESS.md` 必须写入版本、commit、image、artifact、case counts、validator
       status、失败边界和剩余非目标。
 
 ## P7 一口气实施工作包
 
 目标：把真实 Agent 接入拆成可执行工作包，但这些工作包必须在同一轮实现、验证和提交。
 
-- [ ] W1 Contract：新增并贯穿 `LlmAgentRequestEnvelope`、agent input/output schema、
+- [x] W1 Contract：新增并贯穿 `LlmAgentRequestEnvelope`、agent input/output schema、
       sealed output decision enum、audit event、replay anchor 和 migration/serialization tests。
-- [ ] W2 Runtime：注册两个 Runtime profile，绑定 profile contract、adapter contract、
+- [x] W2 Runtime：注册两个 Runtime profile，绑定 profile contract、adapter contract、
       timeout、tool policy、model mapping 和 provider error taxonomy。
-- [ ] W3 Validator：新增统一 Gateway 业务 validator，覆盖 question normalization 和
+- [x] W3 Validator：新增统一 Gateway 业务 validator，覆盖 question normalization 和
       conversation state 输出，并复用/迁移现有 `llm_resolver` 与 `conversation_state`
       合同校验；validator 必须是唯一能构造 accepted decision 的模块。
-- [ ] W4 Gateway：替换 Gateway helper 调用，接入 deterministic pre-resolver、统一 mode gate、
+- [x] W4 Gateway：替换 Gateway helper 调用，接入 deterministic pre-resolver、统一 mode gate、
       accepted/rejected decision、clarification、fail-closed 和 provider-not-called audit。
-- [ ] W5 Context：重构 ContextPackBuilder，只消费 accepted deterministic/Agent result，
+- [x] W5 Context：重构 ContextPackBuilder，只消费 accepted deterministic/Agent result，
       并把 Agent decision digest 纳入 context pack / projection replay digest；删除或封闭
       任何接收 raw Agent JSON / raw provider response 的构造入口。
-- [ ] W6 Eval：补齐 allowed/forbidden trigger fixture、schema invalid 负例、leakage 负例、
+- [x] W6 Eval：补齐 allowed/forbidden trigger fixture、schema invalid 负例、leakage 负例、
       fake-provider contract tests、真实 provider smoke、public scanner 和 replay validator。
-- [ ] W7 Target：更新 compose/env/release automation，执行并通过真实 provider live gate、
+- [x] W7 Target：更新 compose/env/release automation，执行并通过真实 provider live gate、
       release readiness validator、saved validator，并保存 rollback command。
-- [ ] W8 Docs：更新 `PROGRESS.md`、release report schema、操作手册和剩余非目标；不得只写
+- [x] W8 Docs：更新 `PROGRESS.md`、release report schema、操作手册和剩余非目标；不得只写
       “已接入”而缺 artifact path、commit、image、case count 和失败边界。
 
 ## P8 验证命令和 Artifact
 
 目标：验收必须能被别人复跑；如果命令或脚本尚不存在，本次实现必须补齐，不能删除 gate。
 
-- [ ] 禁止用 placeholder script、手工 curl 截图、日志肉眼检查或 README 说明替代 gate。
-- [ ] 每个 gate 必须写入 artifact path、sha256 digest、start/end time、commit、image
+- [x] 禁止用 placeholder script、手工 curl 截图、日志肉眼检查或 README 说明替代 gate。
+- [x] 每个 gate 必须写入 artifact path、sha256 digest、start/end time、commit、image
       或 binary digest；缺任一项只能算未完成。
-- [ ] release readiness validator 必须消费这些 artifact；只把 artifact 放到目录里不算完成。
+- [x] release readiness validator 必须消费这些 artifact；只把 artifact 放到目录里不算完成。
 - [x] `git diff --check`
 - [x] `scripts/qa.sh --full`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
-- [ ] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-core`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
+- [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
 - [x] `cargo clippy --manifest-path agent-platform/Cargo.toml --workspace --all-targets -- -D warnings`
 - [x] `cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- llm-eval --fixture-dir agent-platform/crates/tonglingyu-gateway/evals/fixtures --report-out agent-platform/crates/tonglingyu-gateway/evals/reports/llm-eval.json --fail-on-hard-gate`
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 - [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-release-report.sh <llm-release-report.json>`
 - [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-agent-live-gate.sh` 已接入 release
-      readiness / remote live gates / remote release automation；目标环境实际执行仍未完成。
+      readiness / remote live gates / remote release automation；目标环境已在
+      `remote-release-20260520T203350Z-1275` 实际执行并通过。
 - [x] gatekeeper `scripts/qa.sh --quick`
 - [x] gatekeeper `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
-- [ ] target `<deployment>/scripts/verify-tonglingyu-strict-gateway.sh`
-- [ ] target full remote release automation，且 saved report validator 返回 `status=ok`。
+- [x] target `<deployment>/scripts/verify-tonglingyu-strict-gateway.sh`
+- [x] target full remote release automation，且 saved report validator 返回 `status=ok`。
 
 ## 反提前宣布胜利检查
 
-以下任一情况存在时，只能声明 blocked 或 incomplete，不得声明真实 Agent 接入完成：
+以下任一情况存在时，只能声明 blocked 或 incomplete，不得声明真实 Agent 接入完成。
+当前 `[x]` 表示该提前宣布胜利风险已被排除，不表示风险存在：
 
-- [ ] 只完成 schema / envelope，主路径没有调用 Runtime profile。
-- [ ] 只完成 question normalizer，conversation state writer 未接入或未验证。
-- [ ] 只完成 shadow，enforced accepted/rejected/fail-closed gate 未通过。
-- [ ] 只跑 fake provider，目标环境真实 provider / runtime agent 未被调用。
-- [ ] 只跑 repo-local tests，缺 strict live gate、release readiness 或 saved validator artifact。
-- [ ] 只创建验证脚本或 release report schema，但没有真实运行结果和 validator 消费记录。
-- [ ] artifact 缺 digest、commit、image、case count、mode matrix 或 rollback command。
-- [ ] ContextPackBuilder 仍能从 raw Agent output、raw parser output 或 `serde_json::Value`
+- [x] 只完成 schema / envelope，主路径没有调用 Runtime profile。
+- [x] 只完成 question normalizer，conversation state writer 未接入或未验证。
+- [x] 只完成 shadow，enforced accepted/rejected/fail-closed gate 未通过。
+- [x] 只跑 fake provider，目标环境真实 provider / runtime agent 未被调用。
+- [x] 只跑 repo-local tests，缺 strict live gate、release readiness 或 saved validator artifact。
+- [x] 只创建验证脚本或 release report schema，但没有真实运行结果和 validator 消费记录。
+- [x] artifact 缺 digest、commit、image、case count、mode matrix 或 rollback command。
+- [x] ContextPackBuilder 仍能从 raw Agent output、raw parser output 或 `serde_json::Value`
       构建 context。
-- [ ] validator 模块外仍能伪造 accepted Agent decision。
-- [ ] schema repair 成功被直接当成 accepted，而没有重新通过 validator。
-- [ ] public response scanner 没覆盖非流式、SSE、缓存命中。
-- [ ] replay validator 不能按 trace 重放 Agent decision、context pack 和 projection digest。
-- [ ] 目标环境不可访问但文档写成 completed。
+- [x] validator 模块外仍能伪造 accepted Agent decision。
+- [x] schema repair 成功被直接当成 accepted，而没有重新通过 validator。
+- [x] public response scanner 没覆盖非流式、SSE、缓存命中。
+- [x] replay validator 不能按 trace 重放 Agent decision、context pack 和 projection digest。
+- [x] 目标环境不可访问但文档写成 completed。
 
 ## Production-ready 完成条件
 
 全部满足前，不得声明 production-ready：
 
-- [ ] P0-P8 全部完成。
-- [ ] repo-local Rust tests 通过。
-- [ ] clippy 通过。
-- [ ] llm-eval 通过。
-- [ ] strict Gateway gate 通过。
-- [ ] fake provider contract tests 通过。
-- [ ] 真实 provider / Runtime Agent live gate 通过。
-- [ ] release readiness validator 通过。
-- [ ] saved validator 通过。
-- [ ] full remote release automation 通过。
-- [ ] 普通用户响应无 Agent/context/memory/provider 内部字段。
-- [ ] 管理员 trace 可审计、可 replay、可定位失败。
+- [x] P0-P8 全部完成。
+- [x] repo-local Rust tests 通过。
+- [x] clippy 通过。
+- [x] llm-eval 通过。
+- [x] strict Gateway gate 通过。
+- [x] fake provider contract tests 通过。
+- [x] 真实 provider / Runtime Agent live gate 通过。
+- [x] release readiness validator 通过。
+- [x] saved validator 通过。
+- [x] full remote release automation 通过。
+- [x] 普通用户响应无 Agent/context/memory/provider 内部字段。
+- [x] 管理员 trace 可审计、可 replay、可定位失败。
 
 ## 完成后仍不能声明
 
