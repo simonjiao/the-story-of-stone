@@ -52,6 +52,7 @@ mod llm_modes;
 mod llm_provider;
 mod llm_resolver;
 mod plan;
+mod retrieval_suggestion;
 mod user_response_safety;
 
 use crate::context_governance::{

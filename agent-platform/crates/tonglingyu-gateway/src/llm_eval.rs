@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -20,14 +20,19 @@ use crate::{
         DEFAULT_MAX_BODY_CHARS, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS,
         LLM_EVAL_REPORT_SCHEMA_VERSION, LLM_EVAL_SUITE_VERSION, LlmEvalFixture,
         PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
-        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE, S4_STAGE,
-        SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES, STREAMING_DEDUPE_DATASET,
-        STREAMING_DEDUPE_MIN_CASES,
+        RAG_EVIDENCE_DATASET, RAG_EVIDENCE_MIN_CASES, REQUEST_SAFETY_DATASET,
+        REQUEST_SAFETY_MIN_CASES, RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES, S1_STAGE,
+        S2_STAGE, S3_STAGE, S4_STAGE, S5_STAGE, SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES,
+        STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
     },
     llm_modes::LlmMode,
     llm_provider::{FakeLlmProvider, LlmProviderError},
     llm_resolver::{
         ResolverContractDecision, evaluate_resolver_contract, evaluate_resolver_with_provider,
+    },
+    plan::SearchPolicy,
+    retrieval_suggestion::{
+        evaluate_retrieval_policy_suggestion, retrieval_policy_patch_observation,
     },
     user_response_safety::{fixture_has_internal_leakage, scan_fixture_surfaces},
 };
@@ -44,6 +49,11 @@ const NO_SUMMARY_HALLUCINATION: &str = "no_summary_hallucination";
 const BOUNDARY_PRESERVATION: &str = "boundary_preservation";
 const NO_MEMORY_AS_EVIDENCE: &str = "no_memory_as_evidence";
 const PROJECTION_GUARD_EXPECTED: &str = "projection_guard_expected";
+const RETRIEVAL_POLICY_PATCH_EXPECTED: &str = "retrieval_policy_patch_expected";
+const REQUIRED_EVIDENCE_NOT_DOWNGRADED: &str = "required_evidence_not_downgraded";
+const TOOL_PROFILE_NOT_MUTATED: &str = "tool_profile_not_mutated";
+const RAG_EVIDENCE_EXPECTED: &str = "rag_evidence_expected";
+const SOURCE_VERSION_BOUNDARY: &str = "source_version_boundary";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmEvalCaseResult {
@@ -119,6 +129,10 @@ pub fn run_llm_eval(
             "s4_minimums": {
                 SESSION_SUMMARY_DATASET: SESSION_SUMMARY_MIN_CASES,
             },
+            "s5_minimums": {
+                RETRIEVAL_POLICY_DATASET: RETRIEVAL_POLICY_MIN_CASES,
+                RAG_EVIDENCE_DATASET: RAG_EVIDENCE_MIN_CASES,
+            },
             "fail_on_hard_gate": fail_on_hard_gate,
         },
         "failure_attribution": failure_attribution,
@@ -181,6 +195,8 @@ fn evaluate_fixture(fixture: &LlmEvalFixture) -> LlmEvalCaseResult {
         STREAMING_DEDUPE_DATASET => evaluate_streaming_dedupe(fixture, &mut failures),
         QUESTION_RESOLUTION_DATASET => evaluate_question_resolution(fixture, &mut failures),
         SESSION_SUMMARY_DATASET => evaluate_session_summary(fixture, &mut failures),
+        RETRIEVAL_POLICY_DATASET => evaluate_retrieval_policy(fixture, &mut failures),
+        RAG_EVIDENCE_DATASET => evaluate_rag_evidence(fixture, &mut failures),
         dataset => {
             failures.push(format!("unsupported dataset: {dataset}"));
             json!({})
@@ -206,6 +222,7 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
         QUESTION_RESOLUTION_DATASET if fixture.input.get("provider_mode").is_some() => S3_STAGE,
         QUESTION_RESOLUTION_DATASET => S2_STAGE,
         SESSION_SUMMARY_DATASET => S4_STAGE,
+        RETRIEVAL_POLICY_DATASET | RAG_EVIDENCE_DATASET => S5_STAGE,
         _ => S1_STAGE,
     };
     if fixture.stage != expected_stage {
@@ -563,6 +580,185 @@ fn evaluate_session_summary(fixture: &LlmEvalFixture, failures: &mut Vec<String>
     })
 }
 
+fn evaluate_retrieval_policy(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let base_policy = search_policy_from_value(fixture.input.get("base_policy"));
+    let suggestion_output = fixture.input.get("llm_output").unwrap_or(&Value::Null);
+    let report = evaluate_retrieval_policy_suggestion(&base_policy, suggestion_output);
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == RETRIEVAL_POLICY_PATCH_EXPECTED)
+    {
+        failures.push(format!(
+            "missing hard gate {RETRIEVAL_POLICY_PATCH_EXPECTED}"
+        ));
+    }
+    assert_expected_bool(fixture, "accepted", report.accepted, failures);
+    assert_expected_bool(fixture, "fallback_used", report.fallback_used, failures);
+    assert_expected_bool(fixture, "adopted", report.adopted, failures);
+    compare_expected_bool(
+        fixture,
+        "required_evidence_downgraded",
+        report.required_evidence_downgraded,
+        REQUIRED_EVIDENCE_NOT_DOWNGRADED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "tool_or_profile_mutated",
+        report.tool_or_profile_mutated,
+        TOOL_PROFILE_NOT_MUTATED,
+        failures,
+    );
+    let final_required = report
+        .final_policy
+        .required_evidence_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let required_contains = string_array(fixture.expected.get("final_required_contains"));
+    for required in &required_contains {
+        if !final_required.contains(required) {
+            failures.push(format!(
+                "final policy missing required evidence type: {required}"
+            ));
+        }
+    }
+    let required_absent = string_array(fixture.expected.get("final_required_absent"));
+    for forbidden in &required_absent {
+        if final_required.contains(forbidden) {
+            failures.push(format!(
+                "final policy unexpectedly contains evidence type: {forbidden}"
+            ));
+        }
+    }
+
+    retrieval_policy_patch_observation(&report)
+}
+
+fn evaluate_rag_evidence(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let cards = fixture
+        .input
+        .get("cards")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let required_evidence_types = string_array(fixture.input.get("required_evidence_types"));
+    let gold_evidence_ids = string_array(fixture.input.get("gold_evidence_ids"));
+    let question = fixture
+        .input
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let version_sensitive = fixture
+        .input
+        .get("version_sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let answer_claim = fixture
+        .input
+        .get("answer_claim")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let card_evidence_ids = cards
+        .iter()
+        .filter_map(|card| card.get("evidence_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let card_evidence_types = cards
+        .iter()
+        .filter_map(|card| card.get("evidence_type").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let hit_at_8 = card_evidence_ids
+        .iter()
+        .take(8)
+        .any(|id| gold_evidence_ids.iter().any(|gold| gold == id));
+    let required_evidence_types_present = required_evidence_types
+        .iter()
+        .all(|required| card_evidence_types.contains(required.as_str()));
+    let version_support_present = !version_sensitive
+        || cards.iter().any(|card| {
+            card.get("evidence_type").and_then(Value::as_str) == Some("version_note")
+                || card
+                    .get("source_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| {
+                        source.contains("chengjia")
+                            || source.contains("chengyi")
+                            || source.contains("version")
+                    })
+                || card
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| {
+                        text.contains("程甲")
+                            || text.contains("程乙")
+                            || text.contains("前八十")
+                            || text.contains("后四十")
+                            || text.contains("後四十")
+                    })
+        });
+    let commentary_question = question.contains("脂批") || question.contains("脂評");
+    let commentary_support_present =
+        !commentary_question || card_evidence_types.contains("commentary");
+    let commentary_as_fact_avoided = !(answer_claim.contains("正文")
+        && !cards.is_empty()
+        && cards
+            .iter()
+            .all(|card| card.get("evidence_type").and_then(Value::as_str) == Some("commentary")));
+    let source_version_accuracy = required_evidence_types_present
+        && version_support_present
+        && commentary_support_present
+        && commentary_as_fact_avoided;
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == RAG_EVIDENCE_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {RAG_EVIDENCE_EXPECTED}"));
+    }
+    compare_expected_bool(
+        fixture,
+        "hit_at_8",
+        hit_at_8,
+        RAG_EVIDENCE_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "required_evidence_types_present",
+        required_evidence_types_present,
+        RAG_EVIDENCE_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "source_version_accuracy",
+        source_version_accuracy,
+        SOURCE_VERSION_BOUNDARY,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "commentary_as_fact_avoided",
+        commentary_as_fact_avoided,
+        SOURCE_VERSION_BOUNDARY,
+        failures,
+    );
+
+    json!({
+        "card_count": cards.len(),
+        "hit_at_8": hit_at_8,
+        "required_evidence_types_present": required_evidence_types_present,
+        "version_support_present": version_support_present,
+        "commentary_support_present": commentary_support_present,
+        "commentary_as_fact_avoided": commentary_as_fact_avoided,
+        "source_version_accuracy": source_version_accuracy,
+        "evidence_type_count": card_evidence_types.len(),
+    })
+}
+
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
     let request = fixture.input.get("request").unwrap_or(&Value::Null);
     let expected_accepted = fixture
@@ -700,6 +896,20 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn search_policy_from_value(value: Option<&Value>) -> SearchPolicy {
+    let value = value.unwrap_or(&Value::Null);
+    SearchPolicy {
+        question_type: value
+            .get("question_type")
+            .and_then(Value::as_str)
+            .unwrap_or("base_text")
+            .to_string(),
+        required_evidence_types: string_array(value.get("required_evidence_types")),
+        planned_profiles: string_array(value.get("planned_profiles")),
+        blocked_controls: string_array(value.get("blocked_controls")),
+    }
 }
 
 fn provider_error_from_str(value: &str) -> LlmProviderError {
@@ -857,6 +1067,24 @@ fn validate_fixture_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<Strin
     if session_summary_count > 0 && session_summary_count < SESSION_SUMMARY_MIN_CASES {
         failures.push(format!(
             "{SESSION_SUMMARY_DATASET} requires at least {SESSION_SUMMARY_MIN_CASES} cases got {session_summary_count}"
+        ));
+    }
+    let retrieval_policy_count = dataset_counts
+        .get(RETRIEVAL_POLICY_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if retrieval_policy_count > 0 && retrieval_policy_count < RETRIEVAL_POLICY_MIN_CASES {
+        failures.push(format!(
+            "{RETRIEVAL_POLICY_DATASET} requires at least {RETRIEVAL_POLICY_MIN_CASES} cases got {retrieval_policy_count}"
+        ));
+    }
+    let rag_evidence_count = dataset_counts
+        .get(RAG_EVIDENCE_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if rag_evidence_count > 0 && rag_evidence_count < RAG_EVIDENCE_MIN_CASES {
+        failures.push(format!(
+            "{RAG_EVIDENCE_DATASET} requires at least {RAG_EVIDENCE_MIN_CASES} cases got {rag_evidence_count}"
         ));
     }
     failures
