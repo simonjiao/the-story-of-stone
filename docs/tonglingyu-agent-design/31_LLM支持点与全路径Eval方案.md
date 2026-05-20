@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-版本：v1.2
+版本：v1.3
 日期：2026-05-20
 结论：本文只定义设计约束、决策边界、目标 contract、eval gate 和阶段实施边界；不记录实现进度，不替代实现证据或上线证据。
 
@@ -105,47 +105,47 @@
 | I9 | Evidence package 示例可写 `review: null` | 当前主链路需要 review/journal/wrapper 过滤 | 示例必须表达 review record 存在或可回放。 |
 | I10 | Eval 百分比是已通过事实 | 多数据集 eval suite 尚未整体落地 | 百分比只能作为目标门槛。 |
 
-### 4.2 待确认决策登记
+### 4.2 决策登记
 
-这些决策未关闭前，不能宣布设计完成。
+以下登记同时包含已关闭、部分关闭和仍待确认的设计决策。未关闭项不能宣布设计完成。
 
 | 编号 | 决策问题 | 设计结论 | 必须落实的边界 | 若边界不清的风险 |
 |---|---|---|---|---|
 | D1 | 是否实现 Question Resolver LLM contract | 必须实现，作为 LLM 嵌入流程的入口 contract | 必须确认 schema、调用点、fail-closed、audit、eval | LLM resolver 可能越权进入事实、scope、tool、memory 判断 |
-| D2 | LLM resolver 能读取哪些 context refs | 待定 | 必须使用白名单；候选白名单包含 `authorized_memory_summary`；未知 ref fail-closed | context 膨胀或越权读取 raw memory/full history |
+| D2 | LLM resolver 能读取哪些 context refs | 采用固定白名单 | 仅允许 `current_question`、`recent_user_messages`、`recent_assistant_messages`、`prior_subject`、`session_summary`、`authorized_memory_summary`；未知 ref fail-closed | context 膨胀或越权读取 raw memory/full history |
 | D3 | resolver 是否允许读取 memory summary | 允许 | 只能读取 policy engine 授权、脱敏、预算内的 `authorized_memory_summary` | 把“设计允许”误写成当前支持，或让 resolver 读取 raw memory |
 | D4 | 是否新增 `conversation_state_summary` | 待定 | 若新增，必须确认 writer/loader/schema/projection | summary 幻觉污染 resolver 或 draft |
 | D5 | 是否引入 LLM suggested retrieval policy | 待定 | 必须确认 suggested policy schema 与 deterministic patch | LLM 降级版本/脂批/人物命运必需证据 |
 | D6 | Runtime profile 输出权力边界 | 必须限制 | 每个 profile 只能输出 observation/candidate | profile 输出被误用为事实源 |
-| D7 | Evidence package review record 形态 | 必须存在或可回放 | review record 形态必须明确 | reviewer 可被绕过 |
+| D7 | Evidence package review record 形态 | 必须采用最小 review record | 至少包含 package/draft refs、local/LLM status、severity/issues、required revisions、final decision、override reason、replay anchor | reviewer 可被绕过 |
 | D8 | Claim-first draft 是否作为 final answer 主路径 | 采用，作为 LLM 嵌入回答生成流程的主路径 | draft 必须绑定 package、claim map、reviewer；final answer 只能来自通过 gate 的 draft/revision | draft 引入无证据 claim，或绕过 reviewer 直接进入用户响应 |
 | D9 | LLM reviewer observation 与本地 reviewer 冲突时如何记录 | 必须记录 override；本地 reviewer 最终裁决 | override audit schema、冲突矩阵、revision gate 和最终裁决规则必须明确 | 语义 reviewer 被误当最终裁决，或 LLM pass 放行本地失败 |
 | D10 | Full-path eval suite 的数据集、阈值和 runner | 必须定义 | fixture、指标、runner、release report 必须明确 | 只看最终回答，无法定位节点失败 |
 | D11 | 用户响应脱敏回归是否作为长期门禁 | 必须作为长期门禁 | denylist、recursive scan、SSE replay、cache replay 必须明确 | 内部 trace/context/memory/tool payload 泄露 |
 | D12 | 目标环境 release gate 的边界 | 必须分层 | 本地 gate、smoke、strict gateway、live gate、release readiness 必须分层明确 | repo-local 通过被误写成目标环境 production ready |
 
-### 4.3 待确认与未澄清条目
+### 4.3 U 项收敛状态
 
-以下条目没有关闭前，不能进入实现。它们不是实现进度，而是设计输入缺口。
+U1-U16 不是同一种缺口。`可关闭` 表示现有设计已经给出足够结论，后续进入实现落地；`部分可确定` 表示边界原则已定，但还缺 schema 字段、枚举、阈值或 runner 细节；`仍待确认` 表示是否纳入当前设计目标本身还没有关闭。
 
-| 编号 | 关联决策 | 未澄清问题 | 必须明确到什么程度 | 不明确时的后果 |
+| 编号 | 关联决策 | 状态 | 现有设计下可确定的结论 | 仍需明确 |
 |---|---|---|---|---|
-| U1 | D1 | LLM resolver 的触发条件 | 明确哪些 deterministic failure 才能触发 LLM，例如 unresolved referent、省略、多候选实体；其他情况不调用。 | LLM 被过早放到主链路，扩大不可控面。 |
-| U2 | D2/D3 | `used_context_refs` 最终白名单 | 明确是否只允许 `current_question`、`recent_user_messages`、`recent_assistant_messages`、`prior_subject`、`session_summary`、`authorized_memory_summary`。 | 任意 context ref 进入 resolver，导致 raw memory 或完整 history 泄露。 |
-| U3 | D3 | `authorized_memory_summary` 数据 contract | 明确字段、长度预算、脱敏规则、scope 标识是否可见、audit ref 是否可见、禁止 raw id。 | resolver 实际读取到 memory card id、ACL、read refs 或 raw memory。 |
-| U4 | D4 | 是否新增 `conversation_state_summary` | 明确做或不做；若做，定义 schema、writer/loader、projection 可见范围和 anti-hallucination eval。 | session summary、memory summary、conversation summary 职责混在一起。 |
-| U5 | D5 | 是否引入 LLM suggested retrieval policy | 明确做或不做；若做，定义 suggestion schema、deterministic patch、必需证据不可降级规则。 | LLM 变相决定检索工具和证据类型。 |
-| U6 | D7 | Review record 的最小结构 | 明确 review status、severity、issues、required revisions、package ref、replay anchor。 | evidence package 看似完整，但 reviewer 可以缺席或不可回放。 |
-| U7 | D8 | Revision loop | 明确 draft 失败后如何修订、最大轮数、何时 fail-closed、revision 与 package/review 的绑定关系。 | draft 失败后无限重试，或未经 reviewer 修订就进入用户响应。 |
-| U8 | D8 | Final assembly 来源 | 明确 final answer 是否只能来自最后一个通过 reviewer 的 draft/revision，以及是否允许本地模板拼接。 | final answer 绕过 claim map 或 package gate。 |
-| U9 | D9 | LLM reviewer severity taxonomy | 明确 high/medium/low 或只保留 high/low；列出每类 issue 的处理动作。 | LLM reviewer fail 的含义不稳定，revision gate 无法自动化。 |
-| U10 | D9 | Override reason 枚举 | 明确 `local_enforcement_blocks_llm_pass`、`llm_high_risk_blocks_final` 等枚举和必填字段。 | 冲突记录不可统计、不可回放。 |
-| U11 | D10 | Eval runner 与报告格式 | 明确 fixture 路径、runner 命令、pass/fail 输出、失败归因字段、release report 结构。 | 只有数据集名，没有可执行 eval。 |
-| U12 | D10 | Eval 阈值 | 明确每个数据集的最低门槛，以及哪些门槛是 hard gate、哪些是观察指标。 | 百分比目标再次被误写成已通过事实。 |
-| U13 | D11 | 用户响应泄露 denylist | 明确字段列表、递归扫描规则、SSE delta 检查、cache/dedupe replay 检查。 | 内部 trace、context、memory、tool payload 经用户响应泄露。 |
-| U14 | D12 | 目标环境 gate 分层 | 明确 repo-local、smoke、strict gateway、live gate、release readiness 的边界和证据格式。 | repo-local 通过被误写成 production-ready。 |
-| U15 | S2-S7 | Feature flag 与 rollback 名称 | 明确每个 LLM 能力的开关名、默认值、shadow-only 模式和回滚后保持的基线路径。 | 无法在单阶段失败时回滚。 |
-| U16 | S6 | LLM profile provider/runtime 失败策略 | 明确 timeout、retry、provider error、schema repair 失败、部分 profile 缺失时的 fail-closed 行为。 | 运行时错误被包装成正常回答，或绕过 reviewer。 |
+| U1 | D1 | 部分可确定 | LLM resolver 只能在 deterministic resolver 无法安全生成 `resolved_question`、原本需要澄清或 fail-closed 时调用；不能常驻主链路。 | deterministic failure taxonomy 和 fixture 名称，例如 unresolved referent、省略承接、多候选实体、低置信、prompt injection。 |
+| U2 | D2/D3 | 可关闭 | `used_context_refs` 固定为 `current_question`、`recent_user_messages`、`recent_assistant_messages`、`prior_subject`、`session_summary`、`authorized_memory_summary`。 | 无设计缺口；实现必须对未知 ref fail-closed。 |
+| U3 | D3 | 部分可确定 | `authorized_memory_summary` 只能是 policy engine 授权、脱敏、预算内摘要；禁止 raw memory、memory card id、ACL、read refs。 | 字段 schema、长度预算、scope 标识可见性、audit ref 可见性。 |
+| U4 | D4 | 仍待确认 | 若新增 `conversation_state_summary`，它不能作为事实源，不能进 evidence package，只能进入授权 projection。 | 当前版本是否新增该节点；若新增，还需 writer/loader/schema/projection/eval。 |
+| U5 | D5 | 仍待确认 | 若引入 LLM suggested retrieval policy，LLM 只能输出 suggestion，最终 policy 必须由 deterministic patch 约束。 | 当前版本是否引入该能力；若引入，还需 suggestion schema 与 patch 规则落地。 |
+| U6 | D7 | 可关闭 | 最小 review record 必须包含 package/draft refs、local/LLM status、severity/issues、required revisions、final decision、override reason、replay anchor。 | 无设计缺口；实现时只需固定字段名和持久化位置。 |
+| U7 | D8 | 部分可确定 | unsupported claims 或高风险 reviewer issue 必须进入 revision；revision 后必须重新 review；未通过 gate 不能进入用户响应。 | 最大修订轮数、超过轮数后的 terminal status、revision id 与 package/review 的精确绑定字段。 |
+| U8 | D8 | 可关闭 | final answer 只能来自最后一个通过 package/reviewer gate 的 draft 或 revision；本地模板只允许确定性格式化，不允许新增 claim。 | 无设计缺口；实现必须证明 final assembly 没有绕过 claim map。 |
+| U9 | D9 | 可关闭 | severity taxonomy 采用 `high` / `low`，不引入 `medium`；high 阻塞 final 并要求 revision，low 只能 warning 或非阻塞修订。 | 无设计缺口；实现可继续补充 low-risk 示例。 |
+| U10 | D9 | 可关闭 | override reason 采用固定枚举：`local_enforcement_blocks_llm_pass`、`llm_high_risk_blocks_final`、`llm_low_risk_warning_recorded`、`both_reviewers_block_final`。 | 无设计缺口；实现需把枚举写入 schema 和报告。 |
+| U11 | D10 | 部分可确定 | 数据集、指标和失败归因规则已经确定；eval 必须按节点归因，不只评最终回答。 | fixture 路径、runner 命令、pass/fail 输出格式、release report schema。 |
+| U12 | D10 | 部分可确定 | 用户响应泄露、package/ref validation、高风险 reviewer false pass 属于 hard gate，不能作为观察指标放过。 | 每个数据集的数字阈值、哪些指标是 hard gate、哪些指标只观察。 |
+| U13 | D11 | 可关闭 | 用户响应 denylist 已确定；非流式、SSE delta、cache/dedupe replay 都必须递归扫描。 | 无设计缺口；实现时补充扫描器和 fixture。 |
+| U14 | D12 | 可关闭 | release gate 分为 repo-local、smoke、strict gateway、live gate、release readiness；不能用 repo-local 通过替代 production-ready。 | 无设计缺口；实现时补充各层证据格式。 |
+| U15 | S2-S7 | 部分可确定 | 必须按能力提供 resolver、summary、retrieval suggestion、profile observation、draft、reviewer observation 的开关；新增 LLM 能力默认 disabled 或 shadow-only。 | 精确 flag 名称、配置位置、默认值矩阵、回滚验证命令。 |
+| U16 | S6 | 部分可确定 | provider/runtime/schema repair/profile 缺失都必须 fail-closed；LLM profile 失败不能包装成正常事实回答，也不能绕过 reviewer。 | timeout、retry、provider error 分类、schema repair 次数、部分 profile 缺失时的降级矩阵。 |
 
 ## 5. LLM 支持面设计
 
@@ -491,7 +491,7 @@ Eval 必须按节点归因，不只评最终回答。
 设计进入实现前必须满足：
 
 1. D1-D12 每项都有明确设计结论、禁止边界和验证入口。
-2. U1-U16 每项都有明确答案，或明确排除在当前实施范围之外。
+2. U1-U16 的状态已经收敛；`部分可确定` 项必须补齐剩余字段，`仍待确认` 项必须完成决策或明确排除在当前实施范围之外。
 3. S0 的事实、目标、待确认项和禁止口径均完成审阅，并留下审阅记录。
 4. 每个目标 contract 有 schema、禁止字段、fail-closed 行为、eval fixture 入口。
 5. S1 的最小 runner 和用户响应安全基线有具体文件路径计划。
@@ -516,7 +516,7 @@ Eval 必须按节点归因，不只评最终回答。
 
 | 阶段 | 目标 | 包含工作 | 退出条件 | 不可跨越边界 |
 |---|---|---|---|---|
-| S0 口径冻结 | 固定事实口径、目标增强和待确认项 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | I1-I10、D1-D12、U1-U16、S0-S7 均完成审阅；文档检查通过 | 不能写“基本完成”；不能把目标写成实现 |
+| S0 口径冻结 | 固定事实口径、目标增强和待确认项 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | I1-I10、D1-D12、U1-U16 状态与剩余缺口、S0-S7 均完成审阅；文档检查通过 | 不能写“基本完成”；不能把目标写成实现 |
 | S1 评测与用户响应安全基线 | 先建立最小 gate，再接 LLM | P6 最小回归、P5 最小 runner、`request_safety.jsonl`、`streaming_dedupe.jsonl` | 内部字段扫描、stream replay、缓存复用、request safety 能自动跑 | 不能引入新的 LLM 调用 |
 | S2 Question Resolver contract | 只做 resolver 输出约束，不接生产 LLM | P0 schema、字段白名单、context refs 白名单、confidence gate、audit、fixture；包含 `authorized_memory_summary` 输入 contract | 规则 resolver 行为不变；contract tests 通过 | LLM 不能决定事实、scope、tool、memory ACL、reviewer、package |
 | S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | runtime/Hermes 调用、schema repair、shadow audit、fail-closed | 只在 deterministic 需要澄清时调用；RAG 不被未校验输出驱动 | LLM resolver 不能读取 raw memory 或完整 history |
