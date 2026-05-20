@@ -14,6 +14,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 load_deploy_env_file_or_local
 
 RUN_ID="${TONGLINGYU_SCOPED_CONTEXT_LIVE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+SCOPED_USER_ID="scoped-context-live-${RUN_ID}"
 HEALTH_JSON="${TONGLINGYU_SCOPED_CONTEXT_HEALTH_JSON:-${WORK_DIR}/health.json}"
 FIRST_PAYLOAD="${WORK_DIR}/first-payload.json"
 SECOND_PAYLOAD="${WORK_DIR}/second-payload.json"
@@ -74,7 +75,7 @@ test -n "${key}"
 curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
-  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-user-id: '"${SCOPED_USER_ID}"'" \
   -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
   -H "x-tonglingyu-message-id: scoped-context-live-first-${VERIFY_RUN_ID}" \
   --data-binary @- \
@@ -98,7 +99,7 @@ test -n "${key}"
 curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
-  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-user-id: '"${SCOPED_USER_ID}"'" \
   -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
   -H "x-tonglingyu-message-id: scoped-context-live-second-${VERIFY_RUN_ID}" \
   --data-binary @- \
@@ -138,7 +139,7 @@ test -n "${key}"
 curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
-  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-user-id: '"${SCOPED_USER_ID}"'" \
   -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
   -H "x-tonglingyu-message-id: scoped-context-live-long-${VERIFY_RUN_ID}" \
   --data-binary @- \
@@ -167,7 +168,7 @@ test -n "${key}"
 curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
-  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-user-id: '"${SCOPED_USER_ID}"'" \
   -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
   -H "x-tonglingyu-message-id: scoped-context-live-memory-${VERIFY_RUN_ID}" \
   --data-binary @- \
@@ -312,7 +313,7 @@ test -n "${key}"
 curl -fsS \
   -H "Authorization: Bearer ${key}" \
   -H "content-type: application/json" \
-  -H "x-tonglingyu-user-id: scoped-context-live" \
+  -H "x-tonglingyu-user-id: '"${SCOPED_USER_ID}"'" \
   -H "x-tonglingyu-chat-id: scoped-context-live-${VERIFY_RUN_ID}" \
   -H "x-tonglingyu-message-id: scoped-context-live-memory-read-${VERIFY_RUN_ID}" \
   -d "{\"model\":\"tonglingyu\",\"messages\":[{\"role\":\"user\",\"content\":\"介绍林黛玉。\"}]}" \
