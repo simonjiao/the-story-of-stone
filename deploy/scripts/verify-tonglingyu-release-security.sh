@@ -405,7 +405,7 @@ def scan_release_scripts():
     files = git_tracked_files(
         [
             "deploy/scripts",
-            "deploy/open-webui/functions",
+            "open-webui/functions",
             "deploy/docker-compose.yml",
             "agent-platform/crates/tonglingyu-gateway/Dockerfile",
         ]

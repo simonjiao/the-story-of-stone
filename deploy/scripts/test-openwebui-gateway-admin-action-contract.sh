@@ -2,8 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-FUNCTION_DIR="${DEPLOY_DIR}/open-webui/functions"
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
+FUNCTION_DIR="${OPEN_WEBUI_FUNCTION_DIR}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 

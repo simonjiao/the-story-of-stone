@@ -2,17 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "${SCRIPT_DIR}/../open-webui/functions" ]]; then
-  DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-else
-  DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/deploy"
-fi
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
 load_optional_deploy_env_file
 
-FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/tonglingyu_gateway_admin_action.py}"
+FUNCTION_FILE="${FUNCTION_FILE:-${OPEN_WEBUI_FUNCTION_DIR}/tonglingyu_gateway_admin_action.py}"
 FUNCTION_ID="${FUNCTION_ID:-tonglingyu_gateway_admin}"
 FUNCTION_NAME="${FUNCTION_NAME:-Tonglingyu Gateway Admin}"
 TARGET_MODEL="${TONGLINGYU_GATEWAY_ADMIN_ACTION_TARGET_MODEL:-${TONGLINGYU_MODEL_ID:-tonglingyu}}"

@@ -7,6 +7,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/resolve-layout.sh
 . "${SCRIPT_DIR}/lib/resolve-layout.sh"
 resolve_tonglingyu_layout "${SCRIPT_DIR}"
+# shellcheck source=lib/deploy-env.sh
+. "${SCRIPT_DIR}/lib/deploy-env.sh"
+load_optional_deploy_env_file
 
 QA_MODE="${TONGLINGYU_DEPLOY_QA_MODE:-quick}"
 SKIP_QA="${TONGLINGYU_DEPLOY_SKIP_QA:-false}"
@@ -49,6 +52,7 @@ case "${1:-}" in
 esac
 
 "${SCRIPT_DIR}/bump-deploy-version.sh"
+export TONGLINGYU_VERSION="$(project_version)"
 if [[ ! "${SKIP_QA}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
   "${REPO_DIR}/scripts/qa.sh" "--${QA_MODE}"
 fi

@@ -2,17 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "${SCRIPT_DIR}/../open-webui/functions" ]]; then
-  DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-else
-  DEPLOY_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/deploy"
-fi
+# shellcheck source=lib/resolve-layout.sh
+. "${SCRIPT_DIR}/lib/resolve-layout.sh"
+resolve_tonglingyu_layout "${SCRIPT_DIR}"
 
 # shellcheck source=lib/deploy-env.sh
 . "${SCRIPT_DIR}/lib/deploy-env.sh"
 load_optional_deploy_env_file
 
-FUNCTION_FILE="${FUNCTION_FILE:-${DEPLOY_DIR}/open-webui/functions/agent_identity_bridge_filter.py}"
+FUNCTION_FILE="${FUNCTION_FILE:-${OPEN_WEBUI_FUNCTION_DIR}/agent_identity_bridge_filter.py}"
 FUNCTION_ID="${FUNCTION_ID:-agent_identity_bridge}"
 FUNCTION_NAME="${FUNCTION_NAME:-Agent Identity Bridge}"
 TARGET_MODEL="${AGENT_BRIDGE_TARGET_MODEL:-tonglingyu}"

@@ -11,4 +11,7 @@ resolve_tonglingyu_layout() {
   else
     REPO_DIR="$(cd -- "${script_dir}/../.." && pwd)"
   fi
+
+  SOURCE_REPO_DIR="${REPO_DIR}"
+  OPEN_WEBUI_FUNCTION_DIR="${REPO_DIR}/open-webui/functions"
 }
