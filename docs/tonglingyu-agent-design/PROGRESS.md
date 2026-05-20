@@ -27,10 +27,152 @@
 - `hhost` 重建后 runtime config、`agent_identity_bridge`、
   `tonglingyu_gateway_admin`、model-upstream probe、strict Gateway
   chat/streaming/admin trace 和公网 Open WebUI HTTP 200 均已通过复核。
-- 本次重建不等于 production-ready 发布：aggregate release readiness 当前仍是
-  summary-only，`production_release_ready=false`，还缺 browser-side review、
-  security scan/digest-pinned image、RQA migration/restore/performance/API/user
-  lifecycle、release ops 和监控证据。
+- 2026-05-18 当前 `hhost` 版本已完成 production-ready release automation：
+  `remote-release-20260518T181347Z-50849` 为 `status=ok`、
+  `production_ready_proven=true`，release readiness 为 `status=passed`、
+  `production_release_ready=true`，saved validator 为 `status=ok`、`errors=[]`。
+  该结论覆盖当前 RQA release gate 和 Scoped Context Request Path，不覆盖 scoped memory
+  或 Memory Collector。
+- 2026-05-18 Scoped Context Request Path 已实现并部署：Gateway 请求路径写入
+  `user_session`、`interaction_context`、`context_pack` 和 `session_journal`，
+  支持 `resolved_question`、summary-only admin trace 回放和 fail-closed 追问解析。
+  旧 `gateway_sessions` / `gateway_messages` 未迁移为新 memory 来源。
+- 2026-05-18 `26_Scoped_Context与受控Memory设计.md` 已重构为稳定实现规格稿：
+  固定解释顺序、数据对象、运行流程、Scoped Context Request Path 工作包、禁止项、后续正式工作流边界和
+  production gate。当前 Scoped Context Request Path 已闭合；Context Projection Runtime 仍必须继续遵守
+  active memory、Memory Collector、审核、ACL 和跨 scope memory 的边界，不能把
+  Scoped Context Request Path 结论扩展成 scoped memory production-ready。
+- 2026-05-19 Context Projection Runtime 已细化为独立实现 checklist：
+  `28_Context_Projection_Runtime_Checklist.md`。Context Projection Runtime 只做
+  Context-aware Runtime，包括请求级 `context_pack`、consumer 级
+  `context_projection`、projection ref/digest contract、consumer projection 隔离、
+  tool policy digest、Runtime audit、replay 和 hhost production gate；不做 Memory
+  Collector、`memory_candidate`、active `memory_card`、审核页面或非 Hermes
+  external agent 接入。目标是 Context Projection Runtime production-ready，不是本地代码切片完成；
+  当前已完成实现和 hhost production gate。
+- 2026-05-19 Context Projection Runtime 已部署为 `0.1.7` 并通过 `hhost`
+  production-ready gate：`tonglingyu-gateway` 运行 image id 为
+  `sha256:93df2e2555669a77097590eda1bb4b63e6cc709b58604f741fbf04ce1c6845ab`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T013236Z-78446/remote-live-gates.json`，
+  其中 model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway
+  和 scoped context gate 均通过。完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T013318Z-78823/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`；release readiness 为
+  `status=passed`、`production_release_ready=true`、`required_failures=[]`、
+  `release_blockers=[]`，saved validator 为 `status=ok`、`errors=[]`，open P0
+  retrieval failures / governance tasks 均为 0。该结论只覆盖 Context Projection Runtime，
+  仍不覆盖长期 memory、Memory Collector、审核页面、
+  Context Governance 独立服务或非 Hermes external agent 接入。
+- 2026-05-19 Memory Candidate Workflow 已实现并部署为 `0.1.11`：
+  `29_Memory_Candidate_Workflow_Checklist.md` 已记录实现证据。
+  Memory Candidate Workflow 覆盖 Memory Collector、`memory_candidate`、`memory_card`、完整状态机、
+  admin-only CLI/API、background worker / scheduled / admin manual 三种触发方式和
+  LLM participation fail-closed contract；状态机包含
+  `approve/promote/reject/reclassify/expire/revoke/merge`。`hhost` 运行的
+  `tonglingyu-gateway` image id 为
+  `sha256:8fddab2d2d4213641cba382721844374af4ea09265a1b389f36ff6f788bc0109`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T082735Z-42867/remote-live-gates.json`。
+  完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T084157Z-43947/remote-release-automation.stdout`，
+  `status=ok`、`production_ready=true`；wrapper 为
+  `production_ready_proven=true`、`release_blockers=[]`、`required_failures=[]`；
+  release readiness 为 `status=passed`、`production_release_ready=true`。容量 gate
+  为 `rqa_write_p95_ms=4553`、`admin_read_p95_ms=382`、
+  `metrics_read_p95_ms=162`，post-release monitor 60 分钟窗口
+  `sample_count=13`、`failed_sample_count=0`。background worker 已在 hhost
+  自动运行，最终日志为 `processed_count=60`、`candidate_count=0`、
+  `denied_count=0`、`suppressed_count=60`。该结论只覆盖 Memory Candidate Workflow
+  candidate/card 工作流；自动 promotion 和 active memory 读取路径仍放在 Scoped Memory Production，
+  不声明 scoped memory production-ready。
+- 2026-05-19 Memory Candidate Workflow 设计反思后已把 memory lifecycle 重构为三层：candidate
+  lifecycle、card lifecycle 和 read enablement lifecycle。`reclassify` 是
+  `pending -> pending` 的 action，不再作为独立状态；人工 `promote` 是
+  `approved candidate -> active memory_card` 的跨对象 transition，但 Memory Candidate Workflow 固定
+  `read_enabled=false`。Scoped Memory Production 不再重新定义候选/卡片状态机，只负责打开 ACL 约束下
+  的读取面、自动 promotion 和完整 scoped memory production gate。
+- 2026-05-19 Scoped Memory Production 设计已按最新讨论重构，不再把目标
+  降为最小 user_private 闭环或 collector smoke。`30_Scoped_Memory_Production_Checklist.md`
+  已冻结 Scoped Memory Production 口径：自动策略是一等生产主路径，人工审核流程保留但可被策略跳过；
+  LLM 只做 semantic filter，最终 auto approve / promote / read enablement 由
+  versioned policy engine 决定；主链路必须覆盖
+  `session_journal -> Memory Collector -> memory_candidate -> policy decision ->
+  memory_card -> read enablement -> context_pack.memory_read_refs -> context_projection ->
+  Runtime answer`。该更新只是设计冻结，不声明 scoped memory production-ready。
+- 2026-05-19 Scoped Memory Production policy contract 已冻结为 `scoped-memory-policy-v1`：默认
+  `policy_mode=auto_policy`，保留 `shadow_only` 和 `manual_required` 降级；
+  scope automation matrix、confidence threshold、TTL、candidate type allowlist、
+  LLM schema `scoped-memory-llm-filter-v1`、LLM overreach fail-closed 字段和
+  context read budget 均已写入 checklist。实现不得临场硬编码阈值或以补丁绕过
+  policy contract；任何生产策略调整都必须形成新 policy version 并重新通过 release
+  gate。
+- 2026-05-19 Scoped Memory Production 本地实现已完成并通过本地 gates：Gateway 已新增
+  `memory_policy_decisions`、自动 policy decision、自动 `approve/promote/enable_read`、
+  active/read-enabled memory 读取、`context_pack.memory_read_refs` 持久化、
+  projection 级 memory 可见性隔离、public response/SSE/metrics 内部字段过滤、
+  `profile_common`/`knowledge_space`/`research_topic`/`source_collection` scope matrix、
+  lifecycle export/anonymize/legal hold 覆盖 memory，以及 backup/restore 后 scoped
+  memory read path 验证。已通过 `cargo test --workspace`、`cargo clippy --workspace
+  --all-targets -- -D warnings`、本地 gateway smoke、RQA user lifecycle gate、
+  RQA backup/restore drill 和 release readiness contract。
+- 2026-05-19 Scoped Memory Production 已部署为 `0.1.12` 并通过 hhost
+  production-ready gate：`tonglingyu-gateway` 运行 image id 为
+  `sha256:1e1e53ef3d079166a8c3eb1fd2df088a9535d76b7c3efd495aa69d9ef4e6a17f`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260519T143702Z-79221/remote-live-gates.json`，
+  其中 model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway
+  和 scoped context gate 均通过。完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260519T184551Z-93162/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`；release readiness 为
+  `status=passed`、`production_release_ready=true`，saved validator 为 `status=ok`、
+  `production_release_ready=true`、`errors=[]`。同一 release 绑定
+  `environment=hhost`、`target=tonglingyu-rqa`、git commit
+  `cbba91bb73dd6e3004975eecc0326c32e5c661dd`、`tracked_dirty=false`，16 个
+  required gates 全部通过。容量 gate 为 `rqa_write_p95_ms=4618`、
+  `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、`release_gate_ms=26759`；
+  post-release monitor 60 分钟窗口 `sample_count=13`、`failed_sample_count=0`。
+  因此 scoped memory production-ready gate 已在当前 run 中闭合。
+- 2026-05-20 对 Scoped Context / Scoped Memory 设计与实现做一致性复查，发现两个
+  未影响已部署路径但不应保留的 contract 漏项，并消除一个 patch-style 双路径构造点：
+  非 `user_message`
+  candidate 现在会在 policy engine 内 fail-closed 为 `suppress -> rejected`，不能
+  因 admin/API 插入路径绕过自动策略条件，manual promote 和 read path 也同样要求
+  `user_message` 与 `context_pack_id`；`memory_read_ref_digest` 现在显式写入
+  `context_pack`、projection payload、admin trace summary 和 smoke/live gate。同时
+  已把 `context_pack.profile_views` 与 `context_projection` 改为同源构造，避免
+  patch-style 双路径漂移。已复跑
+  `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 和 `scripts/qa.sh --quick`。
+- 2026-05-20 已按 deploy patch 自增规则部署 `0.1.13` 到 `hhost`：
+  `tonglingyu-gateway` 运行 image 为 `tonglingyu-gateway:0.1.13`，image id 为
+  `sha256:214a8977e8454549d2f7f787929fb6bedb62373280ff3459521b7e2d258fb464`，
+  version label 为 `0.1.13`。远端 `.env` 更新前已备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260520-085354`；
+  当前 `TONGLINGYU_VERSION`、`TONGLINGYU_GATEWAY_IMAGE_REF` 和
+  `TONGLINGYU_GATEWAY_IMAGE_TAG` 均已收敛到 `0.1.13`。
+- 2026-05-20 `0.1.13` 远端 live gates 已通过：
+  `data/tonglingyu/remote-live-gates/remote-live-20260520T005806Z-8320/remote-live-gates.json`，
+  model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway 和
+  scoped context gate 均为 passed。第一次 live gate 暴露出测试脚本使用固定
+  `scoped-context-live` 用户导致历史 active memory 污染空读取断言；已将
+  `verify-tonglingyu-scoped-context-live.sh` 改为 run-scoped user id 后复跑通过。
+- 2026-05-20 `0.1.13` 完整远端 release automation 已通过：
+  `data/tonglingyu/remote-release-automation/remote-release-20260520T005901Z-8691/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`。同一 run 绑定
+  `environment=hhost`、`target=tonglingyu-rqa`、git commit
+  `1ae3a2d633b6eaf55606072645cc257c89bfcffd`、`tracked_dirty=false`；
+  release readiness 为 `status=passed`、`production_release_ready=true`，saved
+  validator 为 `status=ok`、`errors=[]`，open P0 retrieval failures / governance
+  tasks 均为 0。
+- 2026-05-20 `0.1.13` 容量与值守证据通过：
+  `rqa_write_p95_ms=4307`、`admin_read_p95_ms=409`、
+  `metrics_read_p95_ms=152`、`release_gate_ms=26896`；post-release monitor 为
+  60 分钟窗口，`sample_count=13`、`failed_sample_count=0`。因此 2026-05-20
+  一致性收紧后的 Scoped Memory Production hhost production-ready gate 已在
+  `0.1.13` run 中闭合。
 
 ## 已确认
 

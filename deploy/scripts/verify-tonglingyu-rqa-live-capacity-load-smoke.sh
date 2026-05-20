@@ -36,9 +36,17 @@ positive_int() {
   esac
 }
 
+nonnegative_int() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$1" -ge 0 ] ;;
+  esac
+}
+
 OPERATOR="${TONGLINGYU_RQA_LIVE_CAPACITY_OPERATOR:-${TONGLINGYU_RELEASE_OPERATOR:-${USER:-release-operator}}}"
 ENVIRONMENT="${TONGLINGYU_RQA_LIVE_CAPACITY_ENVIRONMENT:-${TONGLINGYU_RELEASE_ENVIRONMENT:-hhost}}"
 ITERATIONS="${TONGLINGYU_RQA_LIVE_CAPACITY_ITERATIONS:-3}"
+WARMUP_REQUESTS="${TONGLINGYU_RQA_LIVE_CAPACITY_WARMUP_REQUESTS:-1}"
 MIN_WINDOW_MINUTES="${TONGLINGYU_RQA_LIVE_CAPACITY_MIN_WINDOW_MINUTES:-10}"
 RUN_ID="${TONGLINGYU_RQA_LIVE_CAPACITY_RUN_ID:-live-capacity-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 INCIDENT_SEVERITY="${TONGLINGYU_RQA_INCIDENT_SEVERITY:-sev3}"
@@ -51,6 +59,7 @@ CURL_CONNECT_TIMEOUT_SECONDS="${TONGLINGYU_RQA_LIVE_CAPACITY_CURL_CONNECT_TIMEOU
 CURL_MAX_TIME_SECONDS="${TONGLINGYU_RQA_LIVE_CAPACITY_CURL_MAX_TIME_SECONDS:-30}"
 
 positive_int "${ITERATIONS}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_ITERATIONS must be a positive integer"
+nonnegative_int "${WARMUP_REQUESTS}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_WARMUP_REQUESTS must be a non-negative integer"
 positive_int "${MIN_WINDOW_MINUTES}" || fail "TONGLINGYU_RQA_LIVE_CAPACITY_MIN_WINDOW_MINUTES must be a positive integer"
 [ -n "${OPERATOR// }" ] || fail "operator is required"
 [ -n "${ENVIRONMENT// }" ] || fail "environment is required"
@@ -80,6 +89,7 @@ REPORT_PATH="${TONGLINGYU_RQA_LIVE_CAPACITY_REPORT_PATH:-${ARTIFACT_DIR}/rqa-liv
 SUMMARY_PATH="${ARTIFACT_DIR}/live-capacity-load-raw-summary.json"
 METRICS_ENV="${ARTIFACT_DIR}/live-capacity-load.env"
 RUNS_JSONL="${ARTIFACT_DIR}/live-performance-runs.jsonl"
+WARMUP_JSONL="${ARTIFACT_DIR}/live-warmup-runs.jsonl"
 INCIDENT_DRILL_PATH="${ARTIFACT_DIR}/incident-drill-live.json"
 CAPACITY_LOAD_EVIDENCE_PATH="${ARTIFACT_DIR}/rqa-capacity-load-evidence.json"
 INCIDENT_AUDIT_EVIDENCE_PATH="${ARTIFACT_DIR}/rqa-incident-audit-evidence.json"
@@ -87,6 +97,7 @@ INCIDENT_CAPACITY_REPORT_PATH="${ARTIFACT_DIR}/rqa-incident-capacity-live-gate.j
 QUALITY_REPORT_PATH="${ARTIFACT_DIR}/rqa-quality-eval-report.json"
 QUALITY_GATE_PATH="${ARTIFACT_DIR}/rqa-quality-gate.json"
 : >"${RUNS_JSONL}"
+: >"${WARMUP_JSONL}"
 
 compose_curl() {
   local output_path="$1"
@@ -124,8 +135,232 @@ fi
 " </dev/null >"${output_path}"
 }
 
+cleanup_open_live_capacity_records() {
+  local cleanup_dir="${ARTIFACT_DIR}/cleanup"
+  local targets_json="${cleanup_dir}/cleanup-targets.json"
+  local targets_tsv="${cleanup_dir}/cleanup-targets.tsv"
+  local verify_json="${cleanup_dir}/cleanup-verify.json"
+  local previous_errexit="false"
+  case "$-" in
+    *e*) previous_errexit="true"; set +e ;;
+  esac
+  mkdir -p "${cleanup_dir}"
+  python3 - "${HOST_DB_PATH}" "${RUN_ID}" "${targets_json}" "${targets_tsv}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, run_id, targets_json_raw, targets_tsv_raw = sys.argv[1:5]
+message_prefix = f"live-capacity-{run_id}-%"
+payload = {
+    "object": "tonglingyu.rqa_live_capacity_cleanup_targets",
+    "schema_version": 1,
+    "run_id": run_id,
+    "failure_ids": [],
+    "task_ids": [],
+    "secret_values_printed": False,
+}
+conn = sqlite3.connect(db_path)
+try:
+    failure_rows = conn.execute(
+        """
+        SELECT DISTINCT rf.failure_id
+        FROM retrieval_failures rf
+        JOIN session_journal sj
+          ON sj.trace_id = rf.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND rf.human_review_status IN ('open', 'in_review')
+        ORDER BY rf.failure_id
+        """,
+        (message_prefix,),
+    ).fetchall()
+    failure_ids = [row[0] for row in failure_rows if row and row[0]]
+    trace_rows = conn.execute(
+        """
+        SELECT DISTINCT sj.trace_id
+        FROM session_journal sj
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND sj.trace_id IS NOT NULL
+        ORDER BY sj.trace_id
+        """,
+        (message_prefix,),
+    ).fetchall()
+    trace_ids = [row[0] for row in trace_rows if row and row[0]]
+    task_ids = []
+    if failure_ids or trace_ids:
+        failure_placeholders = ",".join("?" for _ in failure_ids)
+        trace_placeholders = ",".join("?" for _ in trace_ids)
+        predicates = []
+        params = []
+        if failure_ids:
+            predicates.append(f"source_failure_id IN ({failure_placeholders})")
+            params.extend(failure_ids)
+        if trace_ids:
+            predicates.append(f"trace_id IN ({trace_placeholders})")
+            params.extend(trace_ids)
+        task_rows = conn.execute(
+            f"""
+            SELECT DISTINCT task_id
+            FROM knowledge_governance_tasks
+            WHERE status IN ('open', 'in_review', 'accepted')
+              AND ({' OR '.join(predicates)})
+            ORDER BY task_id
+            """,
+            params,
+        ).fetchall()
+        task_ids = [row[0] for row in task_rows if row and row[0]]
+finally:
+    conn.close()
+payload["failure_ids"] = failure_ids
+payload["task_ids"] = task_ids
+Path(targets_json_raw).write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+with Path(targets_tsv_raw).open("w", encoding="utf-8") as handle:
+    for task_id in task_ids:
+        handle.write(f"task\t{task_id}\n")
+    for failure_id in failure_ids:
+        handle.write(f"failure\t{failure_id}\n")
+PY
+  if [[ -s "${targets_tsv}" ]]; then
+    local cleanup_index=0
+    while IFS=$'\t' read -r cleanup_kind cleanup_id; do
+      cleanup_index=$((cleanup_index + 1))
+      if [[ "${cleanup_kind}" == "task" ]]; then
+        compose_curl "${cleanup_dir}/admin-task-cleanup-${cleanup_index}.json" PATCH \
+          "/v1/admin/governance/tasks/${cleanup_id}" \
+          '{"status":"closed","reviewer":"live-capacity-smoke","review_note":"live capacity cleanup closed interrupted smoke task","evidence_ref":"live-capacity-load-cleanup"}' \
+          admin || true
+      elif [[ "${cleanup_kind}" == "failure" ]]; then
+        compose_curl "${cleanup_dir}/admin-failure-cleanup-${cleanup_index}.json" PATCH \
+          "/v1/admin/retrieval-failures/${cleanup_id}" \
+          '{"human_review_status":"resolved","reviewer":"live-capacity-smoke","review_note":"live capacity cleanup resolved interrupted smoke failure"}' \
+          admin || true
+      fi
+    done <"${targets_tsv}"
+  fi
+  python3 - "${HOST_DB_PATH}" "${RUN_ID}" "${verify_json}" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path, run_id, verify_json_raw = sys.argv[1:4]
+message_prefix = f"live-capacity-{run_id}-%"
+conn = sqlite3.connect(db_path)
+try:
+    open_failures = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM retrieval_failures rf
+        JOIN session_journal sj
+          ON sj.trace_id = rf.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND rf.human_review_status IN ('open', 'in_review')
+        """,
+        (message_prefix,),
+    ).fetchone()[0]
+    open_tasks = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM knowledge_governance_tasks kgt
+        JOIN session_journal sj
+          ON sj.trace_id = kgt.trace_id
+        WHERE sj.external_message_id LIKE ?
+          AND sj.entry_type = 'user_message'
+          AND kgt.status IN ('open', 'in_review', 'accepted')
+        """,
+        (message_prefix,),
+    ).fetchone()[0]
+finally:
+    conn.close()
+payload = {
+    "object": "tonglingyu.rqa_live_capacity_cleanup_verification",
+    "schema_version": 1,
+    "run_id": run_id,
+    "open_failure_count": open_failures,
+    "open_task_count": open_tasks,
+    "status": "ok" if open_failures == 0 and open_tasks == 0 else "failed",
+    "secret_values_printed": False,
+}
+Path(verify_json_raw).write_text(
+    json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+raise SystemExit(0 if payload["status"] == "ok" else 1)
+PY
+  local cleanup_status=$?
+  if [[ "${previous_errexit}" == "true" ]]; then
+    set -e
+  fi
+  return "${cleanup_status}"
+}
+
+cleanup_on_exit() {
+  local status=$?
+  if [[ "${status}" -ne 0 ]]; then
+    cleanup_open_live_capacity_records >&2 || true
+  fi
+  exit "${status}"
+}
+
+trap cleanup_on_exit EXIT
+
 STARTED_AT="$(now_iso)"
 STARTED_MS="$(now_epoch_ms)"
+
+for index in $(seq 1 "${WARMUP_REQUESTS}"); do
+  RUN_DIR="${ARTIFACT_DIR}/warmup-${index}"
+  mkdir -p "${RUN_DIR}"
+  MESSAGE_ID="live-capacity-${RUN_ID}-warmup-${index}"
+  CHAT_BODY='{"model":"tonglingyu","messages":[{"role":"user","content":"通灵玉是什么？"}]}'
+
+  WARMUP_STARTED_MS="$(now_epoch_ms)"
+  docker compose exec -T \
+    -e TLY_REQUEST_BODY="${CHAT_BODY}" \
+    -e TLY_MESSAGE_ID="${MESSAGE_ID}" \
+    open-webui sh -lc "
+set -eu
+key=\"\${OPENAI_API_KEYS%%;*}\"
+test -n \"\${key}\"
+curl -fsS --connect-timeout '${CURL_CONNECT_TIMEOUT_SECONDS}' --max-time '${CURL_MAX_TIME_SECONDS}' \
+  -H \"Authorization: Bearer \${key}\" \
+  -H 'content-type: application/json' \
+  -H 'x-tonglingyu-user-id: live-capacity-warmup' \
+  -H 'x-tonglingyu-chat-id: live-capacity-warmup-${RUN_ID}' \
+  -H \"x-tonglingyu-message-id: \${TLY_MESSAGE_ID}\" \
+  --data \"\${TLY_REQUEST_BODY}\" \
+  '${GATEWAY_URL}/v1/chat/completions'
+" >"${RUN_DIR}/chat.json"
+  WARMUP_FINISHED_MS="$(now_epoch_ms)"
+
+  python3 - "${RUN_DIR}/chat.json" "${WARMUP_JSONL}" \
+    "${WARMUP_STARTED_MS}" "${WARMUP_FINISHED_MS}" "${index}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+chat_path, warmup_path, started, finished, index = sys.argv[1:6]
+chat = json.loads(Path(chat_path).read_text(encoding="utf-8"))
+for forbidden in ("trace_id", "evidence_package_id", "session_id"):
+    if forbidden in chat:
+        raise SystemExit(f"public warmup chat leaked {forbidden}")
+entry = {
+    "index": int(index),
+    "message": "ordinary live gateway warmup before measured RQA writes",
+    "measurements": {
+        "warmup_write_ms": int(finished) - int(started),
+    },
+}
+with Path(warmup_path).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(entry, ensure_ascii=True, sort_keys=True) + "\n")
+PY
+done
 
 for index in $(seq 1 "${ITERATIONS}"); do
   RUN_DIR="${ARTIFACT_DIR}/run-${index}"
@@ -168,19 +403,20 @@ try:
     rows = conn.execute(
         """
         SELECT trace_id, package_id
-        FROM gateway_messages
+        FROM session_journal
         WHERE external_message_id = ?
-        ORDER BY created_at, message_id
+          AND entry_type = 'final_response'
+        ORDER BY created_at DESC, journal_id DESC
         """,
         (external_message_id,),
     ).fetchall()
 finally:
     conn.close()
 if len(rows) != 1:
-    raise SystemExit(f"expected one gateway message for {external_message_id}, got {len(rows)}")
+    raise SystemExit(f"expected one session journal final response for {external_message_id}, got {len(rows)}")
 trace_id, package_id = rows[0]
 if not trace_id or not package_id:
-    raise SystemExit("gateway message metadata missing trace/package")
+    raise SystemExit("session journal metadata missing trace/package")
 Path(ids_path).write_text(
     json.dumps({"trace_id": trace_id, "package_id": package_id}, sort_keys=True) + "\n",
     encoding="utf-8",
@@ -411,8 +647,8 @@ if [ "${ELAPSED_MS}" -lt "${REQUIRED_MS}" ]; then
 fi
 FINISHED_AT="$(now_iso)"
 
-python3 - "${RUNS_JSONL}" "${SUMMARY_PATH}" "${METRICS_ENV}" \
-  "${QUALITY_STARTED_MS}" "${QUALITY_FINISHED_MS}" "${ITERATIONS}" <<'PY'
+python3 - "${RUNS_JSONL}" "${WARMUP_JSONL}" "${SUMMARY_PATH}" "${METRICS_ENV}" \
+  "${QUALITY_STARTED_MS}" "${QUALITY_FINISHED_MS}" "${ITERATIONS}" "${WARMUP_REQUESTS}" <<'PY'
 import hashlib
 import json
 import math
@@ -421,18 +657,27 @@ import sys
 from pathlib import Path
 
 runs_path = Path(sys.argv[1])
-summary_path = Path(sys.argv[2])
-metrics_env_path = Path(sys.argv[3])
-quality_started = int(sys.argv[4])
-quality_finished = int(sys.argv[5])
-iterations = int(sys.argv[6])
+warmup_path = Path(sys.argv[2])
+summary_path = Path(sys.argv[3])
+metrics_env_path = Path(sys.argv[4])
+quality_started = int(sys.argv[5])
+quality_finished = int(sys.argv[6])
+iterations = int(sys.argv[7])
+warmup_requests = int(sys.argv[8])
 runs = [
     json.loads(line)
     for line in runs_path.read_text(encoding="utf-8").splitlines()
     if line.strip()
 ]
+warmups = [
+    json.loads(line)
+    for line in warmup_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
 if len(runs) != iterations:
     raise SystemExit("run_count_mismatch")
+if len(warmups) != warmup_requests:
+    raise SystemExit("warmup_count_mismatch")
 
 
 def percentile_95(numbers):
@@ -469,10 +714,17 @@ summary = {
     "object": "tonglingyu.rqa_live_capacity_load_raw_summary",
     "schema_version": 1,
     "performance_report_count": len(runs),
+    "warmup_report_count": len(warmups),
     "capacity_counts": {
         "eval_report_count": 1,
         "failure_count": len(runs),
         "admin_list_page_count": 2,
+    },
+    "warmup": {
+        "policy": "ordinary live gateway warmup before measured RQA writes",
+        "request_count": len(warmups),
+        "measurements": [warmup["measurements"] for warmup in warmups],
+        "excluded_from_capacity_budget": True,
     },
     "load_measurements": {
         "rqa_write_p95_ms": rqa_write_p95_ms,
@@ -735,6 +987,7 @@ payload = {
     "iterations": int(iterations_raw),
     "min_window_minutes": int(min_window_minutes_raw),
     "artifact_dir": artifact_dir_raw,
+    "warmup": summary.get("warmup"),
     "performance_runs": runs,
     "capacity_counts": summary["capacity_counts"],
     "load_measurements": summary["load_measurements"],

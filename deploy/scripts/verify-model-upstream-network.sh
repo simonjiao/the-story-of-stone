@@ -116,10 +116,10 @@ container = choose_container()
 probe_urls = parse_probe_urls()
 errors: list[str] = []
 probes = []
-max_attempts = parse_int_env("MODEL_UPSTREAM_PROBE_ATTEMPTS", 3, 1, 5, errors)
+max_attempts = parse_int_env("MODEL_UPSTREAM_PROBE_ATTEMPTS", 5, 1, 5, errors)
 retry_delay_seconds = parse_float_env(
     "MODEL_UPSTREAM_PROBE_RETRY_DELAY_SECONDS",
-    1.0,
+    2.0,
     0.0,
     10.0,
     errors,

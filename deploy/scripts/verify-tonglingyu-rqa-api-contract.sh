@@ -238,14 +238,15 @@ def gateway_message_metadata(external_message_id):
         rows = connection.execute(
             """
             SELECT trace_id, package_id
-            FROM gateway_messages
+            FROM session_journal
             WHERE external_message_id = ?
-            ORDER BY created_at, message_id
+              AND entry_type = 'final_response'
+            ORDER BY created_at DESC, journal_id DESC
             """,
             (external_message_id,),
         ).fetchall()
     if len(rows) != 1:
-        errors.append(f"chat_metadata_count_invalid={external_message_id}")
+        errors.append(f"chat_journal_count_invalid={external_message_id}")
         return {"trace_id": "", "evidence_package_id": ""}
     trace_id, package_id = rows[0]
     if not trace_id:

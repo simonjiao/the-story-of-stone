@@ -175,6 +175,9 @@ run_remote_gate "openwebui_admin_action" \
 run_remote_gate "strict_gateway" \
   "verify-tonglingyu-strict-gateway.sh" \
   ""
+run_remote_gate "scoped_context" \
+  "verify-tonglingyu-scoped-context-live.sh" \
+  "tonglingyu.scoped_context_live_gate"
 
 REMOTE_CAPABILITIES_PATH="${ARTIFACT_DIR}/remote-capabilities.json"
 set +e
@@ -203,6 +206,7 @@ required_scripts = [
     "verify-tonglingyu-release-ops-readiness.sh",
     "verify-tonglingyu-post-release-monitor.sh",
     "verify-tonglingyu-release-security.sh",
+    "verify-tonglingyu-scoped-context-live.sh",
 ]
 scripts_dir = Path("scripts")
 present = {
@@ -309,6 +313,7 @@ payload = {
         "openwebui_function_passed": "openwebui_function" not in gate_failures,
         "openwebui_admin_action_passed": "openwebui_admin_action" not in gate_failures,
         "strict_gateway_passed": "strict_gateway" not in gate_failures,
+        "scoped_context_passed": "scoped_context" not in gate_failures,
         "latest_rqa_release_automation_present": not missing_scripts,
     },
     "production_ready_proven": False,

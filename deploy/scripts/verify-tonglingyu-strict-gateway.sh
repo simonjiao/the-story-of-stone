@@ -123,9 +123,10 @@ for candidate in candidates:
     row = conn.execute(
         """
         SELECT trace_id, package_id
-        FROM gateway_messages
+        FROM session_journal
         WHERE external_message_id = ?
-        ORDER BY created_at DESC, message_id DESC
+          AND entry_type = 'final_response'
+        ORDER BY created_at DESC, journal_id DESC
         LIMIT 1
         """,
         (external_message_id,),
@@ -136,7 +137,7 @@ for candidate in candidates:
             "trace_id": row[0],
             "package_id": row[1],
             "external_message_id": external_message_id,
-            "source": "gateway_messages",
+            "source": "session_journal",
         }, ensure_ascii=True, sort_keys=True))
         raise SystemExit(0)
 
@@ -337,6 +338,21 @@ forbidden_public_chat_keys = {
     "stream_source",
     "trace_id",
     "workflow_states",
+    "user_session_id",
+    "interaction_context_id",
+    "context_pack_id",
+    "context_pack",
+    "session_journal",
+    "memory_read_refs",
+    "memory_candidate",
+    "memory_candidate_id",
+    "memory_candidate_ref",
+    "memory_card",
+    "memory_card_id",
+    "memory_card_ref",
+    "memory_transition_audit",
+    "llm_extraction",
+    "read_enabled",
 }
 forbidden_public_knowledge_state_terms = {
     "system_calibrated",

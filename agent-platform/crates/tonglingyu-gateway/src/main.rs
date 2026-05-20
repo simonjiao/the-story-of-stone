@@ -32,17 +32,30 @@ use tonglingyu_runtime::{
     KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
-    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
-    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
-    RetrievalSourceCoverageBoundary, RuntimeWorkflowInput, RuntimeWorkflowOutput,
-    RuntimeWorkflowProfiles, RuntimeWorkflowStreamEvent, TonglingyuAgentRuntimeMode,
+    RUNTIME_CONTEXT_CONSUMER_TYPE, RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
+    RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
+    RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
+    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
+    RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode,
     TonglingyuRuntimeStore, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
     execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
+mod context_governance;
 mod plan;
 
+use crate::context_governance::{
+    ContextMessage, ContextProjection, ContextRequestInput, ContextResolution,
+    FinalResponseJournalInput, MemoryCandidateListInput, MemoryCandidateTransitionInput,
+    MemoryCardListInput, MemoryCardTransitionInput, MemoryCollectorRunInput, append_final_response,
+    append_review_journal, append_runtime_step_journal, create_context_for_request,
+    list_memory_candidates, list_memory_cards, load_deduped_final_response, read_memory_candidate,
+    read_memory_card, run_memory_collector, table_counts as context_table_counts,
+    transition_memory_candidate, transition_memory_card, validate_llm_memory_extraction_output,
+};
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
 };
@@ -107,6 +120,11 @@ enum Command {
     PruneRuntime(PruneRuntimeArgs),
     RqaRestoreCanary(RqaRestoreCanaryArgs),
     RqaUserLifecycle(RqaUserLifecycleArgs),
+    MemoryCollectorRun(MemoryCollectorRunArgs),
+    MemoryCandidateList(MemoryCandidateListArgs),
+    MemoryCandidateTransition(MemoryCandidateTransitionArgs),
+    MemoryCardList(MemoryCardListArgs),
+    MemoryCardTransition(MemoryCardTransitionArgs),
     Healthcheck(HealthcheckArgs),
     Serve(ServeArgs),
 }
@@ -299,6 +317,110 @@ struct RqaUserLifecycleArgs {
 }
 
 #[derive(Debug, Parser, Clone)]
+struct MemoryCollectorRunArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long, default_value = "admin_manual")]
+    trigger: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    #[arg(long)]
+    trace_id: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCandidateListArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    scope_type: Option<String>,
+    #[arg(long)]
+    scope_ref: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCandidateTransitionArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    candidate_id: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    candidate_type: Option<String>,
+    #[arg(long)]
+    sensitivity: Option<String>,
+    #[arg(long)]
+    merge_target_candidate_id: Option<String>,
+    #[arg(long)]
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCardListArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    status: Option<String>,
+    #[arg(long)]
+    scope_type: Option<String>,
+    #[arg(long)]
+    scope_ref: Option<String>,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct MemoryCardTransitionArgs {
+    #[arg(
+        long,
+        env = "TONGLINGYU_DB_PATH",
+        default_value = "data/tonglingyu/tonglingyu.db"
+    )]
+    db: PathBuf,
+    #[arg(long)]
+    memory_card_id: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long, default_value = "cli")]
+    actor: String,
+    #[arg(long)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Parser, Clone)]
 struct HealthcheckArgs {
     #[arg(long, default_value = "http://127.0.0.1:8090/healthz")]
     url: String,
@@ -374,6 +496,24 @@ struct ServeArgs {
     rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
+        default_value_t = true
+    )]
+    memory_collector_background_enabled: bool,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_INTERVAL_SECS",
+        default_value_t = 300
+    )]
+    memory_collector_interval_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_MEMORY_COLLECTOR_BATCH_SIZE",
+        default_value_t = 100
+    )]
+    memory_collector_batch_size: usize,
     #[arg(long, env = "TONGLINGYU_PROFILE_MAIN", default_value = "honglou-main")]
     profile_main: String,
     #[arg(long, env = "TONGLINGYU_PROFILE_TEXT", default_value = "honglou-text")]
@@ -513,6 +653,151 @@ fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProf
     }
 }
 
+fn runtime_context_contract(scoped_context: &ContextResolution) -> RuntimeContextContract {
+    RuntimeContextContract {
+        trace_id: scoped_context
+            .context_pack
+            .get("trace_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        interaction_context_id: scoped_context.interaction_context_id.clone(),
+        context_pack_ref: scoped_context.context_pack_ref.clone(),
+        context_pack_schema_version: context_governance::CONTEXT_SCHEMA_VERSION.to_string(),
+        context_pack_digest: scoped_context.context_pack_digest.clone(),
+        projections: scoped_context
+            .context_projections
+            .iter()
+            .map(runtime_context_projection)
+            .collect(),
+    }
+}
+
+fn runtime_context_projection(projection: &ContextProjection) -> RuntimeContextProjection {
+    RuntimeContextProjection {
+        context_projection_id: projection.context_projection_id.clone(),
+        context_projection_ref: projection.context_projection_ref.clone(),
+        context_pack_ref: projection.context_pack_ref.clone(),
+        context_projection_schema_version: projection.schema_version.clone(),
+        context_projection_digest: projection.digest.clone(),
+        consumer_type: projection.consumer_type.clone(),
+        consumer_name: projection.consumer_name.clone(),
+        runtime_adapter: projection.runtime_adapter.clone(),
+        projection_payload: projection.projection_payload.clone(),
+        allowed_tools: projection.allowed_tools.clone(),
+        forbidden_tools: projection.forbidden_tools.clone(),
+        output_contract: projection.output_contract.clone(),
+        tool_policy_digest: projection.tool_policy_digest.clone(),
+        output_contract_digest: projection.output_contract_digest.clone(),
+    }
+}
+
+fn local_runtime_context_contract(
+    trace_id: &str,
+    question: &str,
+    profiles: &RuntimeWorkflowProfiles,
+) -> Result<RuntimeContextContract> {
+    let interaction_context_id = format!("local-interaction-context-{trace_id}");
+    let context_pack_ref = format!("context-pack://tonglingyu/{trace_id}/local");
+    let pack_payload = json!({
+        "trace_id": trace_id,
+        "interaction_context_id": &interaction_context_id,
+        "resolved_question": question,
+        "schema_version": RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
+        "source": "local_runtime_gate",
+    });
+    let context_pack_digest = hash_value(&pack_payload)?;
+    let projection_specs = [
+        (
+            profiles.main.as_str(),
+            vec![
+                "tonglingyu.evidence.package.create".to_string(),
+                "tonglingyu.evidence.package.read".to_string(),
+            ],
+            Some("local runtime context".to_string()),
+        ),
+        (
+            profiles.text.as_str(),
+            vec!["tonglingyu.text.search".to_string()],
+            None,
+        ),
+        (
+            profiles.commentary.as_str(),
+            vec!["tonglingyu.commentary.search".to_string()],
+            None,
+        ),
+        (
+            profiles.reviewer.as_str(),
+            vec!["tonglingyu.evidence.package.read".to_string()],
+            None,
+        ),
+    ];
+    let mut projections = Vec::new();
+    for (consumer_name, allowed_tools, session_summary) in projection_specs {
+        let context_projection_id = format!("local-context-projection-{consumer_name}");
+        let context_projection_ref =
+            format!("context-projection://tonglingyu/{trace_id}/{consumer_name}");
+        let forbidden_tools = Vec::<String>::new();
+        let projection_payload = json!({
+            "object": "tonglingyu.context_projection_payload",
+            "visible_question": question,
+            "session_summary": session_summary,
+            "forbidden_context": ["complete_user_history", "unauthorized_memory"],
+            "memory_read_refs": [],
+            "consumer_name": consumer_name,
+        });
+        let output_contract = json!({
+            "object": "tonglingyu.local_runtime_projection",
+            "must_return_output_ref": true,
+        });
+        let tool_policy_digest = hash_value(&json!({
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+        }))?;
+        let output_contract_digest = hash_value(&output_contract)?;
+        let projection_unsigned = json!({
+            "context_projection_id": &context_projection_id,
+            "context_projection_ref": &context_projection_ref,
+            "context_pack_ref": &context_pack_ref,
+            "consumer_type": RUNTIME_CONTEXT_CONSUMER_TYPE,
+            "consumer_name": consumer_name,
+            "runtime_adapter": TONGLINGYU_RUNTIME_ADAPTER,
+            "projection_payload": &projection_payload,
+            "allowed_tools": &allowed_tools,
+            "forbidden_tools": &forbidden_tools,
+            "output_contract": &output_contract,
+            "tool_policy_digest": &tool_policy_digest,
+            "output_contract_digest": &output_contract_digest,
+            "schema_version": RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION,
+        });
+        projections.push(RuntimeContextProjection {
+            context_projection_id,
+            context_projection_ref,
+            context_pack_ref: context_pack_ref.clone(),
+            context_projection_schema_version: RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION
+                .to_string(),
+            context_projection_digest: hash_value(&projection_unsigned)?,
+            consumer_type: RUNTIME_CONTEXT_CONSUMER_TYPE.to_string(),
+            consumer_name: consumer_name.to_string(),
+            runtime_adapter: TONGLINGYU_RUNTIME_ADAPTER.to_string(),
+            projection_payload,
+            allowed_tools,
+            forbidden_tools,
+            output_contract,
+            tool_policy_digest,
+            output_contract_digest,
+        });
+    }
+    Ok(RuntimeContextContract {
+        trace_id: trace_id.to_string(),
+        interaction_context_id,
+        context_pack_ref,
+        context_pack_schema_version: RUNTIME_CONTEXT_PACK_SCHEMA_VERSION.to_string(),
+        context_pack_digest,
+        projections,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatCompletionRequest {
     model: Option<String>,
@@ -645,6 +930,34 @@ struct AdminAccessDenialRequest {
     action: Option<String>,
     denial: String,
     model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCollectorRunRequest {
+    trigger: Option<String>,
+    limit: Option<usize>,
+    dry_run: Option<bool>,
+    trace_id: Option<String>,
+    llm_extraction_probe: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCandidateTransitionRequest {
+    action: String,
+    reason: Option<String>,
+    candidate_type: Option<String>,
+    sensitivity: Option<String>,
+    merge_target_candidate_id: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MemoryCardTransitionRequest {
+    action: String,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -985,6 +1298,51 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "instructions",
         "profile_config",
         "internal_config",
+        "interaction_context_id",
+        "context_pack_id",
+        "context_pack_ref",
+        "context_projection",
+        "context_projection_id",
+        "context_projection_ref",
+        "context_projection_digest",
+        "consumer_type",
+        "consumer_name",
+        "runtime_adapter",
+        "context_scope_binding",
+        "scope_id",
+        "scope_graph",
+        "memory_read_scopes",
+        "memory_read_refs",
+        "memory_read_ref_digest",
+        "memory_read_policy_digest",
+        "memory_write_scopes",
+        "memory_scope",
+        "memory_summaries",
+        "memory_policy",
+        "memory_policy_digest",
+        "memory_usage_summary",
+        "memory_candidate",
+        "memory_candidate_id",
+        "memory_candidate_ref",
+        "memory_candidates",
+        "memory_card",
+        "memory_card_id",
+        "memory_card_ref",
+        "memory_cards",
+        "memory_policy_decision",
+        "memory_policy_decision_id",
+        "memory_policy_decision_ref",
+        "memory_policy_decisions",
+        "memory_transition_audit",
+        "memory_collector",
+        "llm_extraction",
+        "llm_filter",
+        "rule_filter",
+        "read_enabled",
+        "forbidden_tools",
+        "tool_policy_digest",
+        "output_contract_digest",
+        "session_journal",
     ];
     const NESTED_OBJECTS: &[&str] = &["metadata", "extra_body", "options", "parameters", "config"];
     const SHALLOW_NESTED_OBJECTS: &[&str] = &["user"];
@@ -1201,6 +1559,43 @@ async fn main() -> Result<()> {
                 Err(anyhow!("rqa user lifecycle action did not complete"))
             }
         }
+        Command::MemoryCollectorRun(args) => {
+            let report = memory_collector_run_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory collector run did not complete"))
+            }
+        }
+        Command::MemoryCandidateList(args) => {
+            let report = memory_candidate_list_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::MemoryCandidateTransition(args) => {
+            let report = memory_candidate_transition_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory candidate transition did not complete"))
+            }
+        }
+        Command::MemoryCardList(args) => {
+            let report = memory_card_list_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::MemoryCardTransition(args) => {
+            let report = memory_card_transition_command(&args)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow!("memory card transition did not complete"))
+            }
+        }
         Command::Healthcheck(args) => {
             let report = healthcheck_command(&args).await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1282,6 +1677,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         },
         started_at: now_rfc3339(),
     });
+    if args.memory_collector_background_enabled {
+        spawn_memory_collector_background_worker(
+            args.db.clone(),
+            args.memory_collector_interval_secs,
+            args.memory_collector_batch_size,
+        );
+    }
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
@@ -1307,6 +1709,31 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/access-denials",
             post(admin_access_denial_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/collector/run",
+            post(memory_collector_run_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates",
+            get(memory_candidates_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates/{candidate_id}",
+            get(memory_candidate_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/candidates/{candidate_id}/transition",
+            post(memory_candidate_transition_endpoint),
+        )
+        .route("/v1/admin/memory/cards", get(memory_cards_endpoint))
+        .route(
+            "/v1/admin/memory/cards/{memory_card_id}",
+            get(memory_card_endpoint),
+        )
+        .route(
+            "/v1/admin/memory/cards/{memory_card_id}/transition",
+            post(memory_card_transition_endpoint),
         )
         .route(
             "/v1/admin/retrieval-failures",
@@ -1352,6 +1779,76 @@ async fn serve(args: ServeArgs) -> Result<()> {
     tracing::info!(bind = %args.bind, "tonglingyu gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn spawn_memory_collector_background_worker(db: PathBuf, interval_secs: u64, batch_size: usize) {
+    let interval_secs = interval_secs.max(30);
+    let limit = batch_size.clamp(1, 100);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let db = db.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let conn = open_db(&db)?;
+                run_memory_collector(
+                    &conn,
+                    MemoryCollectorRunInput {
+                        trigger_type: "background_worker",
+                        actor: "gateway-memory-collector-worker",
+                        limit,
+                        dry_run: false,
+                        trace_id: None,
+                    },
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(report)) => {
+                    let run_id = report
+                        .get("run_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let processed_count = report
+                        .get("processed_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let candidate_count = report
+                        .get("candidate_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let denied_count = report
+                        .get("denied_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let suppressed_count = report
+                        .get("suppressed_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    let duplicate_count = report
+                        .get("duplicate_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or_default();
+                    tracing::info!(
+                        %run_id,
+                        processed_count,
+                        candidate_count,
+                        denied_count,
+                        suppressed_count,
+                        duplicate_count,
+                        "memory collector background worker completed"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "memory collector background worker failed");
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "memory collector background worker panicked");
+                }
+            }
+        }
+    });
 }
 
 fn build_kb(args: &BuildKbArgs) -> Result<()> {
@@ -1450,6 +1947,18 @@ fn remove_sqlite_file_set(path: &Path) {
 fn clear_gateway_generated_rows(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        DELETE FROM memory_collector_leases;
+        DELETE FROM memory_collector_journal_status;
+        DELETE FROM memory_collector_runs;
+        DELETE FROM memory_policy_decisions;
+        DELETE FROM memory_transition_audit;
+        DELETE FROM memory_cards;
+        DELETE FROM memory_candidates;
+        DELETE FROM session_journal;
+        DELETE FROM context_packs;
+        DELETE FROM context_scope_bindings;
+        DELETE FROM interaction_contexts;
+        DELETE FROM user_sessions;
         DELETE FROM gateway_messages;
         DELETE FROM gateway_sessions;
         DELETE FROM workflow_states;
@@ -1888,6 +2397,7 @@ struct LifecycleMessageRef {
     external_message_id: String,
     trace_id: String,
     package_id: Option<String>,
+    context_pack_id: Option<String>,
     question: String,
     response_json: String,
 }
@@ -1899,6 +2409,11 @@ struct RqaUserLifecyclePlan {
     messages: Vec<LifecycleMessageRef>,
     trace_ids: BTreeSet<String>,
     package_ids: BTreeSet<String>,
+    context_pack_ids: BTreeSet<String>,
+    memory_candidate_ids: BTreeSet<String>,
+    memory_card_ids: BTreeSet<String>,
+    memory_policy_decision_ids: BTreeSet<String>,
+    memory_transition_audit_ids: BTreeSet<String>,
     workflow_state_ids: BTreeSet<String>,
     audit_event_ids: BTreeSet<String>,
     retrieval_failure_ids: BTreeSet<String>,
@@ -1929,6 +2444,130 @@ fn rqa_user_lifecycle_command(args: &RqaUserLifecycleArgs) -> Result<Value> {
     }
 }
 
+fn memory_collector_run_command(args: &MemoryCollectorRunArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    run_memory_collector(
+        &conn,
+        MemoryCollectorRunInput {
+            trigger_type: args.trigger.trim(),
+            actor: args.actor.trim(),
+            limit: args.limit,
+            dry_run: args.dry_run,
+            trace_id: args
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    )
+}
+
+fn memory_candidate_list_command(args: &MemoryCandidateListArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    list_memory_candidates(
+        &conn,
+        MemoryCandidateListInput {
+            status: args
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_type: args
+                .scope_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_ref: args
+                .scope_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            limit: args.limit,
+            offset: args.offset,
+        },
+    )
+}
+
+fn memory_candidate_transition_command(args: &MemoryCandidateTransitionArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    transition_memory_candidate(
+        &conn,
+        MemoryCandidateTransitionInput {
+            candidate_id: args.candidate_id.trim(),
+            action: args.action.trim(),
+            actor: args.actor.trim(),
+            reason: args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            candidate_type: args
+                .candidate_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            sensitivity: args
+                .sensitivity
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            merge_target_candidate_id: args
+                .merge_target_candidate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            expires_at: args
+                .expires_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    )
+}
+
+fn memory_card_list_command(args: &MemoryCardListArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    list_memory_cards(
+        &conn,
+        MemoryCardListInput {
+            status: args
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_type: args
+                .scope_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            scope_ref: args
+                .scope_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            limit: args.limit,
+            offset: args.offset,
+        },
+    )
+}
+
+fn memory_card_transition_command(args: &MemoryCardTransitionArgs) -> Result<Value> {
+    let conn = open_db(&args.db)?;
+    transition_memory_card(
+        &conn,
+        MemoryCardTransitionInput {
+            memory_card_id: args.memory_card_id.trim(),
+            action: args.action.trim(),
+            actor: args.actor.trim(),
+            reason: args
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    )
+}
+
 fn build_rqa_user_lifecycle_plan(
     conn: &Connection,
     user_ref: &str,
@@ -1944,12 +2583,27 @@ fn build_rqa_user_lifecycle_plan(
         .iter()
         .filter_map(|message| message.package_id.clone())
         .collect::<BTreeSet<_>>();
+    let context_pack_ids = messages
+        .iter()
+        .filter_map(|message| message.context_pack_id.clone())
+        .collect::<BTreeSet<_>>();
     let session_ids = sessions
         .iter()
         .map(|session| session.session_id.clone())
         .collect::<BTreeSet<_>>();
     let workflow_state_ids = query_lifecycle_workflow_state_ids(conn, &trace_ids, &session_ids)?;
     let audit_event_ids = query_lifecycle_audit_event_ids(conn, &trace_ids)?;
+    let memory_candidate_ids =
+        query_lifecycle_memory_candidate_ids(conn, &session_ids, &trace_ids)?;
+    let memory_card_ids = query_lifecycle_memory_card_ids(conn, &memory_candidate_ids)?;
+    let memory_policy_decision_ids =
+        query_lifecycle_memory_policy_decision_ids(conn, &memory_candidate_ids, &memory_card_ids)?;
+    let memory_transition_audit_ids = query_lifecycle_memory_transition_audit_ids(
+        conn,
+        &memory_candidate_ids,
+        &memory_card_ids,
+        &memory_policy_decision_ids,
+    )?;
     let retrieval_failure_ids =
         query_lifecycle_retrieval_failure_ids(conn, &trace_ids, &package_ids)?;
     let governance_task_ids = query_lifecycle_governance_task_ids(conn, &trace_ids, &package_ids)?;
@@ -1964,6 +2618,11 @@ fn build_rqa_user_lifecycle_plan(
         messages,
         trace_ids,
         package_ids,
+        context_pack_ids,
+        memory_candidate_ids,
+        memory_card_ids,
+        memory_policy_decision_ids,
+        memory_transition_audit_ids,
         workflow_state_ids,
         audit_event_ids,
         retrieval_failure_ids,
@@ -1975,10 +2634,10 @@ fn build_rqa_user_lifecycle_plan(
 fn query_lifecycle_sessions(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleSessionRef>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT session_id, user_ref, chat_ref
-        FROM gateway_sessions
-        WHERE user_ref = ?1
-        ORDER BY session_id
+        SELECT user_session_id, external_user_ref, external_session_id
+        FROM user_sessions
+        WHERE external_user_ref = ?1
+        ORDER BY user_session_id
         "#,
     )?;
     stmt.query_map(params![user_ref], |row| {
@@ -1995,12 +2654,13 @@ fn query_lifecycle_sessions(conn: &Connection, user_ref: &str) -> Result<Vec<Lif
 fn query_lifecycle_messages(conn: &Connection, user_ref: &str) -> Result<Vec<LifecycleMessageRef>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT gm.message_id, gm.external_message_id, gm.trace_id,
-               gm.package_id, gm.question, gm.response_json
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gs.user_ref = ?1
-        ORDER BY gm.created_at, gm.message_id
+        SELECT sj.journal_id, COALESCE(sj.external_message_id, ''), sj.trace_id,
+               sj.package_id, sj.context_pack_id, COALESCE(sj.content, sj.summary),
+               sj.metadata_json
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE us.external_user_ref = ?1
+        ORDER BY sj.created_at, sj.journal_id
         "#,
     )?;
     stmt.query_map(params![user_ref], |row| {
@@ -2009,8 +2669,9 @@ fn query_lifecycle_messages(conn: &Connection, user_ref: &str) -> Result<Vec<Lif
             external_message_id: row.get(1)?,
             trace_id: row.get(2)?,
             package_id: row.get(3)?,
-            question: row.get(4)?,
-            response_json: row.get(5)?,
+            context_pack_id: row.get(4)?,
+            question: row.get(5)?,
+            response_json: row.get(6)?,
         })
     })?
     .collect::<rusqlite::Result<Vec<_>>>()
@@ -2048,6 +2709,88 @@ fn query_lifecycle_audit_event_ids(
     for trace_id in trace_ids {
         for id in stmt.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
             ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_candidate_ids(
+    conn: &Connection,
+    session_ids: &BTreeSet<String>,
+    trace_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_session =
+        conn.prepare("SELECT candidate_id FROM memory_candidates WHERE user_session_id = ?1")?;
+    for session_id in session_ids {
+        for id in by_session.query_map(params![session_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_trace =
+        conn.prepare("SELECT candidate_id FROM memory_candidates WHERE trace_id = ?1")?;
+    for trace_id in trace_ids {
+        for id in by_trace.query_map(params![trace_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_card_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut stmt =
+        conn.prepare("SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1")?;
+    for candidate_id in candidate_ids {
+        for id in stmt.query_map(params![candidate_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_policy_decision_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+    memory_card_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut by_candidate = conn.prepare(
+        "SELECT policy_decision_id FROM memory_policy_decisions WHERE candidate_id = ?1",
+    )?;
+    for candidate_id in candidate_ids {
+        for id in by_candidate.query_map(params![candidate_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    let mut by_card = conn.prepare(
+        "SELECT policy_decision_id FROM memory_policy_decisions WHERE memory_card_id = ?1",
+    )?;
+    for memory_card_id in memory_card_ids {
+        for id in by_card.query_map(params![memory_card_id], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+fn query_lifecycle_memory_transition_audit_ids(
+    conn: &Connection,
+    candidate_ids: &BTreeSet<String>,
+    memory_card_ids: &BTreeSet<String>,
+    policy_decision_ids: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut stmt =
+        conn.prepare("SELECT audit_id FROM memory_transition_audit WHERE entity_id = ?1")?;
+    for id_set in [candidate_ids, memory_card_ids, policy_decision_ids] {
+        for entity_id in id_set {
+            for audit_id in stmt.query_map(params![entity_id], |row| row.get::<_, String>(0))? {
+                ids.insert(audit_id?);
+            }
         }
     }
     Ok(ids)
@@ -2161,6 +2904,11 @@ fn lifecycle_export_manifest(plan: &RqaUserLifecyclePlan) -> Value {
         "messages": messages,
         "trace_sha256": hashed_values(&plan.trace_ids),
         "package_sha256": hashed_values(&plan.package_ids),
+        "context_pack_sha256": hashed_values(&plan.context_pack_ids),
+        "memory_candidate_sha256": hashed_values(&plan.memory_candidate_ids),
+        "memory_card_sha256": hashed_values(&plan.memory_card_ids),
+        "memory_policy_decision_sha256": hashed_values(&plan.memory_policy_decision_ids),
+        "memory_transition_audit_sha256": hashed_values(&plan.memory_transition_audit_ids),
         "retrieval_failure_sha256": hashed_values(&plan.retrieval_failure_ids),
         "governance_task_sha256": hashed_values(&plan.governance_task_ids),
         "source_text_included": false,
@@ -2328,7 +3076,7 @@ fn rqa_user_lifecycle_anonymize(
             let anonymized_chat =
                 format!("anonymized-chat:{}", &hash_text(&session.session_id)[..16]);
             tx.execute(
-                "UPDATE gateway_sessions SET user_ref = ?1, chat_ref = ?2 WHERE session_id = ?3",
+                "UPDATE user_sessions SET external_user_ref = ?1, external_session_id = ?2 WHERE user_session_id = ?3",
                 params![anonymized_user, anonymized_chat, &session.session_id],
             )?;
         }
@@ -2338,14 +3086,20 @@ fn rqa_user_lifecycle_anonymize(
                 "anonymized-message:{}",
                 &hash_text(&message.message_id)[..16]
             );
+            let redacted_question = format!(
+                "[redacted:rqa-user-lifecycle:{}]",
+                &hash_text(&message.question)[..12]
+            );
             tx.execute(
-                "UPDATE gateway_messages SET external_message_id = ?1, question = ?2, response_json = ?3 WHERE message_id = ?4",
+                "UPDATE session_journal
+                 SET external_message_id = CASE WHEN external_message_id IS NULL THEN NULL ELSE ?1 END,
+                     content = CASE WHEN content IS NULL THEN NULL ELSE ?2 END,
+                     summary = ?2,
+                     metadata_json = ?3
+                 WHERE journal_id = ?4",
                 params![
                     anonymized_external_message,
-                    format!(
-                        "[redacted:rqa-user-lifecycle:{}]",
-                        &hash_text(&message.question)[..12]
-                    ),
+                    redacted_question,
                     response_json,
                     &message.message_id,
                 ],
@@ -2363,6 +3117,137 @@ fn rqa_user_lifecycle_anonymize(
                 ],
             )?;
         }
+        for context_pack_id in &plan.context_pack_ids {
+            redact_text_column_by_ids(
+                tx,
+                "context_packs",
+                "context_pack_id",
+                "resolved_question",
+                &BTreeSet::from([context_pack_id.clone()]),
+                &sensitive_values,
+            )?;
+            redact_text_column_by_ids(
+                tx,
+                "context_packs",
+                "context_pack_id",
+                "session_summary",
+                &BTreeSet::from([context_pack_id.clone()]),
+                &sensitive_values,
+            )?;
+            for column in [
+                "active_scopes_json",
+                "candidate_scopes_json",
+                "allowed_tools_json",
+                "forbidden_tools_json",
+                "memory_read_refs_json",
+                "forbidden_context_json",
+                "output_contract_json",
+                "profile_views_json",
+            ] {
+                redact_json_column_by_ids(
+                    tx,
+                    "context_packs",
+                    "context_pack_id",
+                    column,
+                    &BTreeSet::from([context_pack_id.clone()]),
+                    &sensitive_values,
+                )?;
+            }
+        }
+        let anonymized_memory_scope = format!(
+            "user_private:sha256:{}",
+            hash_text(&format!("anonymized-memory:{}", plan.subject_sha256))
+        );
+        redact_text_column_by_ids(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            "summary",
+            &plan.memory_candidate_ids,
+            &sensitive_values,
+        )?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            "raw_excerpt_redacted",
+            &plan.memory_candidate_ids,
+            &sensitive_values,
+        )?;
+        for column in ["risk_flags_json", "llm_extraction_json"] {
+            redact_json_column_by_ids(
+                tx,
+                "memory_candidates",
+                "candidate_id",
+                column,
+                &plan.memory_candidate_ids,
+                &sensitive_values,
+            )?;
+        }
+        update_user_private_scope_refs(
+            tx,
+            "memory_candidates",
+            "candidate_id",
+            &plan.memory_candidate_ids,
+            &anonymized_memory_scope,
+        )?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            "summary",
+            &plan.memory_card_ids,
+            &sensitive_values,
+        )?;
+        redact_json_column_by_ids(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            "acl_json",
+            &plan.memory_card_ids,
+            &sensitive_values,
+        )?;
+        update_user_private_scope_refs(
+            tx,
+            "memory_cards",
+            "memory_card_id",
+            &plan.memory_card_ids,
+            &anonymized_memory_scope,
+        )?;
+        disable_memory_card_reads_for_ids(tx, &plan.memory_card_ids)?;
+        redact_text_column_by_ids(
+            tx,
+            "memory_policy_decisions",
+            "policy_decision_id",
+            "decision_reason",
+            &plan.memory_policy_decision_ids,
+            &sensitive_values,
+        )?;
+        for column in ["rule_filter_json", "llm_filter_json", "risk_flags_json"] {
+            redact_json_column_by_ids(
+                tx,
+                "memory_policy_decisions",
+                "policy_decision_id",
+                column,
+                &plan.memory_policy_decision_ids,
+                &sensitive_values,
+            )?;
+        }
+        update_user_private_scope_refs(
+            tx,
+            "memory_policy_decisions",
+            "policy_decision_id",
+            &plan.memory_policy_decision_ids,
+            &anonymized_memory_scope,
+        )?;
+        redact_json_column_by_ids(
+            tx,
+            "memory_transition_audit",
+            "audit_id",
+            "metadata_json",
+            &plan.memory_transition_audit_ids,
+            &sensitive_values,
+        )?;
         redact_json_column_by_ids(
             tx,
             "workflow_states",
@@ -2420,6 +3305,31 @@ fn lifecycle_sensitive_values(user_ref: &str, plan: &RqaUserLifecyclePlan) -> Ve
         .collect()
 }
 
+fn redact_text_column_by_ids(
+    conn: &Connection,
+    table: &str,
+    id_column: &str,
+    text_column: &str,
+    ids: &BTreeSet<String>,
+    sensitive_values: &[String],
+) -> Result<()> {
+    let select_sql = format!("SELECT {text_column} FROM {table} WHERE {id_column} = ?1");
+    let update_sql = format!("UPDATE {table} SET {text_column} = ?1 WHERE {id_column} = ?2");
+    let mut select = conn.prepare(&select_sql)?;
+    for id in ids {
+        let value = select
+            .query_row(params![id], |row| row.get::<_, String>(0))
+            .optional()?;
+        if let Some(value) = value {
+            conn.execute(
+                &update_sql,
+                params![redact_plain_text(&value, sensitive_values), id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn redact_json_column_by_ids(
     conn: &Connection,
     table: &str,
@@ -2439,6 +3349,48 @@ fn redact_json_column_by_ids(
             let redacted = redact_json_string(&value, sensitive_values)?;
             conn.execute(&update_sql, params![redacted, id])?;
         }
+    }
+    Ok(())
+}
+
+fn update_user_private_scope_refs(
+    conn: &Connection,
+    table: &str,
+    id_column: &str,
+    ids: &BTreeSet<String>,
+    anonymized_scope_ref: &str,
+) -> Result<()> {
+    let update_sql = format!(
+        "UPDATE {table}
+         SET scope_ref = CASE WHEN scope_type = 'user_private' THEN ?1 ELSE scope_ref END
+         WHERE {id_column} = ?2"
+    );
+    for id in ids {
+        conn.execute(&update_sql, params![anonymized_scope_ref, id])?;
+    }
+    Ok(())
+}
+
+fn disable_memory_card_reads_for_ids(
+    conn: &Connection,
+    memory_card_ids: &BTreeSet<String>,
+) -> Result<()> {
+    let mut select = conn.prepare("SELECT acl_json FROM memory_cards WHERE memory_card_id = ?1")?;
+    for memory_card_id in memory_card_ids {
+        let acl_json = select
+            .query_row(params![memory_card_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        let mut acl = acl_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .unwrap_or_else(|| json!({}));
+        if let Some(object) = acl.as_object_mut() {
+            object.insert("read_enabled".to_string(), json!(false));
+        }
+        conn.execute(
+            "UPDATE memory_cards SET read_enabled = 0, acl_json = ?1 WHERE memory_card_id = ?2",
+            params![serde_json::to_string(&acl)?, memory_card_id],
+        )?;
     }
     Ok(())
 }
@@ -2492,6 +3444,11 @@ fn lifecycle_counts(plan: &RqaUserLifecyclePlan) -> Value {
         "message_count": plan.messages.len(),
         "trace_count": plan.trace_ids.len(),
         "package_count": plan.package_ids.len(),
+        "context_pack_count": plan.context_pack_ids.len(),
+        "memory_candidate_count": plan.memory_candidate_ids.len(),
+        "memory_card_count": plan.memory_card_ids.len(),
+        "memory_policy_decision_count": plan.memory_policy_decision_ids.len(),
+        "memory_transition_audit_count": plan.memory_transition_audit_ids.len(),
         "workflow_state_count": plan.workflow_state_ids.len(),
         "audit_event_count": plan.audit_event_ids.len(),
         "retrieval_failure_count": plan.retrieval_failure_ids.len(),
@@ -2518,6 +3475,9 @@ fn lifecycle_report(
         "refs": {
             "trace_count": plan.trace_ids.len(),
             "package_count": plan.package_ids.len(),
+            "memory_candidate_count": plan.memory_candidate_ids.len(),
+            "memory_card_count": plan.memory_card_ids.len(),
+            "memory_policy_decision_count": plan.memory_policy_decision_ids.len(),
             "retrieval_failure_count": plan.retrieval_failure_ids.len(),
             "governance_task_count": plan.governance_task_ids.len(),
         },
@@ -2765,6 +3725,7 @@ fn init_gateway_schema(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO schema_migrations (migration_id, applied_at) VALUES (?1, ?2)",
         params!["tonglingyu-rqa-user-lifecycle-v1", now_rfc3339()],
     )?;
+    context_governance::init_schema(conn)?;
     Ok(())
 }
 
@@ -2824,84 +3785,6 @@ fn record_workflow_state(
     Ok(())
 }
 
-fn get_or_create_session(
-    conn: &Connection,
-    context: &GatewayRequestContext,
-    model_id: &str,
-) -> Result<String> {
-    let existing = conn
-        .query_row(
-            "SELECT session_id FROM gateway_sessions WHERE user_ref = ?1 AND chat_ref = ?2 AND model_id = ?3",
-            params![&context.user_ref, &context.chat_ref, model_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(session_id) = existing {
-        conn.execute(
-            "UPDATE gateway_sessions SET updated_at = ?1 WHERE session_id = ?2",
-            params![now_rfc3339(), session_id],
-        )?;
-        return Ok(session_id);
-    }
-    let session_id = format!("session-{}", uuid::Uuid::now_v7().simple());
-    let now = now_rfc3339();
-    conn.execute(
-        "INSERT INTO gateway_sessions (session_id, user_ref, chat_ref, model_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            session_id,
-            &context.user_ref,
-            &context.chat_ref,
-            model_id,
-            now,
-            now,
-        ],
-    )?;
-    Ok(session_id)
-}
-
-fn load_deduped_message(
-    conn: &Connection,
-    session_id: &str,
-    external_message_id: &str,
-) -> Result<Option<Value>> {
-    conn.query_row(
-        "SELECT response_json FROM gateway_messages WHERE session_id = ?1 AND external_message_id = ?2",
-        params![session_id, external_message_id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()?
-    .map(|value| serde_json::from_str::<Value>(&value).map_err(Into::into))
-    .transpose()
-}
-
-fn store_gateway_message(conn: &Connection, message: GatewayMessageRecord<'_>) -> Result<()> {
-    conn.execute(
-        "INSERT INTO gateway_messages (message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, response_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![
-            format!("msg-{}", uuid::Uuid::now_v7().simple()),
-            message.session_id,
-            &message.context.external_message_id,
-            message.trace_id,
-            message.package_id,
-            message.request_hash,
-            message.question,
-            serde_json::to_string(message.response)?,
-            now_rfc3339(),
-        ],
-    )?;
-    Ok(())
-}
-
-struct GatewayMessageRecord<'a> {
-    session_id: &'a str,
-    context: &'a GatewayRequestContext,
-    trace_id: &'a str,
-    package_id: Option<&'a str>,
-    request_hash: &'a str,
-    question: &'a str,
-    response: &'a Value,
-}
-
 fn hash_value(value: &Value) -> Result<String> {
     let data = serde_json::to_vec(value)?;
     let mut hasher = Sha256::new();
@@ -2932,11 +3815,15 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     let mut policy = search_policy(&args.question);
     policy.planned_profiles = planned_profiles_for_policy(&profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&profiles, &policy);
+    let runtime_profiles = runtime_workflow_profiles(&profiles);
+    let runtime_context =
+        local_runtime_context_contract(&trace_id, &args.question, &runtime_profiles)?;
     let agent_runtime_plan_gate = execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
         question: args.question.clone(),
         required_evidence_types: policy.required_evidence_types.clone(),
-        profiles: runtime_workflow_profiles(&profiles),
+        profiles: runtime_profiles.clone(),
+        context: runtime_context.clone(),
     })
     .await?;
     let workflow = runtime_store
@@ -2945,7 +3832,8 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             question: args.question.clone(),
             limit: args.limit,
             required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: runtime_workflow_profiles(&profiles),
+            profiles: runtime_profiles,
+            context: runtime_context,
         })
         .await?;
     let package = workflow.package;
@@ -3067,12 +3955,15 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
     for case in cases {
         let trace_id = format!("eval-{}", new_trace_id());
         let policy = search_policy(case.question);
+        let profiles = RuntimeWorkflowProfiles::default();
+        let runtime_context = local_runtime_context_contract(&trace_id, case.question, &profiles)?;
         let workflow = runtime_store.execute_workflow(RuntimeWorkflowInput {
             trace_id: trace_id.clone(),
             question: case.question.to_string(),
             limit: case.limit.unwrap_or(args.limit),
             required_evidence_types: policy.required_evidence_types.clone(),
-            profiles: RuntimeWorkflowProfiles::default(),
+            profiles,
+            context: runtime_context,
         })?;
         let package = &workflow.package;
         let replay = runtime_store
@@ -5061,6 +5952,494 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap
     }
 }
 
+async fn memory_collector_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<MemoryCollectorRunRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_collector_run") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory collector db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_collector_db_failed",
+                "memory collector db failed",
+                None,
+            );
+        }
+    };
+    let trigger = payload.trigger.as_deref().unwrap_or("admin_manual");
+    let llm_probe_validation = if let Some(probe) = payload.llm_extraction_probe.as_ref() {
+        match validate_llm_memory_extraction_output(probe) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "llm_memory_extraction_invalid",
+                    safe_error_detail(&error),
+                    None,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    match run_memory_collector(
+        &conn,
+        MemoryCollectorRunInput {
+            trigger_type: trigger,
+            actor: &actor,
+            limit: payload.limit.unwrap_or(50),
+            dry_run: payload.dry_run.unwrap_or(false),
+            trace_id: payload
+                .trace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    ) {
+        Ok(mut report) => {
+            if let Some(validation) = llm_probe_validation {
+                report["llm_extraction_probe_validation"] = validation;
+            }
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_collector_admin_run",
+                &actor,
+                json!({
+                    "run_id": report.get("run_id"),
+                    "trigger_type": trigger,
+                    "dry_run": payload.dry_run.unwrap_or(false),
+                    "processed_count": report.get("processed_count"),
+                    "candidate_count": report.get("candidate_count"),
+                    "suppressed_count": report.get("suppressed_count"),
+                    "denied_count": report.get("denied_count"),
+                    "duplicate_count": report.get("duplicate_count"),
+                    "secret_values_printed": false,
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory collector admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(report).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "memory collector run failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "memory_collector_run_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn memory_candidates_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match memory_candidate_list_input_from_params(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_candidate_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match list_memory_candidates(&conn, input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_list",
+                &actor,
+                json!({
+                    "filter": memory_admin_filter_summary(&params),
+                    "result_count": result.get("items").and_then(Value::as_array).map(Vec::len),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_list_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_candidate_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(candidate_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match read_memory_candidate(&conn, &candidate_id) {
+        Ok(Some(candidate)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_read",
+                &actor,
+                json!({
+                    "candidate_id": &candidate_id,
+                    "status": candidate.get("status"),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.memory_candidate_admin_read",
+                "candidate": candidate,
+                "read_path_enabled": true,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_read_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_candidate_transition_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(candidate_id): AxumPath<String>,
+    Json(payload): Json<MemoryCandidateTransitionRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_candidate_transition") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory candidate db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_candidate_db_failed",
+                "memory candidate db failed",
+                None,
+            );
+        }
+    };
+    match transition_memory_candidate(
+        &conn,
+        MemoryCandidateTransitionInput {
+            candidate_id: &candidate_id,
+            action: payload.action.trim(),
+            actor: &actor,
+            reason: payload
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            candidate_type: payload
+                .candidate_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            sensitivity: payload
+                .sensitivity
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            merge_target_candidate_id: payload
+                .merge_target_candidate_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+            expires_at: payload
+                .expires_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    ) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_candidate_admin_transition",
+                &actor,
+                json!({
+                    "candidate_id": &candidate_id,
+                    "action": payload.action,
+                    "reason_sha256": payload.reason.as_deref().map(hash_text),
+                    "status": result.get("candidate").and_then(|v| v.get("status")),
+                    "read_path_enabled": true,
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory candidate transition audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_candidate_transition_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_cards_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BTreeMap<String, String>>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_list") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let input = match memory_card_list_input_from_params(&params) {
+        Ok(input) => input,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_memory_card_filter",
+                safe_error_detail(&error),
+                None,
+            );
+        }
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match list_memory_cards(&conn, input) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_list",
+                &actor,
+                json!({
+                    "filter": memory_admin_filter_summary(&params),
+                    "result_count": result.get("items").and_then(Value::as_array).map(Vec::len),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card list audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_list_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_card_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(memory_card_id): AxumPath<String>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_read") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match read_memory_card(&conn, &memory_card_id) {
+        Ok(Some(memory_card)) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_read",
+                &actor,
+                json!({
+                    "memory_card_id": &memory_card_id,
+                    "status": memory_card.get("status"),
+                    "read_enabled": memory_card.get("read_enabled"),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card read audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!({
+                "object": "tonglingyu.memory_card_admin_read",
+                "memory_card": memory_card,
+                "read_path_enabled": true,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found"}))).into_response(),
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_read_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
+async fn memory_card_transition_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(memory_card_id): AxumPath<String>,
+    Json(payload): Json<MemoryCardTransitionRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "memory_card_transition") {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory card db open failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "memory_card_db_failed",
+                "memory card db failed",
+                None,
+            );
+        }
+    };
+    match transition_memory_card(
+        &conn,
+        MemoryCardTransitionInput {
+            memory_card_id: &memory_card_id,
+            action: payload.action.trim(),
+            actor: &actor,
+            reason: payload
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty()),
+        },
+    ) {
+        Ok(result) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "memory_card_admin_transition",
+                &actor,
+                json!({
+                    "memory_card_id": &memory_card_id,
+                    "action": payload.action,
+                    "reason_sha256": payload.reason.as_deref().map(hash_text),
+                    "status": result.get("memory_card").and_then(|v| v.get("status")),
+                    "read_enabled": result
+                        .get("memory_card")
+                        .and_then(|v| v.get("read_enabled")),
+                }),
+            ) {
+                tracing::warn!(error = %error, "memory card transition audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(result).into_response()
+        }
+        Err(error) => error_response(
+            StatusCode::BAD_REQUEST,
+            "memory_card_transition_failed",
+            safe_error_detail(&error),
+            None,
+        ),
+    }
+}
+
 async fn retrieval_failures_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -6756,8 +8135,13 @@ async fn chat_completions(
         );
     }
     let context = request_context(&headers, &payload, auth_subject);
-    let session_id = match get_or_create_session(&conn, &context, &state.model_id) {
-        Ok(session_id) => session_id,
+    let user_session_id = match context_governance::get_or_create_user_session(
+        &conn,
+        &context.user_ref,
+        &context.chat_ref,
+        &state.model_id,
+    ) {
+        Ok(user_session_id) => user_session_id,
         Err(error) => {
             tracing::warn!(%trace_id, error = %error, "session mapping failed");
             return error_response(
@@ -6771,11 +8155,12 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&user_session_id),
         None,
         "Normalized",
         "ok",
         &json!({
+            "user_session_id": &user_session_id,
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
@@ -6790,12 +8175,12 @@ async fn chat_completions(
         let detail = json!({
             "message_count": message_count,
             "max_messages": state.max_messages,
-            "behavior": "processed_last_user_message_only",
+            "behavior": "session_summary_created",
         });
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&user_session_id),
             None,
             "Message History Truncated",
             "ok",
@@ -6808,7 +8193,7 @@ async fn chat_completions(
         &trace_id,
         "request_normalized",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &user_session_id,
             "user_ref": &context.user_ref,
             "chat_ref": &context.chat_ref,
             "external_message_id": &context.external_message_id,
@@ -6819,12 +8204,12 @@ async fn chat_completions(
     );
 
     if context.external_message_id_provided {
-        match load_deduped_message(&conn, &session_id, &context.external_message_id) {
+        match load_deduped_final_response(&conn, &user_session_id, &context.external_message_id) {
             Ok(Some(value)) => {
                 let _ = record_workflow_state(
                     &conn,
                     &trace_id,
-                    Some(&session_id),
+                    Some(&user_session_id),
                     value.get("evidence_package_id").and_then(Value::as_str),
                     "Finalized",
                     "deduped",
@@ -6849,38 +8234,189 @@ async fn chat_completions(
         }
     }
 
+    let context_messages = context_messages_from_chat(&request.messages);
+    let scoped_context = match create_context_for_request(
+        &conn,
+        ContextRequestInput {
+            trace_id: &trace_id,
+            model_id: &state.model_id,
+            external_user_ref: &context.user_ref,
+            external_session_id: &context.chat_ref,
+            external_message_id: &context.external_message_id,
+            question: &question,
+            messages: &context_messages,
+            history_over_limit,
+            max_messages: state.max_messages,
+        },
+    ) {
+        Ok(scoped_context) => scoped_context,
+        Err(error) => {
+            tracing::warn!(%trace_id, error = %error, "context governance failed");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "context_governance_failed",
+                "context governance failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let _ = record_workflow_state(
+        &conn,
+        &trace_id,
+        Some(&scoped_context.user_session_id),
+        None,
+        "Context Pack Created",
+        if scoped_context.needs_clarification {
+            "needs_clarification"
+        } else {
+            "ok"
+        },
+        &json!({
+            "context_pack_id": &scoped_context.context_pack_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "resolved_question": &scoped_context.resolved_question,
+            "session_summary_sha256": hash_text(&scoped_context.session_summary),
+            "confidence": scoped_context.confidence,
+            "needs_clarification": scoped_context.needs_clarification,
+            "used_context_refs": &scoped_context.used_context_refs,
+            "context_pack": &scoped_context.context_pack,
+        }),
+    );
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "context_pack_created",
+        &json!({
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "resolved_question": &scoped_context.resolved_question,
+            "confidence": scoped_context.confidence,
+            "needs_clarification": scoped_context.needs_clarification,
+            "used_context_refs": &scoped_context.used_context_refs,
+        }),
+    );
+    let runtime_context = runtime_context_contract(&scoped_context);
+    let projection_audit = runtime_context
+        .projections
+        .iter()
+        .map(|projection| {
+            json!({
+                "context_projection_ref": &projection.context_projection_ref,
+                "context_projection_digest": &projection.context_projection_digest,
+                "consumer_type": &projection.consumer_type,
+                "consumer_name": &projection.consumer_name,
+                "runtime_adapter": &projection.runtime_adapter,
+                "tool_policy_digest": &projection.tool_policy_digest,
+                "output_contract_digest": &projection.output_contract_digest,
+            })
+        })
+        .collect::<Vec<_>>();
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "context_projections_created",
+        &json!({
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "context_pack_digest": &scoped_context.context_pack_digest,
+            "context_projections": projection_audit,
+        }),
+    );
+
     if question.trim().is_empty() {
         let value = completion_value(
             &state.model_id,
             "请提出一个《红楼梦》相关问题。".to_string(),
             None,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
+        );
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
         );
         return Json(public_completion_value(&value)).into_response();
     }
 
-    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
-        let content = openwebui_metadata_completion_content(metadata_task, &question);
-        let mut value = completion_value(&state.model_id, content, None, Some(&session_id));
+    if scoped_context.needs_clarification {
+        let content = scoped_context
+            .clarification_question
+            .clone()
+            .unwrap_or_else(|| "请补充明确的指代对象后再继续。".to_string());
+        let mut value = completion_value(
+            &state.model_id,
+            content,
+            None,
+            Some(&scoped_context.user_session_id),
+        );
         value["trace_id"] = json!(&trace_id);
-        if let Ok(request_hash) = hash_value(&payload) {
-            let _ = store_gateway_message(
-                &conn,
-                GatewayMessageRecord {
-                    session_id: &session_id,
-                    context: &context,
-                    trace_id: &trace_id,
-                    package_id: None,
-                    request_hash: &request_hash,
-                    question: &question,
-                    response: &value,
-                },
-            );
-        }
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
+        );
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
+            None,
+            "Finalized",
+            "clarification_required",
+            &json!({
+                "context_pack_id": &scoped_context.context_pack_id,
+                "unsupported_reason": &scoped_context.unsupported_reason,
+                "elapsed_ms": elapsed_ms(started),
+            }),
+        );
+        return if request.stream.unwrap_or(false) {
+            streaming_response_from_completion_value(&value)
+        } else {
+            Json(public_completion_value(&value)).into_response()
+        };
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &question);
+        let mut value = completion_value(
+            &state.model_id,
+            content,
+            None,
+            Some(&scoped_context.user_session_id),
+        );
+        value["trace_id"] = json!(&trace_id);
+        let _ = append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: &context.external_message_id,
+                package_id: None,
+                response: &value,
+            },
+        );
+        let _ = record_workflow_state(
+            &conn,
+            &trace_id,
+            Some(&scoped_context.user_session_id),
             None,
             "Open WebUI Metadata Request Handled",
             "ok",
@@ -6896,7 +8432,8 @@ async fn chat_completions(
             &trace_id,
             "openwebui_metadata_request_handled",
             &json!({
-                "session_id": &session_id,
+                "user_session_id": &scoped_context.user_session_id,
+                "context_pack_id": &scoped_context.context_pack_id,
                 "user_ref": &context.user_ref,
                 "chat_ref": &context.chat_ref,
                 "external_message_id": &context.external_message_id,
@@ -6909,7 +8446,7 @@ async fn chat_completions(
         let _ = record_workflow_state(
             &conn,
             &trace_id,
-            Some(&session_id),
+            Some(&scoped_context.user_session_id),
             None,
             "Finalized",
             "metadata_response",
@@ -6925,14 +8462,15 @@ async fn chat_completions(
         };
     }
 
-    let mut policy = search_policy(&question);
+    let mut policy = search_policy(&scoped_context.resolved_question);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
-        question: question.clone(),
+        question: scoped_context.resolved_question.clone(),
         required_evidence_types: policy.required_evidence_types.clone(),
         profiles: runtime_workflow_profiles(&state.profiles),
+        context: runtime_context.clone(),
     })
     .await
     {
@@ -6941,7 +8479,7 @@ async fn chat_completions(
             let _ = record_workflow_state(
                 &conn,
                 &trace_id,
-                Some(&session_id),
+                Some(&scoped_context.user_session_id),
                 None,
                 "Failed with Controlled Response",
                 "agent_runtime_plan_gate_failed",
@@ -6958,7 +8496,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         None,
         "Planned",
         "ok",
@@ -6973,7 +8511,9 @@ async fn chat_completions(
         &trace_id,
         "retrieval_plan_created",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "resolved_question": &scoped_context.resolved_question,
             "question_type": &policy.question_type,
             "required_evidence_types": &policy.required_evidence_types,
             "planned_profiles": &policy.planned_profiles,
@@ -6987,7 +8527,8 @@ async fn chat_completions(
         &trace_id,
         "agent_runtime_plan_gate_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "agent_runtime_client": &agent_runtime_plan_gate.agent_runtime_client,
             "profile_contract_version": &agent_runtime_plan_gate.profile_contract_version,
             "profile_contract_count": agent_runtime_plan_gate.profile_contract_count,
@@ -6999,10 +8540,11 @@ async fn chat_completions(
         .runtime_store
         .execute_workflow_with_agent_runtime_steps(RuntimeWorkflowInput {
             trace_id: trace_id.clone(),
-            question: question.clone(),
+            question: scoped_context.resolved_question.clone(),
             limit: state.max_evidence,
             required_evidence_types: policy.required_evidence_types.clone(),
             profiles: runtime_workflow_profiles(&state.profiles),
+            context: runtime_context.clone(),
         })
         .await
     {
@@ -7011,7 +8553,7 @@ async fn chat_completions(
             let _ = record_workflow_state(
                 &conn,
                 &trace_id,
-                Some(&session_id),
+                Some(&scoped_context.user_session_id),
                 None,
                 "Failed with Controlled Response",
                 "runtime_workflow_failed",
@@ -7030,7 +8572,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Runtime Executed",
         "ok",
@@ -7043,7 +8585,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Evidence Retrieved",
         "ok",
@@ -7057,7 +8599,8 @@ async fn chat_completions(
         &trace_id,
         "agent_invocation_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "profiles": &policy.planned_profiles,
             "operation": "runtime_profile_workflow",
             "package_id": &package.package_id,
@@ -7070,7 +8613,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Bundle Created",
         "ok",
@@ -7084,7 +8627,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Drafted",
         "ok",
@@ -7098,7 +8641,8 @@ async fn chat_completions(
         &trace_id,
         "agent_invocation_completed",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "package_id": &package.package_id,
             "profile": "honglou-main",
             "operation": "draft_answer",
@@ -7115,7 +8659,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Reviewed",
         &package.review.status,
@@ -7124,7 +8668,7 @@ async fn chat_completions(
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Revised if Needed",
         revision_status,
@@ -7136,7 +8680,8 @@ async fn chat_completions(
             &trace_id,
             "revision_applied",
             &json!({
-                "session_id": &session_id,
+                "user_session_id": &scoped_context.user_session_id,
+                "context_pack_id": &scoped_context.context_pack_id,
                 "package_id": &package.package_id,
                 "review_status": &package.review.status,
                 "issues": &package.review.issues,
@@ -7147,27 +8692,46 @@ async fn chat_completions(
         &state.model_id,
         final_answer,
         Some(&package),
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
     );
     let cached_value = cache_completion_value(&value, &workflow.stream_events);
-    if let Ok(request_hash) = hash_value(&payload) {
-        let _ = store_gateway_message(
-            &conn,
-            GatewayMessageRecord {
-                session_id: &session_id,
-                context: &context,
-                trace_id: &trace_id,
-                package_id: Some(&package.package_id),
-                request_hash: &request_hash,
-                question: &question,
-                response: &cached_value,
-            },
-        );
-    }
+    let _ = append_runtime_step_journal(
+        &conn,
+        &trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package.package_id),
+        json!({
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    let _ = append_review_journal(
+        &conn,
+        &trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package.package_id),
+        json!(&package.review),
+    );
+    let _ = append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &context.external_message_id,
+            package_id: Some(&package.package_id),
+            response: &cached_value,
+        },
+    );
     let _ = record_workflow_state(
         &conn,
         &trace_id,
-        Some(&session_id),
+        Some(&scoped_context.user_session_id),
         Some(&package.package_id),
         "Finalized",
         "ok",
@@ -7182,7 +8746,8 @@ async fn chat_completions(
         &trace_id,
         "response_finalized",
         &json!({
-            "session_id": &session_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
             "package_id": &package.package_id,
             "stream": request.stream.unwrap_or(false),
             "elapsed_ms": elapsed_ms(started),
@@ -7241,6 +8806,39 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("evidence_package_id");
         map.remove("review");
         map.remove("session_id");
+        map.remove("user_session_id");
+        map.remove("interaction_context_id");
+        map.remove("context_pack_id");
+        map.remove("context_pack_ref");
+        map.remove("context_projection_id");
+        map.remove("context_projection_ref");
+        map.remove("context_projections");
+        map.remove("session_journal");
+        map.remove("context_pack");
+        map.remove("memory_read_refs");
+        map.remove("memory_read_ref_digest");
+        map.remove("memory_read_policy_digest");
+        map.remove("memory_summaries");
+        map.remove("memory_policy");
+        map.remove("memory_policy_digest");
+        map.remove("memory_usage_summary");
+        map.remove("memory_candidate");
+        map.remove("memory_candidate_id");
+        map.remove("memory_candidate_ref");
+        map.remove("memory_candidates");
+        map.remove("memory_card");
+        map.remove("memory_card_id");
+        map.remove("memory_card_ref");
+        map.remove("memory_cards");
+        map.remove("memory_policy_decision");
+        map.remove("memory_policy_decision_id");
+        map.remove("memory_policy_decision_ref");
+        map.remove("memory_policy_decisions");
+        map.remove("memory_transition_audit");
+        map.remove("llm_extraction");
+        map.remove("llm_filter");
+        map.remove("rule_filter");
+        map.remove("read_enabled");
     }
     if let Some(content) = public
         .pointer("/choices/0/message/content")
@@ -7499,10 +9097,10 @@ fn package_owned_by_subject(
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gm.package_id = ?1
-          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE sj.package_id = ?1
+          AND (us.external_user_ref = ?2 OR us.external_user_ref = ?3)
         "#,
         params![package_id, &access.user_ref, &access.subject],
         |row| row.get(0),
@@ -7518,10 +9116,10 @@ fn trace_owned_by_subject(
     let owned: i64 = conn.query_row(
         r#"
         SELECT COUNT(*)
-        FROM gateway_messages AS gm
-        JOIN gateway_sessions AS gs ON gs.session_id = gm.session_id
-        WHERE gm.trace_id = ?1
-          AND (gs.user_ref = ?2 OR gs.user_ref = ?3)
+        FROM session_journal AS sj
+        JOIN user_sessions AS us ON us.user_session_id = sj.user_session_id
+        WHERE sj.trace_id = ?1
+          AND (us.external_user_ref = ?2 OR us.external_user_ref = ?3)
         "#,
         params![trace_id, &access.user_ref, &access.subject],
         |row| row.get(0),
@@ -7896,6 +9494,78 @@ fn knowledge_item_filter_summary(params: &BTreeMap<String, String>) -> Value {
     })
 }
 
+fn memory_candidate_list_input_from_params(
+    params: &BTreeMap<String, String>,
+) -> Result<MemoryCandidateListInput<'_>> {
+    validate_memory_filter_keys(params)?;
+    Ok(MemoryCandidateListInput {
+        status: params
+            .get("status")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_type: params
+            .get("scope_type")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_ref: params
+            .get("scope_ref")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        limit: parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50),
+        offset: parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0),
+    })
+}
+
+fn memory_card_list_input_from_params(
+    params: &BTreeMap<String, String>,
+) -> Result<MemoryCardListInput<'_>> {
+    validate_memory_filter_keys(params)?;
+    Ok(MemoryCardListInput {
+        status: params
+            .get("status")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_type: params
+            .get("scope_type")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope_ref: params
+            .get("scope_ref")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        limit: parse_optional_usize(params.get("limit"), "limit")?.unwrap_or(50),
+        offset: parse_optional_usize(params.get("offset"), "offset")?.unwrap_or(0),
+    })
+}
+
+fn validate_memory_filter_keys(params: &BTreeMap<String, String>) -> Result<()> {
+    for key in params.keys() {
+        if !matches!(
+            key.as_str(),
+            "status" | "scope_type" | "scope_ref" | "limit" | "offset"
+        ) {
+            return Err(anyhow!("unsupported memory filter {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn memory_admin_filter_summary(params: &BTreeMap<String, String>) -> Value {
+    json!({
+        "status": params.get("status"),
+        "scope_type": params.get("scope_type"),
+        "has_scope_ref": params.contains_key("scope_ref"),
+        "has_limit": params.contains_key("limit"),
+        "has_offset": params.contains_key("offset"),
+    })
+}
+
 fn append_admin_audit_event(
     db: &Path,
     event_type: &str,
@@ -7936,15 +9606,19 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     )?;
     let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
     let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
-    let messages = load_rows_json(
-        &conn,
-        "SELECT message_id, session_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE trace_id = ?1 ORDER BY created_at, message_id",
-        trace_id,
-    )?;
+    let scoped_context = context_governance::load_trace_context(&conn, trace_id)?;
+    let scoped_context_has_rows = scoped_context
+        .get("context_packs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || scoped_context
+            .get("session_journal")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
     if package_ids.is_empty()
         && workflow_states.is_empty()
         && audit_events.is_empty()
-        && messages.is_empty()
+        && !scoped_context_has_rows
     {
         return Ok(None);
     }
@@ -7965,7 +9639,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "retrieval_failures": retrieval_failures,
         "governance_task_ids": governance_task_ids(&governance_tasks),
         "governance_tasks": governance_tasks,
-        "messages": messages,
+        "scoped_context": scoped_context,
         "packages": packages,
     })))
 }
@@ -8073,52 +9747,14 @@ fn governance_task_ids(tasks: &[Value]) -> Vec<String> {
 
 fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
     let conn = open_db(db)?;
-    let session = conn
-        .query_row(
-            "SELECT session_id, user_ref, chat_ref, model_id, created_at, updated_at FROM gateway_sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| {
-                Ok(json!({
-                    "session_id": row.get::<_, String>(0)?,
-                    "user_ref": row.get::<_, String>(1)?,
-                    "chat_ref": row.get::<_, String>(2)?,
-                    "model_id": row.get::<_, String>(3)?,
-                    "created_at": row.get::<_, String>(4)?,
-                    "updated_at": row.get::<_, String>(5)?,
-                }))
-            },
-        )
-        .optional()?;
-    let Some(session) = session else {
-        return Ok(None);
-    };
-    let mut stmt = conn.prepare(
-        "SELECT message_id, external_message_id, trace_id, package_id, request_hash, question, created_at FROM gateway_messages WHERE session_id = ?1 ORDER BY created_at, message_id",
-    )?;
-    let messages = stmt
-        .query_map(params![session_id], |row| {
-            Ok(json!({
-                "message_id": row.get::<_, String>(0)?,
-                "external_message_id": row.get::<_, String>(1)?,
-                "trace_id": row.get::<_, String>(2)?,
-                "package_id": row.get::<_, Option<String>>(3)?,
-                "request_hash": row.get::<_, String>(4)?,
-                "question": row.get::<_, String>(5)?,
-                "created_at": row.get::<_, String>(6)?,
-            }))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(Some(json!({
-        "object": "tonglingyu.session",
-        "session": session,
-        "messages": messages,
-    })))
+    context_governance::load_session(&conn, session_id)
 }
 
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
     let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
+    let scoped_context_counts = context_table_counts(&conn)?;
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -8158,8 +9794,18 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "counts": {
             "sources": runtime_stats.sources,
             "blocks": runtime_stats.blocks,
-            "sessions": table_count(&conn, "gateway_sessions")?,
-            "messages": table_count(&conn, "gateway_messages")?,
+            "sessions": scoped_context_counts["user_sessions"].clone(),
+            "messages": scoped_context_counts["session_journal"].clone(),
+            "user_sessions": scoped_context_counts["user_sessions"].clone(),
+            "interaction_contexts": scoped_context_counts["interaction_contexts"].clone(),
+            "context_packs": scoped_context_counts["context_packs"].clone(),
+            "context_projections": scoped_context_counts["context_projections"].clone(),
+            "session_journal": scoped_context_counts["session_journal"].clone(),
+            "memory_candidates": scoped_context_counts["memory_candidates"].clone(),
+            "memory_cards": scoped_context_counts["memory_cards"].clone(),
+            "memory_policy_decisions": scoped_context_counts["memory_policy_decisions"].clone(),
+            "memory_transition_audit": scoped_context_counts["memory_transition_audit"].clone(),
+            "memory_collector_runs": scoped_context_counts["memory_collector_runs"].clone(),
             "evidence_packages": runtime_stats.evidence_packages,
             "evidence_cards": runtime_stats.evidence_cards,
             "retrieval_failures": runtime_stats.retrieval_failures,
@@ -8168,6 +9814,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "workflow_states": table_count(&conn, "workflow_states")?,
             "audit_events": runtime_stats.audit_events,
         },
+        "scoped_context": scoped_context_counts,
         "review_status": runtime_stats.review_status,
         "evidence_types": runtime_stats.evidence_types,
         "rqa": {
@@ -8197,6 +9844,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
     let agent_runtime_mode = TonglingyuAgentRuntimeMode::from_env()?;
+    let scoped_context_counts = context_table_counts(&conn)?;
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -8211,11 +9859,47 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         ("tonglingyu_blocks_total", runtime_stats.blocks),
         (
             "tonglingyu_sessions_total",
-            table_count(&conn, "gateway_sessions")?,
+            metric_i64(&scoped_context_counts, "user_sessions"),
         ),
         (
             "tonglingyu_messages_total",
-            table_count(&conn, "gateway_messages")?,
+            metric_i64(&scoped_context_counts, "session_journal"),
+        ),
+        (
+            "tonglingyu_interaction_contexts_total",
+            metric_i64(&scoped_context_counts, "interaction_contexts"),
+        ),
+        (
+            "tonglingyu_context_packs_total",
+            metric_i64(&scoped_context_counts, "context_packs"),
+        ),
+        (
+            "tonglingyu_context_projections_total",
+            metric_i64(&scoped_context_counts, "context_projections"),
+        ),
+        (
+            "tonglingyu_session_journal_entries_total",
+            metric_i64(&scoped_context_counts, "session_journal"),
+        ),
+        (
+            "tonglingyu_memory_candidates_total",
+            metric_i64(&scoped_context_counts, "memory_candidates"),
+        ),
+        (
+            "tonglingyu_memory_cards_total",
+            metric_i64(&scoped_context_counts, "memory_cards"),
+        ),
+        (
+            "tonglingyu_memory_policy_decisions_total",
+            metric_i64(&scoped_context_counts, "memory_policy_decisions"),
+        ),
+        (
+            "tonglingyu_memory_transition_audit_total",
+            metric_i64(&scoped_context_counts, "memory_transition_audit"),
+        ),
+        (
+            "tonglingyu_memory_collector_runs_total",
+            metric_i64(&scoped_context_counts, "memory_collector_runs"),
         ),
         (
             "tonglingyu_evidence_packages_total",
@@ -8346,6 +10030,10 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+fn metric_i64(counts: &Value, key: &str) -> i64 {
+    counts.get(key).and_then(Value::as_i64).unwrap_or_default()
+}
+
 fn escape_metric_label(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -8430,17 +10118,31 @@ fn last_user_message(messages: &[ChatMessage]) -> String {
         .iter()
         .rev()
         .find(|message| message.role == "user")
-        .map(|message| match &message.content {
-            MessageContent::Text(text) => text.clone(),
-            MessageContent::Parts(parts) => parts
-                .iter()
-                .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
-                .filter_map(|part| part.text.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            MessageContent::Other(value) => value.to_string(),
-        })
+        .map(chat_message_text)
         .unwrap_or_default()
+}
+
+fn context_messages_from_chat(messages: &[ChatMessage]) -> Vec<ContextMessage> {
+    messages
+        .iter()
+        .map(|message| ContextMessage {
+            role: message.role.clone(),
+            content: chat_message_text(message),
+        })
+        .collect()
+}
+
+fn chat_message_text(message: &ChatMessage) -> String {
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MessageContent::Other(value) => value.to_string(),
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -8752,37 +10454,126 @@ mod tests {
 
     fn seed_owned_gateway_package(db_path: &Path, user_id: &str) -> EvidencePackage {
         let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
+        let question = "通灵玉回答是否有证据？";
         let package = runtime_store
             .create_package(
                 "trace-user-feedback-test",
-                "通灵玉回答是否有证据？",
+                question,
                 vec![eval_test_card("block-user-feedback-test")],
             )
             .expect("package creates");
         let conn = open_db(db_path).expect("gateway db opens");
-        let context = GatewayRequestContext {
-            user_ref: user_id.to_string(),
-            chat_ref: "chat-user-feedback-test".to_string(),
-            external_message_id: "message-user-feedback-test".to_string(),
-            external_message_id_provided: true,
-            auth_subject: user_id.to_string(),
-        };
-        let session_id =
-            get_or_create_session(&conn, &context, DEFAULT_MODEL_ID).expect("session creates");
-        store_gateway_message(
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: question.to_string(),
+        }];
+        let scoped_context = create_context_for_request(
             &conn,
-            GatewayMessageRecord {
-                session_id: &session_id,
-                context: &context,
+            ContextRequestInput {
                 trace_id: &package.trace_id,
-                package_id: Some(&package.package_id),
-                request_hash: &hash_text("通灵玉回答是否有证据？"),
-                question: "通灵玉回答是否有证据？",
-                response: &json!({"object": "chat.completion", "id": "cmpl-user-feedback-test"}),
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: user_id,
+                external_session_id: "chat-user-feedback-test",
+                external_message_id: "message-user-feedback-test",
+                question,
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
             },
         )
-        .expect("gateway message stores");
+        .expect("scoped context creates");
+        let response = completion_value(
+            DEFAULT_MODEL_ID,
+            "测试回答".to_string(),
+            Some(&package),
+            Some(&scoped_context.user_session_id),
+        );
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: &package.trace_id,
+                user_session_id: &scoped_context.user_session_id,
+                interaction_context_id: &scoped_context.interaction_context_id,
+                context_pack_id: &scoped_context.context_pack_id,
+                external_message_id: "message-user-feedback-test",
+                package_id: Some(&package.package_id),
+                response: &response,
+            },
+        )
+        .expect("final response journal stores");
         package
+    }
+
+    fn seed_runtime_chat_source(db_path: &Path) {
+        let conn = open_db(db_path).expect("gateway db opens");
+        tonglingyu_runtime::init_runtime_schema(&conn).expect("runtime schema");
+        tonglingyu_runtime::init_knowledge_base_schema(&conn).expect("kb schema");
+        conn.execute(
+            r#"
+            INSERT INTO sources (
+                source_id, source_category, format, title, work, edition, language,
+                source_url, api_url, fetched_at, license, license_url,
+                license_source_url, attribution, usage_boundary, notes,
+                snapshot_contract_json, source_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            "#,
+            params![
+                "quality-source",
+                "base_material",
+                "mediawiki",
+                "质量测试红楼梦 source",
+                "红楼梦",
+                "测试底本；仅用于 Gateway scoped context 单元测试",
+                "zh",
+                "https://example.test/source",
+                "https://example.test/api",
+                "2026-05-18T00:00:00Z",
+                "CC-BY-SA-4.0",
+                "https://creativecommons.org/licenses/by-sa/4.0/",
+                "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "Wikisource contributors",
+                "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+                "测试 source snapshot",
+                serde_json::to_string(&json!({
+                    "license": "CC-BY-SA-4.0",
+                    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                    "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                    "attribution": "Wikisource contributors",
+                    "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+                }))
+                .expect("snapshot contract json"),
+                "hash-quality-source",
+            ],
+        )
+        .expect("insert source");
+        let source_title = "质量测试红楼梦/第六十六回";
+        let text = "尤三姐最后自刎，以明心迹；此处仅作 scoped context 单元测试证据。";
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                "quality-block-yousanjie",
+                "quality-source",
+                "quality-section-066",
+                source_title,
+                tonglingyu_runtime::normalize_for_search(source_title),
+                "https://example.test/source/66",
+                1_i64,
+                1_i64,
+                "paragraph",
+                Option::<String>::None,
+                text,
+                tonglingyu_runtime::normalize_for_search(text),
+                "base_text",
+                66_i64,
+            ],
+        )
+        .expect("insert block");
     }
 
     #[test]
@@ -9486,6 +11277,223 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(audit_event_count(&db_path, "rqa_admin_access_denied"), 1);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn memory_admin_endpoints_collect_transition_and_enable_read_with_policy() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-memory");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let conn = open_db(&db_path).expect("db opens");
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "我喜欢回答里多引用原文。".to_string(),
+        }];
+        let context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-1",
+                question: "我喜欢回答里多引用原文。",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-admin-memory",
+                user_session_id: &context.user_session_id,
+                interaction_context_id: &context.interaction_context_id,
+                context_pack_id: &context.context_pack_id,
+                external_message_id: "memory-message-1",
+                package_id: Some("pkg-admin-memory"),
+                response: &json!({"status": "ok"}),
+            },
+        )
+        .expect("final response journal");
+
+        let collector = memory_collector_run_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            Json(MemoryCollectorRunRequest {
+                trigger: Some("admin_manual".to_string()),
+                limit: Some(20),
+                dry_run: Some(false),
+                trace_id: Some("trace-admin-memory".to_string()),
+                llm_extraction_probe: Some(json!({
+                    "schema_version": "scoped-memory-llm-filter-v1",
+                    "is_long_term_memory": true,
+                    "is_temporary_instruction": false,
+                    "is_quoted_or_third_party": false,
+                    "has_contradiction": false,
+                    "scope_type": "user_private",
+                    "candidate_type": "retrieval_preference",
+                    "confidence": 0.84,
+                    "sensitivity": "low",
+                    "risk_flags": [],
+                    "ttl_hint": "180d",
+                    "exclusion_flags": [],
+                })),
+            }),
+        )
+        .await;
+        assert_eq!(collector.status(), StatusCode::OK);
+        let collector_body: Value =
+            serde_json::from_str(&response_text(collector).await).expect("collector json");
+        assert_eq!(collector_body["candidate_count"], json!(1));
+        assert_eq!(
+            collector_body["llm_extraction_probe_validation"]["status"],
+            json!("pending")
+        );
+
+        let mut list_params = BTreeMap::new();
+        list_params.insert("status".to_string(), "pending".to_string());
+        let list =
+            memory_candidates_endpoint(State(state.clone()), admin_headers(), Query(list_params))
+                .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_body: Value =
+            serde_json::from_str(&response_text(list).await).expect("candidate list json");
+        let candidate_id = list_body["items"][0]["candidate_id"]
+            .as_str()
+            .expect("candidate id")
+            .to_string();
+
+        let approve = memory_candidate_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(candidate_id.clone()),
+            Json(MemoryCandidateTransitionRequest {
+                action: "approve".to_string(),
+                reason: Some("admin approved".to_string()),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(approve.status(), StatusCode::OK);
+        let promote = memory_candidate_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(candidate_id),
+            Json(MemoryCandidateTransitionRequest {
+                action: "promote".to_string(),
+                reason: Some("admin promoted for card lifecycle test".to_string()),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            }),
+        )
+        .await;
+        assert_eq!(promote.status(), StatusCode::OK);
+
+        let mut card_params = BTreeMap::new();
+        card_params.insert("status".to_string(), "active".to_string());
+        let cards =
+            memory_cards_endpoint(State(state.clone()), admin_headers(), Query(card_params)).await;
+        assert_eq!(cards.status(), StatusCode::OK);
+        let cards_body: Value =
+            serde_json::from_str(&response_text(cards).await).expect("memory card list json");
+        assert_eq!(cards_body["items"][0]["read_enabled"], json!(false));
+        let memory_card_id = cards_body["items"][0]["memory_card_id"]
+            .as_str()
+            .expect("memory card id")
+            .to_string();
+
+        let enable = memory_card_transition_endpoint(
+            State(state.clone()),
+            admin_headers(),
+            AxumPath(memory_card_id.clone()),
+            Json(MemoryCardTransitionRequest {
+                action: "enable_read".to_string(),
+                reason: Some("manual review approved read enablement".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(enable.status(), StatusCode::OK);
+        let enable_body: Value =
+            serde_json::from_str(&response_text(enable).await).expect("enable json");
+        assert_eq!(enable_body["memory_card"]["read_enabled"], json!(true));
+        assert_eq!(enable_body["read_path_enabled"], json!(true));
+
+        let read_context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory-read-enabled",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-2",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context reads manual enabled memory");
+        assert_eq!(
+            read_context.context_pack["memory_read_refs"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let unauthorized = memory_cards_endpoint(
+            State(state.clone()),
+            gateway_headers("memory-user"),
+            Query(BTreeMap::new()),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        conn.execute(
+            "DELETE FROM memory_policy_decisions WHERE memory_card_id = ?1",
+            params![memory_card_id],
+        )
+        .expect("remove read policy decision");
+        let fail_closed = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-admin-memory-fail-closed",
+                model_id: DEFAULT_MODEL_ID,
+                external_user_ref: "memory-user",
+                external_session_id: "memory-chat",
+                external_message_id: "memory-message-2",
+                question: "介绍贾宝玉",
+                messages: &[ContextMessage {
+                    role: "user".to_string(),
+                    content: "介绍贾宝玉".to_string(),
+                }],
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect_err("read_enabled cards must fail closed");
+        assert!(fail_closed.to_string().contains("without policy decision"));
+        assert_eq!(audit_event_count(&db_path, "memory_collector_admin_run"), 1);
+        assert_eq!(
+            audit_event_count(&db_path, "memory_candidate_admin_transition"),
+            2
+        );
+        assert_eq!(
+            audit_event_count(&db_path, "memory_card_admin_transition"),
+            1
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -10473,12 +12481,33 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
         );
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'metadata_prompt'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("metadata message count"),
+            .expect("metadata journal count"),
             1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'final_response'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata final response journal count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_packs").expect("context pack count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_projections").expect("context projection count"),
+            4
+        );
+        assert_eq!(
+            table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
+            0
         );
         assert_eq!(
             audit_event_count(&db_path, "openwebui_metadata_request_handled"),
@@ -10551,12 +12580,33 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
         );
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM gateway_messages WHERE package_id IS NULL",
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'metadata_prompt'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .expect("metadata message count"),
+            .expect("metadata journal count"),
             1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM session_journal WHERE entry_type = 'final_response'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("metadata final response journal count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_packs").expect("context pack count"),
+            1
+        );
+        assert_eq!(
+            table_count(&conn, "context_projections").expect("context projection count"),
+            4
+        );
+        assert_eq!(
+            table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
+            0
         );
         assert_eq!(
             audit_event_count(&db_path, "openwebui_metadata_request_handled"),
@@ -10570,6 +12620,7 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
     async fn chat_completion_accepts_long_openwebui_history() {
         let db_path = temp_gateway_db_path("tonglingyu-long-history");
         let state = Arc::new(test_app_state(db_path.clone()));
+        let max_messages = state.max_messages;
         let metadata_prompt = r#"### Task:
 Generate a concise, 3-5 word title with an emoji summarizing the chat history.
 ### Guidelines:
@@ -10581,7 +12632,7 @@ JSON format: { "title": "your concise title here" }
 USER: 介绍尤三姐
 </chat_history>"#;
         let mut messages = Vec::new();
-        for index in 0..state.max_messages {
+        for index in 0..max_messages {
             messages.push(json!({
                 "role": "user",
                 "content": format!("历史消息 {index}"),
@@ -10622,6 +12673,206 @@ USER: 介绍尤三姐
             1
         );
         assert_eq!(audit_event_count(&db_path, "message_history_truncated"), 1);
+        let session_summary = conn
+            .query_row(
+                "SELECT session_summary FROM context_packs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("context pack session summary");
+        assert!(session_summary.contains("历史消息"));
+        let metadata_json: String = conn
+            .query_row(
+                "SELECT metadata_json FROM session_journal WHERE entry_type = 'metadata_prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("metadata prompt journal metadata");
+        let metadata: Value = serde_json::from_str(&metadata_json).expect("journal metadata json");
+        assert_eq!(metadata["history_over_limit"], json!(true));
+        assert_eq!(metadata["max_messages"], json!(max_messages));
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn chat_completion_resolves_follow_up_from_session_journal() {
+        let db_path = temp_gateway_db_path("tonglingyu-scoped-context-follow-up");
+        seed_runtime_chat_source(&db_path);
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let first = chat_completions(
+            State(state.clone()),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "介绍尤三姐"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "scoped-chat",
+                    "message_id": "scoped-message-1",
+                },
+            })),
+        )
+        .await;
+        let first_status = first.status();
+        let first_text = response_text(first).await;
+        assert_eq!(first_status, StatusCode::OK, "{first_text}");
+
+        let second = chat_completions(
+            State(state),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "她最后怎么样？"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "scoped-chat",
+                    "message_id": "scoped-message-2",
+                },
+            })),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(second).await).expect("response json");
+        assert!(body.get("context_pack_id").is_none());
+        assert!(body.get("context_pack_ref").is_none());
+        assert!(body.get("context_projection_id").is_none());
+        assert!(body.get("context_projection_ref").is_none());
+        assert!(body.get("context_projections").is_none());
+        assert!(body.get("interaction_context_id").is_none());
+        assert!(body.get("session_journal").is_none());
+
+        let conn = open_db(&db_path).expect("db opens");
+        let (trace_id, resolved_question): (String, String) = conn
+            .query_row(
+                "SELECT trace_id, resolved_question FROM context_packs ORDER BY created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("latest context pack");
+        assert_eq!(resolved_question, "尤三姐最后怎么样？");
+
+        let trace = load_trace(&db_path, &trace_id)
+            .expect("trace loads")
+            .expect("trace exists");
+        assert_eq!(
+            trace["scoped_context"]["context_packs"][0]["resolved_question"],
+            json!("尤三姐最后怎么样？")
+        );
+        let rendered_trace = serde_json::to_string(&trace).expect("trace json");
+        assert!(!rendered_trace.contains("\"content\":"));
+        assert!(!rendered_trace.contains("memory_candidate_created"));
+        assert!(!rendered_trace.contains("memory_card"));
+        assert!(!rendered_trace.contains("\"projection_payload\":"));
+        let profile_views = trace["scoped_context"]["context_packs"][0]["profile_views"]
+            .as_array()
+            .expect("profile views");
+        for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
+            let view = profile_views
+                .iter()
+                .find(|view| view["profile_name"] == json!(profile))
+                .expect("profile view exists");
+            assert!(view["session_summary"].is_null());
+            assert!(
+                !serde_json::to_string(view)
+                    .expect("profile view json")
+                    .contains("介绍尤三姐")
+            );
+        }
+        let projections = trace["scoped_context"]["context_projections"]
+            .as_array()
+            .expect("context projections");
+        assert_eq!(projections.len(), 4);
+        for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
+            let projection = projections
+                .iter()
+                .find(|projection| projection["consumer_name"] == json!(profile))
+                .expect("profile projection exists");
+            assert_eq!(projection["consumer_type"], json!("runtime_profile"));
+            assert_eq!(
+                projection["runtime_adapter"],
+                json!("tonglingyu-runtime-adapter-v1")
+            );
+            assert!(
+                projection["context_projection_ref"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("context-projection://tonglingyu/"))
+            );
+            assert_eq!(
+                projection["projection_payload_summary"]["has_session_summary"],
+                json!(false)
+            );
+            assert!(
+                !serde_json::to_string(projection)
+                    .expect("projection json")
+                    .contains("介绍尤三姐")
+            );
+        }
+        let main_projection = projections
+            .iter()
+            .find(|projection| projection["consumer_name"] == "honglou-main")
+            .expect("main projection exists");
+        assert_eq!(
+            main_projection["projection_payload_summary"]["has_session_summary"],
+            json!(true)
+        );
+        assert!(
+            main_projection["allowed_tools"]
+                .as_array()
+                .expect("allowed tools")
+                .contains(&json!("tonglingyu.evidence.package.create"))
+        );
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn chat_completion_fails_closed_when_referent_is_unresolved() {
+        let db_path = temp_gateway_db_path("tonglingyu-scoped-context-unresolved");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("scoped-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "她最后怎么样？"}],
+                "metadata": {
+                    "user_id": "scoped-user",
+                    "chat_id": "new-scoped-chat",
+                    "message_id": "unresolved-message-1",
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("response json");
+        assert!(
+            body["choices"][0]["message"]["content"]
+                .as_str()
+                .expect("assistant content")
+                .contains("请明确")
+        );
+        assert!(body.get("evidence_package_id").is_none());
+        assert!(body.get("context_pack_id").is_none());
+        let conn = open_db(&db_path).expect("db opens");
+        assert_eq!(
+            table_count(&conn, "evidence_packages").expect("package count"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM workflow_states WHERE status = 'clarification_required'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("clarification state count"),
+            1
+        );
 
         remove_sqlite_file_set(&db_path);
     }
@@ -10643,12 +12894,34 @@ USER: 介绍尤三姐
                 summary: "reviewer passed".to_string(),
             },
         };
-        let value = completion_value(
+        let mut value = completion_value(
             DEFAULT_MODEL_ID,
             "测试回答".to_string(),
             Some(&package),
             Some("session-public-rqa-test"),
         );
+        value["context_pack_id"] = json!("context-pack-public-rqa-test");
+        value["context_pack_ref"] = json!("context-pack://tonglingyu/public-rqa/test");
+        value["context_projection_id"] = json!("context-projection-public-rqa-test");
+        value["context_projection_ref"] = json!("context-projection://tonglingyu/public-rqa/test");
+        value["context_projections"] = json!([{"consumer_name": "honglou-main"}]);
+        value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
+        value["session_journal"] = json!([{"entry_type": "user_message"}]);
+        value["memory_read_refs"] = json!(["memory:forbidden"]);
+        value["memory_read_ref_digest"] = json!("memory-read-ref-digest");
+        value["memory_read_policy_digest"] = json!("memory-read-policy-digest");
+        value["memory_summaries"] = json!([{"summary": "internal memory"}]);
+        value["memory_policy_digest"] = json!("memory-policy-digest");
+        value["memory_usage_summary"] = json!({"read_ref_count": 1});
+        value["memory_candidate_id"] = json!("memory-candidate-public-rqa-test");
+        value["memory_card_id"] = json!("memory-card-public-rqa-test");
+        value["memory_policy_decision_id"] = json!("memory-policy-decision-public-rqa-test");
+        value["memory_policy_decision_ref"] =
+            json!("memory-policy-decision://tonglingyu/public-rqa/test");
+        value["llm_extraction"] = json!({"summary": "internal"});
+        value["llm_filter"] = json!({"schema_version": "scoped-memory-llm-filter-v1"});
+        value["rule_filter"] = json!({"schema_version": "scoped-memory-rule-filter-v1"});
+        value["read_enabled"] = json!(true);
 
         let rendered =
             serde_json::to_string(&public_completion_value(&value)).expect("completion serializes");
@@ -10660,6 +12933,27 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("pkg-public-rqa-test"));
         assert!(!rendered.contains("reviewer"));
         assert!(!rendered.contains("session-public-rqa-test"));
+        assert!(!rendered.contains("context_pack_id"));
+        assert!(!rendered.contains("context_pack_ref"));
+        assert!(!rendered.contains("context_projection_id"));
+        assert!(!rendered.contains("context_projection_ref"));
+        assert!(!rendered.contains("context_projections"));
+        assert!(!rendered.contains("interaction_context_id"));
+        assert!(!rendered.contains("session_journal"));
+        assert!(!rendered.contains("memory_read_refs"));
+        assert!(!rendered.contains("memory_read_ref_digest"));
+        assert!(!rendered.contains("memory_read_policy_digest"));
+        assert!(!rendered.contains("memory_summaries"));
+        assert!(!rendered.contains("memory_policy_digest"));
+        assert!(!rendered.contains("memory_usage_summary"));
+        assert!(!rendered.contains("memory_candidate_id"));
+        assert!(!rendered.contains("memory_card_id"));
+        assert!(!rendered.contains("memory_policy_decision_id"));
+        assert!(!rendered.contains("memory_policy_decision_ref"));
+        assert!(!rendered.contains("llm_extraction"));
+        assert!(!rendered.contains("llm_filter"));
+        assert!(!rendered.contains("rule_filter"));
+        assert!(!rendered.contains("read_enabled"));
     }
 
     #[test]
@@ -10768,11 +13062,27 @@ USER: 介绍尤三姐
             "metadata": {
                 "runtime_step_plan": [],
                 "admin_trace": {"trace_id": "forged"},
+                "interaction_context_id": "forged-context",
+                "runtime_adapter": "forged-runtime",
+                "session_journal": [{"content": "forged"}],
+                "memory_candidate_id": "forged-candidate",
                 "nested": {"agent_runtime": {"mode": "forged"}},
                 "message_id": "open-webui-message",
             },
             "extra_body": {
                 "allowed_tools": ["tonglingyu.text.search"],
+                "context_pack_id": "forged-pack",
+                "context_projection_digest": "forged-digest",
+                "context_projection_ref": "forged-projection",
+                "forbidden_tools": ["tonglingyu.commentary.search"],
+                "llm_extraction": {"promotion": "forged"},
+                "memory_card_id": "forged-card",
+                "memory_read_policy_digest": "forged-read-policy",
+                "memory_read_ref_digest": "forged-read-ref-digest",
+                "memory_read_refs": ["memory-summary://forged"],
+                "memory_read_scopes": ["user_private:any"],
+                "read_enabled": true,
+                "tool_policy_digest": "forged-tool-policy",
                 "layers": [{"runtime_step_outputs": []}],
             },
             "messages": [{"role": "user", "content": "通灵玉是什么？"}],
@@ -10784,10 +13094,26 @@ USER: 介绍尤三姐
             vec![
                 "agent_runtime_summary",
                 "extra_body.allowed_tools",
+                "extra_body.context_pack_id",
+                "extra_body.context_projection_digest",
+                "extra_body.context_projection_ref",
+                "extra_body.forbidden_tools",
                 "extra_body.layers[0].runtime_step_outputs",
+                "extra_body.llm_extraction",
+                "extra_body.memory_card_id",
+                "extra_body.memory_read_policy_digest",
+                "extra_body.memory_read_ref_digest",
+                "extra_body.memory_read_refs",
+                "extra_body.memory_read_scopes",
+                "extra_body.read_enabled",
+                "extra_body.tool_policy_digest",
                 "metadata.admin_trace",
+                "metadata.interaction_context_id",
+                "metadata.memory_candidate_id",
                 "metadata.nested.agent_runtime",
+                "metadata.runtime_adapter",
                 "metadata.runtime_step_plan",
+                "metadata.session_journal",
             ]
         );
     }

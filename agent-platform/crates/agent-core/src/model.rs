@@ -1515,7 +1515,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         avg_runtime_ms,
         30_000.0,
         120_000.0,
-        "completed runtime latency is above the P1 review threshold",
+        "completed runtime latency is above the runtime readiness review threshold",
     );
     push_count_signal(
         &mut signals,
@@ -1610,7 +1610,7 @@ pub fn assess_observer_snapshot(snapshot: &ObserverSnapshot) -> ObserverSnapshot
         json!([
             {
                 "priority": "low",
-                "recommendation": "Continue normal P1 smoke and audit review; no runtime quality risk crossed the current threshold."
+                "recommendation": "Continue normal runtime readiness smoke and audit review; no runtime quality risk crossed the current threshold."
             }
         ])
     } else {

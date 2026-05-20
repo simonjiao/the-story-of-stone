@@ -30,6 +30,11 @@ Gateway 不等于：
 5. 长期记忆系统；
 6. 自主推理系统。
 
+Scoped Context 与受控 Memory 的详细设计见
+`26_Scoped_Context与受控Memory设计.md`。该设计不改变 Gateway 的薄边界：
+Gateway 只负责 context pack 调用、trace、step plan、journal 索引和响应封装，
+不直接沉淀长期 memory，也不把 memory 当作正式事实源。
+
 ## Gateway 与 `honglou-main` 的区别
 
 | 项目 | Gateway | `honglou-main` |
@@ -122,7 +127,12 @@ Gateway 可以保存：
 4. 证据包索引；
 5. 审校状态；
 6. 错误类别；
-7. 必要的审计摘要。
+7. 必要的审计摘要；
+8. scoped context 所需的 context/journal 索引和限长摘要。
+
+这些 context/journal 数据必须遵循 `11_权限审计与安全治理.md` 和
+`26_Scoped_Context与受控Memory设计.md`：默认不保存不必要的完整隐私文本，
+长期 memory 只能由延迟 collector 和审核策略生成。
 
 ## 验收标准
 
@@ -169,7 +179,7 @@ Open WebUI 账号做发布复核，不改变 Gateway 合同。
 | --- | --- | --- |
 | Open WebUI 页面验收 | OpenAI-compatible HTTP、本地 smoke、远端容器内入口和公网 `/api/config` 已覆盖 | 用真实 Open WebUI 账号复核登录态、普通用户模型可见性、管理员追踪入口和 Cloudflare 公网入口 |
 | 鉴权和权限 | Gateway/admin API key、key rotation、admin 隔离已实现；拒绝内部 Agent、reviewer 开关、私有 trace/package 字段和非 `tonglingyu` 可见模型 | 部署侧必须把凭证放入 `.env`，并确认普通用户无法直接获得 admin key |
-| 会话映射 | Open WebUI user/chat/message 可映射到内部 session/trace/package；同一 message 支持幂等去重 | 页面侧复核多轮会话与刷新重试体验 |
+| 会话映射 | Open WebUI user/chat/message 可映射到内部 session/trace/package；同一 message 支持幂等去重；scoped context / session journal 仍按文档 `26` 进入后续实现 | 页面侧复核多轮会话、刷新重试体验和 context pack 生成 |
 | 状态机 | 已持久化 Received、Authenticated、Normalized、Planned、Evidence Retrieved、Bundle Created、Drafted、Reviewed、Revised if Needed、Finalized 和受控失败原因 | 发布记录必须包含 trace ID 和状态链 |
 | 内部 Agent 编排 | 已按 `honglou-main`、`honglou-text`、`honglou-commentary`、`honglou-reviewer` profile 口径记录计划和受限调用摘要；上游调用有超时与本地降级 | 目标 Runtime 化后必须由 Runtime step plan 执行四 profile，并沿用同一审计与降级合同 |
 | 证据源强制策略 | 已按问题类型强制正文、脂批、版本、人物别名、诗词判词和字形读音检索；缺必要证据时由 reviewer 阻断或降级 | 扩展人工标注层后继续增加关系、事件和更细版本索引 |
