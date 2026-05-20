@@ -407,7 +407,28 @@ Eval 必须按节点归因，不只评最终回答。
 | P5 Full-path Eval Suite | S1、S7 | S1 做最小 runner，S7 做完整 suite 和 release report。 |
 | P6 用户响应脱敏与泄露回归门禁 | S1-S7 | 横切安全门禁，不属于 LLM 能力，贯穿所有阶段。 |
 
-### 13.1 实施路线的待确认口径
+### 13.1 阶段交付细化
+
+| 阶段 | 具体任务 | 主要产物 | 最小验证 | 停止条件 |
+|---|---|---|---|---|
+| S0 口径冻结 | 对齐当前实现、目标增强、外部借鉴边界和待确认项；确认本阶段只改文档。 | 31 号文档、文档地图、待确认项表。 | markdownlint、diff check、确认分支净效果无 Rust 代码变更。 | 文档仍把目标增强写成已实现，或无法解释 I1-I10/P0-P6。 |
+| S1 评测与用户响应安全基线 | 建最小 eval runner；增加用户响应字段泄露扫描；覆盖非流式、SSE、缓存复用和 request safety。 | `request_safety.jsonl`、`streaming_dedupe.jsonl`、用户响应内部字段 denylist、最小 gate 报告。 | request gate 用例通过；用户响应和 SSE 中无 trace/context/memory/review/tool payload 泄露。 | runner 不能稳定复现，或用户响应 gate 无法区分普通用户面与 admin-only 面。 |
+| S2 Question Resolver contract | 定义 LLM resolver schema；校验字段白名单、context refs、confidence、澄清/fail-closed；写审计字段。 | resolver contract、contract tests、`question_resolution.jsonl` fixture、resolver audit schema。 | 规则 resolver 现有行为不变；非法字段、未知 context ref、低置信输出全部 fail-closed。 | contract 需要读取 memory/full history，或会改变现有确定性 resolver 结果。 |
+| S3 Resolver LLM shadow/受控接入 | 只在 deterministic resolver 需要澄清时调用 LLM；先 shadow 记录，再决定是否进入受控主路径。 | runtime/Hermes 调用封装、schema repair、shadow audit、开关配置、失败归因。 | shadow 与规则结果对照可回放；受控主路径只接受已校验输出；低置信澄清或 fail-closed。 | LLM 输出可直接驱动 RAG，或 schema repair 后仍不能解释失败原因。 |
+| S4 Conversation State Summary 决策 | 先决定是否需要新增 summary；若需要，定义 writer/loader、schema、可见范围和 anti-hallucination eval。 | `conversation_state_summary` schema、summary audit、projection 可见性规则、`session_summary.jsonl`。 | summary 不引入新事实；不进入 evidence package；只给授权 projection。 | summary 被当作证据源，或 reviewer/text/commentary 看到不该看的会话状态。 |
+| S5 Retrieval Policy schema 化 | 定义 LLM suggested policy；保留 deterministic patch 强制高风险证据；建立 required evidence eval。 | suggested policy schema、policy patch 规则、`retrieval_policy.jsonl`、`rag_evidence.jsonl`。 | 原文、脂批、版本差异、人物命运问题的必需证据不被降级；gold evidence 命中达标。 | LLM 可降低必需证据，或用户请求可控制内部 profile/tool/reviewer。 |
+| S6 Profile observation 与 draft/reviewer eval | 固化 text/commentary/main/reviewer 输出 contract；评估 observation、claim-first draft 和 reviewer false-pass。 | profile observation datasets、`package_claims.jsonl`、`reviewer_security.jsonl`、override audit。 | refs 全部来自本地 evidence ids；draft 绑定 package；reviewer override 可回放。 | observation 被用作事实源，或 draft/reviewer 绕过 package 与本地裁决。 |
+| S7 全路径发布门禁 | 汇总 request -> response 全路径 replay；整合节点级失败归因；生成 release report。 | full-path eval suite、节点级失败报告、release readiness report、阶段通过/失败记录。 | S1-S6 gates 全部通过；失败能归因到 resolver/summary/policy/package/reviewer/user response/memory。 | 只能证明最终回答看起来正常，但不能证明中间节点正确。 |
+
+每个阶段提交前必须满足：
+
+1. 只包含该阶段声明范围内的变更。
+2. 对应 fixture、单测或脚本能独立运行。
+3. 用户响应安全 gate 没有回退。
+4. 文档同步更新当前事实和剩余风险。
+5. 未通过的 gate 必须写成 blocker，不能写成完成。
+
+### 13.2 实施路线的待确认口径
 
 | 编号 | 待确认问题 | 确认依据 | 确认后动作 | 主要风险 |
 |---|---|---|---|---|
