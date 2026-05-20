@@ -10,6 +10,7 @@ pub const STREAMING_DEDUPE_DATASET: &str = "streaming_dedupe";
 pub const QUESTION_RESOLUTION_DATASET: &str = "question_resolution";
 pub const S1_STAGE: &str = "S1";
 pub const S2_STAGE: &str = "S2";
+pub const S3_STAGE: &str = "S3";
 pub const REQUEST_SAFETY_MIN_CASES: usize = 20;
 pub const STREAMING_DEDUPE_MIN_CASES: usize = 16;
 pub const QUESTION_RESOLUTION_MIN_CASES: usize = 33;

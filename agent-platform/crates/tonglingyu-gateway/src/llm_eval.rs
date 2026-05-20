@@ -15,10 +15,14 @@ use crate::{
         DEFAULT_MAX_BODY_CHARS, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS,
         LLM_EVAL_REPORT_SCHEMA_VERSION, LLM_EVAL_SUITE_VERSION, LlmEvalFixture,
         PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
-        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE,
+        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE,
         STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
     },
-    llm_resolver::{ResolverContractDecision, evaluate_resolver_contract},
+    llm_modes::LlmMode,
+    llm_provider::{FakeLlmProvider, LlmProviderError},
+    llm_resolver::{
+        ResolverContractDecision, evaluate_resolver_contract, evaluate_resolver_with_provider,
+    },
     user_response_safety::{fixture_has_internal_leakage, scan_fixture_surfaces},
 };
 
@@ -27,6 +31,7 @@ const NO_INTERNAL_LEAKAGE: &str = "no_internal_leakage";
 const INTERNAL_LEAKAGE_DETECTED: &str = "internal_leakage_detected";
 const RESPONSE_CONSISTENCY: &str = "response_consistency";
 const RESOLVER_CONTRACT_EXPECTED: &str = "resolver_contract_expected";
+const RESOLVER_PROVIDER_ROUTING_EXPECTED: &str = "resolver_provider_routing_expected";
 const UNKNOWN_CONTEXT_REF_FAIL_CLOSED: &str = "unknown_context_ref_fail_closed";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +188,7 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
     }
     let expected_stage = match fixture.dataset.as_str() {
         REQUEST_SAFETY_DATASET | STREAMING_DEDUPE_DATASET => S1_STAGE,
+        QUESTION_RESOLUTION_DATASET if fixture.input.get("provider_mode").is_some() => S3_STAGE,
         QUESTION_RESOLUTION_DATASET => S2_STAGE,
         _ => S1_STAGE,
     };
@@ -205,6 +211,9 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
 }
 
 fn evaluate_question_resolution(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    if fixture.input.get("provider_mode").is_some() {
+        return evaluate_question_resolution_provider(fixture, failures);
+    }
     let trigger = fixture
         .input
         .get("trigger")
@@ -274,6 +283,86 @@ fn evaluate_question_resolution(fixture: &LlmEvalFixture, failures: &mut Vec<Str
         "error_count": evaluation.errors.len(),
         "errors": evaluation.errors,
     })
+}
+
+fn evaluate_question_resolution_provider(
+    fixture: &LlmEvalFixture,
+    failures: &mut Vec<String>,
+) -> Value {
+    let trigger = fixture
+        .input
+        .get("trigger")
+        .and_then(Value::as_str)
+        .unwrap_or("missing_trigger");
+    let mode = fixture
+        .input
+        .get("provider_mode")
+        .and_then(Value::as_str)
+        .and_then(|value| LlmMode::parse(value).ok())
+        .unwrap_or(LlmMode::Disabled);
+    let provider_input = fixture
+        .input
+        .get("provider_input")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let responses = fixture
+        .input
+        .get("provider_responses")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    if let Some(error) = item.get("error").and_then(Value::as_str) {
+                        Err(provider_error_from_str(error))
+                    } else {
+                        Ok(item.get("ok").cloned().unwrap_or_else(|| item.clone()))
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut provider = FakeLlmProvider::new(responses);
+    let report = evaluate_resolver_with_provider(
+        mode,
+        trigger,
+        provider_input,
+        &format!("fixture://{}", fixture.case_id),
+        &mut provider,
+    );
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == RESOLVER_PROVIDER_ROUTING_EXPECTED)
+    {
+        failures.push(format!(
+            "missing hard gate {RESOLVER_PROVIDER_ROUTING_EXPECTED}"
+        ));
+    }
+    assert_expected_bool(fixture, "provider_called", report.provider_called, failures);
+    assert_expected_bool(
+        fixture,
+        "accepted_for_main",
+        report.accepted_for_main,
+        failures,
+    );
+    assert_expected_bool(
+        fixture,
+        "contract_accepted",
+        report.contract_accepted,
+        failures,
+    );
+    if let Some(expected_error) = fixture.expected.get("error_type").and_then(Value::as_str)
+        && report.error_type.as_deref() != Some(expected_error)
+    {
+        failures.push(format!(
+            "provider error mismatch expected={expected_error} got={:?}",
+            report.error_type
+        ));
+    }
+
+    json!(report)
 }
 
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
@@ -370,6 +459,34 @@ fn evaluate_streaming_dedupe(fixture: &LlmEvalFixture, failures: &mut Vec<String
         "response_consistent": response_consistent,
         "scan_reports": scan.reports,
     })
+}
+
+fn assert_expected_bool(
+    fixture: &LlmEvalFixture,
+    key: &str,
+    actual: bool,
+    failures: &mut Vec<String>,
+) {
+    if let Some(expected) = fixture.expected.get(key).and_then(Value::as_bool)
+        && expected != actual
+    {
+        failures.push(format!("{key} mismatch expected={expected} got={actual}"));
+    }
+}
+
+fn provider_error_from_str(value: &str) -> LlmProviderError {
+    match value {
+        "timeout" => LlmProviderError::Timeout,
+        "rate_limited" => LlmProviderError::RateLimited,
+        "auth_error" => LlmProviderError::AuthError,
+        "schema_invalid" => LlmProviderError::SchemaInvalid,
+        "schema_repair_failed" => LlmProviderError::SchemaRepairFailed,
+        "safety_refusal" => LlmProviderError::SafetyRefusal,
+        "budget_exceeded" => LlmProviderError::BudgetExceeded,
+        "profile_missing" => LlmProviderError::ProfileMissing,
+        "projection_digest_mismatch" => LlmProviderError::ProjectionDigestMismatch,
+        _ => LlmProviderError::ProviderUnavailable,
+    }
 }
 
 fn request_gate_observation(request: &Value, limits: Option<&Value>) -> Value {

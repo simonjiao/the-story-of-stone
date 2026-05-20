@@ -47,6 +47,8 @@ use tower_http::trace::TraceLayer;
 mod context_governance;
 mod llm_contracts;
 mod llm_eval;
+mod llm_modes;
+mod llm_provider;
 mod llm_resolver;
 mod plan;
 mod user_response_safety;
