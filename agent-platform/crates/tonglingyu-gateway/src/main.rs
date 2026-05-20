@@ -123,6 +123,7 @@ enum Command {
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
     LlmEval(LlmEvalArgs),
+    LlmReleaseReport(LlmReleaseReportArgs),
     KnowledgeCalibrate(KnowledgeCalibrateArgs),
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     RuntimeSchemaMigrate(RuntimeSchemaMigrateArgs),
@@ -244,6 +245,14 @@ struct LlmEvalArgs {
     report_out: PathBuf,
     #[arg(long, default_value_t = false)]
     fail_on_hard_gate: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct LlmReleaseReportArgs {
+    #[arg(long)]
+    eval_report: PathBuf,
+    #[arg(long)]
+    report_out: PathBuf,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1519,6 +1528,11 @@ async fn main() -> Result<()> {
                 &args.report_out,
                 args.fail_on_hard_gate,
             )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Command::LlmReleaseReport(args) => {
+            let report = llm_eval::write_llm_release_report(&args.eval_report, &args.report_out)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }

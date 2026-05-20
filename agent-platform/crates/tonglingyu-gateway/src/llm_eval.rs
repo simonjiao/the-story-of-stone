@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DEFAULT_MODEL_ID,
+    context_governance::validate_llm_memory_extraction_output,
     conversation_state::{
         ConversationStateInput, ConversationStateMessage, ConversationStateSummary,
         conversation_state_validation_context, project_conversation_state_summary,
@@ -23,13 +24,14 @@ use crate::{
     llm_contracts::{
         CONTEXT_PROJECTION_DATASET, CONTEXT_PROJECTION_MIN_CASES, DEFAULT_MAX_BODY_CHARS,
         DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS, LLM_EVAL_REPORT_SCHEMA_VERSION,
-        LLM_EVAL_SUITE_VERSION, LlmEvalFixture, PACKAGE_CLAIMS_DATASET, PACKAGE_CLAIMS_MIN_CASES,
-        PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
-        RAG_EVIDENCE_DATASET, RAG_EVIDENCE_MIN_CASES, REQUEST_SAFETY_DATASET,
-        REQUEST_SAFETY_MIN_CASES, RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES,
-        REVIEWER_SECURITY_DATASET, REVIEWER_SECURITY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE,
-        S4_STAGE, S5_STAGE, S6_STAGE, SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES,
-        STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
+        LLM_EVAL_SUITE_VERSION, LlmEvalFixture, MEMORY_POLICY_DATASET, MEMORY_POLICY_MIN_CASES,
+        PACKAGE_CLAIMS_DATASET, PACKAGE_CLAIMS_MIN_CASES, PUBLIC_OUTPUT_FORBIDDEN_KEYS,
+        QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES, RAG_EVIDENCE_DATASET,
+        RAG_EVIDENCE_MIN_CASES, REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES,
+        RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES, REVIEWER_SECURITY_DATASET,
+        REVIEWER_SECURITY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE, S4_STAGE, S5_STAGE, S6_STAGE,
+        S7_STAGE, SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES, STREAMING_DEDUPE_DATASET,
+        STREAMING_DEDUPE_MIN_CASES,
     },
     llm_modes::LlmMode,
     llm_provider::{FakeLlmProvider, LlmProviderError},
@@ -67,6 +69,8 @@ const PACKAGE_CLAIMS_EXPECTED: &str = "package_claims_expected";
 const REVIEWER_SECURITY_EXPECTED: &str = "reviewer_security_expected";
 const REVIEW_OVERRIDE_EXPECTED: &str = "review_override_expected";
 const REVISION_LOOP_EXPECTED: &str = "revision_loop_expected";
+const MEMORY_POLICY_EXPECTED: &str = "memory_policy_expected";
+const MEMORY_BOUNDARY_EXPECTED: &str = "memory_boundary_expected";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmEvalCaseResult {
@@ -151,6 +155,9 @@ pub fn run_llm_eval(
                 PACKAGE_CLAIMS_DATASET: PACKAGE_CLAIMS_MIN_CASES,
                 REVIEWER_SECURITY_DATASET: REVIEWER_SECURITY_MIN_CASES,
             },
+            "s7_minimums": {
+                MEMORY_POLICY_DATASET: MEMORY_POLICY_MIN_CASES,
+            },
             "fail_on_hard_gate": fail_on_hard_gate,
         },
         "failure_attribution": failure_attribution,
@@ -171,6 +178,133 @@ pub fn run_llm_eval(
         return Err(anyhow!("llm eval hard gate failed"));
     }
     Ok(report)
+}
+
+pub fn write_llm_release_report(eval_report_path: &Path, report_out: &Path) -> Result<Value> {
+    let data = fs::read(eval_report_path)
+        .with_context(|| format!("read {}", eval_report_path.display()))?;
+    let eval_report: Value = serde_json::from_slice(&data)
+        .with_context(|| format!("parse {}", eval_report_path.display()))?;
+    let sha256 = format!("sha256:{:x}", Sha256::digest(&data));
+    let dataset_counts = eval_report
+        .pointer("/metric_summary/datasets")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let missing_or_short = required_dataset_minimums()
+        .iter()
+        .filter_map(|(dataset, minimum)| {
+            let count = dataset_counts
+                .get(*dataset)
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            if count < *minimum as u64 {
+                Some(json!({
+                    "dataset": dataset,
+                    "minimum": minimum,
+                    "actual": count,
+                }))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let hard_gate_failures = eval_report
+        .get("hard_gate_failures")
+        .and_then(Value::as_array)
+        .map_or(usize::MAX, Vec::len);
+    let eval_report_object_valid =
+        eval_report.get("object").and_then(Value::as_str) == Some("tonglingyu.llm_eval_report");
+    let eval_report_schema_valid =
+        eval_report.get("schema_version").and_then(Value::as_str) == Some("v1");
+    let eval_report_suite_valid =
+        eval_report.get("suite_version").and_then(Value::as_str) == Some(LLM_EVAL_SUITE_VERSION);
+    let llm_eval_run_id_present = eval_report
+        .get("eval_run_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let total_cases = eval_report
+        .pointer("/case_counts/total")
+        .and_then(Value::as_u64);
+    let passed_cases = eval_report
+        .pointer("/case_counts/passed")
+        .and_then(Value::as_u64);
+    let failed_cases = eval_report
+        .pointer("/case_counts/failed")
+        .and_then(Value::as_u64);
+    let case_counts_complete = match (total_cases, passed_cases, failed_cases) {
+        (Some(total), Some(passed), Some(failed)) => {
+            total > 0 && failed == 0 && passed == total && passed.checked_add(failed) == Some(total)
+        }
+        _ => false,
+    };
+    let eval_passed = eval_report.get("status").and_then(Value::as_str) == Some("passed");
+    let eval_report_valid = eval_report_object_valid
+        && eval_report_schema_valid
+        && eval_report_suite_valid
+        && llm_eval_run_id_present
+        && case_counts_complete;
+    let local_release_gate_passed =
+        eval_report_valid && eval_passed && hard_gate_failures == 0 && missing_or_short.is_empty();
+    let report = json!({
+        "object": "tonglingyu.llm_release_report",
+        "schema_version": "v1",
+        "release_run_id": format!("llm-release-{}", uuid::Uuid::now_v7().simple()),
+        "status": if local_release_gate_passed { "passed" } else { "failed" },
+        "llm_eval_report_path": eval_report_path.display().to_string(),
+        "llm_eval_report_sha256": sha256,
+        "llm_eval_run_id": eval_report.get("eval_run_id").cloned().unwrap_or(Value::Null),
+        "suite_version": eval_report.get("suite_version").cloned().unwrap_or(Value::Null),
+        "case_counts": eval_report.get("case_counts").cloned().unwrap_or(Value::Null),
+        "readiness_checks": {
+            "eval_report_object_valid": eval_report_object_valid,
+            "eval_report_schema_valid": eval_report_schema_valid,
+            "eval_report_suite_valid": eval_report_suite_valid,
+            "llm_eval_run_id_present": llm_eval_run_id_present,
+            "case_counts_complete": case_counts_complete,
+            "repo_local_llm_eval_passed": eval_passed,
+            "hard_gate_failure_count": hard_gate_failures,
+            "s1_to_s7_dataset_minimums_present": missing_or_short.is_empty(),
+            "missing_or_short_datasets": missing_or_short,
+            "user_response_safety_gate_present": dataset_counts.contains_key(REQUEST_SAFETY_DATASET)
+                && dataset_counts.contains_key(STREAMING_DEDUPE_DATASET),
+            "target_environment_live_gate_required": true,
+            "target_environment_live_gate_verified": false,
+            "production_ready_declaration_allowed": false,
+        },
+        "artifact_policy": {
+            "raw_llm_payload_embedded": false,
+            "raw_memory_embedded": false,
+            "tool_payload_embedded": false,
+        },
+    });
+    if let Some(parent) = report_out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(
+        report_out,
+        format!("{}\n", serde_json::to_string_pretty(&report)?),
+    )
+    .with_context(|| format!("write {}", report_out.display()))?;
+    if !local_release_gate_passed {
+        return Err(anyhow!("llm release gate failed"));
+    }
+    Ok(report)
+}
+
+fn required_dataset_minimums() -> &'static [(&'static str, usize)] {
+    &[
+        (REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES),
+        (STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES),
+        (QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES),
+        (SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES),
+        (RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES),
+        (RAG_EVIDENCE_DATASET, RAG_EVIDENCE_MIN_CASES),
+        (CONTEXT_PROJECTION_DATASET, CONTEXT_PROJECTION_MIN_CASES),
+        (PACKAGE_CLAIMS_DATASET, PACKAGE_CLAIMS_MIN_CASES),
+        (REVIEWER_SECURITY_DATASET, REVIEWER_SECURITY_MIN_CASES),
+        (MEMORY_POLICY_DATASET, MEMORY_POLICY_MIN_CASES),
+    ]
 }
 
 fn load_fixtures(fixture_dir: &Path) -> Result<Vec<LlmEvalFixture>> {
@@ -218,6 +352,7 @@ fn evaluate_fixture(fixture: &LlmEvalFixture) -> LlmEvalCaseResult {
         CONTEXT_PROJECTION_DATASET => evaluate_context_projection(fixture, &mut failures),
         PACKAGE_CLAIMS_DATASET => evaluate_package_claims(fixture, &mut failures),
         REVIEWER_SECURITY_DATASET => evaluate_reviewer_security(fixture, &mut failures),
+        MEMORY_POLICY_DATASET => evaluate_memory_policy(fixture, &mut failures),
         dataset => {
             failures.push(format!("unsupported dataset: {dataset}"));
             json!({})
@@ -245,6 +380,7 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
         SESSION_SUMMARY_DATASET => S4_STAGE,
         RETRIEVAL_POLICY_DATASET | RAG_EVIDENCE_DATASET => S5_STAGE,
         CONTEXT_PROJECTION_DATASET | PACKAGE_CLAIMS_DATASET | REVIEWER_SECURITY_DATASET => S6_STAGE,
+        MEMORY_POLICY_DATASET => S7_STAGE,
         _ => S1_STAGE,
     };
     if fixture.stage != expected_stage {
@@ -998,6 +1134,157 @@ fn evaluate_reviewer_security(fixture: &LlmEvalFixture, failures: &mut Vec<Strin
     json!(report)
 }
 
+fn evaluate_memory_policy(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let output = fixture.input.get("llm_output").unwrap_or(&Value::Null);
+    let validation = validate_llm_memory_extraction_output(output);
+    let validated = validation.as_ref().ok();
+    let validation_error = validation.as_ref().err().map(ToString::to_string);
+    let ttl_abuse = memory_ttl_abuse(output);
+    let llm_policy_decision_attempt = contains_any_key(
+        output,
+        &[
+            "approve",
+            "approved",
+            "promote",
+            "promotion",
+            "read_enabled",
+            "status",
+            "task_status",
+        ],
+    );
+    let acl_exposure = contains_any_key(output, &["acl", "acl_json", "read_refs", "memory_acl"]);
+    let reviewer_decision_attempt =
+        contains_any_key(output, &["reviewer", "review", "reviewer_decision"]);
+    let memory_as_evidence_attempt = contains_any_key(
+        output,
+        &[
+            "evidence",
+            "evidence_package",
+            "evidence_package_id",
+            "source_fact",
+            "memory_used_as_evidence",
+        ],
+    ) || output.get("candidate_type").and_then(Value::as_str)
+        == Some("source_fact");
+    let accepted = validated.is_some()
+        && !ttl_abuse
+        && !llm_policy_decision_attempt
+        && !acl_exposure
+        && !reviewer_decision_attempt
+        && !memory_as_evidence_attempt;
+    let status = validated
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("rejected");
+    let policy_engine_decision = if accepted {
+        memory_policy_engine_decision(validated.expect("validated when accepted"))
+    } else {
+        "fail_closed".to_string()
+    };
+    let promotion_allowed = validated
+        .and_then(|value| value.get("promotion_allowed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let acl_allowed = validated
+        .and_then(|value| value.get("acl_allowed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let read_enabled_allowed = validated
+        .and_then(|value| value.get("read_enabled_allowed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let observed = json!({
+        "accepted": accepted,
+        "status": status,
+        "policy_engine_decision": policy_engine_decision,
+        "validation_error": validation_error,
+        "llm_policy_decision_attempt": llm_policy_decision_attempt,
+        "acl_exposure": acl_exposure,
+        "reviewer_decision_attempt": reviewer_decision_attempt,
+        "memory_as_evidence_attempt": memory_as_evidence_attempt,
+        "ttl_abuse": ttl_abuse,
+        "promotion_allowed": promotion_allowed,
+        "acl_allowed": acl_allowed,
+        "read_enabled_allowed": read_enabled_allowed,
+    });
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == MEMORY_POLICY_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {MEMORY_POLICY_EXPECTED}"));
+    }
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == MEMORY_BOUNDARY_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {MEMORY_BOUNDARY_EXPECTED}"));
+    }
+    assert_expected_bool(fixture, "accepted", accepted, failures);
+    assert_expected_str(fixture, "status", status, failures);
+    assert_expected_str(
+        fixture,
+        "policy_engine_decision",
+        observed["policy_engine_decision"]
+            .as_str()
+            .unwrap_or("missing_policy_engine_decision"),
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "llm_policy_decision_attempt",
+        llm_policy_decision_attempt,
+        MEMORY_BOUNDARY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "acl_exposure",
+        acl_exposure,
+        MEMORY_BOUNDARY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "reviewer_decision_attempt",
+        reviewer_decision_attempt,
+        MEMORY_BOUNDARY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "memory_as_evidence_attempt",
+        memory_as_evidence_attempt,
+        NO_MEMORY_AS_EVIDENCE,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "ttl_abuse",
+        ttl_abuse,
+        MEMORY_POLICY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "promotion_allowed",
+        promotion_allowed,
+        MEMORY_BOUNDARY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "read_enabled_allowed",
+        read_enabled_allowed,
+        MEMORY_BOUNDARY_EXPECTED,
+        failures,
+    );
+
+    observed
+}
+
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
     let request = fixture.input.get("request").unwrap_or(&Value::Null);
     let expected_accepted = fixture
@@ -1258,6 +1545,151 @@ fn contains_forbidden_control_field(value: &Value) -> bool {
     }
 }
 
+fn contains_any_key(value: &Value, keys: &[&str]) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| keys.contains(&key.as_str()) || contains_any_key(value, keys)),
+        Value::Array(items) => items.iter().any(|item| contains_any_key(item, keys)),
+        _ => false,
+    }
+}
+
+fn memory_policy_engine_decision(validated: &Value) -> String {
+    if validated.get("status").and_then(Value::as_str) == Some("suppressed") {
+        return "suppress".to_string();
+    }
+    let scope_type = validated
+        .get("scope_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let candidate_type = validated
+        .get("candidate_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if is_forbidden_memory_candidate_type(candidate_type)
+        || !is_auto_memory_candidate_type_allowed_for_scope(scope_type, candidate_type)
+    {
+        return "suppress".to_string();
+    }
+    if !scope_auto_read_enabled(scope_type) {
+        return "pending_manual_review".to_string();
+    }
+    let confidence = validated
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    if confidence < scope_memory_threshold(scope_type) {
+        "pending_manual_review".to_string()
+    } else {
+        "enable_read".to_string()
+    }
+}
+
+fn memory_ttl_abuse(output: &Value) -> bool {
+    let Some(ttl_hint) = output.get("ttl_hint").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(candidate_type) = output.get("candidate_type").and_then(Value::as_str) else {
+        return true;
+    };
+    let Some(days) = parse_ttl_days(ttl_hint) else {
+        return true;
+    };
+    ttl_days_for_memory_candidate_type(candidate_type).is_none_or(|max_days| days > max_days)
+}
+
+fn parse_ttl_days(ttl_hint: &str) -> Option<i64> {
+    ttl_hint
+        .strip_suffix('d')
+        .and_then(|days| days.parse::<i64>().ok())
+        .filter(|days| *days >= 0)
+}
+
+fn scope_memory_threshold(scope_type: &str) -> f64 {
+    match scope_type {
+        "user_private" => 0.85,
+        "profile_common" => 0.92,
+        "knowledge_space" | "research_topic" => 0.94,
+        "source_collection" => 1.0,
+        _ => 1.0,
+    }
+}
+
+fn scope_auto_read_enabled(scope_type: &str) -> bool {
+    matches!(
+        scope_type,
+        "user_private" | "profile_common" | "knowledge_space" | "research_topic"
+    )
+}
+
+fn is_forbidden_memory_candidate_type(candidate_type: &str) -> bool {
+    matches!(
+        candidate_type,
+        "source_fact"
+            | "literary_claim"
+            | "reviewer_decision"
+            | "task_status"
+            | "action_result"
+            | "credential"
+            | "legal_or_identity_assertion"
+            | "permission_or_acl_request"
+            | "temporary_instruction"
+            | "system_or_prompt_instruction"
+    )
+}
+
+fn is_auto_memory_candidate_type_allowed_for_scope(scope_type: &str, candidate_type: &str) -> bool {
+    match scope_type {
+        "user_private" => matches!(
+            candidate_type,
+            "answer_style_preference"
+                | "verbosity_preference"
+                | "language_preference"
+                | "workflow_preference"
+                | "retrieval_preference"
+                | "stable_user_background"
+                | "research_interest"
+        ),
+        "profile_common" => matches!(
+            candidate_type,
+            "answer_style_preference"
+                | "verbosity_preference"
+                | "language_preference"
+                | "workflow_preference"
+                | "retrieval_preference"
+        ),
+        "knowledge_space" => matches!(
+            candidate_type,
+            "workflow_preference" | "retrieval_preference" | "research_interest"
+        ),
+        "research_topic" => matches!(
+            candidate_type,
+            "research_interest"
+                | "research_topic_context"
+                | "workflow_preference"
+                | "retrieval_preference"
+        ),
+        "source_collection" => candidate_type == "source_collection_usage_preference",
+        _ => false,
+    }
+}
+
+fn ttl_days_for_memory_candidate_type(candidate_type: &str) -> Option<i64> {
+    match candidate_type {
+        "answer_style_preference"
+        | "verbosity_preference"
+        | "research_topic_context"
+        | "source_collection_usage_preference" => Some(90),
+        "language_preference"
+        | "workflow_preference"
+        | "retrieval_preference"
+        | "research_interest" => Some(180),
+        "stable_user_background" => Some(365),
+        _ => None,
+    }
+}
+
 fn limit_from(limits: Option<&Value>, key: &str, default_value: usize) -> usize {
     limits
         .and_then(|value| value.get(key))
@@ -1364,6 +1796,15 @@ fn validate_fixture_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<Strin
     if reviewer_security_count > 0 && reviewer_security_count < REVIEWER_SECURITY_MIN_CASES {
         failures.push(format!(
             "{REVIEWER_SECURITY_DATASET} requires at least {REVIEWER_SECURITY_MIN_CASES} cases got {reviewer_security_count}"
+        ));
+    }
+    let memory_policy_count = dataset_counts
+        .get(MEMORY_POLICY_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if memory_policy_count > 0 && memory_policy_count < MEMORY_POLICY_MIN_CASES {
+        failures.push(format!(
+            "{MEMORY_POLICY_DATASET} requires at least {MEMORY_POLICY_MIN_CASES} cases got {memory_policy_count}"
         ));
     }
     failures
@@ -1479,6 +1920,73 @@ mod tests {
 
         assert!(err.to_string().contains("hard gate failed"));
         assert!(report_path.exists());
+        let _ = fs::remove_dir_all(PathBuf::from(&dir));
+    }
+
+    #[test]
+    fn llm_release_report_references_eval_report_without_raw_payload() {
+        let dir = std::env::temp_dir().join(format!(
+            "tonglingyu-llm-release-test-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        fs::create_dir_all(&dir).expect("create temp release dir");
+        let eval_report_path = dir.join("llm-eval.json");
+        let release_report_path = dir.join("llm-release.json");
+        fs::write(
+            &eval_report_path,
+            serde_json::to_string(&json!({
+                "object": "tonglingyu.llm_eval_report",
+                "schema_version": "v1",
+                "eval_run_id": "llm-eval-test",
+                "status": "passed",
+                "suite_version": LLM_EVAL_SUITE_VERSION,
+                "case_counts": {"total": 215, "passed": 215, "failed": 0},
+                "hard_gate_failures": [],
+                "metric_summary": {
+                    "datasets": {
+                        REQUEST_SAFETY_DATASET: REQUEST_SAFETY_MIN_CASES,
+                        STREAMING_DEDUPE_DATASET: STREAMING_DEDUPE_MIN_CASES,
+                        QUESTION_RESOLUTION_DATASET: QUESTION_RESOLUTION_MIN_CASES,
+                        SESSION_SUMMARY_DATASET: SESSION_SUMMARY_MIN_CASES,
+                        RETRIEVAL_POLICY_DATASET: RETRIEVAL_POLICY_MIN_CASES,
+                        RAG_EVIDENCE_DATASET: RAG_EVIDENCE_MIN_CASES,
+                        CONTEXT_PROJECTION_DATASET: CONTEXT_PROJECTION_MIN_CASES,
+                        PACKAGE_CLAIMS_DATASET: PACKAGE_CLAIMS_MIN_CASES,
+                        REVIEWER_SECURITY_DATASET: REVIEWER_SECURITY_MIN_CASES,
+                        MEMORY_POLICY_DATASET: MEMORY_POLICY_MIN_CASES,
+                    }
+                }
+            }))
+            .expect("serialize eval report"),
+        )
+        .expect("write eval report");
+
+        let report = write_llm_release_report(&eval_report_path, &release_report_path)
+            .expect("release report writes");
+
+        assert_eq!(report["status"], json!("passed"));
+        assert_eq!(report["llm_eval_run_id"], json!("llm-eval-test"));
+        assert_eq!(
+            report["readiness_checks"]["eval_report_object_valid"],
+            json!(true)
+        );
+        assert_eq!(
+            report["readiness_checks"]["eval_report_suite_valid"],
+            json!(true)
+        );
+        assert_eq!(
+            report["readiness_checks"]["case_counts_complete"],
+            json!(true)
+        );
+        assert_eq!(
+            report["artifact_policy"]["raw_llm_payload_embedded"],
+            json!(false)
+        );
+        assert!(
+            report["llm_eval_report_sha256"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
         let _ = fs::remove_dir_all(PathBuf::from(&dir));
     }
 }
