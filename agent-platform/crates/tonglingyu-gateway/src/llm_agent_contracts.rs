@@ -267,9 +267,41 @@ fn read_only_profile_contract(profile_id: &str, version: &str, timeout_ms: u64) 
     contract.max_context_messages = Some(3);
     contract.max_runtime_seconds = Some((timeout_ms / 1_000).max(1));
     contract.safety_policy = json!({
-        "profile_controls_context_only": true,
-        "raw_output_must_not_be_persisted": true,
-        "forbidden_output_fields": LLM_RESOLVER_FORBIDDEN_FIELDS,
+        "deny_message_roles": ["tool"],
+        "max_message_bytes": 32768
     });
     contract
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_core::{RuntimeClient, RuntimeProfileInput, RuntimeProfileMessage};
+    use agent_runtime::MinimalRuntimeClient;
+    use serde_json::json;
+
+    use super::tonglingyu_llm_agent_profile_contracts;
+
+    #[tokio::test]
+    async fn llm_agent_profile_contracts_pass_runtime_safety_gate() {
+        let runtime = MinimalRuntimeClient::default();
+        for contract in tonglingyu_llm_agent_profile_contracts() {
+            let profile_id = contract.profile_id.clone();
+            let result = runtime
+                .execute_profile_step(RuntimeProfileInput {
+                    profile_id: profile_id.clone(),
+                    messages: vec![
+                        RuntimeProfileMessage::new("system", "return JSON only"),
+                        RuntimeProfileMessage::new("user", "{}"),
+                    ],
+                    metadata: json!({}),
+                    profile_contract: Some(contract),
+                    runtime_step: None,
+                    requested_tools: Vec::new(),
+                    trace_id: "trace-llm-agent-contract-safety".to_string(),
+                })
+                .await;
+
+            assert!(result.is_ok(), "{profile_id} rejected: {result:?}");
+        }
+    }
 }

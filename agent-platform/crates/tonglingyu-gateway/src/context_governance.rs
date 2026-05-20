@@ -265,6 +265,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             output_contract_json TEXT NOT NULL,
             profile_views_json TEXT NOT NULL,
             policy_versions_json TEXT,
+            llm_agent_context_path_json TEXT,
             schema_version TEXT NOT NULL,
             digest TEXT,
             created_at TEXT NOT NULL
@@ -490,6 +491,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     )?;
     ensure_column(conn, "context_packs", "context_pack_ref", "TEXT")?;
     ensure_column(conn, "context_packs", "policy_versions_json", "TEXT")?;
+    ensure_column(conn, "context_packs", "llm_agent_context_path_json", "TEXT")?;
     ensure_column(conn, "context_packs", "digest", "TEXT")?;
     ensure_column(conn, "session_journal", "package_id", "TEXT")?;
     conn.execute(
@@ -809,6 +811,14 @@ fn create_context_pack_from_validated_parts(
     let memory_read_policy_digest = memory_read_policy_digest(&memory_read_set.reads);
     let memory_usage_summary =
         memory_usage_summary(&memory_read_set.reads, memory_read_set.truncated_count);
+    let llm_agent_context_path = json!({
+        "question_normalizer_mode": question_normalizer_agent_mode().as_str(),
+        "conversation_state_mode": conversation_state_mode.as_str(),
+        "question_normalizer_agent": resolver.agent_audit.clone(),
+        "conversation_state_agent": &conversation_state_agent_audit,
+        "conversation_state_summary_source": conversation_state_source,
+        "raw_agent_output_embedded": false,
+    });
     let mut context_pack = json!({
         "context_pack_id": &context_pack_id,
         "context_pack_ref": &context_pack_ref,
@@ -853,14 +863,7 @@ fn create_context_pack_from_validated_parts(
             "llm_agent_validator": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
         },
         "resolver": resolver.audit_json(),
-        "llm_agent_context_path": {
-            "question_normalizer_mode": question_normalizer_agent_mode().as_str(),
-            "conversation_state_mode": conversation_state_mode.as_str(),
-            "question_normalizer_agent": resolver.agent_audit.clone(),
-            "conversation_state_agent": &conversation_state_agent_audit,
-            "conversation_state_summary_source": conversation_state_source,
-            "raw_agent_output_embedded": false,
-        },
+        "llm_agent_context_path": &llm_agent_context_path,
     });
     let context_pack_digest = digest_json(&context_pack);
     context_pack["digest"] = json!(&context_pack_digest);
@@ -881,8 +884,9 @@ fn create_context_pack_from_validated_parts(
             context_pack_id, context_pack_ref, trace_id, interaction_context_id, profile_name, resolved_question,
             session_summary, active_scopes_json, candidate_scopes_json, allowed_tools_json,
             forbidden_tools_json, memory_read_refs_json, forbidden_context_json,
-            output_contract_json, profile_views_json, policy_versions_json, schema_version, digest, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            output_contract_json, profile_views_json, policy_versions_json, llm_agent_context_path_json,
+            schema_version, digest, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             &context_pack_id,
             &context_pack_ref,
@@ -909,6 +913,7 @@ fn create_context_pack_from_validated_parts(
             serde_json::to_string(&context_pack["output_contract"])?,
             serde_json::to_string(&profile_views)?,
             serde_json::to_string(&context_pack["policy_versions"])?,
+            serde_json::to_string(&llm_agent_context_path)?,
             CONTEXT_SCHEMA_VERSION,
             &context_pack_digest,
             now_rfc3339(),
@@ -971,14 +976,7 @@ fn create_context_pack_from_validated_parts(
                 "memory_read_policy_digest": &memory_read_policy_digest,
                 "conversation_state_summary_digest": &conversation_state_digest,
                 "conversation_state_summary_projection_visible": conversation_state_projected,
-                "llm_agent_context_path": {
-                    "question_normalizer_mode": question_normalizer_agent_mode().as_str(),
-                    "conversation_state_mode": conversation_state_mode.as_str(),
-                    "question_normalizer_agent": resolver.agent_audit.clone(),
-                    "conversation_state_agent": &conversation_state_agent_audit,
-                    "conversation_state_summary_source": conversation_state_source,
-                    "raw_agent_output_embedded": false,
-                },
+                "llm_agent_context_path": &llm_agent_context_path,
             }),
         },
     )?;
@@ -5438,7 +5436,8 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
                 session_summary, active_scopes_json, candidate_scopes_json, allowed_tools_json,
                 forbidden_tools_json, memory_read_refs_json, forbidden_context_json,
                 output_contract_json, profile_views_json, COALESCE(policy_versions_json, '{}'),
-                schema_version, COALESCE(digest, ''), created_at
+                COALESCE(llm_agent_context_path_json, '{}'), schema_version, COALESCE(digest, ''),
+                created_at
          FROM context_packs WHERE trace_id = ?1 ORDER BY created_at, context_pack_id",
     )?;
     let rows = stmt.query_map(params![trace_id], |row| {
@@ -5460,9 +5459,10 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
             "output_contract": parse_json_column(row.get::<_, String>(12)?),
             "profile_views": parse_json_column(row.get::<_, String>(13)?),
             "policy_versions": parse_json_column(row.get::<_, String>(14)?),
-            "schema_version": row.get::<_, String>(15)?,
-            "digest": row.get::<_, String>(16)?,
-            "created_at": row.get::<_, String>(17)?,
+            "llm_agent_context_path": parse_json_column(row.get::<_, String>(15)?),
+            "schema_version": row.get::<_, String>(16)?,
+            "digest": row.get::<_, String>(17)?,
+            "created_at": row.get::<_, String>(18)?,
         }))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -6300,6 +6300,19 @@ mod tests {
             context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["accepted_for_projection"],
             json!(true)
         );
+        let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
+        let persisted_trace = load_trace_context(&persisted_conn, "trace-conversation-state-agent")
+            .expect("persisted trace context");
+        assert_eq!(
+            persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_summary_source"],
+            json!("llm_agent_validated")
+        );
+        assert_eq!(
+            persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
+                ["accepted_for_projection"],
+            json!(true)
+        );
+        drop(persisted_conn);
         let main_projection = context
             .context_projections
             .iter()
