@@ -45,7 +45,10 @@ use tonglingyu_runtime::{
 use tower_http::trace::TraceLayer;
 
 mod context_governance;
+mod llm_contracts;
+mod llm_eval;
 mod plan;
+mod user_response_safety;
 
 use crate::context_governance::{
     ContextMessage, ContextProjection, ContextRequestInput, ContextResolution,
@@ -113,6 +116,7 @@ enum Command {
     ReplayPackage(ReplayPackageArgs),
     RuntimeDryRun(RuntimeDryRunArgs),
     Eval(EvalArgs),
+    LlmEval(LlmEvalArgs),
     KnowledgeCalibrate(KnowledgeCalibrateArgs),
     RuntimeSchemaPreflight(RuntimeSchemaPreflightArgs),
     RuntimeSchemaMigrate(RuntimeSchemaMigrateArgs),
@@ -224,6 +228,16 @@ struct EvalArgs {
         default_value_t = false
     )]
     allow_db_mutation: bool,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct LlmEvalArgs {
+    #[arg(long)]
+    fixture_dir: PathBuf,
+    #[arg(long)]
+    report_out: PathBuf,
+    #[arg(long, default_value_t = false)]
+    fail_on_hard_gate: bool,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -1492,6 +1506,15 @@ async fn main() -> Result<()> {
             } else {
                 Err(anyhow!("tonglingyu eval failed"))
             }
+        }
+        Command::LlmEval(args) => {
+            let report = llm_eval::run_llm_eval(
+                &args.fixture_dir,
+                &args.report_out,
+                args.fail_on_hard_gate,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
         }
         Command::KnowledgeCalibrate(args) => {
             let data = fs::read_to_string(&args.input)
