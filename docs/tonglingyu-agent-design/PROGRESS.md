@@ -30,7 +30,7 @@ test 和 repo-local 验证。
 当前 blocker：
 
 1. 目标环境 live gate 与 release readiness gate 尚未重新通过。
-2. gatekeeper release 工具本地已更新，仍必须提交并同步/部署到目标环境。
+2. gatekeeper release 工具已提交，仍必须同步/部署到目标环境。
 
 本地验证记录：
 

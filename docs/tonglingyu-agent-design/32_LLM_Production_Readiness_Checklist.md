@@ -92,7 +92,7 @@ release readiness 和目标环境 saved validator 还没有针对当前提交重
 - [x] B3：release manifest 没有绑定 `llm_eval_run_id`、`llm_eval_report_sha256`、case counts 和
   LLM artifact policy。
 - [ ] B4：目标环境 live gate 尚未针对当前 LLM S1-S7 版本运行。
-- [ ] B5：gatekeeper release 工具本地已更新；进入 production-ready 前必须提交并同步/部署到目标环境。
+- [ ] B5：gatekeeper release 工具已提交；进入 production-ready 前必须同步/部署到目标环境。
 
 ## 4. 实施 Checklist
 
@@ -105,7 +105,7 @@ release readiness 和目标环境 saved validator 还没有针对当前提交重
   release report。
 - [x] P4：补本地 contract test，证明缺失/失败/过期/夹带 raw payload 的 LLM report 会 hard fail。
 - [x] P5：复跑 repo-local `llm-eval`、`llm-release-report`、Rust test、clippy、gatekeeper full QA。
-- [ ] P6：提交 source/gatekeeper 本地变更，保证目标环境绑定的 git commit 不处于 tracked dirty。
+- [x] P6：提交 source/gatekeeper 本地变更，保证目标环境绑定的 git commit 不处于 tracked dirty。
 - [ ] P7：同步目标环境 release 工具并运行目标环境 live gate。
 - [ ] P8：运行 release readiness gate 与 saved validator，生成 production readiness evidence。
 - [ ] P9：把目标环境 evidence 路径、digest、commit、image 写回本 checklist 与 `PROGRESS.md`。
