@@ -100,7 +100,6 @@ $HOME/tonglingyu-home-runtime/
 
 ## 删除或退出生产路径
 
-- [x] Global Router 不进入新生产路径
 - [x] `agent-manager` 不进入新生产路径
 - [x] `agent-orchestrator` 不进入新生产路径
 - [x] `agent-worker` 不进入新生产路径
@@ -186,8 +185,8 @@ $HOME/tonglingyu-home-runtime/
   `tonglingyu`
 - [x] `ensure-tonglingyu-gateway-env.sh` 会把 Open WebUI provider 收敛为单
   Gateway 入口，并保持密钥只在 `.env` 中
-- [x] `verify-tonglingyu-runtime-config.sh` 会拒绝旧 Agent Platform/Global
-  Router 服务、非 `tonglingyu-` 容器名、旧多 provider 入口和
+- [x] `verify-tonglingyu-runtime-config.sh` 会拒绝旧控制面服务、
+  非 `tonglingyu-` 容器名、旧多 provider 入口和
   `tonglignyu` 拼写错误
 
 ## hhost 执行结果

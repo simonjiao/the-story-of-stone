@@ -41,10 +41,10 @@ Version rules are in `docs/VERSIONING_RULES.md`. The minimum local check is:
 uv run --no-sync python scripts/version.py check
 ```
 
-Every real deploy must bump the third version number with:
+Patch version bumps are source-owned and should go through:
 
 ```bash
-deploy/scripts/bump-deploy-version.sh
+uv run --no-sync python scripts/version.py bump patch
 ```
 
 The project QA wrapper combines version, Python, shell, and Rust format gates:
@@ -70,8 +70,9 @@ bash -n path/to/script.sh
 shellcheck path/to/script.sh
 ```
 
-For deployment config, use dry-runs or render checks first. Back up
-`deploy/.env` before editing it and never output secret values.
+For custom deployment config and production evidence, use the sibling
+`../tonglingyu-gatekeeper/deploy/` repo. For this repo's local stack, use
+dry-runs or render checks first and never output secret values.
 
 ## Rust
 

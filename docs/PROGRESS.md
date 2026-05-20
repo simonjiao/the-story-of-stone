@@ -12,4 +12,6 @@
 ## 相关验证记录
 
 - RQA 生产实现：`docs/tonglingyu-agent-design/22_RQA生产实现Checklist.md`
-- 部署运行手册：`deploy/README.md`
+- 本地启动说明：`deploy/README.md`
+- 定制环境和发布验证：
+  `../tonglingyu-gatekeeper/deploy/runbooks/tonglingyu-rqa-release-runbook.md`

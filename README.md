@@ -3,10 +3,9 @@
 本仓库承载几个相关但边界独立的 Hermes / Open WebUI 工作区：
 
 - “通灵玉”：面向《红楼梦》的研究型 Hermes Agent。
-- `global-router`：独立 OpenAI-compatible 路由层。
-- Agent Platform：Hermes 多 Agent 控制面、运行面和审计链路。
+- `agent-platform/`：通灵玉 Gateway、Runtime 和共享 Agent runtime 组件。
 - `open-webui/functions/`：Open WebUI Function/Filter 正式代码。
-- `deploy/`：通用 compose、构建和启动入口。
+- `deploy/`：本地启动一套 Tonglingyu compose 环境的最小入口。
 - `../tonglingyu-gatekeeper/deploy/`：定制环境文件、维护脚本和验证流程。
 
 `具体进展不要写在根` README；以各项目目录下的 `PROGRESS.md` 为准。
@@ -17,21 +16,18 @@
 | 项目 | 代码入口 | 文档入口 | 进展 |
 | --- | --- | --- | --- |
 | 通灵玉 | `agent-platform/crates/tonglingyu-gateway/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
-| Global Router | `agent-platform/crates/global-router/` | `docs/global-router-design/` | `docs/global-router-design/PROGRESS.md` |
-| Agent Platform | `agent-platform/` | `docs/agent-platform-design/` | `docs/agent-platform-design/PROGRESS.md` |
 | Open WebUI Functions | `open-webui/functions/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
-| Deployment | `deploy/` | `deploy/README.md` | `docs/CHAT_HUIXIANGDOU_OPENWEBUI_TEST_REPORT.md` |
-| Gatekeeper | `../tonglingyu-gatekeeper/deploy/` | `../tonglingyu-gatekeeper/deploy/README.md` | `docs/tonglingyu-agent-design/PROGRESS.md` |
+| Local Stack | `deploy/` | `deploy/README.md` | `deploy/README.md` |
+| Gatekeeper | `../tonglingyu-gatekeeper/deploy/` | `../tonglingyu-gatekeeper/deploy/README.md` | `../tonglingyu-gatekeeper/deploy/runbooks/tonglingyu-rqa-release-runbook.md` |
 <!-- markdownlint-enable MD013 -->
 
 ## 当前边界
 
 - 通灵玉第一版只验证证据型 RAG 链路：
   `source snapshot -> 知识库 -> 证据卡片 -> 证据包 -> reviewer 审校 -> 分层回答`。
-- `global-router` 当前是 MVP 路由层，不是完整生产级 router。
-- Agent Platform 的 P0/P1/P2 状态以 `docs/agent-platform-design/PROGRESS.md`
-  和各 implementation checklist 为准。
-- compose、构建和启动入口保留在本仓库 `deploy/`；定制环境维护和验证以
+- Agent runtime 组件只保留当前通灵玉需要的 Gateway/Runtime 能力；已经不存在的
+  独立平台文档不再作为本仓库入口。
+- 本仓库 `deploy/` 只保留本地启动一套环境的 compose 能力；定制环境维护和验证以
   `../tonglingyu-gatekeeper/deploy/` 当前内容为准；公网入口走 Cloudflare
   Tunnel 到 Open WebUI。
 
@@ -43,10 +39,6 @@
 - [通灵玉完整知识库与风格扩展规划](docs/tonglingyu-agent-design/17_完整知识库与风格扩展规划.md)
 - [通灵玉第一版实施细化计划](docs/tonglingyu-agent-design/18_第一版实施细化计划.md)
 - [通灵玉第一批资料来源登记](docs/tonglingyu-agent-design/19_第一批资料来源登记.md)
-- [Global Router 设计](docs/global-router-design/README.md)
-- [Global Router 进展](docs/global-router-design/PROGRESS.md)
-- [Agent Platform 进展](docs/agent-platform-design/PROGRESS.md)
-- [Agent Platform 总览](docs/agent-platform-design/00-overview.md)
 - [运行手册](docs/RUNBOOK.md)
 - [转录校订流程](docs/VERIFICATION_WORKFLOW.md)
 - [跨项目进展索引](docs/PROGRESS.md)
@@ -117,17 +109,4 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
 
 ```bash
 agent-platform/scripts/tonglingyu-gateway-smoke.sh
-```
-
-## Global Router 常用命令
-
-```bash
-cargo run --manifest-path agent-platform/Cargo.toml -p global-router -- \
-  print-config
-```
-
-```bash
-cargo run --manifest-path agent-platform/Cargo.toml -p global-router -- \
-  serve \
-  --bind 127.0.0.1:8099
 ```

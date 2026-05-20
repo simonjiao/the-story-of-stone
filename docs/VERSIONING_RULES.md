@@ -7,8 +7,8 @@ The initial version is `0.1.0`.
 
 - Use numeric `MAJOR.MINOR.PATCH`, for example `0.1.0`.
 - Do not add `v` prefixes, release suffixes, build metadata, or leading zeroes.
-- Real deployments bump only `PATCH`. Every deploy must increase `PATCH` by
-  exactly `1`.
+- Release version bumps use `PATCH` unless a broader product-version decision
+  is made explicitly.
 
 ## Managed Surfaces
 
@@ -20,8 +20,8 @@ Keep these surfaces synchronized with `VERSION`:
   `requirements.txt` as the dependency source of truth.
 - Containers: `tonglingyu-gateway` Dockerfile `APP_VERSION`, OCI labels, and
   Compose image/build defaults.
-- Scripts and tests: versioned release/QA scripts expose `--version`, and the
-  version-management tests carry the same expected project version.
+- Scripts and tests: versioned QA/local-start scripts expose `--version`, and
+  the version-management tests carry the same expected project version.
 
 ## Commands
 
@@ -39,17 +39,18 @@ uv lock
 cargo metadata --manifest-path agent-platform/Cargo.toml --format-version 1 >/dev/null
 ```
 
-Before every real deploy, use the deploy bump wrapper so `PATCH` increments and
-the Rust/Python lockfiles are refreshed:
+For a source-owned patch bump, run:
 
 ```bash
-deploy/scripts/bump-deploy-version.sh
+uv run --no-sync python scripts/version.py bump patch
+uv lock
+cargo metadata --manifest-path agent-platform/Cargo.toml --format-version 1 >/dev/null
 ```
 
-For a local one-command deploy, use:
+For local compose startup, use:
 
 ```bash
-deploy/scripts/deploy-versioned-stack.sh
+deploy/scripts/start-local-stack.sh
 ```
 
 Run the project QA entrypoint before committing release or version changes:
@@ -67,5 +68,5 @@ Rust toolchain are available.
 - Keep secrets in `.env`; version scripts must not print token, key, or password
   values.
 - `TONGLINGYU_GATEWAY_IMAGE_REF` may still override the local versioned default
-  with a digest-pinned production image. The release record must still show the
-  deploy version that produced that image.
+  with a digest-pinned image. Custom environment release evidence is maintained
+  in `../tonglingyu-gatekeeper/deploy/`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage the project version across Rust, Python, containers, and scripts."""
+"""Manage the project version across Rust, Python, containers, and local compose."""
 
 from __future__ import annotations
 
@@ -21,8 +21,7 @@ CRATES = (
 SCRIPT_FALLBACK_PATHS = (
     "scripts/version.py",
     "scripts/qa.sh",
-    "deploy/scripts/bump-deploy-version.sh",
-    "deploy/scripts/deploy-versioned-stack.sh",
+    "deploy/scripts/start-local-stack.sh",
 )
 TEST_VERSION_PATHS = ("tests/test_version_management.py",)
 

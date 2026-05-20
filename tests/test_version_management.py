@@ -74,8 +74,7 @@ class VersionManagementTest(unittest.TestCase):
         commands = (
             ["uv", "run", "--no-sync", "python", str(VERSION_SCRIPT), "--version"],
             ["bash", str(REPO_DIR / "scripts/qa.sh"), "--version"],
-            ["bash", str(REPO_DIR / "deploy/scripts/bump-deploy-version.sh"), "--version"],
-            ["bash", str(REPO_DIR / "deploy/scripts/deploy-versioned-stack.sh"), "--version"],
+            ["bash", str(REPO_DIR / "deploy/scripts/start-local-stack.sh"), "--version"],
         )
         for command in commands:
             with self.subTest(command=command):
@@ -103,8 +102,7 @@ class VersionManagementTest(unittest.TestCase):
             "deploy/docker-compose.yml",
             "scripts/version.py",
             "scripts/qa.sh",
-            "deploy/scripts/bump-deploy-version.sh",
-            "deploy/scripts/deploy-versioned-stack.sh",
+            "deploy/scripts/start-local-stack.sh",
             "tests/test_version_management.py",
         ]
         for relative in paths:

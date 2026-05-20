@@ -341,7 +341,7 @@ Context Projection Runtime 允许声明的状态只能按证据逐级推进：
 - [x] `cargo test -p tonglingyu-gateway`。
 - [x] `cargo test -p tonglingyu-runtime`。
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`。
-- [x] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Context Projection Runtime
+- [x] `../tonglingyu-gatekeeper/deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Context Projection Runtime
       projection gate。
 - [x] `scripts/qa.sh --quick`。
 
