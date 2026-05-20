@@ -535,7 +535,7 @@ impl HermesRuntimeClient {
         if matches!(external_action_mode, ExternalActionMode::Authorized) {
             return Err(AgentCoreError::coded(
                 ErrorCode::Forbidden,
-                "Hermes Runtime refuses authorized external actions in P1",
+                "Hermes Runtime refuses authorized external actions in read-only runtime mode",
             ));
         }
         Ok(())

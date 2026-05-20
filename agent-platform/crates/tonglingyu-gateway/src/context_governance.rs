@@ -601,9 +601,7 @@ pub(crate) fn create_context_for_request(
         &interaction_context_id,
         &context_pack_id,
         &context_pack_ref,
-        &resolver.resolved_question,
-        &session_summary,
-        &memory_read_set.reads,
+        &profile_views,
     );
     conn.execute(
         "INSERT INTO context_packs (
@@ -1673,6 +1671,8 @@ struct MemoryCandidateCore {
     candidate_id: String,
     candidate_ref: String,
     status: String,
+    source_entry_type: String,
+    context_pack_id: Option<String>,
     scope_type: String,
     scope_ref: String,
     candidate_type: String,
@@ -2576,6 +2576,20 @@ fn promote_memory_candidate(
     Ok(())
 }
 
+fn ensure_candidate_source_read_eligible(candidate: &MemoryCandidateCore) -> Result<()> {
+    if candidate.source_entry_type != "user_message" {
+        return Err(anyhow!(
+            "memory candidate source_entry_type is not eligible for read path"
+        ));
+    }
+    if candidate.context_pack_id.is_none() {
+        return Err(anyhow!(
+            "memory candidate context_pack_id is required for read path"
+        ));
+    }
+    Ok(())
+}
+
 fn promote_memory_candidate_with_options(
     conn: &Connection,
     candidate: &MemoryCandidateCore,
@@ -2587,6 +2601,7 @@ fn promote_memory_candidate_with_options(
 ) -> Result<MemoryCardCore> {
     validate_memory_scope_type(&candidate.scope_type)?;
     validate_memory_promotable_candidate_type(&candidate.scope_type, &candidate.candidate_type)?;
+    ensure_candidate_source_read_eligible(candidate)?;
     if let Some(existing) = conn
         .query_row(
             "SELECT memory_card_id FROM memory_cards WHERE source_candidate_id = ?1",
@@ -2805,10 +2820,13 @@ fn manual_read_enable_policy_decision(
 ) -> Result<MemoryPolicyDecisionRecord> {
     let candidate = load_memory_candidate_core(conn, &card.source_candidate_id)?
         .ok_or_else(|| anyhow!("source memory candidate not found"))?;
+    ensure_candidate_source_read_eligible(&candidate)?;
     let rule_filter = json!({
         "schema_version": "scoped-memory-rule-filter-v1",
         "policy_version": SCOPED_MEMORY_POLICY_VERSION,
         "manual_review": true,
+        "source_entry_type_allowed": candidate.source_entry_type == "user_message",
+        "context_pack_bound": candidate.context_pack_id.is_some(),
         "scope_supported": validate_memory_scope_type(&card.scope_type).is_ok(),
         "suppress": false,
     });
@@ -2885,7 +2903,8 @@ fn load_memory_candidate_core(
     candidate_id: &str,
 ) -> Result<Option<MemoryCandidateCore>> {
     conn.query_row(
-        "SELECT candidate_id, candidate_ref, status, scope_type, scope_ref,
+        "SELECT candidate_id, candidate_ref, status, source_entry_type, context_pack_id,
+                scope_type, scope_ref,
                 candidate_type, summary, summary_sha256, sensitivity, risk_flags_json,
                 confidence
          FROM memory_candidates WHERE candidate_id = ?1",
@@ -2895,14 +2914,16 @@ fn load_memory_candidate_core(
                 candidate_id: row.get(0)?,
                 candidate_ref: row.get(1)?,
                 status: row.get(2)?,
-                scope_type: row.get(3)?,
-                scope_ref: row.get(4)?,
-                candidate_type: row.get(5)?,
-                summary: row.get(6)?,
-                summary_sha256: row.get(7)?,
-                sensitivity: row.get(8)?,
-                risk_flags: parse_json_column(row.get::<_, String>(9)?),
-                confidence: row.get(10)?,
+                source_entry_type: row.get(3)?,
+                context_pack_id: row.get(4)?,
+                scope_type: row.get(5)?,
+                scope_ref: row.get(6)?,
+                candidate_type: row.get(7)?,
+                summary: row.get(8)?,
+                summary_sha256: row.get(9)?,
+                sensitivity: row.get(10)?,
+                risk_flags: parse_json_column(row.get::<_, String>(11)?),
+                confidence: row.get(12)?,
             })
         },
     )
@@ -4069,6 +4090,8 @@ fn load_authorized_memory_reads(
          WHERE card.status = 'active'
            AND card.read_enabled <> 0
            AND (card.expires_at IS NULL OR card.expires_at > ?2)
+           AND candidate.source_entry_type = 'user_message'
+           AND candidate.context_pack_id IS NOT NULL
          ORDER BY decision.confidence DESC, card.promoted_at DESC, card.memory_card_id DESC",
     )?;
     let rows = stmt.query_map(params![SCOPED_MEMORY_POLICY_VERSION, &now], |row| {
@@ -4406,12 +4429,11 @@ fn build_context_projections(
     interaction_context_id: &str,
     context_pack_id: &str,
     context_pack_ref: &str,
-    resolved_question: &str,
-    session_summary: &str,
-    memory_reads: &[ScopedMemoryRead],
+    profile_views: &[ContextPackProfileView],
 ) -> Vec<ContextProjection> {
-    profile_views(resolved_question, session_summary, memory_reads)
-        .into_iter()
+    profile_views
+        .iter()
+        .cloned()
         .map(|view| {
             build_context_projection(
                 trace_id,
@@ -5271,6 +5293,16 @@ mod tests {
             main_projection.projection_payload["memory_read_ref_digest"],
             next_context.context_pack["memory_read_ref_digest"]
         );
+        let main_profile_view = next_context.context_pack["profile_views"]
+            .as_array()
+            .expect("profile views")
+            .iter()
+            .find(|view| view["profile_name"] == json!("honglou-main"))
+            .expect("main profile view");
+        assert_eq!(
+            main_profile_view["memory_read_ref_digest"],
+            main_projection.projection_payload["memory_read_ref_digest"]
+        );
         assert_eq!(
             main_projection.projection_payload["memory_summaries"]
                 .as_array()
@@ -5427,6 +5459,61 @@ mod tests {
                 .expect("exclusion flags")
                 .contains(&json!("source_entry_type_not_allowed"))
         );
+
+        let mut manual_bypass = test_memory_draft(
+            &conn,
+            TestMemoryDraftInput {
+                trace_id: "trace-memory-non-user-source",
+                context: &context,
+                scope_type: "user_private",
+                scope_ref: &user_private_scope_ref("memory-non-user-source"),
+                candidate_type: "language_preference",
+                summary: "non user source manual promote should fail",
+                confidence: 0.99,
+            },
+        );
+        manual_bypass.candidate_id = "memory-candidate-non-user-manual-bypass".to_string();
+        manual_bypass.candidate_ref =
+            "memory-candidate://tonglingyu/trace-memory-non-user-source/manual-bypass".to_string();
+        manual_bypass.source_entry_type = "final_response".to_string();
+        assert!(
+            insert_memory_candidate(&conn, &manual_bypass, "test-admin")
+                .expect("insert manual bypass candidate")
+        );
+        transition_memory_candidate(
+            &conn,
+            MemoryCandidateTransitionInput {
+                candidate_id: &manual_bypass.candidate_id,
+                action: "approve",
+                actor: "test-admin",
+                reason: Some("manual approve should not bypass source boundary"),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect("manual approve non-user source");
+        let err = transition_memory_candidate(
+            &conn,
+            MemoryCandidateTransitionInput {
+                candidate_id: &manual_bypass.candidate_id,
+                action: "promote",
+                actor: "test-admin",
+                reason: Some("manual promote should fail"),
+                candidate_type: None,
+                sensitivity: None,
+                merge_target_candidate_id: None,
+                expires_at: None,
+            },
+        )
+        .expect_err("manual promote cannot bypass source boundary");
+        assert!(
+            err.to_string()
+                .contains("source_entry_type is not eligible"),
+            "{err}"
+        );
+        assert_eq!(table_count(&conn, "memory_cards").expect("card count"), 0);
     }
 
     #[test]

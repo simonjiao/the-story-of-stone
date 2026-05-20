@@ -1,25 +1,25 @@
-# 29 Phase 3 Memory Candidate 实现 Checklist
+# 29 Memory Candidate Workflow 实现 Checklist
 
 ## 状态口径
 
-目标：把 Phase 3 做到目标环境可验证，而不是只新增一个候选表。Phase 3 要实现
+目标：把 Memory Candidate Workflow 做到目标环境可验证，而不是只新增一个候选表。Memory Candidate Workflow 要实现
 Memory Collector、`memory_candidate` 队列、完整审核状态机、admin-only CLI/API、
 LLM 辅助抽取边界和 hhost gate。
 
-Phase 3 不能声明 scoped memory production-ready。即使状态机已经完整实现，长期
+Memory Candidate Workflow 不能声明 scoped memory production-ready。即使状态机已经完整实现，长期
 memory 也不得进入正式回答、`context_pack`、Runtime projection、evidence package
-或 reviewer 裁决。Phase 4 才允许打开 active memory 读取路径和自动 promotion。
+或 reviewer 裁决。Scoped Memory Production 才允许打开 active memory 读取路径和自动 promotion。
 
 ## 已冻结决策
 
-1. **状态机完整实现**：Phase 3 实现 `approve`、`promote`、`reject`、
+1. **状态机完整实现**：Memory Candidate Workflow 实现 `approve`、`promote`、`reject`、
    `reclassify`、`expire`、`revoke`、`merge` 及其 audit。`promote` 可以写出
-   active `memory_card` 状态，但 Phase 3 必须保持读取面关闭，不能让 active
+   active `memory_card` 状态，但 Memory Candidate Workflow 必须保持读取面关闭，不能让 active
    memory 被回答链路消费。
-2. **自动 promotion 放到 Phase 4**：自动 promotion 会让系统在无人确认时产生
+2. **自动 promotion 放到 Scoped Memory Production**：自动 promotion 会让系统在无人确认时产生
    active memory，并且必须同时证明 ACL、retention、revocation、backup/restore、
-   capacity 和 live gate 没有缺口。Phase 3 的核心风险是候选抽取和状态机正确性；
-   把自动 active 推迟到 Phase 4，可以避免用候选队列的通过结论提前声明 scoped
+   capacity 和 live gate 没有缺口。Memory Candidate Workflow 的核心风险是候选抽取和状态机正确性；
+   把自动 active 推迟到 Scoped Memory Production，可以避免用候选队列的通过结论提前声明 scoped
    memory 可用。
 3. **触发方式三者组合**：后台 worker 是主路径；定时任务和 admin 手动触发是辅助
    路径。三者必须共享同一 lease、水位、幂等键、重试和 audit，不允许各自实现一套
@@ -27,11 +27,11 @@ memory 也不得进入正式回答、`context_pack`、Runtime projection、evide
 4. **允许 LLM 参与**：LLM 只能做结构化候选抽取辅助，不能决定事实、权限、scope
    ACL、promotion、reviewer 裁决或 evidence package 内容。LLM 输入必须先经过
    redaction，输出必须是受 schema 校验的 JSON。
-5. **production gate 采用严格建议口径**：Phase 3 gate 必须证明候选可追溯、禁生成项
+5. **production gate 采用严格建议口径**：Memory Candidate Workflow gate 必须证明候选可追溯、禁生成项
    被过滤并审计、scope 不串线、状态机不可绕过、LLM 输出不可越权、public surface
    不泄露、active memory 不被读取，并且 hhost release gate 不恶化。
 
-## 为什么自动 promotion 放到 Phase 4
+## 为什么自动 promotion 放到 Scoped Memory Production
 
 自动 promotion 的问题不在于“能不能写一行 active memory”，而在于一旦系统自动把候选
 变成 active memory，后续就必须承担完整生产语义：
@@ -43,14 +43,14 @@ memory 也不得进入正式回答、`context_pack`、Runtime projection、evide
 4. 容量、错误率和长窗口 post-release monitor 必须重新证明；
 5. 低风险分类一旦错判，就会从“待审核噪声”升级为“生产记忆污染”。
 
-因此 Phase 3 只证明“能安全产生、审核、流转和审计候选/卡片状态”，不证明“memory 可被
-回答读取”。Phase 4 再打开 ContextPackBuilder 的 active memory read path，并把自动
+因此 Memory Candidate Workflow 只证明“能安全产生、审核、流转和审计候选/卡片状态”，不证明“memory 可被
+回答读取”。Scoped Memory Production 再打开 ContextPackBuilder 的 active memory read path，并把自动
 promotion 纳入 scoped memory production gate。
 
 ## 进入条件
 
-- [x] Phase 1 Scoped Context 已 production-ready。
-- [x] Phase 2 Context-aware Runtime 已 production-ready。
+- [x] Scoped Context Request Path 已 production-ready。
+- [x] Context Projection Runtime 已 production-ready。
 - [x] `session_journal`、`context_pack`、`context_projection` 和 admin trace 已进入
       生产路径。
 - [x] public response、SSE 和 metrics 不暴露 context/journal/memory 内部字段。
@@ -58,7 +58,7 @@ promotion 纳入 scoped memory production gate。
 
 ## 非目标
 
-以下不是 Phase 3 目标：
+以下不是 Memory Candidate Workflow 目标：
 
 1. 不声明 scoped memory production-ready；
 2. 不让 active memory 进入 `context_pack`；
@@ -107,7 +107,7 @@ promotion 纳入 scoped memory production gate。
 
 ### `memory_card`
 
-Phase 3 可以实现 `memory_card` 状态机承载表，但读取面必须关闭。
+Memory Candidate Workflow 可以实现 `memory_card` 状态机承载表，但读取面必须关闭。
 
 最低字段：
 
@@ -127,7 +127,7 @@ Phase 3 可以实现 `memory_card` 状态机承载表，但读取面必须关闭
 14. `revoked_by`；
 15. `revoked_at`；
 16. `expires_at`；
-17. `read_enabled`，Phase 3 固定为 `false`；
+17. `read_enabled`，Memory Candidate Workflow 固定为 `false`；
 18. `audit_ref`.
 
 ### `memory_transition_audit`
@@ -152,7 +152,7 @@ Phase 3 可以实现 `memory_card` 状态机承载表，但读取面必须关闭
 
 ## 状态机
 
-Phase 3 状态机分为三层：candidate lifecycle、card lifecycle 和 read enablement
+Memory Candidate Workflow 状态机分为三层：candidate lifecycle、card lifecycle 和 read enablement
 lifecycle。实现时不得把这三层混成一个 `status` 字段。
 
 允许 candidate transition：
@@ -170,12 +170,12 @@ lifecycle。实现时不得把这三层混成一个 `status` 字段。
 2. `active -> revoked`；
 3. `active -> expired`。
 
-Phase 3 read enablement：
+Memory Candidate Workflow read enablement：
 
 1. 所有 `memory_card.read_enabled` 必须为 `false`；
 2. ContextPackBuilder、Runtime projection、evidence package 和 final answer 都不得读取
    `memory_card`；
-3. 任何把 `read_enabled` 打开的操作都属于 Phase 4，Phase 3 必须 fail-closed。
+3. 任何把 `read_enabled` 打开的操作都属于 Scoped Memory Production，Memory Candidate Workflow 必须 fail-closed。
 
 禁止 transition：
 
@@ -185,7 +185,7 @@ Phase 3 read enablement：
 4. 未写 reason 的人工状态变化；
 5. 缺 operator identity 的远程操作；
 6. 通过 SQL 直接改状态；
-7. Phase 3 中任何把 `read_enabled` 改为 `true` 的操作。
+7. Memory Candidate Workflow 中任何把 `read_enabled` 改为 `true` 的操作。
 
 ## Collector 触发
 
@@ -231,16 +231,16 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 
 ## Work Packages
 
-### P3A Schema 与迁移
+### 工作包 A：Schema 与迁移
 
 - [x] 新增 `memory_candidate`。
-- [x] 新增 `memory_card`，Phase 3 `read_enabled=false`。
+- [x] 新增 `memory_card`，Memory Candidate Workflow `read_enabled=false`。
 - [x] 新增 `memory_transition_audit`。
 - [x] 新增 collector run / lease / watermark 表。
 - [x] 迁移为 additive，不迁移旧 `gateway_sessions` / `gateway_messages`。
 - [x] schema preflight 和 backup/restore gate 覆盖新增表。
 
-### P3B Collector Core
+### 工作包 B：Collector Core
 
 - [x] 只扫描 `session_journal` 中已写入 trace/context/pack 的条目；admin manual
       trigger 支持指定 trace 回放，background worker 走同一 collector core。
@@ -250,7 +250,7 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] 生成 candidate 时绑定 journal、trace、context、pack 和 source entry type。
 - [x] 支持 dry-run、idempotency、lease、trigger type、run summary 和 journal status。
 
-### P3C LLM Extractor
+### 工作包 C：LLM Extractor
 
 - [x] 规则过滤先于任何 LLM participation；命中 hard deny 时 `llm_called=false` 并写
       audit。
@@ -261,7 +261,7 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] LLM 越权字段、非法 scope 或 exclusion flag 命中时 fail-closed。
 - [x] 单测覆盖 LLM 注入、低置信度、非法 JSON 和越权 promotion。
 
-### P3D 状态机与 CLI/API
+### 工作包 D：状态机与 CLI/API
 
 - [x] admin-only list/read candidate。
 - [x] admin-only `approve`。
@@ -274,7 +274,7 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] 全部操作强制 reason、operator identity 和 audit。
 - [x] CLI 与 API 使用同一 service，不允许两套状态机。
 
-### P3E 安全与 Public Surface
+### 工作包 E：安全与 Public Surface
 
 - [x] 普通 chat request 不能指定 memory/candidate/control 字段。
 - [x] public response 不返回 candidate/card id。
@@ -283,17 +283,17 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] admin API 只允许通过 admin key 访问；公网 Open WebUI 普通 path 不暴露审核入口。
 - [x] Cloudflare/Open WebUI public path 不暴露 memory 审核入口。
 
-### P3F Scope 隔离
+### 工作包 F：Scope 隔离
 
 - [x] `user_private` 不跨 user，scope ref 使用 `user_private:sha256:*`。
-- [x] `profile_common` 不跨 profile；Phase 3 仅允许候选状态流转，不打开读取面。
-- [x] `knowledge_space` 不跨知识域；Phase 3 仅允许候选状态流转，不打开读取面。
-- [x] `research_topic` 不跨 topic；Phase 3 仅允许候选状态流转，不打开读取面。
-- [x] `source_collection` 不跨 source collection；Phase 3 仅允许候选状态流转，不打开读取面。
+- [x] `profile_common` 不跨 profile；Memory Candidate Workflow 仅允许候选状态流转，不打开读取面。
+- [x] `knowledge_space` 不跨知识域；Memory Candidate Workflow 仅允许候选状态流转，不打开读取面。
+- [x] `research_topic` 不跨 topic；Memory Candidate Workflow 仅允许候选状态流转，不打开读取面。
+- [x] `source_collection` 不跨 source collection；Memory Candidate Workflow 仅允许候选状态流转，不打开读取面。
 - [x] 未知 scope fail-closed。
 - [x] `project/system/work_item/group` 继续 unsupported / fail-closed。
 
-### P3G Gate 与发布
+### 工作包 G：Gate 与发布
 
 - [x] 本地 `cargo fmt --all --check`。
 - [x] 本地 `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
@@ -303,15 +303,15 @@ LLM participation 是允许项，但必须受以下 contract 约束：
 - [x] admin CLI/API contract smoke。
 - [x] scoped context live gate 证明 active memory 不参与回答。
 - [x] hhost full remote release automation 通过。
-- [x] release readiness 记录 Phase 3 gate，并且 p95、错误率、post-release monitor 不恶化。
+- [x] release readiness 记录 Memory Candidate Workflow gate，并且 p95、错误率、post-release monitor 不恶化。
 
-## Phase 3 实现证据（2026-05-19）
+## Memory Candidate Workflow 实现证据（2026-05-19）
 
-Phase 3 已实现并部署为 `0.1.11`，覆盖 Memory Collector、`memory_candidate`、
+Memory Candidate Workflow 已实现并部署为 `0.1.11`，覆盖 Memory Collector、`memory_candidate`、
 `memory_card`、三层状态机、admin-only CLI/API、collector 后台 worker / scheduled /
 manual 三种触发路径，以及 LLM participation 的 fail-closed contract。该结论只覆盖
 memory candidate/card 工作流；active memory 读取路径、自动 promotion 和完整 scoped
-memory production gate 仍属于 Phase 4。
+memory production gate 仍属于 Scoped Memory Production。
 
 目标环境证据：
 
@@ -370,7 +370,7 @@ Collector 运行边界：
 | duplicate idempotency key | 不重复生成 candidate |
 | 状态跳转非法 | fail-closed |
 | 人工操作缺 reason/operator | fail-closed |
-| Phase 3 `read_enabled=true` | fail-closed |
+| Memory Candidate Workflow `read_enabled=true` | fail-closed |
 | public response/SSE 泄露 candidate/card id | gate failed |
 | metrics 输出高基数 candidate/journal/trace id | gate failed |
 
@@ -385,11 +385,11 @@ Collector 运行边界：
 - [x] LLM extractor 只能生成 pending candidate，不能越权决定 promotion、ACL 或 reviewer。
 - [x] active `memory_card` 即使存在，也不会进入 `context_pack`、Runtime projection、
       evidence package 或最终回答。
-- [x] hhost full remote release automation 通过，且 release gate 记录 Phase 3 证据。
+- [x] hhost full remote release automation 通过，且 release gate 记录 Memory Candidate Workflow 证据。
 
 ## 待确认项
 
 无。
 
-上述 5 项决策已冻结：完整状态机、自动 promotion 放 Phase 4、三种触发组合、允许 LLM
+上述 5 项决策已冻结：完整状态机、自动 promotion 放 Scoped Memory Production、三种触发组合、允许 LLM
 辅助抽取、采用严格 production gate。

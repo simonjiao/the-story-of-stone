@@ -31,26 +31,26 @@
   `remote-release-20260518T181347Z-50849` 为 `status=ok`、
   `production_ready_proven=true`，release readiness 为 `status=passed`、
   `production_release_ready=true`，saved validator 为 `status=ok`、`errors=[]`。
-  该结论覆盖当前 RQA release gate 和 Phase 1 scoped context，不覆盖 scoped memory
+  该结论覆盖当前 RQA release gate 和 Scoped Context Request Path，不覆盖 scoped memory
   或 Memory Collector。
-- 2026-05-18 Phase 1 Scoped Context 已实现并部署：Gateway 请求路径写入
+- 2026-05-18 Scoped Context Request Path 已实现并部署：Gateway 请求路径写入
   `user_session`、`interaction_context`、`context_pack` 和 `session_journal`，
   支持 `resolved_question`、summary-only admin trace 回放和 fail-closed 追问解析。
   旧 `gateway_sessions` / `gateway_messages` 未迁移为新 memory 来源。
 - 2026-05-18 `26_Scoped_Context与受控Memory设计.md` 已重构为稳定实现规格稿：
-  固定解释顺序、数据对象、运行流程、Phase 1 工作包、禁止项、Phase 2-4 边界和
-  production gate。当前 Phase 1 scoped context 已闭合；Phase 2 仍必须继续遵守
+  固定解释顺序、数据对象、运行流程、Scoped Context Request Path 工作包、禁止项、后续正式工作流边界和
+  production gate。当前 Scoped Context Request Path 已闭合；Context Projection Runtime 仍必须继续遵守
   active memory、Memory Collector、审核、ACL 和跨 scope memory 的边界，不能把
-  Phase 1 结论扩展成 scoped memory production-ready。
-- 2026-05-19 Phase 2 已细化为独立实现 checklist：
-  `28_Phase2_Context_Aware_Runtime_Implementation_Checklist.md`。Phase 2 只做
+  Scoped Context Request Path 结论扩展成 scoped memory production-ready。
+- 2026-05-19 Context Projection Runtime 已细化为独立实现 checklist：
+  `28_Context_Projection_Runtime_Checklist.md`。Context Projection Runtime 只做
   Context-aware Runtime，包括请求级 `context_pack`、consumer 级
   `context_projection`、projection ref/digest contract、consumer projection 隔离、
   tool policy digest、Runtime audit、replay 和 hhost production gate；不做 Memory
   Collector、`memory_candidate`、active `memory_card`、审核页面或非 Hermes
-  external agent 接入。目标是 Phase 2 production-ready，不是本地代码切片完成；
+  external agent 接入。目标是 Context Projection Runtime production-ready，不是本地代码切片完成；
   当前已完成实现和 hhost production gate。
-- 2026-05-19 Phase 2 Context-aware Runtime 已部署为 `0.1.7` 并通过 `hhost`
+- 2026-05-19 Context Projection Runtime 已部署为 `0.1.7` 并通过 `hhost`
   production-ready gate：`tonglingyu-gateway` 运行 image id 为
   `sha256:93df2e2555669a77097590eda1bb4b63e6cc709b58604f741fbf04ce1c6845ab`。
   live gate artifact 为
@@ -61,12 +61,12 @@
   `status=ok`、`production_ready_proven=true`；release readiness 为
   `status=passed`、`production_release_ready=true`、`required_failures=[]`、
   `release_blockers=[]`，saved validator 为 `status=ok`、`errors=[]`，open P0
-  retrieval failures / governance tasks 均为 0。该结论只覆盖 Phase 2
-  Context-aware Runtime，仍不覆盖长期 memory、Memory Collector、审核页面、
+  retrieval failures / governance tasks 均为 0。该结论只覆盖 Context Projection Runtime，
+  仍不覆盖长期 memory、Memory Collector、审核页面、
   Context Governance 独立服务或非 Hermes external agent 接入。
-- 2026-05-19 Phase 3 Memory Candidate workflow 已实现并部署为 `0.1.11`：
-  `29_Phase3_Memory_Candidate_Implementation_Checklist.md` 已记录实现证据。
-  Phase 3 覆盖 Memory Collector、`memory_candidate`、`memory_card`、完整状态机、
+- 2026-05-19 Memory Candidate Workflow 已实现并部署为 `0.1.11`：
+  `29_Memory_Candidate_Workflow_Checklist.md` 已记录实现证据。
+  Memory Candidate Workflow 覆盖 Memory Collector、`memory_candidate`、`memory_card`、完整状态机、
   admin-only CLI/API、background worker / scheduled / admin manual 三种触发方式和
   LLM participation fail-closed contract；状态机包含
   `approve/promote/reject/reclassify/expire/revoke/merge`。`hhost` 运行的
@@ -83,31 +83,31 @@
   `metrics_read_p95_ms=162`，post-release monitor 60 分钟窗口
   `sample_count=13`、`failed_sample_count=0`。background worker 已在 hhost
   自动运行，最终日志为 `processed_count=60`、`candidate_count=0`、
-  `denied_count=0`、`suppressed_count=60`。该结论只覆盖 Phase 3
-  candidate/card 工作流；自动 promotion 和 active memory 读取路径仍放在 Phase 4，
+  `denied_count=0`、`suppressed_count=60`。该结论只覆盖 Memory Candidate Workflow
+  candidate/card 工作流；自动 promotion 和 active memory 读取路径仍放在 Scoped Memory Production，
   不声明 scoped memory production-ready。
-- 2026-05-19 Phase 3 设计反思后已把 memory lifecycle 重构为三层：candidate
+- 2026-05-19 Memory Candidate Workflow 设计反思后已把 memory lifecycle 重构为三层：candidate
   lifecycle、card lifecycle 和 read enablement lifecycle。`reclassify` 是
   `pending -> pending` 的 action，不再作为独立状态；人工 `promote` 是
-  `approved candidate -> active memory_card` 的跨对象 transition，但 Phase 3 固定
-  `read_enabled=false`。Phase 4 不再重新定义候选/卡片状态机，只负责打开 ACL 约束下
+  `approved candidate -> active memory_card` 的跨对象 transition，但 Memory Candidate Workflow 固定
+  `read_enabled=false`。Scoped Memory Production 不再重新定义候选/卡片状态机，只负责打开 ACL 约束下
   的读取面、自动 promotion 和完整 scoped memory production gate。
-- 2026-05-19 Phase 4 已按最新讨论重构为 Scoped Memory Production 设计，不再把目标
-  降为最小 user_private 闭环或 collector smoke。`30_Phase4_Scoped_Memory_Production_Checklist.md`
-  已冻结 Phase 4 口径：自动策略是一等生产主路径，人工审核流程保留但可被策略跳过；
+- 2026-05-19 Scoped Memory Production 设计已按最新讨论重构，不再把目标
+  降为最小 user_private 闭环或 collector smoke。`30_Scoped_Memory_Production_Checklist.md`
+  已冻结 Scoped Memory Production 口径：自动策略是一等生产主路径，人工审核流程保留但可被策略跳过；
   LLM 只做 semantic filter，最终 auto approve / promote / read enablement 由
   versioned policy engine 决定；主链路必须覆盖
   `session_journal -> Memory Collector -> memory_candidate -> policy decision ->
   memory_card -> read enablement -> context_pack.memory_read_refs -> context_projection ->
   Runtime answer`。该更新只是设计冻结，不声明 scoped memory production-ready。
-- 2026-05-19 Phase 4 policy contract 已冻结为 `scoped-memory-policy-v1`：默认
+- 2026-05-19 Scoped Memory Production policy contract 已冻结为 `scoped-memory-policy-v1`：默认
   `policy_mode=auto_policy`，保留 `shadow_only` 和 `manual_required` 降级；
   scope automation matrix、confidence threshold、TTL、candidate type allowlist、
   LLM schema `scoped-memory-llm-filter-v1`、LLM overreach fail-closed 字段和
   context read budget 均已写入 checklist。实现不得临场硬编码阈值或以补丁绕过
   policy contract；任何生产策略调整都必须形成新 policy version 并重新通过 release
   gate。
-- 2026-05-19 Phase 4 本地实现已完成并通过本地 gates：Gateway 已新增
+- 2026-05-19 Scoped Memory Production 本地实现已完成并通过本地 gates：Gateway 已新增
   `memory_policy_decisions`、自动 policy decision、自动 `approve/promote/enable_read`、
   active/read-enabled memory 读取、`context_pack.memory_read_refs` 持久化、
   projection 级 memory 可见性隔离、public response/SSE/metrics 内部字段过滤、
@@ -116,7 +116,7 @@
   memory read path 验证。已通过 `cargo test --workspace`、`cargo clippy --workspace
   --all-targets -- -D warnings`、本地 gateway smoke、RQA user lifecycle gate、
   RQA backup/restore drill 和 release readiness contract。
-- 2026-05-19 Phase 4 Scoped Memory Production 已部署为 `0.1.12` 并通过 hhost
+- 2026-05-19 Scoped Memory Production 已部署为 `0.1.12` 并通过 hhost
   production-ready gate：`tonglingyu-gateway` 运行 image id 为
   `sha256:1e1e53ef3d079166a8c3eb1fd2df088a9535d76b7c3efd495aa69d9ef4e6a17f`。
   live gate artifact 为
@@ -133,12 +133,16 @@
   required gates 全部通过。容量 gate 为 `rqa_write_p95_ms=4618`、
   `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、`release_gate_ms=26759`；
   post-release monitor 60 分钟窗口 `sample_count=13`、`failed_sample_count=0`。
-  因此 Phase 4 scoped memory production-ready gate 已在当前 run 中闭合。
+  因此 scoped memory production-ready gate 已在当前 run 中闭合。
 - 2026-05-20 对 Scoped Context / Scoped Memory 设计与实现做一致性复查，发现两个
-  未影响已部署路径但不应保留的 contract 漏项并已修复：非 `user_message`
+  未影响已部署路径但不应保留的 contract 漏项，并消除一个 patch-style 双路径构造点：
+  非 `user_message`
   candidate 现在会在 policy engine 内 fail-closed 为 `suppress -> rejected`，不能
-  因 admin/API 插入路径绕过自动策略条件；`memory_read_ref_digest` 现在显式写入
-  `context_pack`、projection payload、admin trace summary 和 smoke/live gate。已复跑
+  因 admin/API 插入路径绕过自动策略条件，manual promote 和 read path 也同样要求
+  `user_message` 与 `context_pack_id`；`memory_read_ref_digest` 现在显式写入
+  `context_pack`、projection payload、admin trace summary 和 smoke/live gate。同时
+  已把 `context_pack.profile_views` 与 `context_projection` 改为同源构造，避免
+  patch-style 双路径漂移。已复跑
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 和 `scripts/qa.sh --quick`。
 

@@ -1,17 +1,17 @@
-# 27 Phase 1 Scoped Context 实现 Checklist
+# 27 Scoped Context Request Path 实现 Checklist
 
 ## 状态口径
 
-目标：实现 `26_Scoped_Context与受控Memory设计.md` 定义的 Phase 1 Scoped Context
+目标：实现 `26_Scoped_Context与受控Memory设计.md` 定义的 Scoped Context Request Path
 最小闭环。
 
-当前状态：Phase 1 Scoped Context 最小闭环已实现、部署到 `hhost`，并通过当次完整
-remote release automation。该结论只覆盖 Phase 1 scoped context，不覆盖 scoped
+当前状态：Scoped Context Request Path 最小闭环已实现、部署到 `hhost`，并通过当次完整
+remote release automation。该结论只覆盖 Scoped Context Request Path，不覆盖 scoped
 memory。
 
 已可声明：
 
-1. 当前 `hhost` 版本的 Phase 1 scoped context production-ready；
+1. 当前 `hhost` 版本的 Scoped Context Request Path production-ready；
 2. 当前 `hhost` 版本的 live release gate 已通过。
 
 仍禁止提前声明：
@@ -48,7 +48,7 @@ memory。
 - [x] 不让 memory、session summary 或用户偏好进入 evidence package
 - [x] 不暴露公网 admin API、memory 审核入口或 journal 原文查看入口
 
-## Phase 1 退出条件
+## Scoped Context Request Path 退出条件
 
 - [x] 多轮追问可以产生 `resolved_question` 或明确 fail-closed
 - [x] 超过 `max_messages` 时生成 session summary，不只保留最后一问
@@ -84,7 +84,7 @@ memory。
 ## 反思记录
 
 - 实现前反思：当前代码仍以 `gateway_sessions` / `gateway_messages` 表达会话与消息。
-  Phase 1 不能在旧表上加字段伪装 scoped context，必须新增 Context Governance 模块和
+  Scoped Context Request Path 不能在旧表上加字段伪装 scoped context，必须新增 Context Governance 模块和
   schema，并让新请求路径写入 `user_session`、`interaction_context`、`context_pack`
   和 `session_journal`。
 - 检查点反思：本次实现已把新请求路径切到 scoped context schema，旧
@@ -94,5 +94,5 @@ memory。
 - hhost 反思：未用“单独补 browser evidence 后重算 readiness”替代 production
   验证，而是重新跑完整 remote release automation，保留 capacity、security、
   60 分钟 post-release、readiness 和 saved validator 的同一 run 证据。当前可以声明
-  Phase 1 scoped context production-ready，但 scoped memory、Memory Collector、
+  Scoped Context Request Path production-ready，但 scoped memory、Memory Collector、
   memory candidate 和审核入口仍未实现，不能进入 scoped memory production-ready 结论。

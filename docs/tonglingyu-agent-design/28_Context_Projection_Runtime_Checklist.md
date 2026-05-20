@@ -1,29 +1,29 @@
-# 28 Phase 2 Context-aware Runtime 实现 Checklist
+# 28 Context Projection Runtime 实现 Checklist
 
 ## 状态口径
 
-目标：把 Phase 2 做到目标环境 production-ready，而不是只完成本地代码切片或文档
-闭环。具体目标是把 Phase 1 生成的 scoped context 真正接入 Runtime 执行链，并把
+目标：把 Context Projection Runtime 做到目标环境 production-ready，而不是只完成本地代码切片或文档
+闭环。具体目标是把 Scoped Context Request Path 生成的 scoped context 真正接入 Runtime 执行链，并把
 Runtime 可见上下文从请求级 `context_pack` 收敛为面向 consumer 的
 `context_projection`，最终通过本地验证、strict Gateway gate、scoped context live
 gate 和 `hhost` full remote release automation。
 
-当前状态：Phase 2 已实现并通过目标环境 production gate。`hhost` 当前部署版本为
+当前状态：Context Projection Runtime 已实现并通过目标环境 production gate。`hhost` 当前部署版本为
 `0.1.7`，Gateway 运行 image id 为
 `sha256:93df2e2555669a77097590eda1bb4b63e6cc709b58604f741fbf04ce1c6845ab`；
 live gate artifact 为
 `data/tonglingyu/remote-live-gates/remote-live-20260519T013236Z-78446/remote-live-gates.json`，
 full remote release automation artifact 为
 `data/tonglingyu/remote-release-automation/remote-release-20260519T013318Z-78823/remote-release-automation.json`。
-该结论只覆盖 Phase 2 Context-aware Runtime，不覆盖长期 memory、Memory Collector、
+该结论只覆盖 Context Projection Runtime，不覆盖长期 memory、Memory Collector、
 审核页面或非 Hermes external agent 接入。
 
-Phase 2 只覆盖 Context-aware Runtime。它不实现长期 memory、Memory Collector、
+Context Projection Runtime 只覆盖 Context-aware Runtime。它不实现长期 memory、Memory Collector、
 memory 审核页面或 Context Governance 独立服务拆分。
 
 ## 防过早声明规则
 
-Phase 2 允许声明的状态只能按证据逐级推进：
+Context Projection Runtime 允许声明的状态只能按证据逐级推进：
 
 1. 设计已对齐：只表示文档、contract、验收和边界一致；
 2. 本地实现已完成：只表示代码和本地测试通过；
@@ -31,11 +31,11 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 4. production-ready：必须同时满足本地验证、strict Gateway gate、scoped context
    live gate、full remote release automation、saved validator 和 release readiness。
 
-以下情况一律不能声明 Phase 2 production-ready：
+以下情况一律不能声明 Context Projection Runtime production-ready：
 
 1. 只完成文档或 checklist；
 2. 只完成本地单元测试、smoke 或 clippy；
-3. 只证明 Phase 1 scoped context production-ready；
+3. 只证明 Scoped Context Request Path production-ready；
 4. 只新增 `context_projection` schema，但 Runtime 仍能读取完整 `context_pack`；
 5. 只预留 `external_agent` schema，但没有独立实现和 gate；
 6. hhost gate 未覆盖 consumer projection 隔离、fail-closed、replay 和 public
@@ -44,7 +44,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ## 进入条件
 
-- [x] Phase 1 Scoped Context 已 production-ready。
+- [x] Scoped Context Request Path 已 production-ready。
 - [x] `hhost` 当次完整 remote release automation 已通过：
       `remote-release-20260518T181347Z-50849`。
 - [x] `user_session`、`interaction_context`、`context_pack`、`session_journal`
@@ -54,7 +54,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ## 非目标
 
-以下不是待办项，而是 Phase 2 实现时必须持续满足的禁止边界：
+以下不是待办项，而是 Context Projection Runtime 实现时必须持续满足的禁止边界：
 
 1. 不实现 Memory Collector；
 2. 不实现 `memory_candidate` 队列；
@@ -66,7 +66,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
    `context_pack`；
 8. 不让用户通过请求字段指定 `context_pack_ref`、`context_projection_ref`、
    consumer、profile、tool policy、Runtime Adapter 或 reviewer 状态；
-9. 不在 Phase 2 宣称支持非 Hermes external agent。`external_agent` 只作为保留
+9. 不在 Context Projection Runtime 宣称支持非 Hermes external agent。`external_agent` 只作为保留
    consumer 类型，默认 unsupported / fail-closed。
 
 ## 核心确认
@@ -84,7 +84,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
    schema version、projection digest、tool policy digest 和 output contract
    digest。
 
-4. Phase 2 只实现当前通灵玉 Runtime consumer。
+4. Context Projection Runtime 只实现当前通灵玉 Runtime consumer。
    当前允许的 `consumer_type` 是 `runtime_profile`，当前允许的
    `runtime_adapter` 是现有 Hermes/Tonglingyu Runtime Adapter，当前允许的
    `consumer_name` 是 `honglou-main`、`honglou-text`、`honglou-commentary` 和
@@ -111,7 +111,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
    replay 不能从当前 journal 重新推导新的 pack/projection 后冒充历史执行。
 
 10. hhost live gate 必须重新跑。
-    Phase 1 的 production run 证明进入条件，不证明 Phase 2 已完成。
+    Scoped Context Request Path 的 production run 证明进入条件，不证明 Context Projection Runtime 已完成。
 
 ## Runtime Context Contract
 
@@ -140,7 +140,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
    Adapter 支持；
 5. pack digest 和 projection digest 必须匹配持久化 snapshot；
 6. `consumer_type`、`consumer_name` 和 `runtime_adapter` 必须等于 projection 绑定值；
-7. 当前 Phase 2 只接受 `consumer_type=runtime_profile`；
+7. 当前 Context Projection Runtime 只接受 `consumer_type=runtime_profile`；
 8. `tool_policy_digest` 必须匹配 projection 和 Runtime step plan 的 allowed tools；
 9. `output_contract_digest` 必须匹配 projection 输出 contract；
 10. 任一校验失败时 workflow fail-closed，并写 audit。
@@ -271,7 +271,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 ## 工作包
 
-### P2A Contract 与 schema
+### 工作包 A：Contract 与 schema
 
 - [x] 定义请求级 `context_pack` schema。
 - [x] 定义 consumer 级 `context_projection` schema。
@@ -282,7 +282,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
       mismatch、consumer mismatch、tool policy mismatch 和 output contract
       mismatch 增加错误类别。
 
-### P2B Context Governance 到 Runtime 的传递链
+### 工作包 B：Context Governance 到 Runtime 的传递链
 
 - [x] Context Governance 为每次 trace 生成请求级 `context_pack`。
 - [x] Context Governance 为每个已登记 consumer 生成独立 `context_projection`。
@@ -292,7 +292,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
       普通日志。
 - [x] 去重 replay 请求必须复用原 trace 的 pack/projection ref，不重新解析用户历史。
 
-### P2C Runtime Adapter projection enforcement
+### 工作包 C：Runtime Adapter projection enforcement
 
 - [x] Runtime workflow input 从 `question` 单字段升级为 question +
       `context_projection_ref` + `context_pack_ref`。
@@ -301,14 +301,14 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 - [x] 未知 `consumer_type`、`consumer_name` 或 `runtime_adapter` fail-closed。
 - [x] `external_agent` consumer 类型保留但默认 unsupported / fail-closed。
 
-### P2D Consumer projection isolation
+### 工作包 D：Consumer projection isolation
 
 - [x] Runtime 在进入每个 consumer 前读取并校验对应 projection。
 - [x] profile step message 只包含该 consumer projection。
 - [x] `honglou-text` / `honglou-commentary` 测试证明看不到完整 session summary。
 - [x] `honglou-reviewer` 测试证明看不到未审核 memory/candidate 和 Hermes transcript。
 
-### P2E Tool policy binding
+### 工作包 E：Tool policy binding
 
 - [x] Runtime allowed tools 必须来自 context projection 和 step plan 的交集。
 - [x] 任一 consumer 请求未授权 tool 时 fail-closed。
@@ -316,7 +316,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 - [x] 负面测试覆盖用户伪造 `allowed_tools`、`forbidden_tools` 和
       `runtime_step_plan`。
 
-### P2F Audit、admin trace 与 replay
+### 工作包 F：Audit、admin trace 与 replay
 
 - [x] Runtime audit 记录 pack ref、projection ref、consumer、runtime adapter、tool
       policy digest、output ref 和 schema version。
@@ -326,7 +326,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
       review 链。
 - [x] replay 不读取当前 journal 来替代历史 pack/projection。
 
-### P2G Public surface 与隐私
+### 工作包 G：Public surface 与隐私
 
 - [x] public chat response 不返回 context/journal/memory 内部 ID。
 - [x] SSE chunk 不泄露 context projection、context pack 或 journal 原文。
@@ -334,18 +334,18 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 - [x] 普通用户不能提交 context、scope、memory、consumer、tool、runtime adapter 或
       reviewer 控制字段。
 
-### P2H 本地验证
+### 工作包 H：本地验证
 
 - [x] `cargo fmt --all --check`。
 - [x] `cargo clippy -p tonglingyu-gateway --all-targets -- -D warnings`。
 - [x] `cargo test -p tonglingyu-gateway`。
 - [x] `cargo test -p tonglingyu-runtime`。
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`。
-- [x] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Phase2
+- [x] `deploy/scripts/verify-tonglingyu-scoped-context-live.sh` 增强或新增 Context Projection Runtime
       projection gate。
 - [x] `scripts/qa.sh --quick`。
 
-### P2I hhost production gate
+### 工作包 I：hhost production gate
 
 - [x] 按版本规则 bump deploy patch version：`0.1.6` -> `0.1.7`。
 - [x] 同步 release tools 到 `hhost`。
@@ -374,7 +374,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 | context projection digest 不匹配 | workflow fail-closed |
 | consumer 读取非本 consumer projection | workflow fail-closed |
 | 未知 `consumer_type` / `consumer_name` / `runtime_adapter` | workflow fail-closed |
-| `external_agent` consumer 在 Phase 2 被请求 | workflow fail-closed |
+| `external_agent` consumer 在 Context Projection Runtime 被请求 | workflow fail-closed |
 | tool policy digest 不匹配 | workflow fail-closed |
 | output contract digest 不匹配 | workflow fail-closed |
 | 用户伪造 context/projection/consumer/tool/reviewer 字段 | public request rejected |
@@ -388,7 +388,7 @@ Phase 2 允许声明的状态只能按证据逐级推进：
       `context_pack`。
 - [x] Hermes transcript 不替代业务 session。
 - [x] pack/projection schema 或 digest 不匹配时 workflow fail-closed。
-- [x] 未知 consumer、未知 runtime adapter 和 `external_agent` 在 Phase 2
+- [x] 未知 consumer、未知 runtime adapter 和 `external_agent` 在 Context Projection Runtime
       fail-closed。
 - [x] replay 能重建 context pack、context projection、Runtime step、package 和
       review 链。
@@ -401,13 +401,13 @@ Phase 2 允许声明的状态只能按证据逐级推进：
 
 无。
 
-当前 Phase 2 已按既定决策收敛为 `context_pack` + `context_projection` + registered
+当前 Context Projection Runtime 已按既定决策收敛为 `context_pack` + `context_projection` + registered
 consumer 模型。非 Hermes agent 只保留 schema 扩展点，不进入当前实现范围；如果未来
-要接入，需要新增独立设计、实现、验收和 hhost gate，不能复用本 Phase 2 完成结论。
+要接入，需要新增独立设计、实现、验收和 hhost gate，不能复用本 Context Projection Runtime 完成结论。
 
 ## 不可声明事项
 
-Phase 2 完成后仍不能声明：
+Context Projection Runtime 完成后仍不能声明：
 
 1. scoped memory production-ready；
 2. Memory Collector 完成；
@@ -417,5 +417,5 @@ Phase 2 完成后仍不能声明：
 6. Context Governance 已拆成独立服务；
 7. 非 Hermes external agent 已接入。
 
-只有 Phase 3 和 Phase 4 退出条件全部通过，并重新完成 hhost live gate 后，才能进入
+只有 Memory Candidate Workflow 和 Scoped Memory Production 退出条件全部通过，并重新完成 hhost live gate 后，才能进入
 scoped memory production-ready 结论。

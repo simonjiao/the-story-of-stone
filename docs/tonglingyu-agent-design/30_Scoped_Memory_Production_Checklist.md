@@ -1,15 +1,15 @@
-# 30 Phase 4 Scoped Memory Production Checklist
+# 30 Scoped Memory Production Checklist
 
 ## 状态口径
 
-Phase 4 的目标是 Scoped Memory Production，不是最小闭环、demo、shadow smoke
-或只证明 Collector 通畅。Phase 4 必须把以下链路做到生产可验证：
+Scoped Memory Production 的目标不是最小闭环、demo、shadow smoke
+或只证明 Collector 通畅。Scoped Memory Production 必须把以下链路做到生产可验证：
 
 `session_journal -> Memory Collector -> memory_candidate -> policy decision ->
 memory_card -> read enablement -> context_pack.memory_read_refs -> context_projection ->
 Runtime answer`
 
-Phase 4 不重新定义 Phase 3 的 candidate/card 状态机。它在 Phase 3 已验证的
+Scoped Memory Production 不重新定义 Memory Candidate Workflow 的 candidate/card 状态机。它在 Memory Candidate Workflow 已验证的
 `memory_candidate`、`memory_card` 和 transition audit 基础上，打开受 ACL、scope、
 retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 
@@ -19,7 +19,7 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 
 ## 已冻结决策
 
-1. **Phase 4 保持 Scoped Memory Production 目标**：不能把目标降级为只跑通
+1. **Scoped Memory Production 保持 Scoped Memory Production 目标**：不能把目标降级为只跑通
    `user_private` 或只验证 collector/context build。
 2. **自动策略是一等生产路径**：规则、LLM semantic filter 和 versioned policy engine
    可以自动把 memory 变成可用状态。
@@ -29,7 +29,7 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
    `approved -> active memory_card`、`read_enabled=false -> true`。
 5. **LLM 不是授权者**：LLM 只能做语义过滤、分类、TTL 建议和风险标记。最终是否
    auto approve、promote 或 enable read 只能由 policy engine 决定。
-6. **Scoped Memory 不是 user_private-only**：Phase 4 必须保留 `user_private`、
+6. **Scoped Memory 不是 user_private-only**：Scoped Memory Production 必须保留 `user_private`、
    `profile_common`、`knowledge_space`、`research_topic` 和 `source_collection` 的
    ACL、读取策略、状态流转和 gate。不同 scope 的自动化门槛可以不同，但不能只有
    `user_private` 有生产路径。
@@ -41,10 +41,10 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 
 ## 进入条件
 
-- [x] Phase 1 Scoped Context 已 production-ready。
-- [x] Phase 2 Context-aware Runtime 已 production-ready。
-- [x] Phase 3 Memory Candidate workflow 已 production-ready。
-- [x] Phase 3 已证明 collector、candidate/card 状态机、admin-only CLI/API 和 audit
+- [x] Scoped Context Request Path 已 production-ready。
+- [x] Context Projection Runtime 已 production-ready。
+- [x] Memory Candidate Workflow 已 production-ready。
+- [x] Memory Candidate Workflow 已证明 collector、candidate/card 状态机、admin-only CLI/API 和 audit
       可用。
 - [x] 当前生产结论明确不覆盖 active memory 读取、自动 read enablement 或 scoped
       memory production-ready。
@@ -52,7 +52,7 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 
 ## 非目标
 
-以下不是 Phase 4 的实现目标：
+以下不是 Scoped Memory Production 的实现目标：
 
 1. 不把 memory 当作正式事实源；
 2. 不让 memory 进入 evidence package；
@@ -63,11 +63,11 @@ retention、revoke/expire、policy 和 lifecycle 约束的读取面。
 6. 不用 Open WebUI conversation、Hermes transcript 或旧 `gateway_messages` 作为
    memory 来源；
 7. 不通过手工 SQL 直接跳过状态机；
-8. 不把非 Hermes external agent memory 接入纳入本 Phase。
+8. 不把非 Hermes external agent memory 接入纳入本工作流。
 
 ## Policy Contract
 
-Phase 4 必须新增或复用结构化 policy decision 记录。最低字段：
+Scoped Memory Production 必须新增或复用结构化 policy decision 记录。最低字段：
 
 1. `policy_decision_id`；
 2. `policy_version`；
@@ -97,7 +97,7 @@ Policy 配置必须版本化。阈值、TTL、scope 允许列表、risk flag 规
 
 ## `scoped-memory-policy-v1`
 
-Phase 4 默认 policy version 固定为 `scoped-memory-policy-v1`。任何阈值、TTL、scope
+Scoped Memory Production 默认 policy version 固定为 `scoped-memory-policy-v1`。任何阈值、TTL、scope
 自动化规则或 LLM schema 的生产变更，都必须形成新的 policy version，并重新通过
 hhost release gate。实现不得在代码里临时改阈值来绕过 policy contract。
 
@@ -241,7 +241,7 @@ ContextPackBuilder 必须限制 memory 读取量，防止 context bloat 和 scop
 
 ## 自动策略分层
 
-自动策略不是单一开关。Phase 4 必须按 scope 和风险分层：
+自动策略不是单一开关。Scoped Memory Production 必须按 scope 和风险分层：
 
 1. `user_private`：稳定偏好、表达方式、工作方法和长期背景可以在低风险条件下自动
    approve、promote 和 enable read；
@@ -293,7 +293,7 @@ LLM semantic filter 用于规则难以判断的语义分类。它必须满足：
 
 ## 状态机与 Read Enablement
 
-Phase 4 保留 Phase 3 三层 lifecycle，并正式打开 read enablement lifecycle：
+Scoped Memory Production 保留 Memory Candidate Workflow 三层 lifecycle，并正式打开 read enablement lifecycle：
 
 1. candidate lifecycle：沿用 `pending`、`approved`、`rejected`、`expired`、`merged`；
 2. card lifecycle：沿用 `active`、`revoked`、`expired`；
@@ -318,7 +318,7 @@ Phase 4 保留 Phase 3 三层 lifecycle，并正式打开 read enablement lifecy
 
 ## Context Build 读取规则
 
-ContextPackBuilder 是 Phase 4 的核心生产边界。它只能读取同时满足以下条件的 memory：
+ContextPackBuilder 是 Scoped Memory Production 的核心生产边界。它只能读取同时满足以下条件的 memory：
 
 1. `memory_card.status=active`；
 2. `memory_card.read_enabled=true`；
@@ -358,7 +358,7 @@ policy payload、journal 原文或 LLM payload。
 
 ## Lifecycle 与隐私
 
-Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
+Scoped Memory Production 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 1. `session_journal`；
 2. `memory_candidate`；
@@ -379,7 +379,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 ## Work Packages
 
-### P4A Policy Schema 与配置
+### 工作包 A：Policy Schema 与配置
 
 - [x] 新增或复用 policy decision 记录。
 - [x] 定义 policy mode：`shadow_only`、`auto_policy`、`manual_required`。
@@ -389,7 +389,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] 实现 read budget 和截断 audit。
 - [x] 配置和 metrics 暴露有效 policy mode，但不暴露敏感 payload。
 
-### P4B Rule + LLM Filter
+### 工作包 B：Rule + LLM Filter
 
 - [x] 规则 hard deny 先于 LLM。
 - [x] LLM 输入 redaction 和 digest 完整记录。
@@ -397,7 +397,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] LLM 越权字段 fail-closed。
 - [x] 低置信、未知 scope、临时指令、引用他人或矛盾内容不得自动可用。
 
-### P4C Auto Policy Transition
+### 工作包 C：Auto Policy Transition
 
 - [x] 自动路径写 `pending -> approved` audit。
 - [x] 自动路径写 `approved -> active memory_card` audit。
@@ -405,7 +405,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] 自动 actor 固定为 `memory_policy:auto` 或带 policy version 的等价身份。
 - [x] manual review 与 auto policy 使用同一 service 和状态机。
 
-### P4D Context Build Read Path
+### 工作包 D：Context Build Read Path
 
 - [x] ContextPackBuilder 读取 active/read-enabled memory。
 - [x] `memory_read_refs` 只包含授权摘要 ref。
@@ -413,7 +413,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] revoked/expired/disabled memory 不进入新 context pack。
 - [x] context replay 可复现 memory read refs。
 
-### P4E Runtime Projection 与回答边界
+### 工作包 E：Runtime Projection 与回答边界
 
 - [x] memory 只进入授权 consumer projection。
 - [x] `honglou-main` 仅把 memory 用作偏好、背景和工作方法。
@@ -423,7 +423,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] reviewer 裁决不受 memory 改写。
 - [x] public response/SSE 不泄露 memory 内部字段。
 
-### P4F Lifecycle 与运维
+### 工作包 F：Lifecycle 与运维
 
 - [x] export 覆盖 candidate、policy decision、card、read enablement 和 audit。
 - [x] anonymize 覆盖 user_private memory 和关联 ref。
@@ -431,7 +431,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 - [x] retention pruning 不破坏 audit 链。
 - [x] backup/restore 后 memory/context/journal/package/reviewer 链可恢复。
 
-### P4G Gate 与发布
+### 工作包 G：Gate 与发布
 
 - [x] 本地 cargo check/test/clippy 通过。
 - [x] collector -> policy -> card -> context build contract smoke 通过。
@@ -484,14 +484,18 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
   `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、
   `release_gate_ms=26759`；post-release monitor 为 60 分钟窗口、
   `sample_count=13`、`failed_sample_count=0`。
-- 2026-05-20 设计-实现一致性复查发现并修复两个 contract 漏项：
+- 2026-05-20 设计-实现一致性复查发现并修复两个 contract 漏项，并消除一个
+  patch-style 双路径构造点：
   1. policy engine 原先记录了 `source_entry_type_allowed`，但自动策略的 `suppress`
      条件未显式纳入该字段；现已改为非 `user_message` candidate 必须
-     `suppress -> rejected`，并写 `source_entry_type_not_allowed` policy/audit reason。
+     `suppress -> rejected`，并写 `source_entry_type_not_allowed` policy/audit reason；
+     manual promote 和 read path 也同样要求 `user_message` 与 `context_pack_id`。
   2. projection 原先只有 `memory_policy_digest`，没有显式
      `memory_read_ref_digest`；现已在 `context_pack`、`context_projection` payload、
      admin trace summary 和 smoke/live gate 中固定该 digest。
-  这两个修复不改变 Phase 4 目标口径，也不放宽 release gate；它们是对已冻结 contract
+  3. `context_pack.profile_views` 和 `context_projection` 原先分别构造 profile view；
+     现已改为 projection 消费同一份 profile view，避免两条路径后续漂移。
+  这些修复不改变 Scoped Memory Production 目标口径，也不放宽 release gate；它们是对已冻结 contract
   的收敛，而不是新的折中路径。
 
 ## Fail-closed Matrix
@@ -536,7 +540,7 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
 
 ## 待确认项
 
-无产品/架构方向待确认项。Phase 4 保持 Scoped Memory Production 目标，自动策略
+无产品/架构方向待确认项。Scoped Memory Production 保持 Scoped Memory Production 目标，自动策略
 作为主生产路径，人工审核流程保留但可被策略跳过，LLM 只做语义过滤，最终授权由
 versioned policy engine 决定。
 
