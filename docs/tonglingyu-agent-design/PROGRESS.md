@@ -2,6 +2,58 @@
 
 ## 当前状态
 
+### LLM Production Readiness
+
+状态：in progress。
+
+本轮目标是把 `31_LLM支持点与全路径Eval方案.md` 中的 LLM 接入与全路径 eval
+完善到 production-ready。当前已按设计文档生成
+`32_LLM_Production_Readiness_Checklist.md`，并完成本地 release readiness wiring、contract
+test 和 repo-local 验证。
+
+当前 checklist 已足够指导后续 production-ready 实施：它不只列状态，还固定了本地提交边界、目标环境
+入口命令、远端 LLM eval/release report 生成要求、live gate/release readiness/saved validator 判定标准、
+证据写回字段和 hard fail 条件。后续执行必须逐项关闭 checklist，不能用本地 report、synthetic report
+或 gate command override 代替目标环境证据。
+
+当前判断：
+
+- S1-S7 的 repo-local 模块、fixture 和 `llm-eval` / `llm-release-report` CLI
+  已在本轮重新生成可复现证据：`llm-eval` 为 `215/215`，hard gate failure 为空。
+- gatekeeper `scripts/qa.sh --full` 已通过，并在 full 模式中运行完整 LLM eval 和 LLM release report。
+- 正式 release readiness 已把 LLM release report 纳入 required gate、release manifest、artifact registry
+  和 saved validator；本地 contract test 已覆盖缺失/失败/过期/raw payload/manifest mismatch/artifact
+  registry 缺失等负向场景。
+- 当前目标环境 live gate、目标环境 release readiness 和 saved validator 尚未针对当前 LLM S1-S7 版本运行，
+  因此不能声明 production-ready。
+
+当前 blocker：
+
+1. 目标环境 live gate 与 release readiness gate 尚未重新通过。
+2. gatekeeper release 工具已提交，仍必须同步/部署到目标环境。
+
+本地验证记录：
+
+- `./deploy/scripts/test-tonglingyu-release-readiness-contract.sh` 通过。
+- `verify-tonglingyu-llm-release-report.sh` 校验实际 `llm-release-production.json` 通过：
+  `status=ok`，`report_sha256=14bf4478186fb423dfc36f15db948b4ee7975c4a2d561e145342a1ad2d7c1a79`。
+- `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway` 通过：`95 passed`。
+- `cargo clippy --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway --all-targets -- -D warnings`
+  通过。
+- `TONGLINGYU_STORY_OF_STONE_DIR=... TONGLINGYU_SOURCE_REPO_DIR=... ./scripts/qa.sh --full` 通过：
+  `qa_status=passed mode=full`。
+- release automation 本地 mock gate 检查已验证目标环境前置链路会生成当次 LLM report：
+  `checks.llm_eval=passed`、`checks.llm_release_report=passed`，两个 report sha256 均存在；该检查因
+  非 live 且使用 gate override 按预期不产生 production-ready 结论。
+- release automation 补强后已复跑 `scripts/qa.sh --full`：`qa_status=passed mode=full`，
+  `eval_run_id=llm-eval-019e454a3a237e53b989eede0fc7d3e4`，
+  `release_run_id=llm-release-019e454a3e157682b59258dd658721be`。
+
+后续进展必须同步更新 `32_LLM_Production_Readiness_Checklist.md` 和本节，不能只保留在对话或临时
+report 中。
+
+## 历史里程碑
+
 - 主线已切到“通灵玉”第一版。
 - 旧基础库产物和旧专用抽取脚本已删除。
 - `scripts/extract_epub.py` 和 `scripts/download_wikisource.py` 已输出
