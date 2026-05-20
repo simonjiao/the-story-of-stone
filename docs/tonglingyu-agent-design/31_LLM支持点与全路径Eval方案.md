@@ -57,7 +57,7 @@ schema、policy、audit、replay、eval 和 release gate 中。
 | I6 | 四个 Runtime profile 被描述为完整 LLM 生成链 | 当前 Runtime workflow 仍保留本地工具、证据包、本地 reviewer enforcement；Hermes/Agent Runtime 输出必须受 contract 和本地治理约束 | LLM profile 是受控执行/观察/候选能力，不是最终事实或最终裁决来源。 |
 | I7 | 27/28 checklist 中“active memory 未实现”容易被读成当前全局状态 | 30 checklist 和 PROGRESS 记录 Scoped Memory Production 已进入 production-ready gate，27/28 的禁止项只属于当时阶段边界 | 文档必须按阶段解释，不能把旧阶段的“非目标”套到当前总状态。 |
 | I8 | Retrieval policy 使用“LLM suggested policy + deterministic patch”像是当前实现 | 当前主路径 `search_policy(resolved_question)` 是确定性入口；LLM suggested policy 尚未接入 | 只能作为后续目标，不是当前事实。 |
-| I9 | Evidence package 示例 `review: null` | 当前主链路 package 带 review，Gateway 后续还记录 review journal 和 public wrapper 过滤 | 示例应表达“review record 必须存在或可回放”，不能暗示 review 可空。 |
+| I9 | Evidence package 示例 `review: null` | 当前主链路 package 带 review，Gateway 后续还记录 review journal 和用户响应 wrapper 过滤 | 示例应表达“review record 必须存在或可回放”，不能暗示 review 可空。 |
 | I10 | Eval 门槛全写成绝对百分比，像是当前已有数据集 | 当前已有多类 gate 和测试，但该文定义的多数据集 eval suite 尚未整体落地 | 百分比可作为发布目标，不能写成已通过事实。 |
 
 ### 1.1 不一致项的待确认口径
@@ -85,7 +85,7 @@ LLM 不能做以下事情：
 2. 不能决定 Gateway 鉴权、限流、请求字段、profile、tool policy 或 Runtime Adapter。
 3. 不能决定 scope、ACL、memory read enablement、reviewer 裁决或 evidence package 写入。
 4. 不能把 session summary、memory、用户偏好或模型推断写入 evidence package 当证据。
-5. 不能绕过 public response wrapper。
+5. 不能绕过用户响应 wrapper。
 
 因此，本方案的目标不是“让模型回答得更像专家”，而是让每个节点的 LLM 输出都能被 schema、policy、audit、replay 和 eval 约束。
 
@@ -109,7 +109,7 @@ LLM 不能做以下事情：
 | 13 | Draft | 当前最终回答仍受 Runtime workflow 和本地治理约束 | `honglou-main` 可提供 draft candidate；必须绑定当前 package。 |
 | 14 | Reviewer | 本地 reviewer enforcement 是最终裁决点 | `honglou-reviewer` 可输出 review observation；不一致时本地 reviewer 覆盖。 |
 | 15 | Final response | `completion_value` 构造内部值，journal 写入 final response | LLM 不直接决定公开字段。 |
-| 16 | Public wrapper / SSE | 删除 trace、package、review、context、memory、LLM 内部字段；stream 只发公开 delta | 无。必须确定性。 |
+| 16 | 用户响应 wrapper / SSE | 删除 trace、package、review、context、memory、LLM 内部字段；stream 只发用户可见 delta | 无。必须确定性。 |
 
 ## 4. LLM 支持点总表
 
@@ -125,7 +125,7 @@ LLM 不能做以下事情：
 | Memory Collector | 已有 collector/policy 主线 | LLM 辅助抽取 candidate 或 semantic filter | 输入必须 redacted；输出只能 schema JSON；不能 approve/promote/enable_read。 |
 | Scoped Memory Read | 已有 read-enabled memory path | 可做摘要去重、排序建议、风险标记 | ACL、scope、budget、read enablement 由 policy engine 决定。 |
 | Knowledge Calibration | 已有 LLM evidence judge 接口 | 判断候选知识是否被证据支持 | 不能写事实表；结果还要过 rule/eval/reviewer/release gate。 |
-| Public Response Safety | 当前确定性过滤 | 可作为额外 observation 检查泄露/无证据断言 | public wrapper 必须最终确定性执行。 |
+| 用户响应安全检查 | 当前确定性过滤 | 可作为额外 observation 检查泄露/无证据断言 | 用户响应 wrapper 必须最终确定性执行。 |
 
 ## 5. Question Resolver 目标 schema
 
@@ -284,9 +284,9 @@ Reviewer 分两层：
 
 LLM reviewer 与本地 reviewer 不一致时，必须记录 override，最终以本地 reviewer 为准。
 
-### 9.4 Public Response
+### 9.4 用户响应
 
-公开响应只能保留 OpenAI-compatible 用户可读内容。必须移除：
+用户响应只能保留 OpenAI-compatible 用户可读内容。必须移除：
 
 1. `trace_id`
 2. `evidence_package_id`
@@ -355,7 +355,7 @@ Eval 必须按节点归因，不只评最终回答。
 | `package_claims.jsonl` | evidence package、claim map、replay | package replay、unsupported claim rate |
 | `reviewer_security.jsonl` | 无证据断言、脂批正文混淆、内部泄露 | high-risk false pass |
 | `memory_policy.jsonl` | candidate extraction、semantic filter、ACL、read budget | policy decision correctness、no evidence misuse |
-| `streaming_dedupe.jsonl` | SSE、缓存复用、公开字段过滤 | response consistency、no internal leakage |
+| `streaming_dedupe.jsonl` | SSE、缓存复用、用户可见字段过滤 | response consistency、no internal leakage |
 
 ## 12. 发布门槛
 
@@ -369,7 +369,7 @@ Eval 必须按节点归因，不只评最终回答。
 | G6 Package Gate | package 可回放；claim-evidence map 完整；refs 来自本地 evidence ids。 |
 | G7 Review Gate | LLM reviewer observation 与本地 reviewer enforcement 均可审计；本地裁决最终有效。 |
 | G8 Memory Gate | memory 不进 evidence package；policy engine 才能 enable read。 |
-| G9 Public Response Gate | 公开响应和 SSE 无内部字段、prompt、tool payload、memory/ref 泄露。 |
+| G9 用户响应安全 Gate | 用户响应和 SSE 无内部字段、prompt、tool payload、memory/ref 泄露。 |
 | G10 Release Gate | 本地测试、clippy、smoke、strict Gateway gate、live gate、saved validator 和 release readiness 按对应阶段全部通过。 |
 
 ## 13. 实施路线
@@ -382,7 +382,7 @@ Eval 必须按节点归因，不只评最终回答。
 | P3 | Profile observation eval | Runtime/Hermes 已有受控接口和 observation 边界 | text/commentary/main/reviewer observation datasets |
 | P4 | Claim-first draft + reviewer eval | 当前有本地 package/reviewer 约束 | claim map eval、reviewer false-pass eval、revision gate |
 | P5 | Full-path Eval Suite | 目标增强 | 多数据集、节点级失败归因、release report |
-| P6 | Public/SSE leakage regression | 当前已有公开面过滤，需要持续守护 | recursive internal-field scan、stream replay checks |
+| P6 | 用户响应脱敏与泄露回归门禁 | 横切安全门禁，不属于 LLM 能力；当前已有过滤，需要持续守护 | recursive internal-field scan、stream replay checks |
 
 ### 13.1 实施路线的待确认口径
 
@@ -394,7 +394,7 @@ Eval 必须按节点归因，不只评最终回答。
 | P3 | 是否为 profile observation 建 eval。 | 需要确认 `text/commentary/main/reviewer` 的输出 contract 是否稳定。 | 建 profile observation datasets，校验 refs、边界、不可最终裁决。 | profile observation 被误用为事实源或最终回答。 |
 | P4 | 是否推进 claim-first draft 和 reviewer eval。 | 需要确认 final answer 是否必须由 claim map 驱动。 | 建 claim map eval、reviewer false-pass eval、revision gate。 | draft 绕过 evidence package 或 reviewer，形成无证据回答。 |
 | P5 | 是否建设 full-path eval suite。 | 需要确认 release 是否要求节点级失败归因，而不是只看最终答案。 | 建多数据集、统一 runner、失败归因和 release report。 | 只评最终回答会掩盖 resolver、summary、policy、package、reviewer 的局部失败。 |
-| P6 | 是否把 Public/SSE leakage regression 设为长期门禁。 | 需要确认公开面安全是否纳入每次发布检查。 | 增加递归内部字段扫描、stream replay、缓存复用检查。 | 内部 trace、context、memory、review、tool payload 泄露到普通用户响应。 |
+| P6 | 是否把用户响应脱敏与泄露回归设为长期门禁。 | 需要确认用户响应安全是否纳入每次发布检查。 | 增加递归内部字段扫描、stream replay、缓存复用检查。 | 内部 trace、context、memory、review、tool payload 泄露到普通用户响应。 |
 
 ## 14. 节点级失败归因
 
@@ -405,7 +405,7 @@ Eval 必须按节点归因，不只评最终回答。
 3. LLM suggested policy 漏掉版本/脂批必需证据，但 deterministic patch 未补齐，记为 Policy patch failure。
 4. evidence refs 不来自本地 evidence ids，记为 Package/ref validation failure。
 5. reviewer 放过无证据 claim，记为 Reviewer false pass。
-6. public response 或 SSE 泄露 context/memory/internal fields，记为 Public wrapper failure。
+6. 用户响应或 SSE 泄露 context/memory/internal fields，记为 User response wrapper failure。
 7. memory 被写进 evidence package 或改变 reviewer 裁决，记为 Memory boundary failure。
 
 ## 15. 最终判断标准
@@ -416,7 +416,7 @@ Eval 必须按节点归因，不只评最终回答。
 2. summary 保留必要上下文和边界，不引入事实。
 3. 检索和证据包能支撑关键 claim。
 4. LLM draft/reviewer/memory/filter 输出全部有 schema、policy、audit 和 fail-closed。
-5. 最终公开响应经过 reviewer 和 public wrapper，不泄露内部状态。
+5. 最终用户响应经过 reviewer 和用户响应 wrapper，不泄露内部状态。
 6. 每次失败都能在 trace 中归因到具体节点。
 
 <!-- markdownlint-enable MD013 MD060 -->
