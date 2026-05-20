@@ -272,8 +272,48 @@ pub fn write_llm_release_report(eval_report_path: &Path, report_out: &Path) -> R
             "target_environment_live_gate_verified": false,
             "production_ready_declaration_allowed": false,
         },
+        "llm_agent": {
+            "schema_version": "tonglingyu-llm-agent-release-v1",
+            "required_profiles": [
+                "tonglingyu-question-normalizer",
+                "tonglingyu-conversation-state-writer",
+            ],
+            "profile_contracts": {
+                "question_normalizer_registered": true,
+                "conversation_state_writer_registered": true,
+                "allowed_tools_empty": true,
+                "runtime_profile_execution_required": true,
+            },
+            "output_control": {
+                "business_validator_required": true,
+                "sealed_decision_required": true,
+                "denylist_scanner_required": true,
+                "confidence_gate_required": true,
+                "raw_agent_output_embedded": false,
+                "context_pack_raw_agent_output_embedded": false,
+            },
+            "mode_matrix": {
+                "required_modes": [
+                    "disabled",
+                    "two_agent_shadow",
+                    "question_normalizer_enforced",
+                    "two_agent_enforced",
+                ],
+                "repo_local_contract_tests_required": true,
+                "target_environment_live_gate_required": true,
+                "target_environment_live_gate_verified": false,
+            },
+            "agent_request_envelope": {
+                "schema_version": "tonglingyu-llm-agent-request-v1",
+                "agent_request_aligned": true,
+                "input_digest_required": true,
+                "projection_ref_required": true,
+            },
+        },
         "artifact_policy": {
             "raw_llm_payload_embedded": false,
+            "raw_agent_output_embedded": false,
+            "context_pack_raw_agent_output_embedded": false,
             "raw_memory_embedded": false,
             "tool_payload_embedded": false,
         },
@@ -1981,6 +2021,18 @@ mod tests {
         assert_eq!(
             report["artifact_policy"]["raw_llm_payload_embedded"],
             json!(false)
+        );
+        assert_eq!(
+            report["artifact_policy"]["raw_agent_output_embedded"],
+            json!(false)
+        );
+        assert_eq!(
+            report["llm_agent"]["output_control"]["sealed_decision_required"],
+            json!(true)
+        );
+        assert_eq!(
+            report["llm_agent"]["mode_matrix"]["target_environment_live_gate_required"],
+            json!(true)
         );
         assert!(
             report["llm_eval_report_sha256"]

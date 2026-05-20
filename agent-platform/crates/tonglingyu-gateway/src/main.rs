@@ -1,3 +1,5 @@
+use agent_core::RuntimeClient;
+use agent_runtime::{HermesRuntimeClient, RuntimeProfileRegistry};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
@@ -47,6 +49,8 @@ use tower_http::trace::TraceLayer;
 mod context_governance;
 mod conversation_state;
 mod draft_revision;
+mod llm_agent_contracts;
+mod llm_agent_validator;
 mod llm_contracts;
 mod llm_eval;
 mod llm_modes;
@@ -56,15 +60,19 @@ mod plan;
 mod retrieval_suggestion;
 mod user_response_safety;
 
+#[cfg(test)]
+use crate::context_governance::create_context_for_request;
 use crate::context_governance::{
     ContextMessage, ContextProjection, ContextRequestInput, ContextResolution,
     FinalResponseJournalInput, MemoryCandidateListInput, MemoryCandidateTransitionInput,
     MemoryCardListInput, MemoryCardTransitionInput, MemoryCollectorRunInput, append_final_response,
-    append_review_journal, append_runtime_step_journal, create_context_for_request,
-    list_memory_candidates, list_memory_cards, load_deduped_final_response, read_memory_candidate,
-    read_memory_card, run_memory_collector, table_counts as context_table_counts,
-    transition_memory_candidate, transition_memory_card, validate_llm_memory_extraction_output,
+    append_review_journal, append_runtime_step_journal,
+    create_context_for_request_with_agent_runtime, list_memory_candidates, list_memory_cards,
+    load_deduped_final_response, read_memory_candidate, read_memory_card, run_memory_collector,
+    table_counts as context_table_counts, transition_memory_candidate, transition_memory_card,
+    validate_llm_memory_extraction_output,
 };
+use crate::llm_agent_contracts::tonglingyu_llm_agent_profile_contracts;
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
 };
@@ -583,6 +591,7 @@ struct AppState {
     admin_rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
     profiles: InternalProfiles,
+    llm_agent_runtime: Arc<dyn RuntimeClient>,
     started_at: String,
 }
 
@@ -1690,6 +1699,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         let report = prune_gateway_and_runtime_data(&args.db, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
+    let llm_agent_runtime = HermesRuntimeClient::from_env()?.with_profile_registry(
+        RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts()),
+    );
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
@@ -1718,6 +1730,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
             commentary: args.profile_commentary,
             reviewer: args.profile_reviewer,
         },
+        llm_agent_runtime: Arc::new(llm_agent_runtime),
         started_at: now_rfc3339(),
     });
     if args.memory_collector_background_enabled {
@@ -8278,8 +8291,9 @@ async fn chat_completions(
     }
 
     let context_messages = context_messages_from_chat(&request.messages);
-    let scoped_context = match create_context_for_request(
-        &conn,
+    drop(conn);
+    let scoped_context = match create_context_for_request_with_agent_runtime(
+        &state.db,
         ContextRequestInput {
             trace_id: &trace_id,
             model_id: &state.model_id,
@@ -8291,7 +8305,10 @@ async fn chat_completions(
             history_over_limit,
             max_messages: state.max_messages,
         },
-    ) {
+        state.llm_agent_runtime.as_ref(),
+    )
+    .await
+    {
         Ok(scoped_context) => scoped_context,
         Err(error) => {
             tracing::warn!(%trace_id, error = %error, "context governance failed");
@@ -8299,6 +8316,18 @@ async fn chat_completions(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "context_governance_failed",
                 "context governance failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(%trace_id, error = %error, "database unavailable after context governance");
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "db_unavailable",
+                "database unavailable",
                 Some(&trace_id),
             );
         }
@@ -10437,6 +10466,11 @@ mod tests {
                 commentary: "honglou-commentary".to_string(),
                 reviewer: "honglou-reviewer".to_string(),
             },
+            llm_agent_runtime: Arc::new(
+                agent_runtime::MinimalRuntimeClient::new("test-llm-agent").with_profile_registry(
+                    RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts()),
+                ),
+            ),
             started_at: now_rfc3339(),
         }
     }

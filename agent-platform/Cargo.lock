@@ -1817,7 +1817,10 @@ dependencies = [
 name = "tonglingyu-gateway"
 version = "0.1.14"
 dependencies = [
+ "agent-core",
+ "agent-runtime",
  "anyhow",
+ "async-trait",
  "axum",
  "clap",
  "dotenvy",

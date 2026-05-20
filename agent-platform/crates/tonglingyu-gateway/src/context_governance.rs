@@ -1,5 +1,8 @@
-use std::env;
+use std::{collections::BTreeSet, env, path::Path};
 
+use agent_core::{
+    RuntimeClient, RuntimeOutput, RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep, new_id,
+};
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -14,7 +17,22 @@ use crate::{
         project_conversation_state_summary, validate_conversation_state_summary,
         write_conversation_state_summary,
     },
-    llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+    llm_agent_contracts::{
+        AgentContextMessage, CONVERSATION_STATE_WRITER_AGENT_TYPE,
+        CONVERSATION_STATE_WRITER_PROFILE_ID, CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
+        CONVERSATION_STATE_WRITER_TIMEOUT_MS, LlmAgentRequestEnvelope,
+        QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
+        QUESTION_NORMALIZER_SYSTEM_PROMPT, QUESTION_NORMALIZER_TIMEOUT_MS,
+        QuestionNormalizerAgentInput, conversation_state_writer_profile_contract,
+        question_normalizer_profile_contract,
+    },
+    llm_agent_validator::{
+        ConversationStateValidationDecision, QuestionNormalizerValidationDecision,
+        conversation_state_runtime_error_decision, error_digest,
+        question_normalizer_runtime_error_decision, validate_conversation_state_runtime_output,
+        validate_question_normalizer_runtime_output,
+    },
+    llm_contracts::{CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_TRIGGERS},
     llm_modes::LlmMode,
 };
 
@@ -46,7 +64,10 @@ const MEMORY_POLICY_MODE_ENV: &str = "TONGLINGYU_MEMORY_POLICY_MODE";
 const MEMORY_POLICY_MODE_AUTO: &str = "auto_policy";
 const MEMORY_POLICY_MODE_MANUAL: &str = "manual_required";
 const MEMORY_POLICY_MODE_SHADOW: &str = "shadow_only";
+#[cfg(test)]
 const CONVERSATION_STATE_SUMMARY_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_SUMMARY_MODE";
+const QUESTION_NORMALIZER_AGENT_MODE_ENV: &str = "TONGLINGYU_LLM_RESOLVER_AGENT_MODE";
+const CONVERSATION_STATE_AGENT_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_AGENT_MODE";
 const MEMORY_READ_BUDGET_TOTAL: usize = 8;
 const MEMORY_READ_BUDGET_USER_PRIVATE: usize = 4;
 const MEMORY_READ_BUDGET_SHARED: usize = 4;
@@ -498,6 +519,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn create_context_for_request(
     conn: &Connection,
     input: ContextRequestInput<'_>,
@@ -505,11 +527,143 @@ pub(crate) fn create_context_for_request(
     create_context_for_request_with_mode(conn, input, conversation_state_summary_mode())
 }
 
+#[cfg(test)]
 fn create_context_for_request_with_mode(
     conn: &Connection,
     input: ContextRequestInput<'_>,
     conversation_state_mode: LlmMode,
 ) -> Result<ContextResolution> {
+    let prepared = prepare_context_request(conn, &input)?;
+    let conversation_state_summary = deterministic_conversation_state_summary(
+        &input,
+        &prepared.session_summary,
+        &prepared.last_public_answer,
+        conversation_state_mode,
+    );
+    create_context_pack_from_validated_parts(
+        conn,
+        &input,
+        prepared.user_session_id,
+        prepared.interaction_context_id,
+        prepared.session_summary,
+        prepared.deterministic_resolver,
+        prepared.last_public_answer,
+        conversation_state_mode,
+        conversation_state_summary,
+        None,
+        "deterministic_builder",
+    )
+}
+
+pub(crate) async fn create_context_for_request_with_agent_runtime(
+    db_path: &Path,
+    input: ContextRequestInput<'_>,
+    runtime_client: &dyn RuntimeClient,
+) -> Result<ContextResolution> {
+    create_context_for_request_with_agent_runtime_and_modes(
+        db_path,
+        input,
+        runtime_client,
+        question_normalizer_agent_mode(),
+        conversation_state_agent_mode(),
+    )
+    .await
+}
+
+async fn create_context_for_request_with_agent_runtime_and_modes(
+    db_path: &Path,
+    input: ContextRequestInput<'_>,
+    runtime_client: &dyn RuntimeClient,
+    question_agent_mode: LlmMode,
+    conversation_state_mode: LlmMode,
+) -> Result<ContextResolution> {
+    let conn = Connection::open(db_path).context("open context governance db")?;
+    let prepared = prepare_context_request(&conn, &input)?;
+    drop(conn);
+    let mut resolver = prepared.deterministic_resolver.clone();
+    if let Some(trigger) = question_normalizer_trigger(
+        input.question,
+        &prepared.deterministic_resolver,
+        prepared.prior_subject.as_deref(),
+    ) && question_agent_mode != LlmMode::Disabled
+    {
+        let decision = run_question_normalizer_agent(
+            runtime_client,
+            question_agent_mode,
+            &trigger,
+            &input,
+            &prepared,
+        )
+        .await;
+        resolver = if let Some(sealed) = decision.accepted_resolution() {
+            ResolverOutput::from_agent_decision(sealed, Some(decision.audit_json()))
+        } else {
+            let mut resolver = resolver;
+            resolver.strategy = if question_agent_mode == LlmMode::Shadow {
+                "deterministic_with_llm_shadow".to_string()
+            } else {
+                "llm_agent_rejected_fallback".to_string()
+            };
+            resolver.agent_audit = Some(decision.audit_json());
+            resolver
+        };
+    }
+
+    let deterministic_summary = deterministic_conversation_state_summary(
+        &input,
+        &prepared.session_summary,
+        &prepared.last_public_answer,
+        conversation_state_mode,
+    );
+    let mut conversation_state_summary = deterministic_summary;
+    let mut conversation_state_source = "deterministic_builder";
+    let mut conversation_state_agent_audit = None;
+    if conversation_state_mode != LlmMode::Disabled {
+        let decision = run_conversation_state_agent(
+            runtime_client,
+            conversation_state_mode,
+            &input,
+            &prepared,
+            &resolver,
+        )
+        .await;
+        conversation_state_agent_audit = Some(decision.audit_json());
+        if let Some(sealed) = decision.accepted_summary() {
+            conversation_state_summary = Some(sealed.summary().clone());
+            conversation_state_source = "llm_agent_validated";
+        }
+    }
+
+    let conn = Connection::open(db_path).context("open context governance db")?;
+    create_context_pack_from_validated_parts(
+        &conn,
+        &input,
+        prepared.user_session_id,
+        prepared.interaction_context_id,
+        prepared.session_summary,
+        resolver,
+        prepared.last_public_answer,
+        conversation_state_mode,
+        conversation_state_summary,
+        conversation_state_agent_audit,
+        conversation_state_source,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PreparedContext {
+    user_session_id: String,
+    interaction_context_id: String,
+    prior_subject: Option<String>,
+    session_summary: String,
+    deterministic_resolver: ResolverOutput,
+    last_public_answer: PublicAnswerBoundary,
+}
+
+fn prepare_context_request(
+    conn: &Connection,
+    input: &ContextRequestInput<'_>,
+) -> Result<PreparedContext> {
     let user_session_id = get_or_create_user_session(
         conn,
         input.external_user_ref,
@@ -520,8 +674,28 @@ fn create_context_for_request_with_mode(
     assert_read_enabled_memory_has_policy_decisions(conn)?;
     let prior_subject = latest_subject_from_journal(conn, &user_session_id)?;
     let session_summary = session_summary(input.messages, prior_subject.as_deref());
-    let resolver = resolve_question(input.question, input.messages, prior_subject.as_deref());
+    let deterministic_resolver =
+        resolve_question(input.question, input.messages, prior_subject.as_deref());
     let last_public_answer = latest_public_answer_boundary(conn, &user_session_id)?;
+    Ok(PreparedContext {
+        user_session_id,
+        interaction_context_id,
+        prior_subject,
+        session_summary,
+        deterministic_resolver,
+        last_public_answer,
+    })
+}
+
+fn deterministic_conversation_state_summary(
+    input: &ContextRequestInput<'_>,
+    session_summary: &str,
+    last_public_answer: &PublicAnswerBoundary,
+    conversation_state_mode: LlmMode,
+) -> Option<ConversationStateSummary> {
+    if conversation_state_mode == LlmMode::Disabled {
+        return None;
+    }
     let recent_state_messages = input
         .messages
         .iter()
@@ -543,27 +717,37 @@ fn create_context_for_request_with_mode(
     let conversation_state_input = ConversationStateInput {
         current_question: input.question,
         recent_messages: &recent_state_messages,
-        session_summary: &session_summary,
+        session_summary,
         last_public_answer_boundary: last_public_answer.boundary.as_deref(),
         evidence_package_refs: &evidence_package_ref_views,
         reviewer_warnings: &[],
     };
-    let conversation_state_summary = if conversation_state_mode == LlmMode::Disabled {
-        None
-    } else {
-        let summary = write_conversation_state_summary(&conversation_state_input);
-        let validation_context = conversation_state_validation_context(
-            &conversation_state_input,
-            &[],
-            &required_boundaries,
-        );
-        let validation = validate_conversation_state_summary(&summary, &validation_context);
-        if validation.accepted {
-            Some(summary)
-        } else {
-            None
-        }
-    };
+    let summary = write_conversation_state_summary(&conversation_state_input);
+    let validation_context =
+        conversation_state_validation_context(&conversation_state_input, &[], &required_boundaries);
+    let validation = validate_conversation_state_summary(&summary, &validation_context);
+    validation.accepted.then_some(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_context_pack_from_validated_parts(
+    conn: &Connection,
+    input: &ContextRequestInput<'_>,
+    user_session_id: String,
+    interaction_context_id: String,
+    session_summary: String,
+    resolver: ResolverOutput,
+    last_public_answer: PublicAnswerBoundary,
+    conversation_state_mode: LlmMode,
+    conversation_state_summary: Option<ConversationStateSummary>,
+    conversation_state_agent_audit: Option<Value>,
+    conversation_state_source: &str,
+) -> Result<ContextResolution> {
+    let evidence_package_ref_views = last_public_answer
+        .evidence_package_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let conversation_state_projected =
         conversation_state_mode == LlmMode::Enforced && conversation_state_summary.is_some();
     let conversation_state_digest = conversation_state_summary
@@ -666,8 +850,17 @@ fn create_context_for_request_with_mode(
             "scoped_memory_policy": SCOPED_MEMORY_POLICY_VERSION,
             "scoped_memory_llm_filter": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
             "conversation_state_summary": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "llm_agent_validator": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
         },
         "resolver": resolver.audit_json(),
+        "llm_agent_context_path": {
+            "question_normalizer_mode": question_normalizer_agent_mode().as_str(),
+            "conversation_state_mode": conversation_state_mode.as_str(),
+            "question_normalizer_agent": resolver.agent_audit.clone(),
+            "conversation_state_agent": &conversation_state_agent_audit,
+            "conversation_state_summary_source": conversation_state_source,
+            "raw_agent_output_embedded": false,
+        },
     });
     let context_pack_digest = digest_json(&context_pack);
     context_pack["digest"] = json!(&context_pack_digest);
@@ -778,6 +971,14 @@ fn create_context_for_request_with_mode(
                 "memory_read_policy_digest": &memory_read_policy_digest,
                 "conversation_state_summary_digest": &conversation_state_digest,
                 "conversation_state_summary_projection_visible": conversation_state_projected,
+                "llm_agent_context_path": {
+                    "question_normalizer_mode": question_normalizer_agent_mode().as_str(),
+                    "conversation_state_mode": conversation_state_mode.as_str(),
+                    "question_normalizer_agent": resolver.agent_audit.clone(),
+                    "conversation_state_agent": &conversation_state_agent_audit,
+                    "conversation_state_summary_source": conversation_state_source,
+                    "raw_agent_output_embedded": false,
+                },
             }),
         },
     )?;
@@ -809,6 +1010,8 @@ fn create_context_for_request_with_mode(
                         .as_ref()
                         .map(|summary| summary.summary_confidence),
                     "projection_visible": conversation_state_projected,
+                    "summary_source": conversation_state_source,
+                    "agent_decision": &conversation_state_agent_audit,
                     "memory_allowed_as_evidence": false,
                     "raw_history_included": false,
                     "evidence_package_refs_count": evidence_package_ref_views.len(),
@@ -894,6 +1097,349 @@ fn create_context_for_request_with_mode(
         context_pack,
         context_projections,
     })
+}
+
+fn question_normalizer_trigger(
+    question: &str,
+    deterministic: &ResolverOutput,
+    prior_subject: Option<&str>,
+) -> Option<String> {
+    let trigger = if deterministic.needs_clarification
+        && deterministic.unsupported_reason.as_deref() == Some("unresolved_referent")
+    {
+        "unresolved_referent"
+    } else if contains_referential_pronoun(question)
+        && (prior_subject.is_some() || !deterministic.referent_bindings.is_empty())
+    {
+        "prior_subject_needed"
+    } else if deterministic.confidence < 0.75 {
+        "low_confidence_binding"
+    } else {
+        return None;
+    };
+    LLM_RESOLVER_ALLOWED_TRIGGERS
+        .contains(&trigger)
+        .then(|| trigger.to_string())
+}
+
+async fn run_question_normalizer_agent(
+    runtime_client: &dyn RuntimeClient,
+    mode: LlmMode,
+    trigger: &str,
+    input: &ContextRequestInput<'_>,
+    prepared: &PreparedContext,
+) -> QuestionNormalizerValidationDecision {
+    let allowed_referents = allowed_referents_for_agent(
+        input.question,
+        input.messages,
+        prepared.prior_subject.as_deref(),
+        &prepared.deterministic_resolver,
+    );
+    let agent_input = QuestionNormalizerAgentInput::new(
+        trigger,
+        input.question,
+        recent_messages_for_agent(input.messages, "user"),
+        recent_messages_for_agent(input.messages, "assistant"),
+        prepared.prior_subject.clone(),
+        prepared.session_summary.clone(),
+        allowed_referents.clone(),
+    );
+    let structured_payload = json!(agent_input);
+    let input_digest = format!("sha256:{}", digest_json(&structured_payload));
+    let envelope = LlmAgentRequestEnvelope::new(
+        new_id("req"),
+        QUESTION_NORMALIZER_AGENT_TYPE,
+        QUESTION_NORMALIZER_PROFILE_ID,
+        mode.as_str(),
+        input.trace_id,
+        prepared.user_session_id.clone(),
+        prepared.interaction_context_id.clone(),
+        llm_agent_projection_ref(
+            input.trace_id,
+            QUESTION_NORMALIZER_PROFILE_ID,
+            &input_digest,
+        ),
+        input_digest,
+        QUESTION_NORMALIZER_TIMEOUT_MS,
+        structured_payload,
+    );
+    let output = execute_llm_agent_profile(
+        runtime_client,
+        QUESTION_NORMALIZER_PROFILE_ID,
+        QUESTION_NORMALIZER_SYSTEM_PROMPT,
+        &envelope,
+        None,
+    )
+    .await;
+    let decision = match output {
+        Ok(output) => validate_question_normalizer_runtime_output(
+            mode,
+            trigger,
+            &envelope,
+            &output.result_summary,
+            output.result_ref.as_deref(),
+            &allowed_referents,
+        ),
+        Err(error) => {
+            question_normalizer_runtime_error_decision(mode, trigger, &envelope, error.to_string())
+        }
+    };
+    if decision.contract_accepted() {
+        return decision;
+    }
+    let first_error_digest = error_digest(decision.errors());
+    let repaired = execute_llm_agent_profile(
+        runtime_client,
+        QUESTION_NORMALIZER_PROFILE_ID,
+        QUESTION_NORMALIZER_SYSTEM_PROMPT,
+        &envelope,
+        Some(decision.errors()),
+    )
+    .await;
+    match repaired {
+        Ok(output) => validate_question_normalizer_runtime_output(
+            mode,
+            trigger,
+            &envelope,
+            &output.result_summary,
+            output.result_ref.as_deref(),
+            &allowed_referents,
+        )
+        .with_repair_metadata(true, Some(first_error_digest)),
+        Err(_) => decision.with_repair_metadata(true, Some(first_error_digest)),
+    }
+}
+
+async fn run_conversation_state_agent(
+    runtime_client: &dyn RuntimeClient,
+    mode: LlmMode,
+    input: &ContextRequestInput<'_>,
+    prepared: &PreparedContext,
+    resolver: &ResolverOutput,
+) -> ConversationStateValidationDecision {
+    let recent_state_messages = input
+        .messages
+        .iter()
+        .map(|message| ConversationStateMessage {
+            role: message.role.as_str(),
+            content: message.content.as_str(),
+        })
+        .collect::<Vec<_>>();
+    let evidence_package_ref_views = prepared
+        .last_public_answer
+        .evidence_package_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_boundaries = prepared
+        .last_public_answer
+        .boundary
+        .as_deref()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let required_entities = resolver
+        .referent_bindings
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let conversation_state_input = ConversationStateInput {
+        current_question: input.question,
+        recent_messages: &recent_state_messages,
+        session_summary: &prepared.session_summary,
+        last_public_answer_boundary: prepared.last_public_answer.boundary.as_deref(),
+        evidence_package_refs: &evidence_package_ref_views,
+        reviewer_warnings: &[],
+    };
+    let validation_context = conversation_state_validation_context(
+        &conversation_state_input,
+        &required_entities,
+        &required_boundaries,
+    );
+    let agent_messages = input
+        .messages
+        .iter()
+        .rev()
+        .take(8)
+        .map(|message| AgentContextMessage {
+            role: message.role.clone(),
+            content: bounded_summary(&message.content, 360),
+        })
+        .collect::<Vec<_>>();
+    let agent_input = crate::llm_agent_contracts::ConversationStateWriterAgentInput::new(
+        input.question,
+        agent_messages,
+        prepared.session_summary.clone(),
+        prepared.last_public_answer.boundary.clone(),
+        prepared.last_public_answer.evidence_package_refs.clone(),
+        Vec::new(),
+        resolver.referent_bindings.clone(),
+        required_boundaries
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect(),
+    );
+    let structured_payload = json!(agent_input);
+    let input_digest = format!("sha256:{}", digest_json(&structured_payload));
+    let envelope = LlmAgentRequestEnvelope::new(
+        new_id("req"),
+        CONVERSATION_STATE_WRITER_AGENT_TYPE,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+        mode.as_str(),
+        input.trace_id,
+        prepared.user_session_id.clone(),
+        prepared.interaction_context_id.clone(),
+        llm_agent_projection_ref(
+            input.trace_id,
+            CONVERSATION_STATE_WRITER_PROFILE_ID,
+            &input_digest,
+        ),
+        input_digest,
+        CONVERSATION_STATE_WRITER_TIMEOUT_MS,
+        structured_payload,
+    );
+    let output = execute_llm_agent_profile(
+        runtime_client,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+        CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
+        &envelope,
+        None,
+    )
+    .await;
+    let decision = match output {
+        Ok(output) => validate_conversation_state_runtime_output(
+            mode,
+            &envelope,
+            &output.result_summary,
+            output.result_ref.as_deref(),
+            &validation_context,
+        ),
+        Err(error) => conversation_state_runtime_error_decision(mode, &envelope, error.to_string()),
+    };
+    if decision.contract_accepted() {
+        return decision;
+    }
+    let first_error_digest = error_digest(decision.errors());
+    let repaired = execute_llm_agent_profile(
+        runtime_client,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+        CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
+        &envelope,
+        Some(decision.errors()),
+    )
+    .await;
+    match repaired {
+        Ok(output) => validate_conversation_state_runtime_output(
+            mode,
+            &envelope,
+            &output.result_summary,
+            output.result_ref.as_deref(),
+            &validation_context,
+        )
+        .with_repair_metadata(true, Some(first_error_digest)),
+        Err(_) => decision.with_repair_metadata(true, Some(first_error_digest)),
+    }
+}
+
+async fn execute_llm_agent_profile(
+    runtime_client: &dyn RuntimeClient,
+    profile_id: &str,
+    system_prompt: &str,
+    envelope: &LlmAgentRequestEnvelope,
+    repair_errors: Option<&[String]>,
+) -> Result<RuntimeOutput> {
+    let contract = if profile_id == QUESTION_NORMALIZER_PROFILE_ID {
+        question_normalizer_profile_contract()
+    } else {
+        conversation_state_writer_profile_contract()
+    };
+    let runtime_step = RuntimeStep::from_profile_contract(
+        &contract,
+        json!({
+            "agent_request_id": &envelope.agent_request_id,
+            "projection_ref": &envelope.projection_ref,
+            "input_digest": &envelope.input_digest,
+            "raw_output_must_not_be_persisted": true,
+        }),
+    );
+    let user_payload = if let Some(errors) = repair_errors {
+        serde_json::to_string_pretty(&json!({
+            "repair": {
+                "schema_error_digest": error_digest(errors),
+                "schema_error_summary": bounded_summary(&errors.join("; "), 360),
+                "instruction": "Return only a corrected JSON object for the same agent_request. Do not include markdown or explanation."
+            },
+            "agent_request": envelope,
+        }))?
+    } else {
+        serde_json::to_string_pretty(envelope)?
+    };
+    runtime_client
+        .execute_profile_step(RuntimeProfileInput {
+            profile_id: profile_id.to_string(),
+            messages: vec![
+                RuntimeProfileMessage::new("system", system_prompt),
+                RuntimeProfileMessage::new("user", user_payload),
+            ],
+            metadata: json!({
+                "agent_request_id": &envelope.agent_request_id,
+                "projection_ref": &envelope.projection_ref,
+                "input_digest": &envelope.input_digest,
+                "raw_output_persisted": false,
+                "repair_attempt": repair_errors.is_some(),
+            }),
+            profile_contract: Some(contract),
+            runtime_step: Some(runtime_step),
+            requested_tools: Vec::new(),
+            trace_id: envelope.trace_id.clone(),
+        })
+        .await
+        .map_err(|error| anyhow!("{error}"))
+}
+
+fn allowed_referents_for_agent(
+    question: &str,
+    messages: &[ContextMessage],
+    prior_subject: Option<&str>,
+    deterministic: &ResolverOutput,
+) -> Vec<String> {
+    let mut referents = deterministic
+        .referent_bindings
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Some(subject) = latest_subject_in_text(question) {
+        referents.insert(subject);
+    }
+    if let Some(subject) = latest_subject_from_messages(messages) {
+        referents.insert(subject);
+    }
+    if let Some(subject) = prior_subject {
+        referents.insert(subject.to_string());
+    }
+    referents.into_iter().collect()
+}
+
+fn recent_messages_for_agent(messages: &[ContextMessage], role: &str) -> Vec<String> {
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == role)
+        .take(4)
+        .map(|message| bounded_summary(&message.content, 360))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn llm_agent_projection_ref(trace_id: &str, profile_id: &str, input_digest: &str) -> String {
+    let digest = input_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(input_digest)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    format!("llm-agent-input://tonglingyu/{trace_id}/{profile_id}/{digest}")
 }
 
 pub(crate) fn load_deduped_final_response(
@@ -3823,8 +4369,23 @@ fn memory_policy_mode() -> String {
     }
 }
 
+#[cfg(test)]
 fn conversation_state_summary_mode() -> LlmMode {
     env::var(CONVERSATION_STATE_SUMMARY_MODE_ENV)
+        .ok()
+        .and_then(|mode| LlmMode::parse(&mode).ok())
+        .unwrap_or(LlmMode::Disabled)
+}
+
+fn question_normalizer_agent_mode() -> LlmMode {
+    env::var(QUESTION_NORMALIZER_AGENT_MODE_ENV)
+        .ok()
+        .and_then(|mode| LlmMode::parse(&mode).ok())
+        .unwrap_or(LlmMode::Disabled)
+}
+
+fn conversation_state_agent_mode() -> LlmMode {
+    env::var(CONVERSATION_STATE_AGENT_MODE_ENV)
         .ok()
         .and_then(|mode| LlmMode::parse(&mode).ok())
         .unwrap_or(LlmMode::Disabled)
@@ -4017,7 +4578,7 @@ fn memory_audit_ref(kind: &str, id: &str) -> String {
     format!("memory-audit://tonglingyu/{kind}/{id}")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ResolverOutput {
     resolved_question: String,
     referent_bindings: Vec<String>,
@@ -4026,13 +4587,15 @@ struct ResolverOutput {
     needs_clarification: bool,
     clarification_question: Option<String>,
     unsupported_reason: Option<String>,
+    strategy: String,
+    agent_audit: Option<Value>,
 }
 
 impl ResolverOutput {
     fn audit_json(&self) -> Value {
         json!({
             "schema_version": RESOLVER_SCHEMA_VERSION,
-            "strategy": "deterministic_rules",
+            "strategy": self.strategy,
             "resolved_question": self.resolved_question,
             "referent_bindings": self.referent_bindings,
             "used_context_refs": self.used_context_refs,
@@ -4040,8 +4603,31 @@ impl ResolverOutput {
             "needs_clarification": self.needs_clarification,
             "clarification_question": self.clarification_question,
             "unsupported_reason": self.unsupported_reason,
-            "llm_used": false,
+            "llm_used": self.agent_audit
+                .as_ref()
+                .and_then(|audit| audit.get("accepted_for_main"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "agent_invoked": self.agent_audit.is_some(),
+            "agent_decision": self.agent_audit,
         })
+    }
+
+    fn from_agent_decision(
+        sealed: &crate::llm_agent_validator::SealedQuestionResolution,
+        agent_audit: Option<Value>,
+    ) -> Self {
+        Self {
+            resolved_question: sealed.resolved_question().to_string(),
+            referent_bindings: sealed.referent_bindings().to_vec(),
+            used_context_refs: sealed.used_context_refs().to_vec(),
+            confidence: sealed.confidence(),
+            needs_clarification: sealed.needs_clarification(),
+            clarification_question: sealed.clarification_question().map(str::to_string),
+            unsupported_reason: sealed.unsupported_reason().map(str::to_string),
+            strategy: "llm_agent_enforced".to_string(),
+            agent_audit,
+        }
     }
 }
 
@@ -4170,6 +4756,8 @@ fn resolve_question(
             needs_clarification: false,
             clarification_question: None,
             unsupported_reason: None,
+            strategy: "deterministic_rules".to_string(),
+            agent_audit: None,
         };
     }
     if contains_referential_pronoun(question) {
@@ -4185,6 +4773,8 @@ fn resolve_question(
                 needs_clarification: false,
                 clarification_question: None,
                 unsupported_reason: None,
+                strategy: "deterministic_rules".to_string(),
+                agent_audit: None,
             };
         }
         return ResolverOutput {
@@ -4197,6 +4787,8 @@ fn resolve_question(
                 "请明确你指的是哪位人物或对象，我再继续回答。".to_string(),
             ),
             unsupported_reason: Some("unresolved_referent".to_string()),
+            strategy: "deterministic_rules".to_string(),
+            agent_audit: None,
         };
     }
     ResolverOutput {
@@ -4207,6 +4799,8 @@ fn resolve_question(
         needs_clarification: false,
         clarification_question: None,
         unsupported_reason: None,
+        strategy: "deterministic_rules".to_string(),
+        agent_audit: None,
     }
 }
 
@@ -5111,6 +5705,17 @@ fn now_rfc3339() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::VecDeque,
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use agent_core::{
+        AgentCoreError, CoreResult, ErrorCode, RuntimeOutput, RuntimeRunInput, RuntimeSessionInput,
+    };
+    use async_trait::async_trait;
+
     use super::*;
 
     fn conn() -> Connection {
@@ -5122,6 +5727,88 @@ mod tests {
         .expect("schema migration table");
         init_schema(&conn).expect("context schema");
         conn
+    }
+
+    fn temp_context_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tonglingyu-context-{label}-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ))
+    }
+
+    fn file_conn(path: &PathBuf) -> Connection {
+        let conn = Connection::open(path).expect("file db");
+        conn.execute(
+            "CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+            [],
+        )
+        .expect("schema migration table");
+        init_schema(&conn).expect("context schema");
+        conn
+    }
+
+    fn remove_file_db(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeRuntimeClient {
+        outputs: Arc<Mutex<VecDeque<String>>>,
+    }
+
+    impl FakeRuntimeClient {
+        fn new(outputs: Vec<Value>) -> Self {
+            Self {
+                outputs: Arc::new(Mutex::new(
+                    outputs
+                        .into_iter()
+                        .map(|value| value.to_string())
+                        .collect::<VecDeque<_>>(),
+                )),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for FakeRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "fake runtime does not support execute_run",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "fake runtime does not support sessions",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let output = self
+                .outputs
+                .lock()
+                .expect("fake runtime lock")
+                .pop_front()
+                .ok_or_else(|| {
+                    AgentCoreError::coded(ErrorCode::NotFound, "fake runtime output missing")
+                })?;
+            Ok(RuntimeOutput {
+                result_summary: output,
+                result_ref: Some(format!("fake://{}", input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({"fake_runtime": true}),
+            })
+        }
     }
 
     struct TestMemoryDraftInput<'a> {
@@ -5425,6 +6112,213 @@ mod tests {
             resolved.unsupported_reason.as_deref(),
             Some("unresolved_referent")
         );
+    }
+
+    #[tokio::test]
+    async fn enforced_question_agent_rewrites_only_after_validator_accepts() {
+        let db_path = temp_context_db_path("question-agent-accept");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::new(vec![json!({
+            "schema_version": RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "晴雯判词如何暗示结局？",
+            "referent_bindings": ["晴雯"],
+            "used_context_refs": ["current_question", "session_summary"],
+            "confidence": 0.91,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null
+        })]);
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "介绍晴雯".to_string(),
+            },
+            ContextMessage {
+                role: "assistant".to_string(),
+                content: "晴雯是重要人物。".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "她最后怎么样？".to_string(),
+            },
+        ];
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-question-agent-accept",
+                model_id: "tonglingyu",
+                external_user_ref: "user-question-agent-accept",
+                external_session_id: "session-question-agent-accept",
+                external_message_id: "message-question-agent-accept",
+                question: "她最后怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Disabled,
+        )
+        .await
+        .expect("context created");
+
+        assert_eq!(context.resolved_question, "晴雯判词如何暗示结局？");
+        assert_eq!(
+            context.context_pack["resolver"]["strategy"],
+            json!("llm_agent_enforced")
+        );
+        assert_eq!(context.context_pack["resolver"]["llm_used"], json!(true));
+        assert_eq!(
+            context.context_pack["resolver"]["agent_decision"]["raw_output_embedded"],
+            json!(false)
+        );
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn forbidden_question_agent_output_is_rejected_and_deterministic_survives() {
+        let db_path = temp_context_db_path("question-agent-reject");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let invalid = json!({
+            "schema_version": RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "晴雯判词如何暗示结局？",
+            "referent_bindings": ["晴雯"],
+            "used_context_refs": ["current_question", "session_summary"],
+            "confidence": 0.91,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null,
+            "allowed_tools": ["tonglingyu.memory.write"]
+        });
+        let runtime = FakeRuntimeClient::new(vec![invalid.clone(), invalid]);
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "介绍晴雯".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "她最后怎么样？".to_string(),
+            },
+        ];
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-question-agent-reject",
+                model_id: "tonglingyu",
+                external_user_ref: "user-question-agent-reject",
+                external_session_id: "session-question-agent-reject",
+                external_message_id: "message-question-agent-reject",
+                question: "她最后怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Disabled,
+        )
+        .await
+        .expect("context created");
+
+        assert_eq!(context.resolved_question, "晴雯最后怎么样？");
+        assert_eq!(
+            context.context_pack["resolver"]["strategy"],
+            json!("llm_agent_rejected_fallback")
+        );
+        assert_eq!(context.context_pack["resolver"]["llm_used"], json!(false));
+        assert_eq!(
+            context.context_pack["resolver"]["agent_invoked"],
+            json!(true)
+        );
+        let errors = context.context_pack["resolver"]["agent_decision"]["errors"]
+            .as_array()
+            .expect("agent errors");
+        assert!(errors.iter().any(|error| {
+            error
+                .as_str()
+                .is_some_and(|text| text.contains("forbidden_field"))
+        }));
+        assert_eq!(
+            context.context_pack["resolver"]["agent_decision"]["raw_output_embedded"],
+            json!(false)
+        );
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn enforced_conversation_state_agent_projects_only_validated_summary() {
+        let db_path = temp_context_db_path("conversation-state-agent");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::new(vec![json!({
+            "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
+            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "current_topic": "晴雯相关问题",
+            "active_entities": ["晴雯"],
+            "open_questions": ["晴雯后来怎么样？"],
+            "last_answer_boundaries": [],
+            "evidence_package_refs": [],
+            "reviewer_warnings": [],
+            "memory_allowed_as_evidence": false,
+            "summary_confidence": 0.9
+        })]);
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "晴雯后来怎么样？".to_string(),
+        }];
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-conversation-state-agent",
+                model_id: "tonglingyu",
+                external_user_ref: "user-conversation-state-agent",
+                external_session_id: "session-conversation-state-agent",
+                external_message_id: "message-conversation-state-agent",
+                question: "晴雯后来怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Disabled,
+            LlmMode::Enforced,
+        )
+        .await
+        .expect("context created");
+
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_summary_source"],
+            json!("llm_agent_validated")
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["accepted_for_projection"],
+            json!(true)
+        );
+        let main_projection = context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-main")
+            .expect("main projection");
+        assert_eq!(
+            main_projection.projection_payload["conversation_state_summary"]["active_entities"],
+            json!(["晴雯"])
+        );
+        for projection in &context.context_projections {
+            if projection.consumer_name != "honglou-main" {
+                assert!(
+                    projection.projection_payload["conversation_state_summary"].is_null(),
+                    "{} should not receive conversation state",
+                    projection.consumer_name
+                );
+            }
+        }
+        remove_file_db(&db_path);
     }
 
     #[test]
