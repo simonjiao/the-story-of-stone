@@ -372,17 +372,40 @@ Eval 必须按节点归因，不只评最终回答。
 | G9 用户响应安全 Gate | 用户响应和 SSE 无内部字段、prompt、tool payload、memory/ref 泄露。 |
 | G10 Release Gate | 本地测试、clippy、smoke、strict Gateway gate、live gate、saved validator 和 release readiness 按对应阶段全部通过。 |
 
-## 13. 实施路线
+## 13. 阶段化实施路线
 
-| 优先级 | 工作包 | 当前判断 | 交付物 |
-|---|---|---|---|
-| P0 | Question Resolver LLM contract | 目标增强，当前尚未落地；外部 LLM 调用未接 | resolver runtime/Hermes 调用、schema repair、audit、eval |
-| P1 | Conversation State Summary | 目标增强，当前未实现 | summary writer/loader、schema、anti-hallucination eval |
-| P2 | Retrieval Policy schema 化 | 目标增强，当前主路径确定性 | LLM suggested policy、deterministic patch、policy eval |
-| P3 | Profile observation eval | Runtime/Hermes 已有受控接口和 observation 边界 | text/commentary/main/reviewer observation datasets |
-| P4 | Claim-first draft + reviewer eval | 当前有本地 package/reviewer 约束 | claim map eval、reviewer false-pass eval、revision gate |
-| P5 | Full-path Eval Suite | 目标增强 | 多数据集、节点级失败归因、release report |
-| P6 | 用户响应脱敏与泄露回归门禁 | 横切安全门禁，不属于 LLM 能力；当前已有过滤，需要持续守护 | recursive internal-field scan、stream replay checks |
+实施不能按 P0-P6 一次性落地。P0-P5 是 LLM 支持点和 eval 能力，P6 是横切安全门禁。正确做法是先建立尺子和用户响应安全边界，再逐个打开 LLM 支持点，每个阶段都必须能单独验证、提交和回滚。
+
+阶段划分原则：
+
+1. 每阶段只引入一个主要风险点。
+2. LLM 不同时进入多个决策节点。
+3. 用户响应脱敏与泄露回归不是 LLM 能力，但从第一阶段开始持续守护。
+4. 每阶段都有进入条件、退出条件和不可跨越边界。
+5. 没有通过上一阶段 gate，不进入下一阶段。
+
+| 阶段 | 目标 | 包含工作 | 进入条件 | 退出条件 | 不可跨越边界 |
+|---|---|---|---|---|---|
+| S0 口径冻结 | 固定当前事实、目标增强和待确认项 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | 当前代码不改；31 号文档已纳入仓库 | 文档能清楚区分当前实现、目标增强、外部借鉴和待确认项 | 不能把设计目标写成已实现 |
+| S1 评测与用户响应安全基线 | 先建立最小 gate，再接 LLM | P6 最小回归、P5 最小 runner、`request_safety.jsonl`、`streaming_dedupe.jsonl` | 当前用户响应 wrapper 和 SSE 行为可回放 | 内部字段扫描、stream replay、缓存复用、request safety 能自动跑 | 不能引入新的 LLM 调用 |
+| S2 Question Resolver contract | 只做 resolver 输出约束，不接生产 LLM | P0 schema、字段白名单、context refs 白名单、confidence gate、audit、`question_resolution.jsonl` | S1 gate 可用 | 规则 resolver 行为不变；contract tests 和 eval fixture 通过 | LLM 不能决定事实、scope、tool、memory、reviewer、package |
+| S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | P0 runtime/Hermes 调用、schema repair、shadow audit、fail-closed | S2 contract 稳定 | 只在 deterministic 需要澄清时调用；低置信澄清或 fail-closed；RAG 不被未校验输出驱动 | 不能让 LLM resolver 读取 memory 或完整 history |
+| S4 Conversation State Summary 决策 | 决定是否新增强状态摘要节点 | P1 writer/loader/schema、可见范围、anti-hallucination eval | S3 证明 resolver 边界稳定，或明确不做 S3 | summary 不引入事实；只进入授权 projection；不进 evidence package | 不能把 summary 当证据源 |
+| S5 Retrieval Policy schema 化 | 让 LLM 只建议检索策略 | P2 suggested policy schema、deterministic patch、required evidence eval | S2/S3 resolver 输出稳定；S4 决策明确 | 高风险问题必需证据不被降级；版本/脂批/人物命运 gate 通过 | LLM 不能决定最终证据类型和工具权限 |
+| S6 Profile observation 与 draft/reviewer eval | 评估 LLM profile 输出质量和边界 | P3 profile observation datasets、P4 claim-first draft、reviewer false-pass eval | S5 检索和 package 边界稳定 | refs 全部来自本地 evidence ids；reviewer override 可审计；draft 不能绕过 package | observation/candidate 不能成为最终事实或最终裁决 |
+| S7 全路径发布门禁 | 汇总节点级 eval 和 release report | P5 full-path suite、失败归因、release report；P6 持续回归 | S1-S6 各阶段 gate 通过 | request -> response 全路径可回放；失败能归因到节点；release gate 明确通过/失败 | 不能只用最终回答效果替代节点级验证 |
+
+阶段与工作包映射：
+
+| 工作包 | 所属阶段 | 实施口径 |
+|---|---|---|
+| P0 Question Resolver LLM contract | S2-S3 | 先 contract，后 shadow/受控接入。 |
+| P1 Conversation State Summary | S4 | 先决策是否新增，再实现。 |
+| P2 Retrieval Policy schema 化 | S5 | LLM 只建议，deterministic patch 最终约束。 |
+| P3 Profile observation eval | S6 | 只评 observation，不放权给最终裁决。 |
+| P4 Claim-first draft + reviewer eval | S6 | draft/reviewer 都必须绑定 package 和 refs。 |
+| P5 Full-path Eval Suite | S1、S7 | S1 做最小 runner，S7 做完整 suite 和 release report。 |
+| P6 用户响应脱敏与泄露回归门禁 | S1-S7 | 横切安全门禁，不属于 LLM 能力，贯穿所有阶段。 |
 
 ### 13.1 实施路线的待确认口径
 
