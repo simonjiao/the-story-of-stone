@@ -284,6 +284,7 @@ production-ready 只能在以下条件全部成立时声明：
 
 - [ ] deploy report `status == "ok"`。
 - [ ] source commit 与 gatekeeper commit 均记录，且 tracked dirty 均为 `false`。
+- [ ] release readiness manifest 中的 git commit 必须绑定 source commit，不能误绑定 gatekeeper commit。
 - [ ] remote live gates report `status == "ok"`，gate result 全部 passed。
 - [ ] remote release automation report `status == "ok"` 且 `production_ready_proven == true`。
 - [ ] release automation 内部 `checks.llm_eval == "passed"`。
