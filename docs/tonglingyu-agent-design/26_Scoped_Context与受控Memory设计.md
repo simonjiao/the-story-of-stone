@@ -10,12 +10,12 @@
 1. Scoped Context Request Path 最小闭环已实现，并已通过当次 `hhost` production gate；
 2. Context Projection Runtime 已实现，并已通过当次 `hhost` production gate；
 3. Memory Candidate Workflow 已实现，并已通过当次 `hhost` production gate；
-4. Scoped Memory Production 已在 `0.1.12` 当次部署中通过 `hhost` production gate，
+4. Scoped Memory Production 已在 `0.1.13` 当次部署中通过 `hhost` production gate，
    active/read-enabled memory 读取路径已按 policy、ACL、scope、TTL、revoke/expire、
    lifecycle 和 projection 约束打开；
 5. 2026-05-20 一致性复查进一步收紧 `user_message` 来源、`context_pack_id`
-   绑定、`memory_read_ref_digest` 和 profile view/projection 同源构造；该收紧已进入
-   当前仓库代码，仍需下一次按版本规则自增部署后，才能成为新的 hhost 运行结论；
+   绑定、`memory_read_ref_digest` 和 profile view/projection 同源构造；该收紧已随
+   `0.1.13` 部署到 `hhost`，并通过当次 production gate；
 6. 仍不能声明 Context Governance 已拆成独立服务、非 Hermes external agent 已接入、
    公网审核页面可用，或 memory 可以作为 evidence/reviewer 事实来源。
 
@@ -86,9 +86,9 @@ Scoped Memory Production 已完成各自当次生产门禁：
 
 因此当前可以声明已部署 run 覆盖的 Scoped Memory Production production-ready。这个结论
 不扩展到 Context Governance 独立服务、非 Hermes external agent、普通公网审核页面，
-也不允许 memory 进入 evidence package 或改变 reviewer 裁决。本次 2026-05-20
-一致性收紧属于当前仓库代码结论；进入 hhost 运行结论前仍需按版本规则自增部署并重跑
-production gates。
+也不允许 memory 进入 evidence package 或改变 reviewer 裁决。2026-05-20
+一致性收紧已随 `0.1.13` 进入 hhost 运行结论；后续任何生产策略或代码变更仍需按
+版本规则自增部署并重跑 production gates。
 
 ## 第一版 Scope Taxonomy
 
@@ -800,7 +800,7 @@ Scoped memory production-ready 还需要：
 
 ## 当前状态口径
 
-截至 2026-05-20 Scoped Memory Production gate 和一致性复查完成时，可以声明：
+截至 2026-05-20 `0.1.13` Scoped Memory Production gate 和一致性复查完成时，可以声明：
 
 1. 设计决策已冻结；
 2. Scoped Context Request Path 已实现并通过当次 `hhost` production gate；
@@ -819,6 +819,7 @@ Scoped memory production-ready 还需要：
    的 `user_message`，不能把 final response、工具结果、reviewer 裁决或任务状态变成
    可读 memory；
 10. scoped memory production-ready 结论来自 Scoped Memory Production 自己的本地测试、hhost live gate、
-    full remote release automation、saved validator 和 2026-05-20 一致性复查，不复用
-    Scoped Context Request Path、Context Projection Runtime 和 Memory Candidate Workflow 结论；
+    full remote release automation、saved validator 和 2026-05-20 一致性复查后的
+    `0.1.13` 部署验证，不复用 Scoped Context Request Path、Context Projection Runtime
+    和 Memory Candidate Workflow 结论；
 11. 非 Hermes external agent 只是 schema 预留点，当前不能声明已接入。

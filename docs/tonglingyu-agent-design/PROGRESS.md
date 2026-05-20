@@ -145,6 +145,34 @@
   patch-style 双路径漂移。已复跑
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 和 `scripts/qa.sh --quick`。
+- 2026-05-20 已按 deploy patch 自增规则部署 `0.1.13` 到 `hhost`：
+  `tonglingyu-gateway` 运行 image 为 `tonglingyu-gateway:0.1.13`，image id 为
+  `sha256:214a8977e8454549d2f7f787929fb6bedb62373280ff3459521b7e2d258fb464`，
+  version label 为 `0.1.13`。远端 `.env` 更新前已备份到
+  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260520-085354`；
+  当前 `TONGLINGYU_VERSION`、`TONGLINGYU_GATEWAY_IMAGE_REF` 和
+  `TONGLINGYU_GATEWAY_IMAGE_TAG` 均已收敛到 `0.1.13`。
+- 2026-05-20 `0.1.13` 远端 live gates 已通过：
+  `data/tonglingyu/remote-live-gates/remote-live-20260520T005806Z-8320/remote-live-gates.json`，
+  model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway 和
+  scoped context gate 均为 passed。第一次 live gate 暴露出测试脚本使用固定
+  `scoped-context-live` 用户导致历史 active memory 污染空读取断言；已将
+  `verify-tonglingyu-scoped-context-live.sh` 改为 run-scoped user id 后复跑通过。
+- 2026-05-20 `0.1.13` 完整远端 release automation 已通过：
+  `data/tonglingyu/remote-release-automation/remote-release-20260520T005901Z-8691/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`。同一 run 绑定
+  `environment=hhost`、`target=tonglingyu-rqa`、git commit
+  `1ae3a2d633b6eaf55606072645cc257c89bfcffd`、`tracked_dirty=false`；
+  release readiness 为 `status=passed`、`production_release_ready=true`，saved
+  validator 为 `status=ok`、`errors=[]`，open P0 retrieval failures / governance
+  tasks 均为 0。
+- 2026-05-20 `0.1.13` 容量与值守证据通过：
+  `rqa_write_p95_ms=4307`、`admin_read_p95_ms=409`、
+  `metrics_read_p95_ms=152`、`release_gate_ms=26896`；post-release monitor 为
+  60 分钟窗口，`sample_count=13`、`failed_sample_count=0`。因此 2026-05-20
+  一致性收紧后的 Scoped Memory Production hhost production-ready gate 已在
+  `0.1.13` run 中闭合。
 
 ## 已确认
 

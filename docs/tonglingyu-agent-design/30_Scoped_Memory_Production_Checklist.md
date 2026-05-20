@@ -497,6 +497,25 @@ Scoped Memory Production 必须让 export、anonymize、legal hold 和 retention
      现已改为 projection 消费同一份 profile view，避免两条路径后续漂移。
   这些修复不改变 Scoped Memory Production 目标口径，也不放宽 release gate；它们是对已冻结 contract
   的收敛，而不是新的折中路径。
+- 2026-05-20 上述一致性收紧已随 `0.1.13` 部署到 hhost，并通过完整生产验证：
+  `tonglingyu-gateway` 运行 image 为 `tonglingyu-gateway:0.1.13`，image id 为
+  `sha256:214a8977e8454549d2f7f787929fb6bedb62373280ff3459521b7e2d258fb464`。
+  live gate artifact 为
+  `data/tonglingyu/remote-live-gates/remote-live-20260520T005806Z-8320/remote-live-gates.json`，
+  model upstream、Open WebUI Function、Open WebUI Admin Action、strict Gateway 和
+  scoped context gate 均通过。
+- 2026-05-20 完整远端 release automation artifact 为
+  `data/tonglingyu/remote-release-automation/remote-release-20260520T005901Z-8691/remote-release-automation.json`，
+  `status=ok`、`production_ready_proven=true`、`release_blockers=[]`、
+  `required_failures=[]`、`secret_values_printed=false`。release readiness 为
+  `status=passed`、`production_release_ready=true`；saved validator 为
+  `status=ok`、`errors=[]`。同一 release 绑定 git commit
+  `1ae3a2d633b6eaf55606072645cc257c89bfcffd`、`tracked_dirty=false`，open P0
+  retrieval failures / governance tasks 均为 0。
+- 2026-05-20 容量与值守证据通过：`rqa_write_p95_ms=4307`、
+  `admin_read_p95_ms=409`、`metrics_read_p95_ms=152`、
+  `release_gate_ms=26896`；post-release monitor 为 60 分钟窗口、
+  `sample_count=13`、`failed_sample_count=0`。
 
 ## Fail-closed Matrix
 
