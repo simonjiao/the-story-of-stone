@@ -145,7 +145,7 @@
   patch-style 双路径漂移。已复跑
   `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
   `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 和 `scripts/qa.sh --quick`。
-- 2026-05-20 已按 deploy patch 自增规则部署 `0.1.13` 到 `hhost`：
+- 2026-05-20 已按当时版本规则部署 `0.1.13` 到 `hhost`：
   `tonglingyu-gateway` 运行 image 为 `tonglingyu-gateway:0.1.13`，image id 为
   `sha256:214a8977e8454549d2f7f787929fb6bedb62373280ff3459521b7e2d258fb464`，
   version label 为 `0.1.13`。远端 `.env` 更新前已按 gatekeeper 维护的 env

@@ -40,12 +40,24 @@ gates.
 
 ## Versioning
 
-Version management remains source-owned and is run from the repo root:
+Version management remains source-owned and is run from the repo root. First
+check synchronization:
 
 ```bash
 cd ..
 uv run --no-sync python scripts/version.py check
+```
+
+For a small feature or bugfix:
+
+```bash
 uv run --no-sync python scripts/version.py bump patch
+```
+
+For a large feature or refactor:
+
+```bash
+uv run --no-sync python scripts/version.py bump minor
 ```
 
 Run source QA before committing code or version changes:

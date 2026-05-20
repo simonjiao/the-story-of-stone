@@ -21,7 +21,7 @@
 - Git 提交按 task 或节点及时拆分；大提交的提交信息正文按关键更改列出不超过 5 条要点。
 - Rust 编码规则遵循 `docs/RUST_CODING_RULES.md`，尤其注意模板化、并发和错误边界。
 - Lint/test 细则遵循 `docs/LINT_AND_TEST_RULES.md`，`AGENTS.md` 不承载长命令清单。
-- 版本管理和 deploy 自增规则遵循 `docs/VERSIONING_RULES.md`，这里只保留入口。
+- 版本管理和版本分级规则遵循 `docs/VERSIONING_RULES.md`，这里只保留入口。
 
 ## 文档规则
 

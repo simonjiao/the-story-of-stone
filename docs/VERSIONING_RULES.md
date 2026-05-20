@@ -7,8 +7,26 @@ The initial version is `0.1.0`.
 
 - Use numeric `MAJOR.MINOR.PATCH`, for example `0.1.0`.
 - Do not add `v` prefixes, release suffixes, build metadata, or leading zeroes.
-- Release version bumps use `PATCH` unless a broader product-version decision
-  is made explicitly.
+- Keep `MAJOR` manual while the project is in `0.x`. Use `set` for a reviewed
+  first-position change only when the public product contract is being reset.
+
+## Bump Policy
+
+Use one explicit source-owned version bump for changes that affect build,
+runtime, local compose behavior, deployable assets, or release evidence.
+
+- `PATCH`: bugfixes, small features, narrow script fixes, local stack usability
+  updates, test-only fixes that guard released behavior, and small documentation
+  updates that are part of a release handoff.
+- `MINOR`: large features, cross-module behavior changes, runtime or gateway
+  contract changes, architecture refactors, data-schema changes, and deployment
+  boundary changes. A minor bump resets patch to zero.
+- No bump: typo-only documentation, commentary-only design notes, formatting,
+  or local notes that do not change a build, runtime, deployable asset, or
+  release handoff.
+
+When a change is both a bugfix and a broad refactor, use `MINOR`. Do not split a
+single coherent feature into several patch bumps just to avoid a minor version.
 
 ## Managed Surfaces
 
@@ -31,18 +49,27 @@ Check version synchronization:
 uv run --no-sync python scripts/version.py check
 ```
 
-Set a specific version only when initializing or repairing drift:
+For small features or bugfixes:
 
 ```bash
-uv run --no-sync python scripts/version.py set 0.1.0
+uv run --no-sync python scripts/version.py bump patch
 uv lock
 cargo metadata --manifest-path agent-platform/Cargo.toml --format-version 1 >/dev/null
 ```
 
-For a source-owned patch bump, run:
+For large features or refactors:
 
 ```bash
-uv run --no-sync python scripts/version.py bump patch
+uv run --no-sync python scripts/version.py bump minor
+uv lock
+cargo metadata --manifest-path agent-platform/Cargo.toml --format-version 1 >/dev/null
+```
+
+Set a specific version only when initializing, repairing drift, or performing a
+reviewed manual `MAJOR` change:
+
+```bash
+uv run --no-sync python scripts/version.py set 0.1.0
 uv lock
 cargo metadata --manifest-path agent-platform/Cargo.toml --format-version 1 >/dev/null
 ```

@@ -347,7 +347,7 @@ Context Projection Runtime 允许声明的状态只能按证据逐级推进：
 
 ### 工作包 I：hhost production gate
 
-- [x] 按版本规则 bump deploy patch version：`0.1.6` -> `0.1.7`。
+- [x] 按当时版本规则完成版本更新：`0.1.6` -> `0.1.7`。
 - [x] 同步 release tools 到 `hhost`。
 - [x] 重建并部署 `tonglingyu-gateway` 镜像。
 - [x] 运行 strict Gateway live gate。

@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 
-PROJECT_VERSION_FALLBACK = "0.1.13"
+PROJECT_VERSION_FALLBACK = "0.1.14"
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CRATES = (
     "agent-core",
@@ -50,9 +50,26 @@ def read_project_version(repo_dir: Path) -> str:
     return validate_version(PROJECT_VERSION_FALLBACK)
 
 
-def bump_patch(version: str) -> str:
+def parse_version(version: str) -> tuple[int, int, int]:
     major, minor, patch = (int(part) for part in validate_version(version).split("."))
-    return f"{major}.{minor}.{patch + 1}"
+    return major, minor, patch
+
+
+def bump_version(version: str, part: str) -> str:
+    major, minor, patch = parse_version(version)
+    if part == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    if part == "minor":
+        return f"{major}.{minor + 1}.0"
+    raise VersionError(f"unsupported bump part {part!r}; expected patch or minor")
+
+
+def bump_patch(version: str) -> str:
+    return bump_version(version, "patch")
+
+
+def bump_minor(version: str) -> str:
+    return bump_version(version, "minor")
 
 
 def replace_required(text: str, pattern: str, repl: str, label: str) -> str:
@@ -330,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser = subparsers.add_parser("set", help="Set and sync a version.")
     set_parser.add_argument("version")
     bump_parser = subparsers.add_parser("bump", help="Bump and sync a version.")
-    bump_parser.add_argument("part", choices=("patch",))
+    bump_parser.add_argument("part", choices=("patch", "minor"))
     subparsers.add_parser("check", help="Check all managed version surfaces.")
     return parser
 
@@ -351,9 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "bump":
         current = read_project_version(repo_dir)
-        if args.part != "patch":
-            parser.error("only patch deploy bumps are supported")
-        next_version = bump_patch(current)
+        next_version = bump_version(current, args.part)
         set_version(repo_dir, next_version)
         print(next_version)
         return 0

@@ -41,10 +41,17 @@ Version rules are in `docs/VERSIONING_RULES.md`. The minimum local check is:
 uv run --no-sync python scripts/version.py check
 ```
 
-Patch version bumps are source-owned and should go through:
+Choose the bump type from `docs/VERSIONING_RULES.md`. Small features and
+bugfixes use:
 
 ```bash
 uv run --no-sync python scripts/version.py bump patch
+```
+
+Large features and refactors use:
+
+```bash
+uv run --no-sync python scripts/version.py bump minor
 ```
 
 The project QA wrapper combines version, Python, shell, and Rust format gates:

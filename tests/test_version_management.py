@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-EXPECTED_PROJECT_VERSION = "0.1.13"
+EXPECTED_PROJECT_VERSION = "0.1.14"
 REPO_DIR = Path(__file__).resolve().parents[1]
 VERSION_SCRIPT = REPO_DIR / "scripts/version.py"
 
@@ -27,12 +27,18 @@ class VersionManagementTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.version_module = load_version_module()
 
-    def test_version_format_and_patch_bump(self) -> None:
+    def test_version_format_and_bumps(self) -> None:
         validate = self.version_module.validate_version
+        bump_version = self.version_module.bump_version
         bump_patch = self.version_module.bump_patch
+        bump_minor = self.version_module.bump_minor
         self.assertEqual(validate("0.1.0"), "0.1.0")
         self.assertEqual(bump_patch("0.1.0"), "0.1.1")
         self.assertEqual(bump_patch("10.200.999"), "10.200.1000")
+        self.assertEqual(bump_minor("0.1.13"), "0.2.0")
+        self.assertEqual(bump_version("10.200.999", "minor"), "10.201.0")
+        with self.assertRaises(Exception):
+            bump_version("0.1.0", "major")
         for invalid in ("", "v0.1.0", "0.1", "0.1.0-rc1", "01.1.0"):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(Exception):
