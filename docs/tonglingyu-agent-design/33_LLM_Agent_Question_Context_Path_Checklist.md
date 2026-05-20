@@ -24,6 +24,11 @@ automation 尚未执行，不能声明 target ready 或 production-ready。
   跨 `await` 无法挂载 handler。
 - 定向测试覆盖 accepted rewrite、forbidden-field rejection fallback、conversation-state
   validated projection 和 validator 负例。
+- forbidden-control 请求在进入 Runtime profile 前写入
+  `llm_agent_provider_not_called` audit，记录两个 LLM Agent profile 均未调用和 raw output
+  未嵌入。
+- gatekeeper 新增 `verify-tonglingyu-llm-agent-live-gate.sh`，release readiness 和 remote
+  live/release automation 已把 LLM Agent mode matrix live gate 纳入 required live gate。
 
 仍不能声明完成：目标环境真实 provider live gate、saved report validator、full remote
 automation、target artifact digest、image/rollback evidence 尚未全部闭合。
@@ -302,7 +307,7 @@ memory、evidence 或 context projection。
 - [x] 新增统一 mode gate，默认 `disabled`，非法值启动失败或请求 fail-closed。
 - [x] `/v1/chat/completions` 主路径必须先执行 deterministic pre-resolver。
 - [x] 只有 allowed trigger 才创建 `question_normalization` Agent request。
-- [ ] forbidden trigger 必须记录 audit，并证明 provider-not-called。
+- [x] forbidden trigger 必须记录 audit，并证明 provider-not-called。
 - [x] `shadow` 模式只写 audit，不改变主路径 `resolved_question`。
 - [x] `enforced` 模式只有 accepted result 才能替换 deterministic resolver 输出。
 - [x] Agent result 未 accepted 时，只允许回退 deterministic safe result、要求澄清或
@@ -373,10 +378,12 @@ memory、evidence 或 context projection。
 目标：真实环境必须证明这些 Agent 被真实 Runtime 调用。shadow/enforced 是同一 release
 run 内的运行门控，不是分批实现理由。
 
-- [ ] 在 compose / env 中注册两个内部 Runtime profile。
+- [x] 在 compose / env 中注册两个内部 Runtime profile 的 mode 开关。
 - [ ] 配置 profile model mapping，例如：
       `AGENT_RUNTIME_HERMES_PROFILE_MODELS=tonglingyu-question-normalizer=hermes-agent,tonglingyu-conversation-state-writer=hermes-agent`。
-- [ ] 同一目标环境 release run 必须覆盖 baseline disabled、two-agent shadow、
+- [x] gatekeeper live gate 脚本定义同一目标环境 release run 必须覆盖 baseline disabled、
+      two-agent shadow、question normalizer enforced、two-agent enforced 四组 gate。
+- [ ] 同一目标环境 release run 必须实际覆盖 baseline disabled、two-agent shadow、
       question normalizer enforced、two-agent enforced 四组 gate。
 - [ ] shadow live gate 必须证明两个 Agent 都调用真实 provider / runtime agent，且主路径未被改变。
 - [ ] question normalizer enforced live gate 必须证明 accepted result 能替换
@@ -405,6 +412,7 @@ run 内的运行门控，不是分批实现理由。
 - [x] release report 必须确认无 raw prompt、raw response、raw memory、tool payload、
       ACL 或 secret。
 - [x] release readiness validator 必须消费 LLM Agent release report。
+- [x] release readiness validator 必须把 LLM Agent live gate 作为 required live gate。
 - [ ] saved validator 必须能按 trace 重放 Agent request、Agent decision、
       context pack 和 projection digest。
 - [ ] `hhost` full remote release automation 必须通过。
@@ -452,6 +460,8 @@ run 内的运行门控，不是分批实现理由。
 - [x] `cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- llm-eval --fixture-dir agent-platform/crates/tonglingyu-gateway/evals/fixtures --report-out agent-platform/crates/tonglingyu-gateway/evals/reports/llm-eval.json --fail-on-hard-gate`
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 - [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-release-report.sh <llm-release-report.json>`
+- [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-agent-live-gate.sh` 已接入 release
+      readiness / remote live gates / remote release automation；目标环境实际执行仍未完成。
 - [x] gatekeeper `scripts/qa.sh --quick`
 - [x] gatekeeper `deploy/scripts/test-tonglingyu-release-readiness-contract.sh`
 - [ ] target `<deployment>/scripts/verify-tonglingyu-strict-gateway.sh`

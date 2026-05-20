@@ -72,7 +72,10 @@ use crate::context_governance::{
     table_counts as context_table_counts, transition_memory_candidate, transition_memory_card,
     validate_llm_memory_extraction_output,
 };
-use crate::llm_agent_contracts::tonglingyu_llm_agent_profile_contracts;
+use crate::llm_agent_contracts::{
+    CONVERSATION_STATE_WRITER_PROFILE_ID, QUESTION_NORMALIZER_PROFILE_ID,
+    tonglingyu_llm_agent_profile_contracts,
+};
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
 };
@@ -8111,6 +8114,7 @@ async fn chat_completions(
 
     let forbidden = forbidden_control_fields(&payload);
     if !forbidden.is_empty() {
+        let forbidden_digest = hash_value(&json!(&forbidden)).unwrap_or_default();
         let _ = record_workflow_state(
             &conn,
             &trace_id,
@@ -8119,6 +8123,23 @@ async fn chat_completions(
             "Failed with Controlled Response",
             "rejected",
             &json!({"reason": "forbidden_control_fields", "fields": forbidden}),
+        );
+        let _ = insert_audit_event(
+            &conn,
+            &trace_id,
+            "llm_agent_provider_not_called",
+            &json!({
+                "reason": "forbidden_control_fields",
+                "trigger": "forbidden_control_field_detected",
+                "provider_called": false,
+                "profiles_not_called": [
+                    QUESTION_NORMALIZER_PROFILE_ID,
+                    CONVERSATION_STATE_WRITER_PROFILE_ID,
+                ],
+                "forbidden_field_count": forbidden.len(),
+                "forbidden_fields_sha256": forbidden_digest,
+                "raw_agent_output_embedded": false,
+            }),
         );
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -12950,6 +12971,49 @@ USER: 介绍尤三姐
             .expect("clarification state count"),
             1
         );
+
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn forbidden_control_fields_audit_llm_provider_not_called() {
+        let db_path = temp_gateway_db_path("tonglingyu-llm-agent-provider-not-called");
+        let state = Arc::new(test_app_state(db_path.clone()));
+
+        let response = chat_completions(
+            State(state),
+            gateway_headers("provider-not-called-user"),
+            Json(json!({
+                "model": DEFAULT_MODEL_ID,
+                "messages": [{"role": "user", "content": "通灵玉是什么？"}],
+                "metadata": {
+                    "user_id": "provider-not-called-user",
+                    "chat_id": "provider-not-called-chat",
+                    "message_id": "provider-not-called-message",
+                },
+                "extra_body": {
+                    "context_pack_id": "forged-context-pack"
+                },
+            })),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            audit_event_count(&db_path, "llm_agent_provider_not_called"),
+            1
+        );
+        let payload = latest_audit_event_payload(&db_path, "llm_agent_provider_not_called");
+        assert_eq!(payload["provider_called"], json!(false));
+        assert_eq!(
+            payload["profiles_not_called"],
+            json!([
+                QUESTION_NORMALIZER_PROFILE_ID,
+                CONVERSATION_STATE_WRITER_PROFILE_ID
+            ])
+        );
+        assert_eq!(payload["raw_agent_output_embedded"], json!(false));
+        assert!(payload["forbidden_fields_sha256"].as_str().is_some());
 
         remove_sqlite_file_set(&db_path);
     }
