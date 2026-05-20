@@ -60,6 +60,21 @@ schema、policy、audit、replay、eval 和 release gate 中。
 | I9 | Evidence package 示例 `review: null` | 当前主链路 package 带 review，Gateway 后续还记录 review journal 和 public wrapper 过滤 | 示例应表达“review record 必须存在或可回放”，不能暗示 review 可空。 |
 | I10 | Eval 门槛全写成绝对百分比，像是当前已有数据集 | 当前已有多类 gate 和测试，但该文定义的多数据集 eval suite 尚未整体落地 | 百分比可作为发布目标，不能写成已通过事实。 |
 
+### 1.1 不一致项的待确认口径
+
+| 编号 | 是否待确认 | 需要确认的问题 | 确认后动作 | 不能误写成 |
+|---|---|---|---|---|
+| I1 | 否，已决纠偏 | 无。当前只能按 v1 书写。 | 文档、schema 示例和 eval fixture 统一使用 `tonglingyu-question-resolver-v1`。 | 不能写成 v2 已存在，除非先做 schema v2 迁移。 |
+| I2 | 是 | LLM resolver 未来能读取哪些 context refs。 | 明确白名单、未知 ref fail-closed、补 schema 和 eval。 | 不能默认允许 memory、完整 history、任意 session hint。 |
+| I3 | 是 | 是否新增 `conversation_state_summary` 节点。 | 若确认新增，需要 writer/loader/schema/audit/eval；若不新增，保留确定性 `session_summary`。 | 不能写成当前链路已有该节点。 |
+| I4 | 是，架构级 | resolver 是否允许读取 memory summary。 | 若允许，需要调整 resolver 与 memory read 的执行顺序，并补 ACL、budget、fail-closed gate。 | 不能在当前顺序下声称 resolver 已可见 memory。 |
+| I5 | 是 | 是否继续实现 LLM resolver contract。 | 若确认实现，补 resolver runtime/Hermes 调用、schema repair、audit 和 eval；若不实现，保持规则 resolver。 | 不能把“显式 Question Resolution 已存在”说成“LLM resolver 已生产接入”。 |
+| I6 | 是 | 每个 Runtime profile 的输出权力边界。 | 确认 profile 只输出 observation/candidate，最终事实、证据包和裁决仍由本地治理约束。 | 不能写成四个 profile 共同生成最终事实链。 |
+| I7 | 否，阶段口径纠偏 | 无。27/28 和 30 属于不同阶段。 | 文档引用时标明阶段边界，避免旧 checklist 覆盖新 production gate。 | 不能把 27/28 的“未实现/非目标”当成当前全局状态。 |
+| I8 | 是 | 是否引入 LLM suggested retrieval policy。 | 若确认引入，需要建议 schema、deterministic patch、版本/脂批强制证据 eval。 | 不能写成当前 retrieval policy 已由 LLM 决定。 |
+| I9 | 是，schema 表达 | evidence package 中 review record 的必需形态。 | 明确 review record 必须存在或可回放，示例避免 `review: null`。 | 不能暗示 reviewer 可缺席或可由 LLM 直接替代。 |
+| I10 | 是，评测口径 | 多数据集 eval suite 的数据集、阈值和基线。 | 建 fixture、指标、release report；百分比只作为目标门槛。 | 不能把目标百分比写成已通过事实。 |
+
 ## 2. 设计结论
 
 LLM 在通灵玉系统中只能做结构化辅助：理解、分类、摘要、检索意图建议、证据观察、草稿候选、review observation、memory semantic filter 和知识校准 judge。
@@ -114,7 +129,7 @@ LLM 不能做以下事情：
 
 ## 5. Question Resolver 目标 schema
 
-当前 schema version 必须使用：
+若后续落地 Question Resolver LLM contract，schema version 必须使用：
 
 ```json
 {
@@ -129,7 +144,7 @@ LLM 不能做以下事情：
 }
 ```
 
-当前允许的 `used_context_refs` 集合：
+目标 contract 允许的 `used_context_refs` 集合：
 
 1. `current_question`
 2. `recent_user_messages`
@@ -137,7 +152,7 @@ LLM 不能做以下事情：
 4. `prior_subject`
 5. `session_summary`
 
-当前不允许的字段：
+目标 contract 不允许的字段：
 
 1. `answer`
 2. `final_answer`
@@ -154,7 +169,7 @@ LLM 不能做以下事情：
 13. `read_enabled`
 14. `system_prompt`
 
-处理规则：
+目标处理规则：
 
 1. 先走 deterministic resolver。
 2. 只有 deterministic resolver 需要澄清时，才允许调用 LLM resolver。
@@ -368,6 +383,18 @@ Eval 必须按节点归因，不只评最终回答。
 | P4 | Claim-first draft + reviewer eval | 当前有本地 package/reviewer 约束 | claim map eval、reviewer false-pass eval、revision gate |
 | P5 | Full-path Eval Suite | 目标增强 | 多数据集、节点级失败归因、release report |
 | P6 | Public/SSE leakage regression | 当前已有公开面过滤，需要持续守护 | recursive internal-field scan、stream replay checks |
+
+### 13.1 实施路线的待确认口径
+
+| 编号 | 待确认问题 | 确认依据 | 确认后动作 | 主要风险 |
+|---|---|---|---|---|
+| P0 | 是否实现 Question Resolver LLM contract。 | 需要产品上确认复杂指代/省略补全是否值得引入 LLM；工程上确认 resolver 调用点、schema repair 和 fail-closed 策略。 | 增加 contract、runtime/Hermes 调用、audit 字段、`question_resolution.jsonl`。 | LLM resolver 若越权，会把 memory、scope、tool 或事实判断提前带入 RAG。 |
+| P1 | 是否新增 Conversation State Summary。 | 需要确认多轮体验是否需要比当前 `session_summary` 更强的状态表达。 | 增加 summary writer/loader、schema、可见范围、anti-hallucination eval。 | summary 幻觉会污染 resolver、draft 或 memory 判断。 |
+| P2 | 是否将 Retrieval Policy schema 化并引入 LLM suggested policy。 | 需要确认问题类型、版本敏感度、脂批需求是否难以靠确定性规则覆盖。 | 定义 suggested policy schema、deterministic patch、required evidence eval。 | LLM 降级必需证据，会让版本/脂批/人物命运问题失去证据约束。 |
+| P3 | 是否为 profile observation 建 eval。 | 需要确认 `text/commentary/main/reviewer` 的输出 contract 是否稳定。 | 建 profile observation datasets，校验 refs、边界、不可最终裁决。 | profile observation 被误用为事实源或最终回答。 |
+| P4 | 是否推进 claim-first draft 和 reviewer eval。 | 需要确认 final answer 是否必须由 claim map 驱动。 | 建 claim map eval、reviewer false-pass eval、revision gate。 | draft 绕过 evidence package 或 reviewer，形成无证据回答。 |
+| P5 | 是否建设 full-path eval suite。 | 需要确认 release 是否要求节点级失败归因，而不是只看最终答案。 | 建多数据集、统一 runner、失败归因和 release report。 | 只评最终回答会掩盖 resolver、summary、policy、package、reviewer 的局部失败。 |
+| P6 | 是否把 Public/SSE leakage regression 设为长期门禁。 | 需要确认公开面安全是否纳入每次发布检查。 | 增加递归内部字段扫描、stream replay、缓存复用检查。 | 内部 trace、context、memory、review、tool payload 泄露到普通用户响应。 |
 
 ## 14. 节点级失败归因
 
