@@ -7,12 +7,59 @@ pub const USER_RESPONSE_SAFETY_SCHEMA_VERSION: &str = "tonglingyu-user-response-
 
 pub const REQUEST_SAFETY_DATASET: &str = "request_safety";
 pub const STREAMING_DEDUPE_DATASET: &str = "streaming_dedupe";
+pub const QUESTION_RESOLUTION_DATASET: &str = "question_resolution";
 pub const S1_STAGE: &str = "S1";
+pub const S2_STAGE: &str = "S2";
 pub const REQUEST_SAFETY_MIN_CASES: usize = 20;
 pub const STREAMING_DEDUPE_MIN_CASES: usize = 16;
+pub const QUESTION_RESOLUTION_MIN_CASES: usize = 33;
 pub const DEFAULT_MAX_MESSAGES: usize = 20;
 pub const DEFAULT_MAX_BODY_CHARS: usize = 20_000;
 pub const DEFAULT_MAX_QUESTION_CHARS: usize = 2_000;
+pub const QUESTION_RESOLVER_SCHEMA_VERSION: &str = "tonglingyu-question-resolver-v1";
+
+pub const LLM_RESOLVER_ALLOWED_CONTEXT_REFS: &[&str] = &[
+    "current_question",
+    "recent_user_messages",
+    "recent_assistant_messages",
+    "prior_subject",
+    "session_summary",
+    "authorized_memory_summary",
+];
+
+pub const LLM_RESOLVER_ALLOWED_TRIGGERS: &[&str] = &[
+    "unresolved_referent",
+    "elliptical_followup",
+    "multi_candidate_entity",
+    "prior_subject_needed",
+    "low_confidence_binding",
+];
+
+pub const LLM_RESOLVER_FORBIDDEN_TRIGGERS: &[&str] = &[
+    "prompt_injection_detected",
+    "forbidden_control_field_detected",
+    "unsupported_domain",
+    "context_budget_exceeded",
+    "memory_policy_denied",
+    "schema_or_model_not_allowed",
+];
+
+pub const LLM_RESOLVER_FORBIDDEN_FIELDS: &[&str] = &[
+    "answer",
+    "final_answer",
+    "facts",
+    "scope",
+    "tool_policy",
+    "allowed_tools",
+    "forbidden_tools",
+    "acl",
+    "memory_acl",
+    "reviewer_decision",
+    "evidence_package_id",
+    "promotion",
+    "read_enabled",
+    "system_prompt",
+];
 
 pub const PUBLIC_OUTPUT_FORBIDDEN_KEYS: &[&str] = &[
     "trace_id",

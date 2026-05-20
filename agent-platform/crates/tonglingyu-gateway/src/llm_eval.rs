@@ -14,9 +14,11 @@ use crate::{
     llm_contracts::{
         DEFAULT_MAX_BODY_CHARS, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS,
         LLM_EVAL_REPORT_SCHEMA_VERSION, LLM_EVAL_SUITE_VERSION, LlmEvalFixture,
-        PUBLIC_OUTPUT_FORBIDDEN_KEYS, REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE,
+        PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
+        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE,
         STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
     },
+    llm_resolver::{ResolverContractDecision, evaluate_resolver_contract},
     user_response_safety::{fixture_has_internal_leakage, scan_fixture_surfaces},
 };
 
@@ -24,6 +26,8 @@ const REQUEST_GATE_EXPECTED: &str = "request_gate_expected";
 const NO_INTERNAL_LEAKAGE: &str = "no_internal_leakage";
 const INTERNAL_LEAKAGE_DETECTED: &str = "internal_leakage_detected";
 const RESPONSE_CONSISTENCY: &str = "response_consistency";
+const RESOLVER_CONTRACT_EXPECTED: &str = "resolver_contract_expected";
+const UNKNOWN_CONTEXT_REF_FAIL_CLOSED: &str = "unknown_context_ref_fail_closed";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmEvalCaseResult {
@@ -93,6 +97,9 @@ pub fn run_llm_eval(
                 REQUEST_SAFETY_DATASET: REQUEST_SAFETY_MIN_CASES,
                 STREAMING_DEDUPE_DATASET: STREAMING_DEDUPE_MIN_CASES,
             },
+            "s2_minimums": {
+                QUESTION_RESOLUTION_DATASET: QUESTION_RESOLUTION_MIN_CASES,
+            },
             "fail_on_hard_gate": fail_on_hard_gate,
         },
         "failure_attribution": failure_attribution,
@@ -153,6 +160,7 @@ fn evaluate_fixture(fixture: &LlmEvalFixture) -> LlmEvalCaseResult {
     let observed = match fixture.dataset.as_str() {
         REQUEST_SAFETY_DATASET => evaluate_request_safety(fixture, &mut failures),
         STREAMING_DEDUPE_DATASET => evaluate_streaming_dedupe(fixture, &mut failures),
+        QUESTION_RESOLUTION_DATASET => evaluate_question_resolution(fixture, &mut failures),
         dataset => {
             failures.push(format!("unsupported dataset: {dataset}"));
             json!({})
@@ -173,8 +181,16 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
     if fixture.case_id.trim().is_empty() {
         failures.push("missing case_id".to_string());
     }
-    if fixture.stage != S1_STAGE {
-        failures.push(format!("expected stage={S1_STAGE} got {}", fixture.stage));
+    let expected_stage = match fixture.dataset.as_str() {
+        REQUEST_SAFETY_DATASET | STREAMING_DEDUPE_DATASET => S1_STAGE,
+        QUESTION_RESOLUTION_DATASET => S2_STAGE,
+        _ => S1_STAGE,
+    };
+    if fixture.stage != expected_stage {
+        failures.push(format!(
+            "expected stage={expected_stage} got {}",
+            fixture.stage
+        ));
     }
     if fixture.hard_gates.is_empty() {
         failures.push("missing hard_gates".to_string());
@@ -186,6 +202,78 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
         failures.push("missing expected".to_string());
     }
     failures
+}
+
+fn evaluate_question_resolution(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let trigger = fixture
+        .input
+        .get("trigger")
+        .and_then(Value::as_str)
+        .unwrap_or("missing_trigger");
+    let output = fixture.input.get("llm_output").unwrap_or(&Value::Null);
+    let expected_decision = fixture
+        .expected
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("missing_expected_decision");
+    let expected_accepted = fixture
+        .expected
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let expected_can_call = fixture
+        .expected
+        .get("can_call_llm")
+        .and_then(Value::as_bool);
+    let evaluation = evaluate_resolver_contract(trigger, output);
+    let decision = match evaluation.decision {
+        ResolverContractDecision::Accept => "accept",
+        ResolverContractDecision::Clarify => "clarify",
+        ResolverContractDecision::FailClosed => "fail_closed",
+    };
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == RESOLVER_CONTRACT_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {RESOLVER_CONTRACT_EXPECTED}"));
+    }
+    if output
+        .get("used_context_refs")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("raw_memory")))
+        && !fixture
+            .hard_gates
+            .iter()
+            .any(|gate| gate == UNKNOWN_CONTEXT_REF_FAIL_CLOSED)
+    {
+        failures.push(format!(
+            "missing hard gate {UNKNOWN_CONTEXT_REF_FAIL_CLOSED}"
+        ));
+    }
+    if evaluation.accepted != expected_accepted || decision != expected_decision {
+        failures.push(format!(
+            "resolver contract mismatch expected accepted={expected_accepted} decision={expected_decision} got accepted={} decision={decision}",
+            evaluation.accepted
+        ));
+    }
+    if let Some(expected) = expected_can_call
+        && evaluation.can_call_llm != expected
+    {
+        failures.push(format!(
+            "resolver trigger callability mismatch expected={expected} got={}",
+            evaluation.can_call_llm
+        ));
+    }
+
+    json!({
+        "accepted": evaluation.accepted,
+        "decision": decision,
+        "can_call_llm": evaluation.can_call_llm,
+        "error_count": evaluation.errors.len(),
+        "errors": evaluation.errors,
+    })
 }
 
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
@@ -406,6 +494,15 @@ fn validate_s1_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<String> {
     if streaming_count < STREAMING_DEDUPE_MIN_CASES {
         failures.push(format!(
             "{STREAMING_DEDUPE_DATASET} requires at least {STREAMING_DEDUPE_MIN_CASES} cases got {streaming_count}"
+        ));
+    }
+    let question_resolution_count = dataset_counts
+        .get(QUESTION_RESOLUTION_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if question_resolution_count > 0 && question_resolution_count < QUESTION_RESOLUTION_MIN_CASES {
+        failures.push(format!(
+            "{QUESTION_RESOLUTION_DATASET} requires at least {QUESTION_RESOLUTION_MIN_CASES} cases got {question_resolution_count}"
         ));
     }
     failures
