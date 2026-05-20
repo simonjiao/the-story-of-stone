@@ -111,15 +111,15 @@
 
 | 编号 | 决策问题 | 设计结论 | 必须落实的边界 | 若边界不清的风险 |
 |---|---|---|---|---|
-| D1 | 是否实现 Question Resolver LLM contract | 待定 | 若做，必须确认 schema、调用点、fail-closed、audit、eval | LLM resolver 可能越权进入事实、scope、tool、memory 判断 |
+| D1 | 是否实现 Question Resolver LLM contract | 必须实现，作为 LLM 嵌入流程的入口 contract | 必须确认 schema、调用点、fail-closed、audit、eval | LLM resolver 可能越权进入事实、scope、tool、memory 判断 |
 | D2 | LLM resolver 能读取哪些 context refs | 待定 | 必须使用白名单；候选白名单包含 `authorized_memory_summary`；未知 ref fail-closed | context 膨胀或越权读取 raw memory/full history |
 | D3 | resolver 是否允许读取 memory summary | 允许 | 只能读取 policy engine 授权、脱敏、预算内的 `authorized_memory_summary` | 把“设计允许”误写成当前支持，或让 resolver 读取 raw memory |
 | D4 | 是否新增 `conversation_state_summary` | 待定 | 若新增，必须确认 writer/loader/schema/projection | summary 幻觉污染 resolver 或 draft |
 | D5 | 是否引入 LLM suggested retrieval policy | 待定 | 必须确认 suggested policy schema 与 deterministic patch | LLM 降级版本/脂批/人物命运必需证据 |
 | D6 | Runtime profile 输出权力边界 | 必须限制 | 每个 profile 只能输出 observation/candidate | profile 输出被误用为事实源 |
 | D7 | Evidence package review record 形态 | 必须存在或可回放 | review record 形态必须明确 | reviewer 可被绕过 |
-| D8 | Claim-first draft 是否作为 final answer 主路径 | 待定 | 必须明确 draft/package/reviewer 绑定关系 | draft 引入无证据 claim |
-| D9 | LLM reviewer observation 与本地 reviewer 冲突时如何记录 | 必须记录 override | override audit schema 和裁决规则必须明确 | 语义 reviewer 被误当最终裁决 |
+| D8 | Claim-first draft 是否作为 final answer 主路径 | 采用，作为 LLM 嵌入回答生成流程的主路径 | draft 必须绑定 package、claim map、reviewer；final answer 只能来自通过 gate 的 draft/revision | draft 引入无证据 claim，或绕过 reviewer 直接进入用户响应 |
+| D9 | LLM reviewer observation 与本地 reviewer 冲突时如何记录 | 必须记录 override；本地 reviewer 最终裁决 | override audit schema、冲突矩阵、revision gate 和最终裁决规则必须明确 | 语义 reviewer 被误当最终裁决，或 LLM pass 放行本地失败 |
 | D10 | Full-path eval suite 的数据集、阈值和 runner | 必须定义 | fixture、指标、runner、release report 必须明确 | 只看最终回答，无法定位节点失败 |
 | D11 | 用户响应脱敏回归是否作为长期门禁 | 必须作为长期门禁 | denylist、recursive scan、SSE replay、cache replay 必须明确 | 内部 trace/context/memory/tool payload 泄露 |
 | D12 | 目标环境 release gate 的边界 | 必须分层 | 本地 gate、smoke、strict gateway、live gate、release readiness 必须分层明确 | repo-local 通过被误写成目标环境 production ready |
@@ -288,6 +288,98 @@ Reviewer 分两层：
 | deterministic / local reviewer enforcement | 拦截硬规则错误、版本边界、无证据 claim、内部泄露 | 最终裁决 |
 | LLM reviewer observation | 判断语义支持、措辞过度、需要修订项 | 观察和建议 |
 
+#### 6.4.1 D8：Claim-first Draft 主路径
+
+在“流程中嵌入 LLM”的前提下，LLM 不直接生成 final answer，而是生成 claim-first draft candidate。final answer 只能从通过 package/reviewer gate 的 draft 或 revision 派生。
+
+Draft 输入只能包含：
+
+1. `resolved_question`
+2. `evidence_package_id`
+3. `claim_evidence_map`
+4. 本地 evidence ids 和必要摘录
+5. 允许的回答风格约束
+6. 授权的 `authorized_memory_summary`
+
+Draft 输入不能包含：
+
+1. raw memory
+2. memory card id
+3. ACL / read refs
+4. 未进入 evidence package 的检索结果
+5. reviewer 最终裁决字段
+6. 用户不可见内部 trace 字段
+
+目标 draft candidate schema：
+
+```json
+{
+  "schema_version": "tonglingyu-draft-candidate-v1",
+  "evidence_package_id": "package:...",
+  "resolved_question": "晴雯的判词和晴雯结局有什么关系？",
+  "draft": "候选回答正文",
+  "claims": [
+    {
+      "claim_id": "claim:1",
+      "text": "候选 claim",
+      "evidence_refs": ["evidence:..."],
+      "confidence": 0.86
+    }
+  ],
+  "unsupported_claims": [],
+  "style_notes_applied": ["简洁回答"],
+  "memory_used_as_evidence": false
+}
+```
+
+Draft acceptance gate：
+
+1. `evidence_package_id` 必须等于当前 package。
+2. `draft` 必须非空。
+3. 每个 claim 必须绑定 package 内 evidence refs。
+4. `unsupported_claims` 必须为空，否则进入 revision。
+5. `memory_used_as_evidence` 必须为 `false`。
+6. 不得引用 package 外 evidence refs。
+7. 不得包含 trace/context/memory/internal fields。
+8. 必须进入 reviewer，不得直接进入用户响应。
+
+#### 6.4.2 D9：Reviewer 冲突矩阵
+
+Reviewer 设计目标是“双层审查，单一最终裁决”。LLM reviewer 可以发现语义支持不足、措辞过度、版本边界不清、缺少限定语等问题；本地 reviewer enforcement 仍是最终裁决者。
+
+| 本地 reviewer | LLM reviewer | 最终处理 | 必须记录 |
+|---|---|---|---|
+| pass | pass | 可进入 final assembly | review pass record |
+| fail | pass | fail；LLM pass 不能覆盖本地失败 | override reason: `local_enforcement_blocks_llm_pass` |
+| pass | fail，高风险 | revision required；修订后重新 review | override reason: `llm_high_risk_blocks_final` |
+| pass | fail，低风险 | 可修订或记录 warning；不能改变 evidence/package | warning record and final reason |
+| fail | fail | fail 或 revision required | both failure records |
+
+高风险 LLM reviewer issue 包括：
+
+1. 无证据 claim。
+2. evidence ref 不支持 claim。
+3. 把脂批写成正文事实。
+4. 版本边界不清。
+5. 把 memory 当证据。
+6. 用户响应泄露内部字段。
+
+目标 override audit schema：
+
+```json
+{
+  "schema_version": "tonglingyu-review-override-v1",
+  "evidence_package_id": "package:...",
+  "draft_candidate_id": "draft:...",
+  "local_reviewer_status": "pass",
+  "llm_reviewer_status": "fail",
+  "llm_reviewer_severity": "high",
+  "final_decision": "revision_required",
+  "override_reason": "llm_high_risk_blocks_final",
+  "required_revision_ids": ["revision:1"]
+}
+```
+
 ### 6.5 Memory 与 LLM Contract
 
 Scoped Memory 的设计口径：
@@ -406,7 +498,7 @@ Eval 必须按节点归因，不只评最终回答。
 | S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | runtime/Hermes 调用、schema repair、shadow audit、fail-closed | 只在 deterministic 需要澄清时调用；RAG 不被未校验输出驱动 | LLM resolver 不能读取 raw memory 或完整 history |
 | S4 Conversation State Summary 决策 | 决定是否新增强状态摘要节点 | P1 writer/loader/schema、可见范围、anti-hallucination eval | summary 不引入事实；只进入授权 projection；不进 evidence package | 不能把 summary 当证据源 |
 | S5 Retrieval Policy schema 化 | 让 LLM 只建议检索策略 | P2 suggested policy schema、deterministic patch、required evidence eval | 高风险问题必需证据不被降级 | LLM 不能决定最终证据类型和工具权限 |
-| S6 Profile observation 与 draft/reviewer eval | 评估 LLM profile 输出质量和边界 | P3 datasets、P4 claim-first draft、reviewer false-pass eval | refs 全部来自本地 evidence ids；override 可审计 | observation/candidate 不能成为最终事实或最终裁决 |
+| S6 Profile observation 与 draft/reviewer eval | 评估 LLM profile 输出质量和边界 | P3 datasets、P4 claim-first draft、reviewer false-pass eval、draft candidate schema、review override schema | refs 全部来自本地 evidence ids；override 可审计；高风险 LLM reviewer issue 触发 revision gate | observation/candidate 不能成为最终事实或最终裁决 |
 | S7 全路径发布门禁 | 汇总节点级 eval 和 release report | P5 full-path suite、失败归因、release report、P6 持续回归 | request -> response 可回放；失败能归因到节点 | 不能只用最终回答效果替代节点级验证 |
 
 阶段与工作包映射：
@@ -431,7 +523,7 @@ Eval 必须按节点归因，不只评最终回答。
 | S3 | 接 LLM resolver shadow/受控路径 | feature flag、shadow audit、schema repair、failure record | shadow 可回放；受控输出才可进入 RAG | LLM 输出绕过 contract |
 | S4 | 决策并实现 conversation state summary | schema、writer/loader、projection rule、summary eval | summary 不引入事实，不进 package | summary 被用作证据 |
 | S5 | schema 化 retrieval suggestion | suggested policy schema、patch rule、retrieval eval | 必需证据不被降级 | LLM 可决定最终工具或证据类型 |
-| S6 | 建 profile observation 和 draft/reviewer eval | datasets、package claim eval、reviewer security eval | refs 来自本地 evidence ids；override 可审计 | profile 输出被用作最终事实 |
+| S6 | 建 profile observation 和 draft/reviewer eval | datasets、package claim eval、reviewer security eval、draft candidate schema、review override audit | refs 来自本地 evidence ids；override 可审计；高风险 reviewer issue 必须 revision | profile 输出被用作最终事实，或 LLM reviewer pass 放行本地失败 |
 | S7 | 全路径 gate 和 release report | full-path runner、failure attribution、release report | 所有阶段 gate 有可复现通过证据 | 只看最终回答，不看节点证据 |
 
 每个阶段提交前必须满足：
