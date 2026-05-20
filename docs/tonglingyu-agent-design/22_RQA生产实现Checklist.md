@@ -1230,11 +1230,8 @@ report 已在提交 `ed6cdb69fd22c6c18ee36f284391cf427532b921` 上通过）
   （45 tests）、两包 `cargo clippy -D warnings`、`cargo fmt --check` 和
   `../tonglingyu-gatekeeper/deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
 - 2026-05-16 已将提交 `4f514d0` 部署到 `hhost` 并重启
-  `tonglingyu-gateway`。远端 `.env` 已按规则备份两次：先备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
-  后用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
-  并 pin 回新 image id
+  `tonglingyu-gateway`。远端 `.env` 已按 gatekeeper 维护的 env 备份流程完成两次备份；
+  先备份后用 `tonglingyu-gateway:formal` 完成 build/up，再次备份后 pin 回新 image id
   `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
 - 完整远端 release automation `remote-release-20260516T055004Z-50395` 已在默认
   10 分钟窗口下通过 live capacity 和 incident/capacity gate：

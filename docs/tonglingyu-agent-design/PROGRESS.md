@@ -148,8 +148,8 @@
 - 2026-05-20 已按 deploy patch 自增规则部署 `0.1.13` 到 `hhost`：
   `tonglingyu-gateway` 运行 image 为 `tonglingyu-gateway:0.1.13`，image id 为
   `sha256:214a8977e8454549d2f7f787929fb6bedb62373280ff3459521b7e2d258fb464`，
-  version label 为 `0.1.13`。远端 `.env` 更新前已备份到
-  `/home/simon/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260520-085354`；
+  version label 为 `0.1.13`。远端 `.env` 更新前已按 gatekeeper 维护的 env
+  备份流程完成备份；具体策略与路径由 `../tonglingyu-gatekeeper/deploy/` 维护；
   当前 `TONGLINGYU_VERSION`、`TONGLINGYU_GATEWAY_IMAGE_REF` 和
   `TONGLINGYU_GATEWAY_IMAGE_TAG` 均已收敛到 `0.1.13`。
 - 2026-05-20 `0.1.13` 远端 live gates 已通过：
@@ -1186,11 +1186,8 @@
   `cargo test -p tonglingyu-gateway`（45 tests）、两包 `cargo clippy -D warnings`、
   `cargo fmt --check` 和 `../tonglingyu-gatekeeper/deploy/scripts/test-tonglingyu-release-readiness-contract.sh`。
   2026-05-16 已将提交 `4f514d0` 同步到 `hhost`，重建并重启
-  `tonglingyu-gateway`；远端 `.env` 先备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-134919`
-  后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-140333`
-  并 pin 回新 image id
+  `tonglingyu-gateway`；远端 `.env` 先按 gatekeeper 维护的 env 备份流程完成备份，
+  后临时使用 `tonglingyu-gateway:formal` 完成 build/up，再次备份后 pin 回新 image id
   `sha256:f7a3752b4981eeddd17c314dba2503261f76d24a7aab72509a62c2941306925b`。
   完整远端 release automation
   `remote-release-20260516T055004Z-50395` 已在默认 10 分钟 live capacity
@@ -1206,9 +1203,8 @@
   DB 中确保 `model:tonglingyu` active 且存在 `access_grant user:* read`。远端执行
   结果为 `public_read_grant_count=1`，普通用户内部 `/api/models` 验证
   `has_tonglingyu=true`。
-- 同日已完成 Open WebUI browser-side review evidence，并绑定进远端 `.env`
-  （更新前已备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-143756`）：
+- 同日已完成 Open WebUI browser-side review evidence，并在按 gatekeeper 维护的
+  env 备份流程备份后绑定进远端 `.env`：
   evidence ref 为 `browser-review-20260516T063114Z`，远端 evidence JSON 为
   `$HOME/hermes-home-deploy/data/tonglingyu/browser-review/browser-review-20260516T063114Z/openwebui-browser-review.json`。
   `verify-openwebui-browser-review-evidence.sh` 已验证 ordinary-user model
@@ -1223,8 +1219,8 @@
   `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
   56 tests 通过，`cargo clippy --manifest-path agent-platform/Cargo.toml -p
   tonglingyu-gateway -- -D warnings` 通过。
-- 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先备份到
-  `$HOME/OneDrive/backup/the-story-of-stone/deploy-env/deploy.env.bak.20260516-145106`，
+- 已将 metadata 隔离修复部署到 `hhost`。远端 `.env` 先按 gatekeeper 维护的
+  env 备份流程完成备份，
   `tonglingyu-gateway` 已重建并 pin 到 image id
   `sha256:e63ea6deda84bc6f93a023f1736af6b502908cd12b419a5fde4f2703bcafb947`。
   远端 metadata smoke 证明 title prompt 返回 JSON、没有
