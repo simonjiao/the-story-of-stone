@@ -1,12 +1,43 @@
-# the-story-of-stone LLM 支持点与全路径 Eval 方案
+# the-story-of-stone LLM 支持点与全路径 Eval 设计候选稿
 
 <!-- markdownlint-disable MD013 MD060 -->
 
-版本：v1.1
+版本：v1.2
 日期：2026-05-20
-口径：融合当前仓库实现、通灵玉设计文档，以及本轮关于“从 user request 到 user response 的完整流程中所有可用 LLM 支持点”的讨论。
+状态：`in_progress`
+结论：本文不是设计完成声明、实现完成声明、上线声明或 production-ready 声明。当前分支只形成可审阅的设计候选稿。
 
-## 0. 证据口径
+## 0. 状态边界
+
+本文的第一原则是：没有证据就不宣布完成；没有 gate 通过就不宣布 ready；有不一致就明确指出，不猜测、不折中。
+
+状态表达只允许使用：
+
+1. `not_started`：尚未开始。
+2. `blocked`：有明确 blocker。
+3. `in_progress`：正在实施或审阅。
+4. `passed_with_evidence`：通过，并且有可复现证据。
+5. `failed`：验证失败。
+
+禁止使用：
+
+1. “基本完成”。
+2. “大体完成”。
+3. “差不多完成”。
+4. “可以认为完成”。
+5. “先算完成”。
+
+当前状态表：
+
+| 对象 | 状态 | 证据 | 不能宣称 |
+|---|---|---|---|
+| 31 号文档 | `in_progress` | 已形成候选稿，但仍需审阅 I1-I10、D1-D12、S0-S7 | 不能宣称设计完成 |
+| LLM 支持点实现 | `not_started` | 当前分支净效果只有文档变更 | 不能宣称 LLM resolver、summary、policy 或 profile eval 已落地 |
+| 全路径 eval suite | `not_started` | 本文只定义目标数据集和 gate | 不能宣称已有 release report |
+| 用户响应脱敏回归 | `not_started` | 本文只定义横切门禁 | 不能宣称新增自动化回归能力 |
+| production-ready | `blocked` | S1-S7 未实施，目标环境 gate 未运行 | 不能宣称 production ready |
+
+## 1. 证据口径
 
 本文只采用当前可核验的 repo-local 证据：
 
@@ -20,138 +51,112 @@
 8. `docs/tonglingyu-agent-design/30_Scoped_Memory_Production_Checklist.md`
 9. `docs/tonglingyu-agent-design/PROGRESS.md`
 
-本文不使用未经当前核验的外部产品能力作为设计依据。OpenAI、Anthropic、LangGraph、
-Hermes/AiBot 等只能作为工程模式类比，不能作为通灵玉当前实现事实。
+外部实现只能作为工程模式参考。OpenAI、Anthropic、LangGraph、Hermes/AiBot 等不能作为本仓库当前实现事实。
 
-## 0.1 外部实现模式的借鉴边界
+可借鉴的只是模式：
 
-可以借鉴外部实现模式，但不能借鉴完成状态。理由如下：
+| 外部模式 | 可借鉴 | 必须重新落到本仓库的约束 |
+|---|---|---|
+| OpenAI / Agents | structured output、tool call、trace、eval、single entry orchestration | schema、policy、audit、eval、release gate |
+| Anthropic / MCP / Skills | 最小工具权限、上下文隔离、能力包版本化 | context projection、tool policy、能力版本、权限审计 |
+| LangGraph / LangSmith | state graph、节点 I/O、replay、失败归因 | request -> response 全路径节点级 eval |
+| Hermes / AiBot | profile 隔离、runtime client、tool registry、session/runtime audit | Runtime/Gateway contract、output_ref、hhost gate |
 
-1. OpenAI / Agents 类模式可借鉴 structured output、tool call、trace、eval 和
-   single entry orchestration。这些模式适合映射到 resolver、profile step、
-   reviewer observation 和节点级 eval，但不能证明本仓库已完成对应能力。
-2. Anthropic / MCP / Skills 类模式可借鉴最小工具权限、上下文隔离和能力包版本化。
-   这些模式适合映射到 `context_projection`、profile-specific tools 和可版本化
-   能力模块，但不能替代本仓库的权限、证据治理和审计账本。
-3. LangGraph / LangSmith 类模式可借鉴 state graph、节点输入输出、replay 和失败归因。
-   这些模式适合映射到 request -> context -> retrieval -> package -> review ->
-   response 的全路径 eval，但每个节点必须落到通灵玉自己的 schema 和 release gate。
-4. Hermes / AiBot 类模式可借鉴 profile 隔离、runtime client、tool registry、
-   session/runtime audit。当前系统已有这类接入方向，但仍必须由本仓库的
-   Runtime/Gateway contract、tool policy、output_ref、audit 和 hhost gate 验证。
+## 2. 不可变设计原则
 
-因此，外部系统只作为工程模式参考；凡是借鉴的模式，都必须重新落到通灵玉自己的
-schema、policy、audit、replay、eval 和 release gate 中。
+以下原则不参与折中：
 
-## 0.2 状态边界与禁止口径
+1. LLM 不能作为事实源。
+2. LLM 不能决定 Gateway 鉴权、限流、请求字段、profile、tool policy 或 Runtime Adapter。
+3. LLM 不能决定 scope、ACL、memory read enablement、reviewer 裁决或 evidence package 写入。
+4. LLM 不能把 session summary、memory、用户偏好或模型推断写入 evidence package 当证据。
+5. LLM 不能绕过用户响应 wrapper。
+6. Runtime profile 的 LLM 输出只能是 observation 或 candidate，不能是最终事实或最终裁决。
+7. evidence refs 必须来自本地 Runtime/tool 返回的 evidence ids。
+8. memory 只能进入受控 context/projection，不能进入 evidence package。
+9. 用户响应与 SSE 必须由确定性 wrapper 过滤内部字段。
+10. 每个 LLM 输出都必须 schema-bound、audit-bound、replayable、fail-closed。
 
-本文是设计候选稿，不是完成声明、上线声明或 production-ready 声明。当前分支只形成可审阅的阶段化方案；在待确认项没有逐条关闭、对应 gate 没有证据前，不能宣布设计完成。
+## 3. 当前流程与 LLM 可插入点
 
-状态表达只允许使用以下几类：
+当前从 user request 到 user response 的链路按节点治理。LLM 只能插在允许的节点，且必须受 contract 约束。
 
-1. `not_started`：尚未开始。
-2. `blocked`：有明确 blocker。
-3. `in_progress`：正在实施或审阅。
-4. `passed_with_evidence`：通过，并且有可复现证据。
-5. `failed`：验证失败。
-
-禁止使用以下模糊口径：
-
-1. “基本完成”。
-2. “大体完成”。
-3. “差不多完成”。
-4. “可以认为完成”。
-5. “先算完成”。
-
-S0 口径冻结也不能默认宣布通过。只有当 I1-I10、P0-P6、S0-S7 的边界、待确认项和退出条件都被明确审阅，并且文档检查通过后，才能把 S0 写成 `passed_with_evidence`。否则只能写成 `in_progress` 或 `blocked`。
-
-## 1. 必须明确指出的不一致
-
-以下不是折中项，而是必须在文档中改正或标注的事实差异。
-
-| 编号 | 原稿说法 | 当前实现或设计证据 | 结论 |
+| 阶段 | 节点 | 当前职责 | LLM 口径 |
 |---|---|---|---|
-| I1 | Question Resolver schema 写为 `tonglingyu-question-resolver-v2` | 当前代码常量是 `RESOLVER_SCHEMA_VERSION = "tonglingyu-question-resolver-v1"` | 原稿 schema version 不一致，本文统一为 v1。 |
-| I2 | LLM resolver 的 `used_context_refs` 示例为 `session_hint`、`conversation_state_summary` | 若后续落地 LLM resolver contract，受控 context refs 应限制为 `current_question`、`recent_user_messages`、`recent_assistant_messages`、`prior_subject`、`session_summary` 一类白名单 | 原稿示例不可直接落地，必须改为当前允许集合，或先新增 schema 版本和迁移。 |
-| I3 | `conversation_state_summary` 被写成目标结构，像是已在链路中存在 | 当前请求路径只有确定性 `session_summary(...)`；没有独立持久化的 `conversation_state_summary` 节点 | 只能标为目标增强，不能写成当前实现。 |
-| I4 | Question Resolver 可见“受控 memory summary” | 当前 `create_context_for_request` 先执行 `resolve_question(...)`，之后才 `load_authorized_memory_reads(...)` | 当前 resolver 不能依赖 memory summary；若要引入，必须重新设计顺序和 fail-closed gate。 |
-| I5 | “P0 显式 Question Resolution”像是完全未实现 | 当前已有 `resolved_question`、context pack、admin trace 和 fail-closed 澄清；LLM resolver 输出 contract 仍是后续目标增强 | 正确口径是：显式节点已存在，但真实外部 LLM resolver 尚未生产接入。 |
-| I6 | 四个 Runtime profile 被描述为完整 LLM 生成链 | 当前 Runtime workflow 仍保留本地工具、证据包、本地 reviewer enforcement；Hermes/Agent Runtime 输出必须受 contract 和本地治理约束 | LLM profile 是受控执行/观察/候选能力，不是最终事实或最终裁决来源。 |
-| I7 | 27/28 checklist 中“active memory 未实现”容易被读成当前全局状态 | 30 checklist 和 PROGRESS 记录 Scoped Memory Production 已进入 production-ready gate，27/28 的禁止项只属于当时阶段边界 | 文档必须按阶段解释，不能把旧阶段的“非目标”套到当前总状态。 |
-| I8 | Retrieval policy 使用“LLM suggested policy + deterministic patch”像是当前实现 | 当前主路径 `search_policy(resolved_question)` 是确定性入口；LLM suggested policy 尚未接入 | 只能作为后续目标，不是当前事实。 |
-| I9 | Evidence package 示例 `review: null` | 当前主链路 package 带 review，Gateway 后续还记录 review journal 和用户响应 wrapper 过滤 | 示例应表达“review record 必须存在或可回放”，不能暗示 review 可空。 |
-| I10 | Eval 门槛全写成绝对百分比，像是当前已有数据集 | 当前已有多类 gate 和测试，但该文定义的多数据集 eval suite 尚未整体落地 | 百分比可作为发布目标，不能写成已通过事实。 |
-
-### 1.1 不一致项的待确认口径
-
-| 编号 | 是否待确认 | 需要确认的问题 | 确认后动作 | 不能误写成 |
-|---|---|---|---|---|
-| I1 | 否，已决纠偏 | 无。当前只能按 v1 书写。 | 文档、schema 示例和 eval fixture 统一使用 `tonglingyu-question-resolver-v1`。 | 不能写成 v2 已存在，除非先做 schema v2 迁移。 |
-| I2 | 是 | LLM resolver 未来能读取哪些 context refs。 | 明确白名单、未知 ref fail-closed、补 schema 和 eval。 | 不能默认允许 memory、完整 history、任意 session hint。 |
-| I3 | 是 | 是否新增 `conversation_state_summary` 节点。 | 若确认新增，需要 writer/loader/schema/audit/eval；若不新增，保留确定性 `session_summary`。 | 不能写成当前链路已有该节点。 |
-| I4 | 是，架构级 | resolver 是否允许读取 memory summary。 | 若允许，需要调整 resolver 与 memory read 的执行顺序，并补 ACL、budget、fail-closed gate。 | 不能在当前顺序下声称 resolver 已可见 memory。 |
-| I5 | 是 | 是否继续实现 LLM resolver contract。 | 若确认实现，补 resolver runtime/Hermes 调用、schema repair、audit 和 eval；若不实现，保持规则 resolver。 | 不能把“显式 Question Resolution 已存在”说成“LLM resolver 已生产接入”。 |
-| I6 | 是 | 每个 Runtime profile 的输出权力边界。 | 确认 profile 只输出 observation/candidate，最终事实、证据包和裁决仍由本地治理约束。 | 不能写成四个 profile 共同生成最终事实链。 |
-| I7 | 否，阶段口径纠偏 | 无。27/28 和 30 属于不同阶段。 | 文档引用时标明阶段边界，避免旧 checklist 覆盖新 production gate。 | 不能把 27/28 的“未实现/非目标”当成当前全局状态。 |
-| I8 | 是 | 是否引入 LLM suggested retrieval policy。 | 若确认引入，需要建议 schema、deterministic patch、版本/脂批强制证据 eval。 | 不能写成当前 retrieval policy 已由 LLM 决定。 |
-| I9 | 是，schema 表达 | evidence package 中 review record 的必需形态。 | 明确 review record 必须存在或可回放，示例避免 `review: null`。 | 不能暗示 reviewer 可缺席或可由 LLM 直接替代。 |
-| I10 | 是，评测口径 | 多数据集 eval suite 的数据集、阈值和基线。 | 建 fixture、指标、release report；百分比只作为目标门槛。 | 不能把目标百分比写成已通过事实。 |
-
-## 2. 设计结论
-
-LLM 在通灵玉系统中只能做结构化辅助：理解、分类、摘要、检索意图建议、证据观察、草稿候选、review observation、memory semantic filter 和知识校准 judge。
-
-LLM 不能做以下事情：
-
-1. 不能作为事实源。
-2. 不能决定 Gateway 鉴权、限流、请求字段、profile、tool policy 或 Runtime Adapter。
-3. 不能决定 scope、ACL、memory read enablement、reviewer 裁决或 evidence package 写入。
-4. 不能把 session summary、memory、用户偏好或模型推断写入 evidence package 当证据。
-5. 不能绕过用户响应 wrapper。
-
-因此，本方案的目标不是“让模型回答得更像专家”，而是让每个节点的 LLM 输出都能被 schema、policy、audit、replay 和 eval 约束。
-
-## 3. 当前 user request 到 user response 的主流程
-
-| 阶段 | 当前节点 | 当前职责 | LLM 支持口径 |
-|---|---|---|---|
-| 0 | Open WebUI request | 用户消息、模型、stream、metadata/header | 无。用户不能指定内部 profile/tool/reviewer/context。 |
-| 1 | Gateway auth / rate limit / schema init | 鉴权、限流、DB、runtime schema | 无。必须确定性。 |
-| 2 | Forbidden control field gate | 拒绝内部控制字段注入 | 无。必须确定性。 |
-| 3 | Request normalization | model allowlist、问题长度、最后 user message、user/chat/message 映射 | 无。必须确定性。 |
-| 4 | Dedupe | 按 external message id 复用已保存 final response | 无。必须确定性。 |
-| 5 | Session summary | 当前为确定性 summary：最近对象、最近用户问题、长度限制 | 可增强为受控 LLM `conversation_state_summary`，但当前未实现。 |
-| 6 | Question Resolver | 当前规则优先；明确实体直接通过，简单指代绑定，不清楚则澄清 | 可在规则不足时调用 LLM resolver，只接受 schema-bound JSON。 |
-| 7 | Context pack | 生成 active scopes、candidate scopes、memory read refs、policy versions、resolver audit | 无自由 LLM。只能记录被校验后的 resolver/summary/memory 决策。 |
-| 8 | Context projection | 为 `honglou-main/text/commentary/reviewer` 生成最小可见上下文和工具权限 | LLM profile 只能读取自己的 projection，不能读完整 context pack。 |
-| 9 | Retrieval policy | 当前由 `search_policy(resolved_question)` 确定 | 可引入 LLM suggested policy，但 deterministic policy patch 必须最终约束高风险证据源。 |
-| 10 | Runtime step plan gate | 校验 profile contract、tool policy、dependency、output_ref、context projection digest | 无自由 LLM。plan gate 是执行前约束。 |
-| 11 | Text/commentary evidence retrieval | 只读工具返回 evidence cards、quality report、evidence ids | LLM profile 可做 evidence observation，但 evidence refs 必须来自工具输出。 |
-| 12 | Evidence package | 本地工具创建 package、claims、review metadata 和 replay anchor | LLM 可提出 package observation 或 claim scaffold；不能写 package。 |
-| 13 | Draft | 当前最终回答仍受 Runtime workflow 和本地治理约束 | `honglou-main` 可提供 draft candidate；必须绑定当前 package。 |
-| 14 | Reviewer | 本地 reviewer enforcement 是最终裁决点 | `honglou-reviewer` 可输出 review observation；不一致时本地 reviewer 覆盖。 |
+| 0 | Open WebUI request | 用户消息、模型、stream、metadata/header | 不允许。用户不能指定内部 profile/tool/reviewer/context。 |
+| 1 | Gateway auth / rate limit / schema init | 鉴权、限流、DB、runtime schema | 不允许。必须确定性。 |
+| 2 | Forbidden control field gate | 拒绝内部控制字段注入 | 不允许。必须确定性。 |
+| 3 | Request normalization | model allowlist、问题长度、最后 user message、user/chat/message 映射 | 不允许。必须确定性。 |
+| 4 | Dedupe | 按 external message id 复用已保存 final response | 不允许。必须确定性。 |
+| 5 | Session summary | 当前为确定性 summary | 目标增强：受控 `conversation_state_summary`，当前未实现。 |
+| 6 | Question Resolver | 当前规则优先，歧义 fail-closed 澄清 | 目标增强：只在规则不足时调用 LLM resolver，当前未实现。 |
+| 7 | Context pack | active scopes、candidate scopes、memory read refs、policy versions、resolver audit | 不允许自由 LLM。只能记录已校验决策。 |
+| 8 | Context projection | 为不同 Runtime profile 生成最小可见上下文和工具权限 | LLM profile 只能读自己的 projection。 |
+| 9 | Retrieval policy | 当前由 `search_policy(resolved_question)` 确定 | 目标增强：LLM suggested policy，deterministic patch 最终约束。 |
+| 10 | Runtime step plan gate | 校验 profile contract、tool policy、dependency、output_ref、projection digest | 不允许自由 LLM。 |
+| 11 | Text/commentary retrieval | 只读工具返回 evidence cards、quality report、evidence ids | LLM profile 可做 evidence observation，不能写 evidence。 |
+| 12 | Evidence package | 本地工具创建 package、claims、review metadata、replay anchor | LLM 可提出 claim scaffold，不能写 package。 |
+| 13 | Draft | 最终回答受 Runtime workflow 和本地治理约束 | `honglou-main` 可提供 draft candidate，必须绑定 package。 |
+| 14 | Reviewer | 本地 reviewer enforcement 是最终裁决点 | `honglou-reviewer` 可输出 observation，不可替代本地裁决。 |
 | 15 | Final response | `completion_value` 构造内部值，journal 写入 final response | LLM 不直接决定公开字段。 |
-| 16 | 用户响应 wrapper / SSE | 删除 trace、package、review、context、memory、LLM 内部字段；stream 只发用户可见 delta | 无。必须确定性。 |
+| 16 | 用户响应 wrapper / SSE | 删除 trace、package、review、context、memory、LLM 内部字段 | 不允许 LLM。必须确定性。 |
 
-## 4. LLM 支持点总表
+## 4. 事实纠偏与待确认项
 
-| 模块 | 当前状态 | 可使用 LLM 的方式 | 强制边界 |
+### 4.1 必须纠偏的不一致
+
+| 编号 | 原稿或讨论中容易误写的说法 | 当前证据口径 | 处理 |
 |---|---|---|---|
-| Session Summary | 规则 summary 已存在 | 生成 `conversation_state_summary`：主题、活跃实体、未决问题、上一轮边界、reviewer 警告 | 不能引入事实；不能进入 evidence package；不能给 text/commentary/reviewer 完整可见。 |
-| Question Resolver | 规则优先；LLM output contract 尚未落地 | 复杂指代、省略补全、澄清问题生成 | `confidence >= 0.75` 才接受；低置信澄清或 fail-closed；不能决定事实/权限/scope/tool/memory/reviewer/package。 |
-| Retrieval Policy | 当前确定性 | 题型、版本敏感度、是否需要 commentary 的建议 | Gateway/Runtime 必须强制 patch 高风险 evidence requirements。 |
-| Text Profile | 设计上是 LLM profile；工具为 `tonglingyu.text.search` | 正文证据观察、支持范围、不支持范围 | 不能输出最终回答；不能解释脂批；refs 必须来自本地 evidence ids。 |
-| Commentary Profile | 设计上是 LLM profile；工具为 `tonglingyu.commentary.search` | 脂批/版本证据观察 | 不能把脂批当正文事实；不能输出最终回答。 |
-| Main Profile | 设计上是 LLM profile；当前受本地 workflow 治理 | claim-first draft candidate、分层回答草稿 | 必须绑定 package id；不能绕过 reviewer；不能伪造证据。 |
-| Reviewer Profile | 设计上是 LLM profile；本地 reviewer enforcement authoritative | review status/severity/issues/required revisions observation | 不能重写最终答案；不能改变 evidence package；不能替代本地裁决。 |
-| Memory Collector | 已有 collector/policy 主线 | LLM 辅助抽取 candidate 或 semantic filter | 输入必须 redacted；输出只能 schema JSON；不能 approve/promote/enable_read。 |
-| Scoped Memory Read | 已有 read-enabled memory path | 可做摘要去重、排序建议、风险标记 | ACL、scope、budget、read enablement 由 policy engine 决定。 |
-| Knowledge Calibration | 已有 LLM evidence judge 接口 | 判断候选知识是否被证据支持 | 不能写事实表；结果还要过 rule/eval/reviewer/release gate。 |
-| 用户响应安全检查 | 当前确定性过滤 | 可作为额外 observation 检查泄露/无证据断言 | 用户响应 wrapper 必须最终确定性执行。 |
+| I1 | Question Resolver schema 是 `tonglingyu-question-resolver-v2` | 当前代码常量是 `tonglingyu-question-resolver-v1` | 必须统一为 v1；v2 只能作为未来迁移。 |
+| I2 | LLM resolver 可使用 `session_hint`、`conversation_state_summary` 等任意 context refs | 未来 contract 必须使用白名单 | 不能默认允许 memory、完整 history 或任意 session hint。 |
+| I3 | `conversation_state_summary` 已在链路中存在 | 当前只有确定性 `session_summary` | 只能写成目标增强。 |
+| I4 | Question Resolver 当前可见受控 memory summary | 当前 resolver 在 memory read 之前执行 | 若要允许，需要重排链路并补 ACL/budget/fail-closed。 |
+| I5 | 显式 Question Resolution 完全未实现 | 当前已有 `resolved_question`、context pack、admin trace、fail-closed 澄清 | 正确口径：显式节点已存在，LLM resolver 未生产接入。 |
+| I6 | 四个 Runtime profile 是完整 LLM 生成链 | 当前仍受本地工具、package、reviewer enforcement 约束 | profile 是 observation/candidate，不是最终事实链。 |
+| I7 | 27/28 checklist 的 active memory 未实现代表当前全局状态 | 30 checklist 和 PROGRESS 属于后续阶段 | 必须按阶段解释，不能用旧阶段覆盖新状态。 |
+| I8 | Retrieval policy 当前由 LLM suggested policy 决定 | 当前主路径是确定性 `search_policy(resolved_question)` | LLM suggested policy 只能作为目标增强。 |
+| I9 | Evidence package 示例可写 `review: null` | 当前主链路需要 review/journal/wrapper 过滤 | 示例必须表达 review record 存在或可回放。 |
+| I10 | Eval 百分比是已通过事实 | 多数据集 eval suite 尚未整体落地 | 百分比只能作为目标门槛。 |
 
-## 5. Question Resolver 目标 schema
+### 4.2 待确认决策登记
 
-若后续落地 Question Resolver LLM contract，schema version 必须使用：
+这些决策未关闭前，不能宣布设计完成。
+
+| 编号 | 决策问题 | 当前状态 | 关闭条件 | 未关闭风险 |
+|---|---|---|---|---|
+| D1 | 是否实现 Question Resolver LLM contract | `in_progress` | 明确做/不做；若做，确认 schema、调用点、fail-closed、audit、eval | LLM resolver 可能越权进入事实、scope、tool、memory 判断 |
+| D2 | LLM resolver 能读取哪些 context refs | `in_progress` | 白名单、未知 ref 处理、fixture 全部确定 | context 膨胀或越权读取 memory/full history |
+| D3 | resolver 是否允许读取 memory summary | `blocked` | 必须先决定是否重排 resolver 与 memory read 顺序 | 在当前顺序下声称可读 memory 是错误设计 |
+| D4 | 是否新增 `conversation_state_summary` | `in_progress` | 明确新增或不新增；若新增，确认 writer/loader/schema/projection | summary 幻觉污染 resolver 或 draft |
+| D5 | 是否引入 LLM suggested retrieval policy | `in_progress` | 确认 suggested policy schema 与 deterministic patch | LLM 降级版本/脂批/人物命运必需证据 |
+| D6 | Runtime profile 输出权力边界 | `in_progress` | 明确每个 profile 只能 observation/candidate | profile 输出被误用为事实源 |
+| D7 | Evidence package review record 形态 | `in_progress` | 明确 review 必须存在或可回放 | reviewer 可被绕过 |
+| D8 | Claim-first draft 是否作为 final answer 主路径 | `in_progress` | 明确 draft/package/reviewer 绑定关系 | draft 引入无证据 claim |
+| D9 | LLM reviewer observation 与本地 reviewer 冲突时如何记录 | `in_progress` | override audit schema 和裁决规则明确 | 语义 reviewer 被误当最终裁决 |
+| D10 | Full-path eval suite 的数据集、阈值和 runner | `not_started` | fixture、指标、runner、release report 明确 | 只看最终回答，无法定位节点失败 |
+| D11 | 用户响应脱敏回归是否作为长期门禁 | `not_started` | denylist、recursive scan、SSE replay、cache replay 明确 | 内部 trace/context/memory/tool payload 泄露 |
+| D12 | 目标环境 release gate 的边界 | `not_started` | 本地 gate、smoke、strict gateway、live gate、release readiness 分层明确 | repo-local 通过被误写成目标环境 production ready |
+
+## 5. LLM 支持面设计
+
+| 支持面 | 当前状态 | 目标用法 | 强制边界 | 所属阶段 |
+|---|---|---|---|---|
+| Session Summary | 确定性 summary 已存在 | 可选新增 `conversation_state_summary` | 不引入事实，不进 evidence package，不给 text/commentary/reviewer 完整可见 | S4 |
+| Question Resolver | 规则 resolver 已存在；LLM contract 未落地 | 复杂指代、省略补全、澄清问题生成 | 规则优先；只接受 schema JSON；低置信澄清或 fail-closed | S2-S3 |
+| Retrieval Policy | 当前确定性 | 题型、版本敏感度、脂批需求建议 | LLM 只建议；deterministic patch 强制必需证据 | S5 |
+| Text Profile | Runtime profile 方向存在 | 正文证据 observation | 不能输出最终回答；refs 必须来自本地 evidence ids | S6 |
+| Commentary Profile | Runtime profile 方向存在 | 脂批/版本 observation | 脂批不能写成正文事实 | S6 |
+| Main Profile | Runtime workflow 治理下的 candidate | claim-first draft candidate | 必须绑定 package id；不能绕过 reviewer | S6 |
+| Reviewer Profile | 本地 reviewer enforcement authoritative | review observation、severity、required revisions | 不能替代本地裁决 | S6 |
+| Memory Collector / Filter | Scoped memory 主线存在 | semantic filter、分类、TTL 建议、风险标记 | 不能 approve/promote/enable_read | 现有能力延续，S7 回归 |
+| Knowledge Calibration | 已有 LLM evidence judge 接口方向 | 候选知识证据支持判断 | 不能写事实表，仍需 rule/eval/reviewer gate | S7 回归 |
+| 用户响应安全检查 | 当前已有过滤方向 | 泄露检测 observation | 最终 wrapper 必须确定性执行 | S1-S7 |
+
+## 6. 目标 Contract
+
+### 6.1 Question Resolver LLM Contract
+
+当前未落地。若后续落地，schema version 必须使用：
 
 ```json
 {
@@ -166,7 +171,7 @@ LLM 不能做以下事情：
 }
 ```
 
-目标 contract 允许的 `used_context_refs` 集合：
+允许的 `used_context_refs`：
 
 1. `current_question`
 2. `recent_user_messages`
@@ -174,7 +179,7 @@ LLM 不能做以下事情：
 4. `prior_subject`
 5. `session_summary`
 
-目标 contract 不允许的字段：
+禁止字段：
 
 1. `answer`
 2. `final_answer`
@@ -191,28 +196,18 @@ LLM 不能做以下事情：
 13. `read_enabled`
 14. `system_prompt`
 
-目标处理规则：
+处理规则：
 
 1. 先走 deterministic resolver。
 2. 只有 deterministic resolver 需要澄清时，才允许调用 LLM resolver。
-3. LLM 输出必须是 JSON。
-4. schema invalid、未知 context ref、越权字段、低置信都不得进入 RAG。
-5. `confidence >= 0.75` 才接受。
-6. `0.45 <= confidence < 0.75` 必须返回澄清问题。
-7. `< 0.45` fail-closed。
+3. schema invalid、未知 context ref、越权字段、低置信都不得进入 RAG。
+4. `confidence >= 0.75` 才接受。
+5. `0.45 <= confidence < 0.75` 必须返回澄清问题。
+6. `< 0.45` fail-closed。
 
-## 6. Session Summary 设计
+### 6.2 Conversation State Summary Contract
 
-当前实现只有确定性 `session_summary`，可作为 `session_hint` 使用。目标增强是增加 `conversation_state_summary`，但它必须是新增节点，不是当前已存在能力。
-
-| 层级 | 当前状态 | 用途 | 可见范围 |
-|---|---|---|---|
-| `session_summary` / `session_hint` | 已存在，确定性 | 最近讨论对象、最近用户问题、规则 fallback | Question Resolver、`honglou-main` |
-| `conversation_state_summary` | 未实现，目标增强 | 当前主题、活跃实体、未决问题、上一轮边界、reviewer 警告 | 只能给 Question Resolver 和 `honglou-main` 的受控 projection |
-
-`conversation_state_summary` 不能作为证据源，不能进入 evidence package，不能让 text/commentary/reviewer 看到完整会话历史。
-
-目标 schema：
+当前未实现。是否新增仍是 D4。若新增，目标 schema 为：
 
 ```json
 {
@@ -229,50 +224,53 @@ LLM 不能做以下事情：
 }
 ```
 
-## 7. Context Pack 与 Context Projection
+硬规则：
 
-当前已实现的边界：
+1. 不能作为证据源。
+2. 不能进入 evidence package。
+3. 不能让 text/commentary/reviewer 看到完整会话历史。
+4. 只能进入授权 projection。
+5. 必须有 anti-hallucination eval。
 
-1. `context_pack` 是请求/trace 级受控上下文包，用于审计、回放和生成 projection。
-2. Runtime profile 不直接读取完整 `context_pack`。
-3. `context_projection` 是 Runtime 可见上下文。
-4. 每个 consumer 只能读取自己的 projection。
-5. `honglou-text` 和 `honglou-commentary` 不应看到完整 session summary。
-6. `honglou-reviewer` 不应看到 user_private memory、未审核 candidate 或 Hermes 私有 transcript。
-7. projection 绑定 `tool_policy_digest`、`output_contract_digest`、pack/projection ref 和 digest。
+### 6.3 Retrieval Policy Suggestion Contract
 
-Consumer 可见性：
+当前未实现。若新增，LLM 只能输出 suggestion，不能输出最终 policy。
 
-| Consumer | 当前可见内容 | 禁止内容 |
+```json
+{
+  "schema_version": "tonglingyu-retrieval-policy-suggestion-v1",
+  "question_type": "character_fate",
+  "alias_expansions": ["晴雯"],
+  "version_sensitive": true,
+  "commentary_recommended": true,
+  "confidence": 0.86,
+  "unsupported_reason": null
+}
+```
+
+禁止字段：
+
+1. `required_evidence_final`
+2. `tool_choice`
+3. `profile`
+4. `reviewer_state`
+5. `skip_review`
+6. `final_answer`
+
+deterministic patch 必须强制补齐：
+
+| 问题类型 | 必需证据 | 不可降级规则 |
 |---|---|---|
-| `honglou-main` | resolved question、有限 session summary、授权 memory summaries、package tool | 完整用户历史、未授权 memory、系统提示词、未审核 candidate |
-| `honglou-text` | resolved question、text search、部分非 user_private 工具偏好 memory | 完整 session summary、user_private memory、commentary tool |
-| `honglou-commentary` | resolved question、commentary search、部分非 user_private 工具偏好 memory | 完整正文库、user_private memory、最终回答 |
-| `honglou-reviewer` | visible question、evidence package read、review usage summary | user_private memory、未审核 candidate、Hermes private transcript |
+| 原文定位 | 原文库、回目结构 | 不可凭模型记忆回答 |
+| 诗词判词 | 诗词判词曲文库、原文库 | 必须区分原文与解读 |
+| 人物关系 | 人物库、关系库、正文证据 | 关系必须可追溯 |
+| 人物命运 | 原文、脂批、版本、事件 | 必须区分前八十回、后四十回、脂批、推断 |
+| 脂批问题 | 脂批、对应正文、版本 | 脂批不可写成正文事实 |
+| 版本差异 | 版本库、对齐正文、脂批 | 禁止无版本标签结论 |
 
-## 8. Retrieval Policy 与证据型 RAG
+### 6.4 Evidence Package / Draft / Reviewer Contract
 
-当前主路径是确定性 `search_policy(resolved_question)`。后续可以加入 LLM suggested policy，但必须满足：
-
-1. LLM 只能建议题型、检索意图、别名扩展、版本敏感度。
-2. 高风险问题由 deterministic policy patch 强制补齐证据类型。
-3. 必需证据类型不能被 LLM 降级。
-4. 用户不能通过请求字段指定内部 profile、tool choice 或 reviewer 状态。
-
-| 问题类型 | 必需证据 | LLM 可支持 | 硬规则 |
-|---|---|---|---|
-| 原文定位 | 原文库、回目结构 | 别名识别、查询扩展 | 不强制脂批；不可凭记忆回答。 |
-| 诗词判词 | 诗词判词曲文库、原文库 | 专题识别、文本定位 | 解释必须区分原文与解读。 |
-| 人物关系 | 人物库、关系库、正文证据 | 关系意图拆解 | 关系必须可追溯。 |
-| 人物命运 | 原文、脂批、版本、事件 | 版本敏感计划 | 必须区分前八十回、后四十回、脂批、推断。 |
-| 脂批问题 | 脂批、对应正文、版本 | 批语意图识别 | 脂批不可写成正文事实。 |
-| 版本差异 | 版本库、对齐正文、脂批 | 差异维度拆解 | 禁止无版本标签结论。 |
-
-## 9. Evidence Package、Draft、Reviewer 与 Response
-
-### 9.1 Evidence Package
-
-证据包必须是本地 Runtime/tool 创建和回放的对象。LLM 可以生成 claim scaffold 或 package observation，但 evidence refs 必须来自本地工具返回的 evidence ids。
+Evidence package 必须由本地 Runtime/tool 创建和回放。LLM 可以生成 claim scaffold 或 package observation，但 evidence refs 必须来自本地工具返回的 evidence ids。
 
 Evidence package 必须表达：
 
@@ -285,17 +283,13 @@ Evidence package 必须表达：
 7. `review`
 8. replay metadata
 
-### 9.2 Draft
+Draft candidate 必须满足：
 
-`honglou-main` 可做 claim-first draft candidate。若使用 Hermes/LLM draft：
-
-1. 必须绑定当前 evidence package id。
-2. 必须提供非空 draft。
-3. 不得引入 package 外 evidence ref。
-4. 不得绕过 reviewer。
+1. 绑定当前 evidence package id。
+2. 提供非空 draft。
+3. 不引入 package 外 evidence ref。
+4. 不绕过 reviewer。
 5. 本地治理不接受时，不能进入 final answer。
-
-### 9.3 Reviewer
 
 Reviewer 分两层：
 
@@ -304,9 +298,20 @@ Reviewer 分两层：
 | deterministic / local reviewer enforcement | 拦截硬规则错误、版本边界、无证据 claim、内部泄露 | 最终裁决 |
 | LLM reviewer observation | 判断语义支持、措辞过度、需要修订项 | 观察和建议 |
 
-LLM reviewer 与本地 reviewer 不一致时，必须记录 override，最终以本地 reviewer 为准。
+### 6.5 Memory 与 LLM Contract
 
-### 9.4 用户响应
+当前 Scoped Memory 的正确口径：
+
+1. Memory 可以进入 `context_pack.memory_read_refs` 和 `context_projection`。
+2. Memory 不能进入 evidence package。
+3. Memory 不能成为事实源。
+4. Memory 不能改变 reviewer 裁决。
+5. LLM 只能做 semantic filter、分类、TTL 建议和风险标记。
+6. `auto_approve`、`auto_promote`、`enable_read` 只能由 versioned policy engine 决定。
+
+LLM semantic filter 输出包含 `approve`、`promote`、`read_enabled`、`acl`、`reviewer_decision`、`evidence_package_id` 或任务状态字段时，必须 fail-closed。
+
+### 6.6 用户响应 Contract
 
 用户响应只能保留 OpenAI-compatible 用户可读内容。必须移除：
 
@@ -330,56 +335,38 @@ LLM reviewer 与本地 reviewer 不一致时，必须记录 override，最终以
 18. `rule_filter`
 19. `_runtime_stream_events`
 
-## 10. Memory 与 LLM
+用户响应脱敏与泄露回归是横切安全门禁，不属于 LLM 能力，但必须从 S1 到 S7 持续运行。
 
-当前 Scoped Memory Production 的正确口径：
-
-1. Memory 可以进入 `context_pack.memory_read_refs` 和 `context_projection`。
-2. Memory 不能进入 evidence package。
-3. Memory 不能成为事实源。
-4. Memory 不能改变 reviewer 裁决。
-5. LLM 只能做 semantic filter、分类、TTL 建议和风险标记。
-6. `auto_approve`、`auto_promote`、`enable_read` 只能由 versioned policy engine 决定。
-
-LLM semantic filter schema 使用 `scoped-memory-llm-filter-v1`。输出包含：
-
-```json
-{
-  "schema_version": "scoped-memory-llm-filter-v1",
-  "is_long_term_memory": true,
-  "is_temporary_instruction": false,
-  "is_quoted_or_third_party": false,
-  "has_contradiction": false,
-  "scope_type": "user_private",
-  "candidate_type": "answer_style_preference",
-  "confidence": 0.91,
-  "sensitivity": "low",
-  "risk_flags": [],
-  "ttl_hint": "90d",
-  "exclusion_flags": []
-}
-```
-
-输出包含 `approve`、`promote`、`read_enabled`、`acl`、`reviewer_decision`、`evidence_package_id` 或任务状态字段时，必须 fail-closed。
-
-## 11. 全路径 Eval 方案
+## 7. Eval 设计
 
 Eval 必须按节点归因，不只评最终回答。
 
-| 数据集 | 覆盖内容 | 核心指标 |
-|---|---|---|
-| `request_safety.jsonl` | forbidden fields、model allowlist、body/message/question limit | reject accuracy、no false accept |
-| `session_summary.jsonl` | 长对话、多人物、上一轮边界、metadata prompt | active entity recall、boundary preservation、hallucination rate |
-| `question_resolution.jsonl` | 指代、省略、歧义、prompt injection、低置信 | canonical accuracy、false resolution、clarification recall |
-| `context_projection.jsonl` | consumer isolation、digest mismatch、unknown consumer | projection isolation、fail-closed |
-| `retrieval_policy.jsonl` | 题型、版本、脂批、人物命运 | required evidence recall、policy patch correctness |
-| `rag_evidence.jsonl` | gold evidence、别名、版本、脂批对应正文 | hit@k、source/version accuracy |
-| `package_claims.jsonl` | evidence package、claim map、replay | package replay、unsupported claim rate |
-| `reviewer_security.jsonl` | 无证据断言、脂批正文混淆、内部泄露 | high-risk false pass |
-| `memory_policy.jsonl` | candidate extraction、semantic filter、ACL、read budget | policy decision correctness、no evidence misuse |
-| `streaming_dedupe.jsonl` | SSE、缓存复用、用户可见字段过滤 | response consistency、no internal leakage |
+| 数据集 | 覆盖内容 | 核心指标 | 首次阶段 |
+|---|---|---|---|
+| `request_safety.jsonl` | forbidden fields、model allowlist、body/message/question limit | reject accuracy、no false accept | S1 |
+| `streaming_dedupe.jsonl` | SSE、缓存复用、用户可见字段过滤 | response consistency、no internal leakage | S1 |
+| `question_resolution.jsonl` | 指代、省略、歧义、prompt injection、低置信 | canonical accuracy、false resolution、clarification recall | S2 |
+| `session_summary.jsonl` | 长对话、多人物、上一轮边界、metadata prompt | active entity recall、boundary preservation、hallucination rate | S4 |
+| `retrieval_policy.jsonl` | 题型、版本、脂批、人物命运 | required evidence recall、policy patch correctness | S5 |
+| `rag_evidence.jsonl` | gold evidence、别名、版本、脂批对应正文 | hit@k、source/version accuracy | S5 |
+| `context_projection.jsonl` | consumer isolation、digest mismatch、unknown consumer | projection isolation、fail-closed | S6 |
+| `package_claims.jsonl` | evidence package、claim map、replay | package replay、unsupported claim rate | S6 |
+| `reviewer_security.jsonl` | 无证据断言、脂批正文混淆、内部泄露 | high-risk false pass | S6 |
+| `memory_policy.jsonl` | candidate extraction、semantic filter、ACL、read budget | policy decision correctness、no evidence misuse | S7 |
 
-## 12. 发布门槛
+失败归因规则：
+
+1. resolved question 错导致 RAG 错，记为 Resolution failure，不记为 RAG failure。
+2. summary 引入新事实导致后续错误，记为 Summary hallucination。
+3. LLM suggested policy 漏掉版本/脂批必需证据，但 deterministic patch 未补齐，记为 Policy patch failure。
+4. evidence refs 不来自本地 evidence ids，记为 Package/ref validation failure。
+5. reviewer 放过无证据 claim，记为 Reviewer false pass。
+6. 用户响应或 SSE 泄露 context/memory/internal fields，记为 User response wrapper failure。
+7. memory 被写进 evidence package 或改变 reviewer 裁决，记为 Memory boundary failure。
+
+## 8. Gate 设计
+
+### 8.1 节点级 gate
 
 | Gate | 必须通过 |
 |---|---|
@@ -394,28 +381,43 @@ Eval 必须按节点归因，不只评最终回答。
 | G9 用户响应安全 Gate | 用户响应和 SSE 无内部字段、prompt、tool payload、memory/ref 泄露。 |
 | G10 Release Gate | 本地测试、clippy、smoke、strict Gateway gate、live gate、saved validator 和 release readiness 按对应阶段全部通过。 |
 
-## 13. 阶段化实施路线
+### 8.2 设计可实施 gate
+
+设计进入实现前必须满足：
+
+1. D1-D12 每项都为关闭、明确不做，或明确 `blocked`。
+2. S0 状态为 `passed_with_evidence`，并列出证据。
+3. 每个目标 contract 有 schema、禁止字段、fail-closed 行为、eval fixture 入口。
+4. S1 的最小 runner 和用户响应安全基线有具体文件路径计划。
+5. 文档不包含“基本完成”类状态。
+
+### 8.3 production-ready gate
+
+production-ready 不是本文当前状态。要声明 production-ready，至少需要：
+
+1. S1-S7 均为 `passed_with_evidence`。
+2. full-path eval suite 有 release report。
+3. 用户响应脱敏与泄露回归覆盖非流式、SSE、缓存复用。
+4. 本地测试、clippy、smoke、strict Gateway gate 通过。
+5. 目标环境 live gate 和 release readiness gate 通过。
+6. 所有 blocker 均关闭，或被明确排除在发布范围之外。
+
+## 9. 阶段化实施路线
 
 实施不能按 P0-P6 一次性落地。P0-P5 是 LLM 支持点和 eval 能力，P6 是横切安全门禁。正确做法是先建立尺子和用户响应安全边界，再逐个打开 LLM 支持点，每个阶段都必须能单独验证、提交和回滚。
 
-阶段划分原则：
+阶段状态：
 
-1. 每阶段只引入一个主要风险点。
-2. LLM 不同时进入多个决策节点。
-3. 用户响应脱敏与泄露回归不是 LLM 能力，但从第一阶段开始持续守护。
-4. 每阶段都有进入条件、退出条件和不可跨越边界。
-5. 没有通过上一阶段 gate，不进入下一阶段。
-
-| 阶段 | 目标 | 包含工作 | 进入条件 | 退出条件 | 不可跨越边界 |
+| 阶段 | 当前状态 | 目标 | 包含工作 | 退出条件 | 不可跨越边界 |
 |---|---|---|---|---|---|
-| S0 口径冻结 | 固定当前事实、目标增强和待确认项 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | 当前代码不改；31 号文档已纳入仓库 | I1-I10、P0-P6、S0-S7 均完成审阅；文档能清楚区分当前实现、目标增强、外部借鉴和待确认项 | 不能把设计目标写成已实现；不能写“基本完成” |
-| S1 评测与用户响应安全基线 | 先建立最小 gate，再接 LLM | P6 最小回归、P5 最小 runner、`request_safety.jsonl`、`streaming_dedupe.jsonl` | 当前用户响应 wrapper 和 SSE 行为可回放 | 内部字段扫描、stream replay、缓存复用、request safety 能自动跑 | 不能引入新的 LLM 调用 |
-| S2 Question Resolver contract | 只做 resolver 输出约束，不接生产 LLM | P0 schema、字段白名单、context refs 白名单、confidence gate、audit、`question_resolution.jsonl` | S1 gate 可用 | 规则 resolver 行为不变；contract tests 和 eval fixture 通过 | LLM 不能决定事实、scope、tool、memory、reviewer、package |
-| S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | P0 runtime/Hermes 调用、schema repair、shadow audit、fail-closed | S2 contract 稳定 | 只在 deterministic 需要澄清时调用；低置信澄清或 fail-closed；RAG 不被未校验输出驱动 | 不能让 LLM resolver 读取 memory 或完整 history |
-| S4 Conversation State Summary 决策 | 决定是否新增强状态摘要节点 | P1 writer/loader/schema、可见范围、anti-hallucination eval | S3 证明 resolver 边界稳定，或明确不做 S3 | summary 不引入事实；只进入授权 projection；不进 evidence package | 不能把 summary 当证据源 |
-| S5 Retrieval Policy schema 化 | 让 LLM 只建议检索策略 | P2 suggested policy schema、deterministic patch、required evidence eval | S2/S3 resolver 输出稳定；S4 决策明确 | 高风险问题必需证据不被降级；版本/脂批/人物命运 gate 通过 | LLM 不能决定最终证据类型和工具权限 |
-| S6 Profile observation 与 draft/reviewer eval | 评估 LLM profile 输出质量和边界 | P3 profile observation datasets、P4 claim-first draft、reviewer false-pass eval | S5 检索和 package 边界稳定 | refs 全部来自本地 evidence ids；reviewer override 可审计；draft 不能绕过 package | observation/candidate 不能成为最终事实或最终裁决 |
-| S7 全路径发布门禁 | 汇总节点级 eval 和 release report | P5 full-path suite、失败归因、release report；P6 持续回归 | S1-S6 各阶段 gate 通过 | request -> response 全路径可回放；失败能归因到节点；release gate 明确通过/失败 | 不能只用最终回答效果替代节点级验证 |
+| S0 口径冻结 | `in_progress` | 固定当前事实、目标增强和待确认项 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | I1-I10、D1-D12、S0-S7 均完成审阅；文档检查通过 | 不能写“基本完成”；不能把目标写成实现 |
+| S1 评测与用户响应安全基线 | `not_started` | 先建立最小 gate，再接 LLM | P6 最小回归、P5 最小 runner、`request_safety.jsonl`、`streaming_dedupe.jsonl` | 内部字段扫描、stream replay、缓存复用、request safety 能自动跑 | 不能引入新的 LLM 调用 |
+| S2 Question Resolver contract | `not_started` | 只做 resolver 输出约束，不接生产 LLM | P0 schema、字段白名单、context refs 白名单、confidence gate、audit、fixture | 规则 resolver 行为不变；contract tests 通过 | LLM 不能决定事实、scope、tool、memory、reviewer、package |
+| S3 Resolver LLM shadow/受控接入 | `not_started` | 在规则 resolver 不足时受控试用 LLM | runtime/Hermes 调用、schema repair、shadow audit、fail-closed | 只在 deterministic 需要澄清时调用；RAG 不被未校验输出驱动 | 不能让 LLM resolver 读取 memory 或完整 history |
+| S4 Conversation State Summary 决策 | `not_started` | 决定是否新增强状态摘要节点 | P1 writer/loader/schema、可见范围、anti-hallucination eval | summary 不引入事实；只进入授权 projection；不进 evidence package | 不能把 summary 当证据源 |
+| S5 Retrieval Policy schema 化 | `not_started` | 让 LLM 只建议检索策略 | P2 suggested policy schema、deterministic patch、required evidence eval | 高风险问题必需证据不被降级 | LLM 不能决定最终证据类型和工具权限 |
+| S6 Profile observation 与 draft/reviewer eval | `not_started` | 评估 LLM profile 输出质量和边界 | P3 datasets、P4 claim-first draft、reviewer false-pass eval | refs 全部来自本地 evidence ids；override 可审计 | observation/candidate 不能成为最终事实或最终裁决 |
+| S7 全路径发布门禁 | `not_started` | 汇总节点级 eval 和 release report | P5 full-path suite、失败归因、release report、P6 持续回归 | request -> response 可回放；失败能归因到节点 | 不能只用最终回答效果替代节点级验证 |
 
 阶段与工作包映射：
 
@@ -429,18 +431,18 @@ Eval 必须按节点归因，不只评最终回答。
 | P5 Full-path Eval Suite | S1、S7 | S1 做最小 runner，S7 做完整 suite 和 release report。 |
 | P6 用户响应脱敏与泄露回归门禁 | S1-S7 | 横切安全门禁，不属于 LLM 能力，贯穿所有阶段。 |
 
-### 13.1 阶段交付细化
+阶段交付细化：
 
 | 阶段 | 具体任务 | 主要产物 | 最小验证 | 停止条件 |
 |---|---|---|---|---|
-| S0 口径冻结 | 对齐当前实现、目标增强、外部借鉴边界和待确认项；确认本阶段只改文档。 | 31 号文档、文档地图、待确认项表。 | markdownlint、diff check、确认分支净效果无 Rust 代码变更；逐条审阅 I1-I10/P0-P6/S0-S7。 | 文档仍把目标增强写成已实现，无法解释 I1-I10/P0-P6，或使用“基本完成”类模糊状态。 |
-| S1 评测与用户响应安全基线 | 建最小 eval runner；增加用户响应字段泄露扫描；覆盖非流式、SSE、缓存复用和 request safety。 | `request_safety.jsonl`、`streaming_dedupe.jsonl`、用户响应内部字段 denylist、最小 gate 报告。 | request gate 用例通过；用户响应和 SSE 中无 trace/context/memory/review/tool payload 泄露。 | runner 不能稳定复现，或用户响应 gate 无法区分普通用户面与 admin-only 面。 |
-| S2 Question Resolver contract | 定义 LLM resolver schema；校验字段白名单、context refs、confidence、澄清/fail-closed；写审计字段。 | resolver contract、contract tests、`question_resolution.jsonl` fixture、resolver audit schema。 | 规则 resolver 现有行为不变；非法字段、未知 context ref、低置信输出全部 fail-closed。 | contract 需要读取 memory/full history，或会改变现有确定性 resolver 结果。 |
-| S3 Resolver LLM shadow/受控接入 | 只在 deterministic resolver 需要澄清时调用 LLM；先 shadow 记录，再决定是否进入受控主路径。 | runtime/Hermes 调用封装、schema repair、shadow audit、开关配置、失败归因。 | shadow 与规则结果对照可回放；受控主路径只接受已校验输出；低置信澄清或 fail-closed。 | LLM 输出可直接驱动 RAG，或 schema repair 后仍不能解释失败原因。 |
-| S4 Conversation State Summary 决策 | 先决定是否需要新增 summary；若需要，定义 writer/loader、schema、可见范围和 anti-hallucination eval。 | `conversation_state_summary` schema、summary audit、projection 可见性规则、`session_summary.jsonl`。 | summary 不引入新事实；不进入 evidence package；只给授权 projection。 | summary 被当作证据源，或 reviewer/text/commentary 看到不该看的会话状态。 |
-| S5 Retrieval Policy schema 化 | 定义 LLM suggested policy；保留 deterministic patch 强制高风险证据；建立 required evidence eval。 | suggested policy schema、policy patch 规则、`retrieval_policy.jsonl`、`rag_evidence.jsonl`。 | 原文、脂批、版本差异、人物命运问题的必需证据不被降级；gold evidence 命中达标。 | LLM 可降低必需证据，或用户请求可控制内部 profile/tool/reviewer。 |
-| S6 Profile observation 与 draft/reviewer eval | 固化 text/commentary/main/reviewer 输出 contract；评估 observation、claim-first draft 和 reviewer false-pass。 | profile observation datasets、`package_claims.jsonl`、`reviewer_security.jsonl`、override audit。 | refs 全部来自本地 evidence ids；draft 绑定 package；reviewer override 可回放。 | observation 被用作事实源，或 draft/reviewer 绕过 package 与本地裁决。 |
-| S7 全路径发布门禁 | 汇总 request -> response 全路径 replay；整合节点级失败归因；生成 release report。 | full-path eval suite、节点级失败报告、release readiness report、阶段通过/失败记录。 | S1-S6 gates 全部通过；失败能归因到 resolver/summary/policy/package/reviewer/user response/memory。 | 只能证明最终回答看起来正常，但不能证明中间节点正确。 |
+| S0 | 审阅并冻结事实、目标、待确认项、禁止口径 | 31 号文档、文档地图、决策登记 | markdownlint、diff check、无 Rust 净变更、逐条审阅记录 | 仍有未解释冲突或模糊完成口径 |
+| S1 | 建最小 eval runner 和用户响应泄露扫描 | request safety fixture、streaming fixture、denylist、gate report | 用户响应和 SSE 无内部字段泄露 | runner 不稳定或 admin-only 与普通用户面混淆 |
+| S2 | 定义 resolver schema 和校验 | contract、unit tests、fixture、audit schema | 规则 resolver 行为不变；非法输出 fail-closed | contract 改变现有 resolver 语义 |
+| S3 | 接 LLM resolver shadow/受控路径 | feature flag、shadow audit、schema repair、failure record | shadow 可回放；受控输出才可进入 RAG | LLM 输出绕过 contract |
+| S4 | 决策并实现 conversation state summary | schema、writer/loader、projection rule、summary eval | summary 不引入事实，不进 package | summary 被用作证据 |
+| S5 | schema 化 retrieval suggestion | suggested policy schema、patch rule、retrieval eval | 必需证据不被降级 | LLM 可决定最终工具或证据类型 |
+| S6 | 建 profile observation 和 draft/reviewer eval | datasets、package claim eval、reviewer security eval | refs 来自本地 evidence ids；override 可审计 | profile 输出被用作最终事实 |
+| S7 | 全路径 gate 和 release report | full-path runner、failure attribution、release report | 所有阶段 gate passed_with_evidence | 只看最终回答，不看节点证据 |
 
 每个阶段提交前必须满足：
 
@@ -449,33 +451,45 @@ Eval 必须按节点归因，不只评最终回答。
 3. 用户响应安全 gate 没有回退。
 4. 文档同步更新当前事实和剩余风险。
 5. 未通过的 gate 必须写成 blocker，不能写成完成。
-6. 阶段状态只能使用 `not_started`、`blocked`、`in_progress`、`passed_with_evidence`、`failed`，不能使用“基本完成”类口径。
+6. 阶段状态只能使用 `not_started`、`blocked`、`in_progress`、`passed_with_evidence`、`failed`。
 
-### 13.2 实施路线的待确认口径
+## 10. 回滚与开关要求
 
-| 编号 | 待确认问题 | 确认依据 | 确认后动作 | 主要风险 |
-|---|---|---|---|---|
-| P0 | 是否实现 Question Resolver LLM contract。 | 需要产品上确认复杂指代/省略补全是否值得引入 LLM；工程上确认 resolver 调用点、schema repair 和 fail-closed 策略。 | 增加 contract、runtime/Hermes 调用、audit 字段、`question_resolution.jsonl`。 | LLM resolver 若越权，会把 memory、scope、tool 或事实判断提前带入 RAG。 |
-| P1 | 是否新增 Conversation State Summary。 | 需要确认多轮体验是否需要比当前 `session_summary` 更强的状态表达。 | 增加 summary writer/loader、schema、可见范围、anti-hallucination eval。 | summary 幻觉会污染 resolver、draft 或 memory 判断。 |
-| P2 | 是否将 Retrieval Policy schema 化并引入 LLM suggested policy。 | 需要确认问题类型、版本敏感度、脂批需求是否难以靠确定性规则覆盖。 | 定义 suggested policy schema、deterministic patch、required evidence eval。 | LLM 降级必需证据，会让版本/脂批/人物命运问题失去证据约束。 |
-| P3 | 是否为 profile observation 建 eval。 | 需要确认 `text/commentary/main/reviewer` 的输出 contract 是否稳定。 | 建 profile observation datasets，校验 refs、边界、不可最终裁决。 | profile observation 被误用为事实源或最终回答。 |
-| P4 | 是否推进 claim-first draft 和 reviewer eval。 | 需要确认 final answer 是否必须由 claim map 驱动。 | 建 claim map eval、reviewer false-pass eval、revision gate。 | draft 绕过 evidence package 或 reviewer，形成无证据回答。 |
-| P5 | 是否建设 full-path eval suite。 | 需要确认 release 是否要求节点级失败归因，而不是只看最终答案。 | 建多数据集、统一 runner、失败归因和 release report。 | 只评最终回答会掩盖 resolver、summary、policy、package、reviewer 的局部失败。 |
-| P6 | 是否把用户响应脱敏与泄露回归设为长期门禁。 | 需要确认用户响应安全是否纳入每次发布检查。 | 增加递归内部字段扫描、stream replay、缓存复用检查。 | 内部 trace、context、memory、review、tool payload 泄露到普通用户响应。 |
+任何引入 LLM 的阶段都必须有回滚路径：
 
-## 14. 节点级失败归因
+| 能力 | 必须有的开关 | 回滚后应保持 |
+|---|---|---|
+| LLM resolver | resolver LLM enable/disable、shadow-only | deterministic resolver 主路径可用 |
+| conversation state summary | summary writer enable/disable、projection visibility | 原 `session_summary` 可用 |
+| suggested retrieval policy | LLM suggestion enable/disable | deterministic `search_policy` 可用 |
+| profile observation | per-profile enable/disable | 本地 tools/package/reviewer 可用 |
+| draft candidate | draft candidate enable/disable | 本地治理不接受时不进 final answer |
+| LLM reviewer observation | reviewer observation enable/disable | local reviewer enforcement 仍为最终裁决 |
+| 用户响应安全 gate | 不允许关闭 release gate，只允许增加 denylist | 普通用户响应不泄露内部字段 |
 
-失败必须归因到具体节点：
+## 11. 第一轮实施建议
 
-1. resolved question 错导致 RAG 错，记为 Resolution failure，不记为 RAG failure。
-2. summary 引入新事实导致后续错误，记为 Summary hallucination。
-3. LLM suggested policy 漏掉版本/脂批必需证据，但 deterministic patch 未补齐，记为 Policy patch failure。
-4. evidence refs 不来自本地 evidence ids，记为 Package/ref validation failure。
-5. reviewer 放过无证据 claim，记为 Reviewer false pass。
-6. 用户响应或 SSE 泄露 context/memory/internal fields，记为 User response wrapper failure。
-7. memory 被写进 evidence package 或改变 reviewer 裁决，记为 Memory boundary failure。
+第一轮不能接生产 LLM。建议只进入 S1，原因是没有 eval runner 和用户响应安全基线时，后续任何 LLM 接入都无法证明没有回退。
 
-## 15. 最终判断标准
+S1 最小范围：
+
+1. 建 `request_safety.jsonl`。
+2. 建 `streaming_dedupe.jsonl`。
+3. 建用户响应内部字段 denylist。
+4. 增加非流式 response replay。
+5. 增加 SSE stream replay。
+6. 增加 cache/dedupe replay。
+7. 输出最小 gate report。
+
+S1 不做：
+
+1. 不接 LLM resolver。
+2. 不新增 conversation_state_summary。
+3. 不改 retrieval policy。
+4. 不改 profile contract。
+5. 不改变用户响应内容，只检查泄露。
+
+## 12. 最终判断标准
 
 第一版成功标准不是回答是否流畅，而是：
 
@@ -485,5 +499,7 @@ Eval 必须按节点归因，不只评最终回答。
 4. LLM draft/reviewer/memory/filter 输出全部有 schema、policy、audit 和 fail-closed。
 5. 最终用户响应经过 reviewer 和用户响应 wrapper，不泄露内部状态。
 6. 每次失败都能在 trace 中归因到具体节点。
+
+当前本文不满足“设计完成”标准；它只把完成标准写清楚。
 
 <!-- markdownlint-enable MD013 MD060 -->
