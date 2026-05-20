@@ -16,13 +16,19 @@ use crate::{
         conversation_state_validation_context, project_conversation_state_summary,
         validate_conversation_state_summary, write_conversation_state_summary,
     },
+    draft_revision::{
+        draft_gate_observation, evaluate_draft_candidate_contract,
+        evaluate_profile_observation_contract, evaluate_reviewer_flow,
+    },
     llm_contracts::{
-        DEFAULT_MAX_BODY_CHARS, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS,
-        LLM_EVAL_REPORT_SCHEMA_VERSION, LLM_EVAL_SUITE_VERSION, LlmEvalFixture,
+        CONTEXT_PROJECTION_DATASET, CONTEXT_PROJECTION_MIN_CASES, DEFAULT_MAX_BODY_CHARS,
+        DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS, LLM_EVAL_REPORT_SCHEMA_VERSION,
+        LLM_EVAL_SUITE_VERSION, LlmEvalFixture, PACKAGE_CLAIMS_DATASET, PACKAGE_CLAIMS_MIN_CASES,
         PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
         RAG_EVIDENCE_DATASET, RAG_EVIDENCE_MIN_CASES, REQUEST_SAFETY_DATASET,
-        REQUEST_SAFETY_MIN_CASES, RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES, S1_STAGE,
-        S2_STAGE, S3_STAGE, S4_STAGE, S5_STAGE, SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES,
+        REQUEST_SAFETY_MIN_CASES, RETRIEVAL_POLICY_DATASET, RETRIEVAL_POLICY_MIN_CASES,
+        REVIEWER_SECURITY_DATASET, REVIEWER_SECURITY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE,
+        S4_STAGE, S5_STAGE, S6_STAGE, SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES,
         STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
     },
     llm_modes::LlmMode,
@@ -54,6 +60,13 @@ const REQUIRED_EVIDENCE_NOT_DOWNGRADED: &str = "required_evidence_not_downgraded
 const TOOL_PROFILE_NOT_MUTATED: &str = "tool_profile_not_mutated";
 const RAG_EVIDENCE_EXPECTED: &str = "rag_evidence_expected";
 const SOURCE_VERSION_BOUNDARY: &str = "source_version_boundary";
+const PROJECTION_ISOLATION_EXPECTED: &str = "projection_isolation_expected";
+const PROFILE_OBSERVATION_EXPECTED: &str = "profile_observation_expected";
+const DRAFT_CANDIDATE_EXPECTED: &str = "draft_candidate_expected";
+const PACKAGE_CLAIMS_EXPECTED: &str = "package_claims_expected";
+const REVIEWER_SECURITY_EXPECTED: &str = "reviewer_security_expected";
+const REVIEW_OVERRIDE_EXPECTED: &str = "review_override_expected";
+const REVISION_LOOP_EXPECTED: &str = "revision_loop_expected";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmEvalCaseResult {
@@ -133,6 +146,11 @@ pub fn run_llm_eval(
                 RETRIEVAL_POLICY_DATASET: RETRIEVAL_POLICY_MIN_CASES,
                 RAG_EVIDENCE_DATASET: RAG_EVIDENCE_MIN_CASES,
             },
+            "s6_minimums": {
+                CONTEXT_PROJECTION_DATASET: CONTEXT_PROJECTION_MIN_CASES,
+                PACKAGE_CLAIMS_DATASET: PACKAGE_CLAIMS_MIN_CASES,
+                REVIEWER_SECURITY_DATASET: REVIEWER_SECURITY_MIN_CASES,
+            },
             "fail_on_hard_gate": fail_on_hard_gate,
         },
         "failure_attribution": failure_attribution,
@@ -197,6 +215,9 @@ fn evaluate_fixture(fixture: &LlmEvalFixture) -> LlmEvalCaseResult {
         SESSION_SUMMARY_DATASET => evaluate_session_summary(fixture, &mut failures),
         RETRIEVAL_POLICY_DATASET => evaluate_retrieval_policy(fixture, &mut failures),
         RAG_EVIDENCE_DATASET => evaluate_rag_evidence(fixture, &mut failures),
+        CONTEXT_PROJECTION_DATASET => evaluate_context_projection(fixture, &mut failures),
+        PACKAGE_CLAIMS_DATASET => evaluate_package_claims(fixture, &mut failures),
+        REVIEWER_SECURITY_DATASET => evaluate_reviewer_security(fixture, &mut failures),
         dataset => {
             failures.push(format!("unsupported dataset: {dataset}"));
             json!({})
@@ -223,6 +244,7 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
         QUESTION_RESOLUTION_DATASET => S2_STAGE,
         SESSION_SUMMARY_DATASET => S4_STAGE,
         RETRIEVAL_POLICY_DATASET | RAG_EVIDENCE_DATASET => S5_STAGE,
+        CONTEXT_PROJECTION_DATASET | PACKAGE_CLAIMS_DATASET | REVIEWER_SECURITY_DATASET => S6_STAGE,
         _ => S1_STAGE,
     };
     if fixture.stage != expected_stage {
@@ -759,6 +781,223 @@ fn evaluate_rag_evidence(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -
     })
 }
 
+fn evaluate_context_projection(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let report = evaluate_profile_observation_contract(&fixture.input);
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == PROJECTION_ISOLATION_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {PROJECTION_ISOLATION_EXPECTED}"));
+    }
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == PROFILE_OBSERVATION_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {PROFILE_OBSERVATION_EXPECTED}"));
+    }
+    assert_expected_bool(fixture, "accepted", report.accepted, failures);
+    compare_expected_bool(
+        fixture,
+        "unknown_consumer",
+        report.unknown_consumer,
+        PROJECTION_ISOLATION_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "digest_mismatch",
+        report.digest_mismatch,
+        PROJECTION_ISOLATION_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "cross_profile_leakage",
+        report.cross_profile_leakage,
+        PROJECTION_ISOLATION_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "external_ref_detected",
+        report.external_ref_detected,
+        PROFILE_OBSERVATION_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "package_ref_allowed",
+        report.package_ref_allowed,
+        PROFILE_OBSERVATION_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "final_answer_attempt",
+        report.final_answer_attempt,
+        NO_INTERNAL_LEAKAGE,
+        failures,
+    );
+
+    json!(report)
+}
+
+fn evaluate_package_claims(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let package = fixture.input.get("package").unwrap_or(&Value::Null);
+    let draft_output = fixture.input.get("draft_candidate").unwrap_or(&Value::Null);
+    let report = evaluate_draft_candidate_contract(package, draft_output);
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == DRAFT_CANDIDATE_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {DRAFT_CANDIDATE_EXPECTED}"));
+    }
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == PACKAGE_CLAIMS_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {PACKAGE_CLAIMS_EXPECTED}"));
+    }
+    assert_expected_bool(fixture, "accepted", report.accepted, failures);
+    compare_expected_bool(
+        fixture,
+        "external_ref_detected",
+        report.external_ref_detected,
+        PACKAGE_CLAIMS_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "unsupported_claim_detected",
+        report.unsupported_claim_detected,
+        DRAFT_CANDIDATE_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "memory_as_evidence_detected",
+        report.memory_as_evidence_detected,
+        NO_MEMORY_AS_EVIDENCE,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "claim_map_complete",
+        report.claim_map_complete,
+        PACKAGE_CLAIMS_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "package_replay_ok",
+        report.package_replay_ok,
+        PACKAGE_CLAIMS_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "review_required",
+        report.review_required,
+        DRAFT_CANDIDATE_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "final_answer_attempt",
+        report.final_answer_attempt,
+        NO_INTERNAL_LEAKAGE,
+        failures,
+    );
+
+    draft_gate_observation(&report)
+}
+
+fn evaluate_reviewer_security(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let report = evaluate_reviewer_flow(&fixture.input);
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == REVIEWER_SECURITY_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {REVIEWER_SECURITY_EXPECTED}"));
+    }
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == REVIEW_OVERRIDE_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {REVIEW_OVERRIDE_EXPECTED}"));
+    }
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == REVISION_LOOP_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {REVISION_LOOP_EXPECTED}"));
+    }
+    assert_expected_str(
+        fixture,
+        "final_decision",
+        &report.override_record.final_decision,
+        failures,
+    );
+    assert_expected_str(
+        fixture,
+        "override_reason",
+        &report.override_record.override_reason,
+        failures,
+    );
+    assert_expected_str(
+        fixture,
+        "revision_terminal_status",
+        &report.revision.terminal_status,
+        failures,
+    );
+    assert_expected_bool(
+        fixture,
+        "final_answer_allowed",
+        report.revision.final_answer_allowed,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "high_risk_false_pass",
+        report.high_risk_false_pass,
+        REVIEWER_SECURITY_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "override_violation",
+        report.override_violation,
+        REVIEW_OVERRIDE_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "revision_limit_respected",
+        report.revision.revision_limit_respected,
+        REVISION_LOOP_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "package_mutated",
+        report.revision.package_mutated,
+        REVISION_LOOP_EXPECTED,
+        failures,
+    );
+
+    json!(report)
+}
+
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
     let request = fixture.input.get("request").unwrap_or(&Value::Null);
     let expected_accepted = fixture
@@ -862,6 +1101,19 @@ fn assert_expected_bool(
     failures: &mut Vec<String>,
 ) {
     if let Some(expected) = fixture.expected.get(key).and_then(Value::as_bool)
+        && expected != actual
+    {
+        failures.push(format!("{key} mismatch expected={expected} got={actual}"));
+    }
+}
+
+fn assert_expected_str(
+    fixture: &LlmEvalFixture,
+    key: &str,
+    actual: &str,
+    failures: &mut Vec<String>,
+) {
+    if let Some(expected) = fixture.expected.get(key).and_then(Value::as_str)
         && expected != actual
     {
         failures.push(format!("{key} mismatch expected={expected} got={actual}"));
@@ -1085,6 +1337,33 @@ fn validate_fixture_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<Strin
     if rag_evidence_count > 0 && rag_evidence_count < RAG_EVIDENCE_MIN_CASES {
         failures.push(format!(
             "{RAG_EVIDENCE_DATASET} requires at least {RAG_EVIDENCE_MIN_CASES} cases got {rag_evidence_count}"
+        ));
+    }
+    let context_projection_count = dataset_counts
+        .get(CONTEXT_PROJECTION_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if context_projection_count > 0 && context_projection_count < CONTEXT_PROJECTION_MIN_CASES {
+        failures.push(format!(
+            "{CONTEXT_PROJECTION_DATASET} requires at least {CONTEXT_PROJECTION_MIN_CASES} cases got {context_projection_count}"
+        ));
+    }
+    let package_claims_count = dataset_counts
+        .get(PACKAGE_CLAIMS_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if package_claims_count > 0 && package_claims_count < PACKAGE_CLAIMS_MIN_CASES {
+        failures.push(format!(
+            "{PACKAGE_CLAIMS_DATASET} requires at least {PACKAGE_CLAIMS_MIN_CASES} cases got {package_claims_count}"
+        ));
+    }
+    let reviewer_security_count = dataset_counts
+        .get(REVIEWER_SECURITY_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if reviewer_security_count > 0 && reviewer_security_count < REVIEWER_SECURITY_MIN_CASES {
+        failures.push(format!(
+            "{REVIEWER_SECURITY_DATASET} requires at least {REVIEWER_SECURITY_MIN_CASES} cases got {reviewer_security_count}"
         ));
     }
     failures

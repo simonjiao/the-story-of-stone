@@ -46,6 +46,7 @@ use tower_http::trace::TraceLayer;
 
 mod context_governance;
 mod conversation_state;
+mod draft_revision;
 mod llm_contracts;
 mod llm_eval;
 mod llm_modes;
