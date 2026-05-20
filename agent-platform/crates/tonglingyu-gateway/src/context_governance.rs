@@ -1,9 +1,22 @@
+use std::env;
+
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use time::{Duration as TimeDuration, OffsetDateTime};
+
+use crate::{
+    conversation_state::{
+        ConversationStateInput, ConversationStateMessage, ConversationStateSummary,
+        conversation_state_summary_digest, conversation_state_validation_context,
+        project_conversation_state_summary, validate_conversation_state_summary,
+        write_conversation_state_summary,
+    },
+    llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+    llm_modes::LlmMode,
+};
 
 pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "tonglingyu-scoped-context-v1";
 pub(crate) const CONTEXT_PROJECTION_SCHEMA_VERSION: &str = "tonglingyu-context-projection-v1";
@@ -33,6 +46,7 @@ const MEMORY_POLICY_MODE_ENV: &str = "TONGLINGYU_MEMORY_POLICY_MODE";
 const MEMORY_POLICY_MODE_AUTO: &str = "auto_policy";
 const MEMORY_POLICY_MODE_MANUAL: &str = "manual_required";
 const MEMORY_POLICY_MODE_SHADOW: &str = "shadow_only";
+const CONVERSATION_STATE_SUMMARY_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_SUMMARY_MODE";
 const MEMORY_READ_BUDGET_TOTAL: usize = 8;
 const MEMORY_READ_BUDGET_USER_PRIVATE: usize = 4;
 const MEMORY_READ_BUDGET_SHARED: usize = 4;
@@ -488,6 +502,14 @@ pub(crate) fn create_context_for_request(
     conn: &Connection,
     input: ContextRequestInput<'_>,
 ) -> Result<ContextResolution> {
+    create_context_for_request_with_mode(conn, input, conversation_state_summary_mode())
+}
+
+fn create_context_for_request_with_mode(
+    conn: &Connection,
+    input: ContextRequestInput<'_>,
+    conversation_state_mode: LlmMode,
+) -> Result<ContextResolution> {
     let user_session_id = get_or_create_user_session(
         conn,
         input.external_user_ref,
@@ -499,6 +521,54 @@ pub(crate) fn create_context_for_request(
     let prior_subject = latest_subject_from_journal(conn, &user_session_id)?;
     let session_summary = session_summary(input.messages, prior_subject.as_deref());
     let resolver = resolve_question(input.question, input.messages, prior_subject.as_deref());
+    let last_public_answer = latest_public_answer_boundary(conn, &user_session_id)?;
+    let recent_state_messages = input
+        .messages
+        .iter()
+        .map(|message| ConversationStateMessage {
+            role: message.role.as_str(),
+            content: message.content.as_str(),
+        })
+        .collect::<Vec<_>>();
+    let evidence_package_ref_views = last_public_answer
+        .evidence_package_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_boundaries = last_public_answer
+        .boundary
+        .as_deref()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let conversation_state_input = ConversationStateInput {
+        current_question: input.question,
+        recent_messages: &recent_state_messages,
+        session_summary: &session_summary,
+        last_public_answer_boundary: last_public_answer.boundary.as_deref(),
+        evidence_package_refs: &evidence_package_ref_views,
+        reviewer_warnings: &[],
+    };
+    let conversation_state_summary = if conversation_state_mode == LlmMode::Disabled {
+        None
+    } else {
+        let summary = write_conversation_state_summary(&conversation_state_input);
+        let validation_context = conversation_state_validation_context(
+            &conversation_state_input,
+            &[],
+            &required_boundaries,
+        );
+        let validation = validate_conversation_state_summary(&summary, &validation_context);
+        if validation.accepted {
+            Some(summary)
+        } else {
+            None
+        }
+    };
+    let conversation_state_projected =
+        conversation_state_mode == LlmMode::Enforced && conversation_state_summary.is_some();
+    let conversation_state_digest = conversation_state_summary
+        .as_ref()
+        .map(conversation_state_summary_digest);
     let context_pack_id = format!("context-pack-{}", uuid::Uuid::now_v7().simple());
     let context_pack_ref = context_pack_ref(input.trace_id, &context_pack_id);
     let active_scopes = vec![
@@ -571,15 +641,19 @@ pub(crate) fn create_context_for_request(
         "memory_read_ref_digest": &memory_read_ref_digest,
         "memory_read_policy_digest": &memory_read_policy_digest,
         "memory_usage_summary": &memory_usage_summary,
+        "conversation_state_summary_digest": &conversation_state_digest,
+        "conversation_state_summary_projection_visible": conversation_state_projected,
         "forbidden_context": [
             "complete_user_history",
             "unauthorized_memory",
             "system_prompt",
-            "unreviewed_memory_candidate"
+            "unreviewed_memory_candidate",
+            "conversation_state_summary_as_evidence"
         ],
         "output_contract": {
             "public_response_exposes_context_ids": false,
             "evidence_package_allows_memory": false,
+            "conversation_state_summary_allows_evidence": false,
             "schema_version": CONTEXT_SCHEMA_VERSION,
         },
         "profile_views": &profile_views,
@@ -591,6 +665,7 @@ pub(crate) fn create_context_for_request(
             "journal_retention": JOURNAL_RETENTION_POLICY_VERSION,
             "scoped_memory_policy": SCOPED_MEMORY_POLICY_VERSION,
             "scoped_memory_llm_filter": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
+            "conversation_state_summary": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
         },
         "resolver": resolver.audit_json(),
     });
@@ -602,6 +677,11 @@ pub(crate) fn create_context_for_request(
         &context_pack_id,
         &context_pack_ref,
         &profile_views,
+        if conversation_state_projected {
+            conversation_state_summary.as_ref()
+        } else {
+            None
+        },
     );
     conn.execute(
         "INSERT INTO context_packs (
@@ -630,7 +710,8 @@ pub(crate) fn create_context_for_request(
                 "complete_user_history",
                 "unauthorized_memory",
                 "system_prompt",
-                "unreviewed_memory_candidate"
+                "unreviewed_memory_candidate",
+                "conversation_state_summary_as_evidence"
             ]))?,
             serde_json::to_string(&context_pack["output_contract"])?,
             serde_json::to_string(&profile_views)?,
@@ -695,9 +776,46 @@ pub(crate) fn create_context_for_request(
                 "memory_read_ref_count": memory_read_refs.len(),
                 "memory_read_ref_digest": &memory_read_ref_digest,
                 "memory_read_policy_digest": &memory_read_policy_digest,
+                "conversation_state_summary_digest": &conversation_state_digest,
+                "conversation_state_summary_projection_visible": conversation_state_projected,
             }),
         },
     )?;
+    if conversation_state_mode != LlmMode::Disabled {
+        append_journal_entry(
+            conn,
+            JournalEntryInput {
+                trace_id: input.trace_id,
+                user_session_id: &user_session_id,
+                interaction_context_id: &interaction_context_id,
+                context_pack_id: Some(&context_pack_id),
+                package_id: None,
+                external_message_id: Some(input.external_message_id),
+                entry_type: "conversation_state_summary_written",
+                content: None,
+                summary: if conversation_state_summary.is_some() {
+                    "conversation state summary written"
+                } else {
+                    "conversation state summary rejected"
+                },
+                retention_policy: JOURNAL_RETENTION_POLICY_VERSION,
+                sensitivity: "internal_conversation_state",
+                metadata: json!({
+                    "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+                    "mode": conversation_state_mode.as_str(),
+                    "status": if conversation_state_summary.is_some() { "accepted" } else { "rejected" },
+                    "conversation_state_summary_digest": &conversation_state_digest,
+                    "summary_confidence": conversation_state_summary
+                        .as_ref()
+                        .map(|summary| summary.summary_confidence),
+                    "projection_visible": conversation_state_projected,
+                    "memory_allowed_as_evidence": false,
+                    "raw_history_included": false,
+                    "evidence_package_refs_count": evidence_package_ref_views.len(),
+                }),
+            },
+        )?;
+    }
     append_journal_entry(
         conn,
         JournalEntryInput {
@@ -799,6 +917,56 @@ pub(crate) fn load_deduped_final_response(
             .context("final response journal missing response")
     })
     .transpose()
+}
+
+#[derive(Debug, Clone, Default)]
+struct PublicAnswerBoundary {
+    boundary: Option<String>,
+    evidence_package_refs: Vec<String>,
+}
+
+fn latest_public_answer_boundary(
+    conn: &Connection,
+    user_session_id: &str,
+) -> Result<PublicAnswerBoundary> {
+    let row = conn
+        .query_row(
+            "SELECT package_id, metadata_json FROM session_journal
+             WHERE user_session_id = ?1 AND entry_type = 'final_response'
+             ORDER BY created_at DESC, journal_id DESC LIMIT 1",
+            params![user_session_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((package_id, metadata_json)) = row else {
+        return Ok(PublicAnswerBoundary::default());
+    };
+    let metadata = serde_json::from_str::<Value>(&metadata_json)?;
+    let boundary = metadata
+        .get("response")
+        .and_then(public_response_boundary)
+        .map(|value| bounded_summary(&value, JOURNAL_SUMMARY_MAX_CHARS));
+    let evidence_package_refs = package_id
+        .map(|id| format!("package:{id}"))
+        .into_iter()
+        .collect::<Vec<_>>();
+    Ok(PublicAnswerBoundary {
+        boundary,
+        evidence_package_refs,
+    })
+}
+
+fn public_response_boundary(response: &Value) -> Option<String> {
+    response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response
+                .pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| response.get("content").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 pub(crate) fn append_final_response(
@@ -3645,14 +3813,21 @@ fn validate_memory_policy_mode(mode: &str) -> Result<()> {
 }
 
 fn memory_policy_mode() -> String {
-    let mode = std::env::var(MEMORY_POLICY_MODE_ENV)
-        .unwrap_or_else(|_| MEMORY_POLICY_MODE_AUTO.to_string());
+    let mode =
+        env::var(MEMORY_POLICY_MODE_ENV).unwrap_or_else(|_| MEMORY_POLICY_MODE_AUTO.to_string());
     let mode = mode.trim();
     if validate_memory_policy_mode(mode).is_ok() {
         mode.to_string()
     } else {
         MEMORY_POLICY_MODE_MANUAL.to_string()
     }
+}
+
+fn conversation_state_summary_mode() -> LlmMode {
+    env::var(CONVERSATION_STATE_SUMMARY_MODE_ENV)
+        .ok()
+        .and_then(|mode| LlmMode::parse(&mode).ok())
+        .unwrap_or(LlmMode::Disabled)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4430,6 +4605,7 @@ fn build_context_projections(
     context_pack_id: &str,
     context_pack_ref: &str,
     profile_views: &[ContextPackProfileView],
+    conversation_state_summary: Option<&ConversationStateSummary>,
 ) -> Vec<ContextProjection> {
     profile_views
         .iter()
@@ -4441,6 +4617,7 @@ fn build_context_projections(
                 context_pack_id,
                 context_pack_ref,
                 view,
+                conversation_state_summary,
             )
         })
         .collect()
@@ -4452,16 +4629,26 @@ fn build_context_projection(
     context_pack_id: &str,
     context_pack_ref: &str,
     view: ContextPackProfileView,
+    conversation_state_summary: Option<&ConversationStateSummary>,
 ) -> ContextProjection {
     let context_projection_id = format!("context-projection-{}", uuid::Uuid::now_v7().simple());
     let context_projection_ref =
         format!("context-projection://tonglingyu/{trace_id}/{context_projection_id}");
     let output_contract = projection_output_contract(&view.profile_name);
     let forbidden_tools = Vec::<String>::new();
+    let projected_conversation_state = conversation_state_summary
+        .and_then(|summary| project_conversation_state_summary(summary, &view.profile_name));
+    let projected_conversation_state_digest = if projected_conversation_state.is_some() {
+        conversation_state_summary.map(conversation_state_summary_digest)
+    } else {
+        None
+    };
     let projection_payload = json!({
         "object": "tonglingyu.context_projection_payload",
         "visible_question": &view.visible_question,
         "session_summary": &view.session_summary,
+        "conversation_state_summary": &projected_conversation_state,
+        "conversation_state_summary_digest": &projected_conversation_state_digest,
         "forbidden_context": &view.forbidden_context,
         "memory_read_refs": &view.memory_read_refs,
         "memory_read_ref_digest": &view.memory_read_ref_digest,
@@ -4531,6 +4718,8 @@ fn projection_output_contract(consumer_name: &str) -> Value {
             "object": "tonglingyu.main_runtime_projection",
             "must_return_output_ref": true,
             "evidence_package_allows_memory": false,
+            "conversation_state_summary_allows_evidence": false,
+            "conversation_state_summary_scope": "projection_only",
         }),
     }
 }
@@ -4834,6 +5023,13 @@ fn projection_payload_summary(value: &Value) -> Value {
             .and_then(Value::as_str)
             .map(hash_text),
         "has_session_summary": value.get("session_summary").is_some_and(|item| !item.is_null()),
+        "has_conversation_state_summary": value
+            .get("conversation_state_summary")
+            .is_some_and(|item| !item.is_null()),
+        "conversation_state_summary_digest": value
+            .get("conversation_state_summary_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         "forbidden_context_count": value
             .get("forbidden_context")
             .and_then(Value::as_array)
@@ -4995,6 +5191,147 @@ mod tests {
             confidence: input.confidence,
             audit_ref: memory_audit_ref("candidate-create", &candidate_id),
         }
+    }
+
+    #[test]
+    fn conversation_state_summary_projects_only_to_main_profile() {
+        let conn = conn();
+        let first_messages = [ContextMessage {
+            role: "user".to_string(),
+            content: "晴雯判词在哪里？".to_string(),
+        }];
+        let first_context = create_context_for_request_with_mode(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-conversation-state-first",
+                model_id: "tonglingyu",
+                external_user_ref: "user-conversation-state",
+                external_session_id: "session-conversation-state",
+                external_message_id: "message-first",
+                question: "晴雯判词在哪里？",
+                messages: &first_messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            LlmMode::Disabled,
+        )
+        .expect("first context");
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "上一轮只确认晴雯判词位置，未断言结局。"
+                }
+            }]
+        });
+        append_final_response(
+            &conn,
+            FinalResponseJournalInput {
+                trace_id: "trace-conversation-state-first",
+                user_session_id: &first_context.user_session_id,
+                interaction_context_id: &first_context.interaction_context_id,
+                context_pack_id: &first_context.context_pack_id,
+                external_message_id: "message-first",
+                package_id: Some("pkg-conversation-state-boundary"),
+                response: &response,
+            },
+        )
+        .expect("final response");
+
+        let follow_messages = [
+            ContextMessage {
+                role: "user".to_string(),
+                content: "晴雯判词在哪里？".to_string(),
+            },
+            ContextMessage {
+                role: "assistant".to_string(),
+                content: "上一轮只确认晴雯判词位置，未断言结局。".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "她的结局呢？".to_string(),
+            },
+        ];
+        let follow_context = create_context_for_request_with_mode(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-conversation-state-follow",
+                model_id: "tonglingyu",
+                external_user_ref: "user-conversation-state",
+                external_session_id: "session-conversation-state",
+                external_message_id: "message-follow",
+                question: "她的结局呢？",
+                messages: &follow_messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            LlmMode::Enforced,
+        )
+        .expect("follow context");
+
+        assert!(
+            !follow_context
+                .used_context_refs
+                .iter()
+                .any(|item| item == "conversation_state_summary")
+        );
+        assert!(
+            follow_context
+                .context_pack
+                .get("conversation_state_summary")
+                .is_none()
+        );
+        assert_eq!(
+            follow_context.context_pack["conversation_state_summary_projection_visible"],
+            json!(true)
+        );
+
+        let main_projection = follow_context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-main")
+            .expect("main projection");
+        let state_summary = &main_projection.projection_payload["conversation_state_summary"];
+        assert_eq!(
+            state_summary["object"],
+            json!("tonglingyu.conversation_state_summary")
+        );
+        assert_eq!(state_summary["memory_allowed_as_evidence"], json!(false));
+        assert!(
+            state_summary["active_entities"]
+                .as_array()
+                .expect("active entities")
+                .contains(&json!("晴雯"))
+        );
+        assert!(
+            state_summary["last_answer_boundaries"]
+                .as_array()
+                .expect("boundaries")
+                .iter()
+                .any(|item| item
+                    .as_str()
+                    .is_some_and(|value| value.contains("上一轮只确认晴雯判词位置")))
+        );
+        for projection in &follow_context.context_projections {
+            if projection.consumer_name != "honglou-main" {
+                assert!(
+                    projection.projection_payload["conversation_state_summary"].is_null(),
+                    "{} should not receive conversation summary",
+                    projection.consumer_name
+                );
+            }
+        }
+
+        let journal_metadata: String = conn
+            .query_row(
+                "SELECT metadata_json FROM session_journal
+                 WHERE trace_id = ?1 AND entry_type = 'conversation_state_summary_written'",
+                params!["trace-conversation-state-follow"],
+                |row| row.get(0),
+            )
+            .expect("conversation state journal");
+        let metadata: Value = serde_json::from_str(&journal_metadata).expect("metadata json");
+        assert_eq!(metadata["status"], json!("accepted"));
+        assert_eq!(metadata["projection_visible"], json!(true));
     }
 
     fn insert_and_apply_test_memory(conn: &Connection, draft: &MemoryCandidateDraft) {

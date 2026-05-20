@@ -11,12 +11,18 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DEFAULT_MODEL_ID,
+    conversation_state::{
+        ConversationStateInput, ConversationStateMessage, ConversationStateSummary,
+        conversation_state_validation_context, project_conversation_state_summary,
+        validate_conversation_state_summary, write_conversation_state_summary,
+    },
     llm_contracts::{
         DEFAULT_MAX_BODY_CHARS, DEFAULT_MAX_MESSAGES, DEFAULT_MAX_QUESTION_CHARS,
         LLM_EVAL_REPORT_SCHEMA_VERSION, LLM_EVAL_SUITE_VERSION, LlmEvalFixture,
         PUBLIC_OUTPUT_FORBIDDEN_KEYS, QUESTION_RESOLUTION_DATASET, QUESTION_RESOLUTION_MIN_CASES,
-        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE,
-        STREAMING_DEDUPE_DATASET, STREAMING_DEDUPE_MIN_CASES,
+        REQUEST_SAFETY_DATASET, REQUEST_SAFETY_MIN_CASES, S1_STAGE, S2_STAGE, S3_STAGE, S4_STAGE,
+        SESSION_SUMMARY_DATASET, SESSION_SUMMARY_MIN_CASES, STREAMING_DEDUPE_DATASET,
+        STREAMING_DEDUPE_MIN_CASES,
     },
     llm_modes::LlmMode,
     llm_provider::{FakeLlmProvider, LlmProviderError},
@@ -33,6 +39,11 @@ const RESPONSE_CONSISTENCY: &str = "response_consistency";
 const RESOLVER_CONTRACT_EXPECTED: &str = "resolver_contract_expected";
 const RESOLVER_PROVIDER_ROUTING_EXPECTED: &str = "resolver_provider_routing_expected";
 const UNKNOWN_CONTEXT_REF_FAIL_CLOSED: &str = "unknown_context_ref_fail_closed";
+const SUMMARY_CONTRACT_EXPECTED: &str = "summary_contract_expected";
+const NO_SUMMARY_HALLUCINATION: &str = "no_summary_hallucination";
+const BOUNDARY_PRESERVATION: &str = "boundary_preservation";
+const NO_MEMORY_AS_EVIDENCE: &str = "no_memory_as_evidence";
+const PROJECTION_GUARD_EXPECTED: &str = "projection_guard_expected";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LlmEvalCaseResult {
@@ -69,12 +80,12 @@ pub fn run_llm_eval(
         results.push(result);
     }
 
-    let suite_failures = validate_s1_suite(&dataset_counts);
+    let suite_failures = validate_fixture_suite(&dataset_counts);
     for failure in &suite_failures {
         hard_gate_failures.push(json!({
             "case_id": "suite",
             "dataset": "suite",
-            "hard_gates": ["s1_fixture_contract"],
+            "hard_gates": ["fixture_contract"],
             "failure": failure,
         }));
     }
@@ -104,6 +115,9 @@ pub fn run_llm_eval(
             },
             "s2_minimums": {
                 QUESTION_RESOLUTION_DATASET: QUESTION_RESOLUTION_MIN_CASES,
+            },
+            "s4_minimums": {
+                SESSION_SUMMARY_DATASET: SESSION_SUMMARY_MIN_CASES,
             },
             "fail_on_hard_gate": fail_on_hard_gate,
         },
@@ -166,6 +180,7 @@ fn evaluate_fixture(fixture: &LlmEvalFixture) -> LlmEvalCaseResult {
         REQUEST_SAFETY_DATASET => evaluate_request_safety(fixture, &mut failures),
         STREAMING_DEDUPE_DATASET => evaluate_streaming_dedupe(fixture, &mut failures),
         QUESTION_RESOLUTION_DATASET => evaluate_question_resolution(fixture, &mut failures),
+        SESSION_SUMMARY_DATASET => evaluate_session_summary(fixture, &mut failures),
         dataset => {
             failures.push(format!("unsupported dataset: {dataset}"));
             json!({})
@@ -190,6 +205,7 @@ fn validate_common_fixture(fixture: &LlmEvalFixture) -> Vec<String> {
         REQUEST_SAFETY_DATASET | STREAMING_DEDUPE_DATASET => S1_STAGE,
         QUESTION_RESOLUTION_DATASET if fixture.input.get("provider_mode").is_some() => S3_STAGE,
         QUESTION_RESOLUTION_DATASET => S2_STAGE,
+        SESSION_SUMMARY_DATASET => S4_STAGE,
         _ => S1_STAGE,
     };
     if fixture.stage != expected_stage {
@@ -365,6 +381,188 @@ fn evaluate_question_resolution_provider(
     json!(report)
 }
 
+fn evaluate_session_summary(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
+    let input = &fixture.input;
+    let current_question = input
+        .get("current_question")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let session_summary = input
+        .get("session_summary")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let last_boundary = input
+        .get("last_public_answer_boundary")
+        .and_then(Value::as_str);
+    let owned_messages = input
+        .get("recent_messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|message| {
+                    (
+                        message
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let recent_messages = owned_messages
+        .iter()
+        .map(|(role, content)| ConversationStateMessage {
+            role: role.as_str(),
+            content: content.as_str(),
+        })
+        .collect::<Vec<_>>();
+    let evidence_refs = string_array(input.get("evidence_package_refs"));
+    let evidence_ref_views = evidence_refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let reviewer_warnings = string_array(input.get("reviewer_warnings"));
+    let reviewer_warning_views = reviewer_warnings
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_entities = string_array(input.get("required_active_entities"));
+    let required_entity_views = required_entities
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_boundaries = string_array(input.get("required_last_answer_boundaries"));
+    let required_boundary_views = required_boundaries
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let state_input = ConversationStateInput {
+        current_question,
+        recent_messages: &recent_messages,
+        session_summary,
+        last_public_answer_boundary: last_boundary,
+        evidence_package_refs: &evidence_ref_views,
+        reviewer_warnings: &reviewer_warning_views,
+    };
+    let summary = match input.get("llm_output") {
+        Some(output) => match serde_json::from_value::<ConversationStateSummary>(output.clone()) {
+            Ok(summary) => summary,
+            Err(error) => {
+                failures.push(format!("summary parse failed: {error}"));
+                return json!({
+                    "accepted": false,
+                    "parse_error": true,
+                });
+            }
+        },
+        None => write_conversation_state_summary(&state_input),
+    };
+    let validation_context = conversation_state_validation_context(
+        &state_input,
+        &required_entity_views,
+        &required_boundary_views,
+    );
+    let validation = validate_conversation_state_summary(&summary, &validation_context);
+    let projected_to_main = validation.accepted
+        && project_conversation_state_summary(&summary, "honglou-main").is_some();
+    let projected_to_text = validation.accepted
+        && project_conversation_state_summary(&summary, "honglou-text").is_some();
+    let projected_to_reviewer = validation.accepted
+        && project_conversation_state_summary(&summary, "honglou-reviewer").is_some();
+
+    if !fixture
+        .hard_gates
+        .iter()
+        .any(|gate| gate == SUMMARY_CONTRACT_EXPECTED)
+    {
+        failures.push(format!("missing hard gate {SUMMARY_CONTRACT_EXPECTED}"));
+    }
+    assert_expected_bool(fixture, "accepted", validation.accepted, failures);
+    compare_expected_bool(
+        fixture,
+        "hallucination_detected",
+        validation.hallucination_detected,
+        NO_SUMMARY_HALLUCINATION,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "internal_leakage_detected",
+        validation.internal_leakage_detected,
+        if validation.internal_leakage_detected {
+            INTERNAL_LEAKAGE_DETECTED
+        } else {
+            NO_INTERNAL_LEAKAGE
+        },
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "boundary_preserved",
+        validation.boundary_preserved,
+        BOUNDARY_PRESERVATION,
+        failures,
+    );
+    let memory_as_evidence_rejected = validation
+        .errors
+        .iter()
+        .any(|error| error == "memory_allowed_as_evidence_true")
+        || !summary.memory_allowed_as_evidence;
+    compare_expected_bool(
+        fixture,
+        "memory_as_evidence_rejected",
+        memory_as_evidence_rejected,
+        NO_MEMORY_AS_EVIDENCE,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "projected_to_main",
+        projected_to_main,
+        PROJECTION_GUARD_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "projected_to_text",
+        projected_to_text,
+        PROJECTION_GUARD_EXPECTED,
+        failures,
+    );
+    compare_expected_bool(
+        fixture,
+        "projected_to_reviewer",
+        projected_to_reviewer,
+        PROJECTION_GUARD_EXPECTED,
+        failures,
+    );
+
+    json!({
+        "accepted": validation.accepted,
+        "error_count": validation.errors.len(),
+        "errors": validation.errors,
+        "hallucination_detected": validation.hallucination_detected,
+        "internal_leakage_detected": validation.internal_leakage_detected,
+        "boundary_preserved": validation.boundary_preserved,
+        "active_entity_recall": validation.active_entity_recall,
+        "active_entity_count": summary.active_entities.len(),
+        "open_question_count": summary.open_questions.len(),
+        "last_answer_boundary_count": summary.last_answer_boundaries.len(),
+        "evidence_package_ref_count": summary.evidence_package_refs.len(),
+        "summary_confidence": summary.summary_confidence,
+        "projection": {
+            "main_visible": projected_to_main,
+            "text_visible": projected_to_text,
+            "reviewer_visible": projected_to_reviewer,
+        },
+    })
+}
+
 fn evaluate_request_safety(fixture: &LlmEvalFixture, failures: &mut Vec<String>) -> Value {
     let request = fixture.input.get("request").unwrap_or(&Value::Null);
     let expected_accepted = fixture
@@ -472,6 +670,36 @@ fn assert_expected_bool(
     {
         failures.push(format!("{key} mismatch expected={expected} got={actual}"));
     }
+}
+
+fn compare_expected_bool(
+    fixture: &LlmEvalFixture,
+    key: &str,
+    actual: bool,
+    required_gate: &str,
+    failures: &mut Vec<String>,
+) {
+    if let Some(expected) = fixture.expected.get(key).and_then(Value::as_bool) {
+        if !fixture.hard_gates.iter().any(|gate| gate == required_gate) {
+            failures.push(format!("missing hard gate {required_gate}"));
+        }
+        if expected != actual {
+            failures.push(format!("{key} mismatch expected={expected} got={actual}"));
+        }
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn provider_error_from_str(value: &str) -> LlmProviderError {
@@ -593,7 +821,7 @@ fn extract_public_text(value: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn validate_s1_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<String> {
+fn validate_fixture_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<String> {
     let mut failures = Vec::new();
     let request_count = dataset_counts
         .get(REQUEST_SAFETY_DATASET)
@@ -620,6 +848,15 @@ fn validate_s1_suite(dataset_counts: &BTreeMap<String, usize>) -> Vec<String> {
     if question_resolution_count > 0 && question_resolution_count < QUESTION_RESOLUTION_MIN_CASES {
         failures.push(format!(
             "{QUESTION_RESOLUTION_DATASET} requires at least {QUESTION_RESOLUTION_MIN_CASES} cases got {question_resolution_count}"
+        ));
+    }
+    let session_summary_count = dataset_counts
+        .get(SESSION_SUMMARY_DATASET)
+        .copied()
+        .unwrap_or_default();
+    if session_summary_count > 0 && session_summary_count < SESSION_SUMMARY_MIN_CASES {
+        failures.push(format!(
+            "{SESSION_SUMMARY_DATASET} requires at least {SESSION_SUMMARY_MIN_CASES} cases got {session_summary_count}"
         ));
     }
     failures
