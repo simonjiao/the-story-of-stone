@@ -1312,6 +1312,9 @@ fn forbidden_control_fields(payload: &Value) -> Vec<String> {
         "scope_id",
         "scope_graph",
         "memory_read_scopes",
+        "memory_read_refs",
+        "memory_read_ref_digest",
+        "memory_read_policy_digest",
         "memory_write_scopes",
         "memory_scope",
         "memory_summaries",
@@ -8813,6 +8816,8 @@ fn public_completion_value(value: &Value) -> Value {
         map.remove("session_journal");
         map.remove("context_pack");
         map.remove("memory_read_refs");
+        map.remove("memory_read_ref_digest");
+        map.remove("memory_read_policy_digest");
         map.remove("memory_summaries");
         map.remove("memory_policy");
         map.remove("memory_policy_digest");
@@ -12903,6 +12908,8 @@ USER: 介绍尤三姐
         value["interaction_context_id"] = json!("interaction-context-public-rqa-test");
         value["session_journal"] = json!([{"entry_type": "user_message"}]);
         value["memory_read_refs"] = json!(["memory:forbidden"]);
+        value["memory_read_ref_digest"] = json!("memory-read-ref-digest");
+        value["memory_read_policy_digest"] = json!("memory-read-policy-digest");
         value["memory_summaries"] = json!([{"summary": "internal memory"}]);
         value["memory_policy_digest"] = json!("memory-policy-digest");
         value["memory_usage_summary"] = json!({"read_ref_count": 1});
@@ -12934,6 +12941,8 @@ USER: 介绍尤三姐
         assert!(!rendered.contains("interaction_context_id"));
         assert!(!rendered.contains("session_journal"));
         assert!(!rendered.contains("memory_read_refs"));
+        assert!(!rendered.contains("memory_read_ref_digest"));
+        assert!(!rendered.contains("memory_read_policy_digest"));
         assert!(!rendered.contains("memory_summaries"));
         assert!(!rendered.contains("memory_policy_digest"));
         assert!(!rendered.contains("memory_usage_summary"));
@@ -13068,6 +13077,9 @@ USER: 介绍尤三姐
                 "forbidden_tools": ["tonglingyu.commentary.search"],
                 "llm_extraction": {"promotion": "forged"},
                 "memory_card_id": "forged-card",
+                "memory_read_policy_digest": "forged-read-policy",
+                "memory_read_ref_digest": "forged-read-ref-digest",
+                "memory_read_refs": ["memory-summary://forged"],
                 "memory_read_scopes": ["user_private:any"],
                 "read_enabled": true,
                 "tool_policy_digest": "forged-tool-policy",
@@ -13089,6 +13101,9 @@ USER: 介绍尤三姐
                 "extra_body.layers[0].runtime_step_outputs",
                 "extra_body.llm_extraction",
                 "extra_body.memory_card_id",
+                "extra_body.memory_read_policy_digest",
+                "extra_body.memory_read_ref_digest",
+                "extra_body.memory_read_refs",
                 "extra_body.memory_read_scopes",
                 "extra_body.read_enabled",
                 "extra_body.tool_policy_digest",

@@ -134,6 +134,13 @@
   `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、`release_gate_ms=26759`；
   post-release monitor 60 分钟窗口 `sample_count=13`、`failed_sample_count=0`。
   因此 Phase 4 scoped memory production-ready gate 已在当前 run 中闭合。
+- 2026-05-20 对 Scoped Context / Scoped Memory 设计与实现做一致性复查，发现两个
+  未影响已部署路径但不应保留的 contract 漏项并已修复：非 `user_message`
+  candidate 现在会在 policy engine 内 fail-closed 为 `suppress -> rejected`，不能
+  因 admin/API 插入路径绕过自动策略条件；`memory_read_ref_digest` 现在显式写入
+  `context_pack`、projection payload、admin trace summary 和 smoke/live gate。已复跑
+  `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+  `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 和 `scripts/qa.sh --quick`。
 
 ## 已确认
 

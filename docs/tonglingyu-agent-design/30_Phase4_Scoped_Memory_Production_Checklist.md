@@ -484,6 +484,15 @@ Phase 4 必须让 export、anonymize、legal hold 和 retention 覆盖：
   `admin_read_p95_ms=387`、`metrics_read_p95_ms=173`、
   `release_gate_ms=26759`；post-release monitor 为 60 分钟窗口、
   `sample_count=13`、`failed_sample_count=0`。
+- 2026-05-20 设计-实现一致性复查发现并修复两个 contract 漏项：
+  1. policy engine 原先记录了 `source_entry_type_allowed`，但自动策略的 `suppress`
+     条件未显式纳入该字段；现已改为非 `user_message` candidate 必须
+     `suppress -> rejected`，并写 `source_entry_type_not_allowed` policy/audit reason。
+  2. projection 原先只有 `memory_policy_digest`，没有显式
+     `memory_read_ref_digest`；现已在 `context_pack`、`context_projection` payload、
+     admin trace summary 和 smoke/live gate 中固定该 digest。
+  这两个修复不改变 Phase 4 目标口径，也不放宽 release gate；它们是对已冻结 contract
+  的收敛，而不是新的折中路径。
 
 ## Fail-closed Matrix
 

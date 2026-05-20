@@ -98,6 +98,7 @@ pub(crate) struct ContextPackProfileView {
     pub(crate) forbidden_context: Vec<String>,
     pub(crate) memory_read_refs: Vec<String>,
     pub(crate) memory_summaries: Vec<Value>,
+    pub(crate) memory_read_ref_digest: String,
     pub(crate) memory_policy_digest: String,
     pub(crate) memory_usage_summary: Value,
 }
@@ -550,6 +551,7 @@ pub(crate) fn create_context_for_request(
         .iter()
         .map(|read| read.memory_read_ref.clone())
         .collect::<Vec<_>>();
+    let memory_read_ref_digest = memory_read_ref_digest(&memory_read_refs);
     let memory_read_policy_digest = memory_read_policy_digest(&memory_read_set.reads);
     let memory_usage_summary =
         memory_usage_summary(&memory_read_set.reads, memory_read_set.truncated_count);
@@ -566,6 +568,7 @@ pub(crate) fn create_context_for_request(
         "allowed_tools": ["tonglingyu.text.search", "tonglingyu.commentary.search"],
         "forbidden_tools": [],
         "memory_read_refs": &memory_read_refs,
+        "memory_read_ref_digest": &memory_read_ref_digest,
         "memory_read_policy_digest": &memory_read_policy_digest,
         "memory_usage_summary": &memory_usage_summary,
         "forbidden_context": [
@@ -692,6 +695,7 @@ pub(crate) fn create_context_for_request(
                 "session_summary_sha256": hash_text(&session_summary),
                 "context_projection_count": context_projections.len(),
                 "memory_read_ref_count": memory_read_refs.len(),
+                "memory_read_ref_digest": &memory_read_ref_digest,
                 "memory_read_policy_digest": &memory_read_policy_digest,
             }),
         },
@@ -715,6 +719,7 @@ pub(crate) fn create_context_for_request(
                 "policy_mode": memory_policy_mode(),
                 "read_budget": memory_read_budget_json(),
                 "memory_read_refs": &memory_read_refs,
+                "memory_read_ref_digest": &memory_read_ref_digest,
                 "memory_read_policy_digest": &memory_read_policy_digest,
                 "memory_usage_summary": &memory_usage_summary,
                 "truncated_count": memory_read_set.truncated_count,
@@ -2255,6 +2260,14 @@ fn scoped_memory_policy_reason(
         .get("suppress")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let source_entry_type_allowed = rule_filter
+        .get("source_entry_type_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let context_pack_bound = rule_filter
+        .get("context_pack_bound")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if rule_suppressed || !llm_allows || disallowed_type || scope.is_none() {
         return ScopedMemoryPolicyReason {
             auto_enable: false,
@@ -2264,7 +2277,11 @@ fn scoped_memory_policy_reason(
             } else {
                 "pending_manual_review".to_string()
             },
-            reason: if rule_suppressed {
+            reason: if !source_entry_type_allowed {
+                "source_entry_type_not_allowed".to_string()
+            } else if !context_pack_bound {
+                "context_pack_missing".to_string()
+            } else if rule_suppressed {
                 "rule_filter_suppressed".to_string()
             } else if disallowed_type {
                 "candidate_type_not_allowed_for_scope".to_string()
@@ -2322,19 +2339,37 @@ fn scoped_memory_rule_filter(draft: &MemoryCandidateDraft) -> Value {
     let temporary_instruction = is_temporary_memory_instruction(&draft.raw_excerpt_redacted);
     let forbidden_candidate_type = is_forbidden_memory_candidate_type(&draft.candidate_type);
     let scope_supported = validate_memory_scope_type(&draft.scope_type).is_ok();
+    let source_entry_type_allowed = draft.source_entry_type == "user_message";
     let context_pack_bound = draft.context_pack_id.is_some();
+    let mut suppression_reasons = Vec::new();
+    if !source_entry_type_allowed {
+        suppression_reasons.push(json!("source_entry_type_not_allowed"));
+    }
+    if !context_pack_bound {
+        suppression_reasons.push(json!("context_pack_missing"));
+    }
+    if temporary_instruction {
+        suppression_reasons.push(json!("temporary_instruction"));
+    }
+    if forbidden_candidate_type {
+        suppression_reasons.push(json!("forbidden_candidate_type"));
+    }
+    if !scope_supported {
+        suppression_reasons.push(json!("scope_not_supported"));
+    }
     json!({
         "schema_version": "scoped-memory-rule-filter-v1",
         "policy_version": SCOPED_MEMORY_POLICY_VERSION,
         "hard_deny_filter_passed": true,
-        "source_entry_type_allowed": draft.source_entry_type == "user_message",
+        "source_entry_type_allowed": source_entry_type_allowed,
         "context_pack_bound": context_pack_bound,
         "scope_supported": scope_supported,
         "temporary_instruction": temporary_instruction,
         "forbidden_candidate_type": forbidden_candidate_type,
         "scope_automation": scope_policy_config(&draft.scope_type).map(|scope| scope.automation),
         "threshold": scope_policy_config(&draft.scope_type).map(|scope| scope.threshold),
-        "suppress": !context_pack_bound || temporary_instruction || forbidden_candidate_type || !scope_supported,
+        "suppress": !source_entry_type_allowed || !context_pack_bound || temporary_instruction || forbidden_candidate_type || !scope_supported,
+        "suppression_reasons": suppression_reasons,
         "input_digest": {
             "summary_sha256": &draft.summary_sha256,
             "raw_excerpt_sha256": &draft.raw_excerpt_sha256,
@@ -2357,6 +2392,27 @@ fn scoped_memory_semantic_filter(draft: &MemoryCandidateDraft, rule_filter: &Val
     let mut exclusion_flags = Vec::new();
     if temporary {
         exclusion_flags.push(json!("temporary_instruction"));
+    }
+    if !rule_filter
+        .get("source_entry_type_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        exclusion_flags.push(json!("source_entry_type_not_allowed"));
+    }
+    if !rule_filter
+        .get("context_pack_bound")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        exclusion_flags.push(json!("context_pack_missing"));
+    }
+    if !rule_filter
+        .get("scope_supported")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        exclusion_flags.push(json!("scope_not_supported"));
     }
     if forbidden {
         exclusion_flags.push(json!("forbidden_candidate_type"));
@@ -4187,6 +4243,13 @@ fn tool_profile_memory_reads(
         .collect()
 }
 
+fn memory_read_refs_for_reads(memory_reads: &[ScopedMemoryRead]) -> Vec<String> {
+    memory_reads
+        .iter()
+        .map(|read| read.memory_read_ref.clone())
+        .collect()
+}
+
 fn memory_read_summary_payload(read: &ScopedMemoryRead) -> Value {
     json!({
         "memory_read_ref": &read.memory_read_ref,
@@ -4199,6 +4262,13 @@ fn memory_read_summary_payload(read: &ScopedMemoryRead) -> Value {
         "confidence": read.confidence,
         "expires_at": &read.expires_at,
     })
+}
+
+fn memory_read_ref_digest(memory_read_refs: &[String]) -> String {
+    digest_json(&json!({
+        "policy_version": SCOPED_MEMORY_POLICY_VERSION,
+        "memory_read_refs": memory_read_refs,
+    }))
 }
 
 fn memory_read_policy_digest(memory_reads: &[ScopedMemoryRead]) -> String {
@@ -4251,6 +4321,10 @@ fn profile_views(
     let text_reads = tool_profile_memory_reads(memory_reads, "honglou-text");
     let commentary_reads = tool_profile_memory_reads(memory_reads, "honglou-commentary");
     let reviewer_usage = reviewer_memory_usage_summary(memory_reads);
+    let main_read_refs = memory_read_refs_for_reads(&main_reads);
+    let text_read_refs = memory_read_refs_for_reads(&text_reads);
+    let commentary_read_refs = memory_read_refs_for_reads(&commentary_reads);
+    let reviewer_read_refs = Vec::<String>::new();
     vec![
         ContextPackProfileView {
             profile_name: "honglou-main".to_string(),
@@ -4266,10 +4340,8 @@ fn profile_views(
                 "system_prompt".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: main_reads
-                .iter()
-                .map(|read| read.memory_read_ref.clone())
-                .collect(),
+            memory_read_ref_digest: memory_read_ref_digest(&main_read_refs),
+            memory_read_refs: main_read_refs,
             memory_summaries: main_reads.iter().map(memory_read_summary_payload).collect(),
             memory_policy_digest: memory_read_policy_digest(&main_reads),
             memory_usage_summary: memory_usage_summary(&main_reads, 0),
@@ -4285,10 +4357,8 @@ fn profile_views(
                 "unauthorized_scoped_memory".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: text_reads
-                .iter()
-                .map(|read| read.memory_read_ref.clone())
-                .collect(),
+            memory_read_ref_digest: memory_read_ref_digest(&text_read_refs),
+            memory_read_refs: text_read_refs,
             memory_summaries: text_reads.iter().map(memory_read_summary_payload).collect(),
             memory_policy_digest: memory_read_policy_digest(&text_reads),
             memory_usage_summary: memory_usage_summary(&text_reads, 0),
@@ -4303,10 +4373,8 @@ fn profile_views(
                 "full_base_text_corpus".to_string(),
                 "unreviewed_memory_candidate".to_string(),
             ],
-            memory_read_refs: commentary_reads
-                .iter()
-                .map(|read| read.memory_read_ref.clone())
-                .collect(),
+            memory_read_ref_digest: memory_read_ref_digest(&commentary_read_refs),
+            memory_read_refs: commentary_read_refs,
             memory_summaries: commentary_reads
                 .iter()
                 .map(memory_read_summary_payload)
@@ -4324,7 +4392,8 @@ fn profile_views(
                 "unreviewed_memory_candidate".to_string(),
                 "hermes_private_transcript".to_string(),
             ],
-            memory_read_refs: Vec::new(),
+            memory_read_ref_digest: memory_read_ref_digest(&reviewer_read_refs),
+            memory_read_refs: reviewer_read_refs,
             memory_summaries: Vec::new(),
             memory_policy_digest: memory_read_policy_digest(memory_reads),
             memory_usage_summary: reviewer_usage,
@@ -4373,6 +4442,7 @@ fn build_context_projection(
         "session_summary": &view.session_summary,
         "forbidden_context": &view.forbidden_context,
         "memory_read_refs": &view.memory_read_refs,
+        "memory_read_ref_digest": &view.memory_read_ref_digest,
         "memory_summaries": &view.memory_summaries,
         "memory_policy_digest": &view.memory_policy_digest,
         "memory_usage_summary": &view.memory_usage_summary,
@@ -4567,6 +4637,7 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
          FROM context_packs WHERE trace_id = ?1 ORDER BY created_at, context_pack_id",
     )?;
     let rows = stmt.query_map(params![trace_id], |row| {
+        let memory_read_refs = parse_json_column(row.get::<_, String>(10)?);
         Ok(json!({
             "context_pack_id": row.get::<_, String>(0)?,
             "context_pack_ref": row.get::<_, String>(1)?,
@@ -4578,7 +4649,8 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
             "candidate_scopes": parse_json_column(row.get::<_, String>(7)?),
             "allowed_tools": parse_json_column(row.get::<_, String>(8)?),
             "forbidden_tools": parse_json_column(row.get::<_, String>(9)?),
-            "memory_read_refs": parse_json_column(row.get::<_, String>(10)?),
+            "memory_read_ref_digest": memory_read_ref_digest_from_value(&memory_read_refs),
+            "memory_read_refs": memory_read_refs,
             "forbidden_context": parse_json_column(row.get::<_, String>(11)?),
             "output_contract": parse_json_column(row.get::<_, String>(12)?),
             "profile_views": parse_json_column(row.get::<_, String>(13)?),
@@ -4719,6 +4791,20 @@ fn parse_json_column(value: String) -> Value {
     serde_json::from_str(&value).unwrap_or(Value::Null)
 }
 
+fn memory_read_ref_digest_from_value(value: &Value) -> String {
+    let refs = value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    memory_read_ref_digest(&refs)
+}
+
 fn projection_payload_summary(value: &Value) -> Value {
     json!({
         "visible_question_sha256": value
@@ -4738,6 +4824,10 @@ fn projection_payload_summary(value: &Value) -> Value {
             .get("memory_summaries")
             .and_then(Value::as_array)
             .map_or(0, Vec::len),
+        "memory_read_ref_digest": value
+            .get("memory_read_ref_digest")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         "memory_policy_digest": value
             .get("memory_policy_digest")
             .and_then(Value::as_str)
@@ -5167,11 +5257,20 @@ mod tests {
             .as_array()
             .expect("memory read refs");
         assert_eq!(refs.len(), 1);
+        assert!(
+            next_context.context_pack["memory_read_ref_digest"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
         let main_projection = next_context
             .context_projections
             .iter()
             .find(|projection| projection.consumer_name == "honglou-main")
             .expect("main projection");
+        assert_eq!(
+            main_projection.projection_payload["memory_read_ref_digest"],
+            next_context.context_pack["memory_read_ref_digest"]
+        );
         assert_eq!(
             main_projection.projection_payload["memory_summaries"]
                 .as_array()
@@ -5183,6 +5282,11 @@ mod tests {
             .iter()
             .find(|projection| projection.consumer_name == "honglou-reviewer")
             .expect("reviewer projection");
+        assert!(
+            reviewer_projection.projection_payload["memory_read_ref_digest"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
         assert_eq!(
             reviewer_projection.projection_payload["memory_summaries"]
                 .as_array()
@@ -5196,6 +5300,10 @@ mod tests {
                 .as_array()
                 .map(Vec::len),
             Some(1)
+        );
+        assert_eq!(
+            persisted_trace["context_packs"][0]["memory_read_ref_digest"],
+            next_context.context_pack["memory_read_ref_digest"]
         );
         assert_eq!(
             persisted_trace["context_packs"][0]["forbidden_tools"],
@@ -5233,6 +5341,92 @@ mod tests {
         assert_eq!(after_revoke.context_pack["memory_read_refs"], json!([]));
         let audit_count = table_count(&conn, "memory_transition_audit").expect("audit count");
         assert!(audit_count >= 4, "audit_count={audit_count}");
+    }
+
+    #[test]
+    fn scoped_memory_policy_suppresses_non_user_message_candidates() {
+        let conn = conn();
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "以后回答时，请用简体中文短句总结。".to_string(),
+        }];
+        let context = create_context_for_request(
+            &conn,
+            ContextRequestInput {
+                trace_id: "trace-memory-non-user-source",
+                model_id: "tonglingyu",
+                external_user_ref: "memory-non-user-source",
+                external_session_id: "memory-non-user-source-chat",
+                external_message_id: "memory-non-user-source-message",
+                question: "以后回答时，请用简体中文短句总结。",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 40,
+            },
+        )
+        .expect("context created");
+        let mut draft = test_memory_draft(
+            &conn,
+            TestMemoryDraftInput {
+                trace_id: "trace-memory-non-user-source",
+                context: &context,
+                scope_type: "user_private",
+                scope_ref: &user_private_scope_ref("memory-non-user-source"),
+                candidate_type: "language_preference",
+                summary: "non user source should not become memory",
+                confidence: 0.99,
+            },
+        );
+        draft.candidate_id = "memory-candidate-non-user-source".to_string();
+        draft.candidate_ref =
+            "memory-candidate://tonglingyu/trace-memory-non-user-source/non-user-source"
+                .to_string();
+        draft.source_entry_type = "final_response".to_string();
+
+        assert!(
+            insert_memory_candidate(&conn, &draft, "test-admin")
+                .expect("insert non-user-source candidate")
+        );
+        let result = apply_scoped_memory_policy_for_candidate(&conn, &draft, "test-admin")
+            .expect("apply scoped memory policy");
+
+        assert!(!result.auto_read_enabled);
+        assert_eq!(result.public_summary["decision"], json!("suppress"));
+        assert_eq!(
+            result.public_summary["decision_reason"],
+            json!("source_entry_type_not_allowed")
+        );
+        let candidate = read_memory_candidate(&conn, &draft.candidate_id)
+            .expect("read candidate")
+            .expect("candidate exists");
+        assert_eq!(candidate["status"], json!("rejected"));
+        assert_eq!(table_count(&conn, "memory_cards").expect("card count"), 0);
+
+        let (decision, decision_reason, rule_filter_json, llm_filter_json): (
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT decision, decision_reason, rule_filter_json, llm_filter_json
+                 FROM memory_policy_decisions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("policy decision row");
+        let rule_filter: Value = serde_json::from_str(&rule_filter_json).expect("rule filter json");
+        let llm_filter: Value = serde_json::from_str(&llm_filter_json).expect("llm filter json");
+        assert_eq!(decision, "suppress");
+        assert_eq!(decision_reason, "source_entry_type_not_allowed");
+        assert_eq!(rule_filter["source_entry_type_allowed"], json!(false));
+        assert_eq!(rule_filter["suppress"], json!(true));
+        assert!(
+            llm_filter["exclusion_flags"]
+                .as_array()
+                .expect("exclusion flags")
+                .contains(&json!("source_entry_type_not_allowed"))
+        );
     }
 
     #[test]

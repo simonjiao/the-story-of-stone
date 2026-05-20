@@ -489,6 +489,11 @@ for payload in [chat, duplicate]:
         "agent_runtime_plan_gate",
         "runtime_stream_events",
         "planned_profiles",
+        "memory_read_refs",
+        "memory_read_ref_digest",
+        "memory_read_policy_digest",
+        "memory_summaries",
+        "memory_policy",
         "memory_candidate",
         "memory_candidate_id",
         "memory_card",
@@ -500,6 +505,8 @@ for payload in [chat, duplicate]:
 memory_public = json.dumps(memory_chat, ensure_ascii=False)
 for forbidden_memory_public in [
     "memory_read_refs",
+    "memory_read_ref_digest",
+    "memory_read_policy_digest",
     "memory_summaries",
     "memory_policy",
     "memory_candidate",
@@ -536,10 +543,16 @@ assert card["acl"]["policy_version"] == "scoped-memory-policy-v1", card
 assert memory_read_meta["session_id"] == memory_meta["session_id"], (memory_read_meta, memory_meta)
 read_packs = memory_read_trace["scoped_context"]["context_packs"]
 assert any(pack.get("memory_read_refs") for pack in read_packs), memory_read_trace
+assert all(
+    pack.get("memory_read_ref_digest")
+    for pack in read_packs
+    if pack.get("memory_read_refs")
+), memory_read_trace
 read_projections = memory_read_trace["scoped_context"]["context_projections"]
 assert any(
     item["consumer_name"] == "honglou-main"
     and item["projection_payload_summary"]["memory_read_ref_count"] >= 1
+    and item["projection_payload_summary"]["memory_read_ref_digest"]
     for item in read_projections
 ), memory_read_trace
 assert not any(

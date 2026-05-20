@@ -429,6 +429,8 @@ for name, response in [
         "user_session_id",
         "session_journal",
         "memory_read_refs",
+        "memory_read_ref_digest",
+        "memory_read_policy_digest",
         "memory_summaries",
         "memory_policy",
         "memory_candidate",
@@ -458,6 +460,8 @@ else:
     pack = second_packs[-1]
     if pack.get("resolved_question") != "贾宝玉是谁？":
         errors.append("second_resolved_question_unexpected")
+    if not pack.get("memory_read_ref_digest"):
+        errors.append("second_memory_read_ref_digest_missing")
     if pack.get("memory_read_refs") != []:
         errors.append("second_memory_read_refs_must_be_empty")
     for view in pack.get("profile_views") or []:
@@ -518,6 +522,8 @@ def validate_context_projections(trace_name, trace):
         if not isinstance(summary, dict):
             errors.append(f"{trace_name}_{consumer}_projection_summary_missing")
             summary = {}
+        if not summary.get("memory_read_ref_digest"):
+            errors.append(f"{trace_name}_{consumer}_memory_read_ref_digest_missing")
         if consumer in {
             "honglou-text",
             "honglou-commentary",
