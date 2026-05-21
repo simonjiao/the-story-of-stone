@@ -173,10 +173,12 @@ pub(crate) fn validate_question_normalizer_runtime_output(
     envelope: &LlmAgentRequestEnvelope,
     raw_output: &str,
     output_ref: Option<&str>,
+    runtime_metadata: Option<&Value>,
     allowed_referents: &[String],
 ) -> QuestionNormalizerValidationDecision {
     let raw_output_sha256 = hash_text(raw_output);
-    let parsed = parse_agent_json(raw_output);
+    let provider_output_features = provider_output_audit_features(runtime_metadata);
+    let parsed = parse_agent_json_for_validation(raw_output, runtime_metadata);
     let (value, local_json_extraction_applied) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -189,6 +191,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
                 vec![error],
                 false,
                 false,
+                provider_output_features,
             );
         }
     };
@@ -213,6 +216,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
                 errors,
                 false,
                 schema_repaired_locally,
+                provider_output_features,
             );
         }
     };
@@ -299,6 +303,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
             accepted_for_main,
             &decision,
             schema_repaired_locally,
+            provider_output_features,
         ),
         accepted,
         errors,
@@ -320,6 +325,7 @@ pub(crate) fn question_normalizer_runtime_error_decision(
         vec![format!("runtime_error: {}", error.into())],
         false,
         false,
+        Value::Null,
     )
 }
 
@@ -328,10 +334,12 @@ pub(crate) fn validate_conversation_state_runtime_output(
     envelope: &LlmAgentRequestEnvelope,
     raw_output: &str,
     output_ref: Option<&str>,
+    runtime_metadata: Option<&Value>,
     validation_context: &ConversationStateValidationContext<'_>,
 ) -> ConversationStateValidationDecision {
     let raw_output_sha256 = hash_text(raw_output);
-    let parsed = parse_agent_json(raw_output);
+    let provider_output_features = provider_output_audit_features(runtime_metadata);
+    let parsed = parse_agent_json_for_validation(raw_output, runtime_metadata);
     let (value, local_json_extraction_applied) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -343,6 +351,7 @@ pub(crate) fn validate_conversation_state_runtime_output(
                 vec![error],
                 false,
                 false,
+                provider_output_features,
             );
         }
     };
@@ -361,6 +370,7 @@ pub(crate) fn validate_conversation_state_runtime_output(
                 errors,
                 false,
                 local_json_extraction_applied,
+                provider_output_features,
             );
         }
     };
@@ -393,6 +403,7 @@ pub(crate) fn validate_conversation_state_runtime_output(
             accepted_for_projection,
             &decision,
             local_json_extraction_applied,
+            provider_output_features,
         ),
         accepted,
         errors,
@@ -412,6 +423,7 @@ pub(crate) fn conversation_state_runtime_error_decision(
         vec![format!("runtime_error: {}", error.into())],
         false,
         false,
+        Value::Null,
     )
 }
 
@@ -425,6 +437,7 @@ fn rejected_question_decision(
     errors: Vec<String>,
     contract_accepted: bool,
     schema_repaired_locally: bool,
+    provider_output_features: Value,
 ) -> QuestionNormalizerValidationDecision {
     let decision = AgentValidationDecision::Rejected;
     QuestionNormalizerValidationDecision {
@@ -439,6 +452,7 @@ fn rejected_question_decision(
             false,
             &decision,
             schema_repaired_locally,
+            provider_output_features,
         ),
         accepted: None,
         errors,
@@ -453,6 +467,7 @@ fn rejected_conversation_state_decision(
     errors: Vec<String>,
     contract_accepted: bool,
     schema_repaired_locally: bool,
+    provider_output_features: Value,
 ) -> ConversationStateValidationDecision {
     let decision = AgentValidationDecision::Rejected;
     ConversationStateValidationDecision {
@@ -466,6 +481,7 @@ fn rejected_conversation_state_decision(
             false,
             &decision,
             schema_repaired_locally,
+            provider_output_features,
         ),
         accepted: None,
         errors,
@@ -484,6 +500,7 @@ fn question_audit(
     accepted_for_main: bool,
     decision: &AgentValidationDecision,
     local_json_extraction_applied: bool,
+    provider_output_features: Value,
 ) -> Value {
     json!({
         "schema_version": LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -504,6 +521,7 @@ fn question_audit(
         "output_ref": output_ref,
         "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
+        "provider_output_features": provider_output_features,
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
     })
@@ -520,6 +538,7 @@ fn conversation_state_audit(
     accepted_for_projection: bool,
     decision: &AgentValidationDecision,
     local_json_extraction_applied: bool,
+    provider_output_features: Value,
 ) -> Value {
     json!({
         "schema_version": LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -539,6 +558,7 @@ fn conversation_state_audit(
         "output_ref": output_ref,
         "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
+        "provider_output_features": provider_output_features,
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
     })
@@ -551,6 +571,91 @@ fn runtime_adapter_from_output_ref(output_ref: Option<&str>) -> &'static str {
         value if value.starts_with("result://") => "minimal",
         _ => "unknown",
     }
+}
+
+fn parse_agent_json_for_validation(
+    raw_output: &str,
+    runtime_metadata: Option<&Value>,
+) -> Result<(Value, bool), String> {
+    let provider_output = runtime_metadata.and_then(provider_output_metadata);
+    match parse_agent_json(raw_output) {
+        Ok((value, local_json_extraction_applied)) => {
+            let provider_extraction_applied = provider_output
+                .and_then(|provider| {
+                    provider
+                        .get("business_json_candidate_source")
+                        .and_then(Value::as_str)
+                })
+                .is_some_and(|source| source != "direct_json_content");
+            Ok((
+                value,
+                local_json_extraction_applied || provider_extraction_applied,
+            ))
+        }
+        Err(error) => {
+            if let Some(provider) = provider_output {
+                let candidate_missing = provider
+                    .get("business_json_candidate_present")
+                    .and_then(Value::as_bool)
+                    == Some(false);
+                if candidate_missing {
+                    let reasoning_details_present = provider
+                        .get("reasoning_details_present")
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    let content_contains_think_blocks = provider
+                        .get("content_contains_think_blocks")
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                    if reasoning_details_present || content_contains_think_blocks {
+                        return Err(
+                            "schema_parse_failed: provider_reasoning_without_business_json"
+                                .to_string(),
+                        );
+                    }
+                    return Err("schema_parse_failed: provider_business_json_not_found".to_string());
+                }
+                if provider
+                    .get("business_json_candidate_present")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    return Err(format!(
+                        "schema_parse_failed: provider_business_json_candidate_invalid: {error}"
+                    ));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn provider_output_metadata(metadata: &Value) -> Option<&Value> {
+    metadata
+        .get("provider_output")
+        .filter(|value| value.is_object())
+}
+
+fn provider_output_audit_features(runtime_metadata: Option<&Value>) -> Value {
+    let Some(provider) = runtime_metadata.and_then(provider_output_metadata) else {
+        return Value::Null;
+    };
+    json!({
+        "schema_version": provider.get("schema_version").cloned().unwrap_or(Value::Null),
+        "response_format_json_requested": provider.get("response_format_json_requested").cloned().unwrap_or(Value::Null),
+        "content_present": provider.get("content_present").cloned().unwrap_or(Value::Null),
+        "content_sha256": provider.get("content_sha256").cloned().unwrap_or(Value::Null),
+        "content_contains_think_blocks": provider.get("content_contains_think_blocks").cloned().unwrap_or(Value::Null),
+        "content_without_think_sha256": provider.get("content_without_think_sha256").cloned().unwrap_or(Value::Null),
+        "reasoning_details_present": provider.get("reasoning_details_present").cloned().unwrap_or(Value::Null),
+        "reasoning_details_sha256": provider.get("reasoning_details_sha256").cloned().unwrap_or(Value::Null),
+        "business_json_candidate_present": provider.get("business_json_candidate_present").cloned().unwrap_or(Value::Null),
+        "business_json_candidate_sha256": provider.get("business_json_candidate_sha256").cloned().unwrap_or(Value::Null),
+        "business_json_candidate_source": provider.get("business_json_candidate_source").cloned().unwrap_or(Value::Null),
+        "validator_content_sha256": provider.get("validator_content_sha256").cloned().unwrap_or(Value::Null),
+        "raw_provider_fields_embedded_in_validator_audit": false,
+        "raw_agent_output_embedded": false,
+    })
 }
 
 fn parse_agent_json(raw_output: &str) -> Result<(Value, bool), String> {
@@ -579,17 +684,33 @@ fn parse_agent_json(raw_output: &str) -> Result<(Value, bool), String> {
     {
         return Ok((value, true));
     }
-    let Some(start) = trimmed.find('{') else {
+    let (without_think_blocks, think_blocks_removed) = remove_think_blocks_for_agent_json(trimmed);
+    if think_blocks_removed {
+        let cleaned = without_think_blocks.trim();
+        if cleaned.is_empty() {
+            return Err("schema_parse_failed: reasoning_without_business_json".to_string());
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(cleaned)
+            && value.is_object()
+        {
+            return Ok((value, true));
+        }
+        if let Some(candidate) = first_balanced_json_object_candidate(cleaned) {
+            return serde_json::from_str::<Value>(&candidate)
+                .map_err(|error| format!("schema_parse_failed: {error}"))
+                .and_then(|value| {
+                    if value.is_object() {
+                        Ok((value, true))
+                    } else {
+                        Err("schema_parse_failed: output_not_object".to_string())
+                    }
+                });
+        }
+    }
+    let Some(candidate) = first_balanced_json_object_candidate(trimmed) else {
         return Err("schema_parse_failed: object_start_not_found".to_string());
     };
-    let Some(end) = trimmed.rfind('}') else {
-        return Err("schema_parse_failed: object_end_not_found".to_string());
-    };
-    if end <= start {
-        return Err("schema_parse_failed: object_bounds_invalid".to_string());
-    }
-    let candidate = &trimmed[start..=end];
-    serde_json::from_str::<Value>(candidate)
+    serde_json::from_str::<Value>(&candidate)
         .map_err(|error| format!("schema_parse_failed: {error}"))
         .and_then(|value| {
             if value.is_object() {
@@ -598,6 +719,92 @@ fn parse_agent_json(raw_output: &str) -> Result<(Value, bool), String> {
                 Err("schema_parse_failed: output_not_object".to_string())
             }
         })
+}
+
+fn remove_think_blocks_for_agent_json(text: &str) -> (String, bool) {
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut removed = false;
+    while cursor < text.len() {
+        let Some(start) = find_think_start_tag(text, cursor) else {
+            output.push_str(&text[cursor..]);
+            break;
+        };
+        output.push_str(&text[cursor..start]);
+        removed = true;
+        let Some(start_tag_end_relative) = text[start..].find('>') else {
+            break;
+        };
+        let content_start = start + start_tag_end_relative + 1;
+        let Some(end_relative) = find_ascii_case_insensitive(&text[content_start..], "</think>")
+        else {
+            break;
+        };
+        cursor = content_start + end_relative + "</think>".len();
+    }
+    (output, removed)
+}
+
+fn find_think_start_tag(text: &str, mut cursor: usize) -> Option<usize> {
+    while cursor < text.len() {
+        let relative = find_ascii_case_insensitive(&text[cursor..], "<think")?;
+        let start = cursor + relative;
+        let after = start + "<think".len();
+        let next = text[after..].chars().next();
+        if matches!(next, Some('>' | ' ' | '\t' | '\n' | '\r')) {
+            return Some(start);
+        }
+        cursor = after;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
+fn first_balanced_json_object_candidate(text: &str) -> Option<String> {
+    for (start, ch) in text.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let mut depth = 0_u32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (relative, candidate_ch) in text[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if candidate_ch == '\\' {
+                    escaped = true;
+                } else if candidate_ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match candidate_ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let end = start + relative + candidate_ch.len_utf8();
+                        let candidate = &text[start..end];
+                        if serde_json::from_str::<Value>(candidate)
+                            .is_ok_and(|value| value.is_object())
+                        {
+                            return Some(candidate.to_string());
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn reject_forbidden_fields(path: &str, value: &Value, errors: &mut Vec<String>) {
@@ -703,6 +910,10 @@ mod tests {
         }
     }
 
+    fn provider_output_metadata(provider_output: Value) -> Value {
+        json!({ "provider_output": provider_output })
+    }
+
     #[test]
     fn question_validator_accepts_only_sealed_valid_output() {
         let output = json!({
@@ -721,6 +932,7 @@ mod tests {
             &envelope(QUESTION_NORMALIZER_PROFILE_ID),
             &output.to_string(),
             Some("hermes://profiles/test"),
+            None,
             &["晴雯".to_string()],
         );
 
@@ -734,6 +946,99 @@ mod tests {
             "晴雯后来怎么样？"
         );
         assert_eq!(decision.audit_json()["raw_output_embedded"], json!(false));
+    }
+
+    #[test]
+    fn question_validator_records_provider_features_without_raw_reasoning() {
+        let output = json!({
+            "schema_version": QUESTION_RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "晴雯后来怎么样？",
+            "referent_bindings": ["晴雯"],
+            "used_context_refs": ["current_question", "session_summary"],
+            "confidence": 0.92,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null
+        });
+        let metadata = provider_output_metadata(json!({
+            "schema_version": "openai-compatible-provider-output-v1",
+            "response_format_json_requested": true,
+            "content_present": true,
+            "content_sha256": "sha256:raw",
+            "content_contains_think_blocks": true,
+            "content_without_think_sha256": "sha256:clean",
+            "reasoning_details_present": false,
+            "reasoning_details_sha256": null,
+            "business_json_candidate_present": true,
+            "business_json_candidate_sha256": "sha256:candidate",
+            "business_json_candidate_source": "embedded_json_object",
+            "business_json_candidate": output.to_string(),
+            "validator_content_sha256": "sha256:candidate",
+            "preserved_raw_fields": {
+                "content": "<think>{\"not\":\"business\"}</think>",
+                "reasoning_details": null
+            }
+        }));
+        let decision = validate_question_normalizer_runtime_output(
+            LlmMode::Enforced,
+            "prior_subject_needed",
+            &envelope(QUESTION_NORMALIZER_PROFILE_ID),
+            &output.to_string(),
+            Some("openai-compatible-network://profiles/test"),
+            Some(&metadata),
+            &["晴雯".to_string()],
+        );
+
+        assert!(decision.contract_accepted());
+        assert_eq!(
+            decision.audit_json()["provider_output_features"]["content_contains_think_blocks"],
+            json!(true)
+        );
+        assert_eq!(
+            decision.audit_json()["provider_output_features"]["business_json_candidate_source"],
+            json!("embedded_json_object")
+        );
+        let audit_text = decision.audit_json().to_string();
+        assert!(!audit_text.contains("<think>"));
+        assert!(!audit_text.contains("not\":\"business"));
+        assert_eq!(decision.audit_json()["raw_output_embedded"], json!(false));
+    }
+
+    #[test]
+    fn question_validator_accepts_raw_think_prefixed_json_without_provider_metadata() {
+        let output = json!({
+            "schema_version": QUESTION_RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "晴雯后来怎么样？",
+            "referent_bindings": ["晴雯"],
+            "used_context_refs": ["current_question", "session_summary"],
+            "confidence": 0.92,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null
+        });
+        let raw_output = format!(
+            "<think>{{\"schema_version\":\"reasoning-only\"}}</think>\n{}",
+            output
+        );
+
+        let decision = validate_question_normalizer_runtime_output(
+            LlmMode::Enforced,
+            "prior_subject_needed",
+            &envelope(QUESTION_NORMALIZER_PROFILE_ID),
+            &raw_output,
+            Some("hermes://profiles/test"),
+            None,
+            &["晴雯".to_string()],
+        );
+
+        assert!(decision.contract_accepted());
+        assert_eq!(
+            decision.audit_json()["local_json_extraction_applied"],
+            json!(true)
+        );
+        let audit_text = decision.audit_json().to_string();
+        assert!(!audit_text.contains("<think>"));
+        assert!(!audit_text.contains("reasoning-only"));
     }
 
     #[test]
@@ -755,6 +1060,7 @@ mod tests {
             &envelope(QUESTION_NORMALIZER_PROFILE_ID),
             &output.to_string(),
             None,
+            None,
             &["晴雯".to_string()],
         );
 
@@ -766,6 +1072,67 @@ mod tests {
                 .iter()
                 .any(|error| error.contains("forbidden_field"))
         );
+    }
+
+    #[test]
+    fn conversation_state_validator_rejects_reasoning_only_provider_output() {
+        let messages = [];
+        let evidence_refs = [];
+        let input = ConversationStateInput {
+            current_question: "晴雯后来怎么样？",
+            recent_messages: &messages,
+            session_summary: "最近讨论对象：晴雯",
+            last_public_answer_boundary: None,
+            evidence_package_refs: &evidence_refs,
+            reviewer_warnings: &[],
+        };
+        let validation_context = conversation_state_validation_context(&input, &["晴雯"], &[]);
+        let metadata = provider_output_metadata(json!({
+            "schema_version": "openai-compatible-provider-output-v1",
+            "response_format_json_requested": true,
+            "content_present": true,
+            "content_sha256": "sha256:raw",
+            "content_contains_think_blocks": true,
+            "content_without_think_sha256": null,
+            "reasoning_details_present": true,
+            "reasoning_details_sha256": "sha256:reasoning",
+            "business_json_candidate_present": false,
+            "business_json_candidate_sha256": null,
+            "business_json_candidate_source": "business_json_not_found",
+            "validator_content_sha256": null,
+            "preserved_raw_fields": {
+                "content": "<think>{\"not\":\"business\"}</think>",
+                "reasoning_details": {"items": []}
+            }
+        }));
+
+        let decision = validate_conversation_state_runtime_output(
+            LlmMode::Enforced,
+            &envelope(CONVERSATION_STATE_WRITER_PROFILE_ID),
+            "",
+            Some("openai-compatible-network://profiles/test"),
+            Some(&metadata),
+            &validation_context,
+        );
+
+        assert!(!decision.contract_accepted());
+        assert!(
+            decision
+                .errors()
+                .iter()
+                .any(|error| error.contains("provider_reasoning_without_business_json"))
+        );
+        assert_eq!(
+            decision.audit_json()["provider_output_features"]["reasoning_details_present"],
+            json!(true)
+        );
+        assert_eq!(
+            decision.audit_json()["provider_output_features"]["raw_provider_fields_embedded_in_validator_audit"],
+            json!(false)
+        );
+        let audit_text = decision.audit_json().to_string();
+        assert!(!audit_text.contains("<think>"));
+        assert!(!audit_text.contains("not\":\"business"));
     }
 
     #[test]
@@ -797,6 +1164,7 @@ mod tests {
             LlmMode::Enforced,
             &envelope(CONVERSATION_STATE_WRITER_PROFILE_ID),
             &output.to_string(),
+            None,
             None,
             &validation_context,
         );

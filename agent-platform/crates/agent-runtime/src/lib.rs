@@ -1481,19 +1481,23 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "OpenAI-compatible Runtime returned a safety refusal",
             ));
         }
-        let content = choice
-            .message
-            .content
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                OpenAiRuntimeAttemptError::fatal(
-                    "provider_empty_content",
-                    "OpenAI-compatible Runtime response did not include assistant content",
-                )
-            })?
-            .to_string();
+        let raw_content = choice.message.content.as_deref().unwrap_or_default();
+        let reasoning_details = choice.message.reasoning_details.clone();
+        if raw_content.trim().is_empty() && reasoning_details.is_none() {
+            return Err(OpenAiRuntimeAttemptError::fatal(
+                "provider_empty_content",
+                "OpenAI-compatible Runtime response did not include assistant content",
+            ));
+        }
+        let provider_output = openai_provider_output_envelope(
+            raw_content,
+            reasoning_details.as_ref(),
+            self.config.response_format_json,
+        );
+        let content = provider_output
+            .business_json_candidate
+            .clone()
+            .unwrap_or_else(|| provider_output.validator_content.clone());
         let latency_ms = started.elapsed().as_millis() as u64;
         let input_digest = input
             .metadata
@@ -1536,6 +1540,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "attempt_count": attempt,
                 "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
                 "parsed_json_sha256": content_json_digest.map(|value| format!("sha256:{value}")),
+                "provider_output": provider_output.to_metadata(),
                 "tool_calling_supported": false,
                 "requested_tools_exposed_as_text": !requested_tools.is_empty(),
                 "requested_tool_count": requested_tools.len(),
@@ -4027,6 +4032,208 @@ struct OpenAiCompatibleAssistantMessage {
     content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiProviderOutputEnvelope {
+    raw_content: String,
+    reasoning_details: Option<Value>,
+    content_without_think_blocks: String,
+    content_contains_think_blocks: bool,
+    response_format_json_requested: bool,
+    business_json_candidate: Option<String>,
+    business_json_candidate_source: &'static str,
+    validator_content: String,
+}
+
+impl OpenAiProviderOutputEnvelope {
+    fn to_metadata(&self) -> Value {
+        let content_sha256 = non_empty_sha256(&self.raw_content);
+        let content_without_think_sha256 = non_empty_sha256(&self.content_without_think_blocks);
+        let reasoning_details_sha256 = self
+            .reasoning_details
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok())
+            .map(|value| format!("sha256:{}", sha256_hex(&value)));
+        let business_json_candidate_sha256 = self
+            .business_json_candidate
+            .as_deref()
+            .and_then(non_empty_sha256);
+        let validator_content_sha256 = non_empty_sha256(&self.validator_content);
+        json!({
+            "schema_version": "openai-compatible-provider-output-v1",
+            "response_format_json_requested": self.response_format_json_requested,
+            "content_present": !self.raw_content.trim().is_empty(),
+            "content_sha256": content_sha256,
+            "content_contains_think_blocks": self.content_contains_think_blocks,
+            "content_without_think_sha256": content_without_think_sha256,
+            "reasoning_details_present": self.reasoning_details.is_some(),
+            "reasoning_details_sha256": reasoning_details_sha256,
+            "business_json_candidate_present": self.business_json_candidate.is_some(),
+            "business_json_candidate_sha256": business_json_candidate_sha256,
+            "business_json_candidate_source": self.business_json_candidate_source,
+            "business_json_candidate": self.business_json_candidate,
+            "validator_content_sha256": validator_content_sha256,
+            "raw_provider_fields_embedded": true,
+            "raw_fields_embedded_in_validator_audit": false,
+            "preserved_raw_fields": {
+                "content": self.raw_content,
+                "reasoning_details": self.reasoning_details.clone().unwrap_or(Value::Null),
+            },
+        })
+    }
+}
+
+fn openai_provider_output_envelope(
+    raw_content: &str,
+    reasoning_details: Option<&Value>,
+    response_format_json_requested: bool,
+) -> OpenAiProviderOutputEnvelope {
+    let raw_content = raw_content.to_string();
+    let (content_without_think_blocks, content_contains_think_blocks) =
+        remove_think_blocks_for_business_json(&raw_content);
+    let (business_json_candidate, business_json_candidate_source) =
+        if response_format_json_requested {
+            extract_business_json_candidate(&content_without_think_blocks)
+                .unwrap_or((None, "business_json_not_found"))
+        } else {
+            (None, "not_requested")
+        };
+    let validator_content = business_json_candidate.clone().unwrap_or_else(|| {
+        if response_format_json_requested {
+            content_without_think_blocks.trim().to_string()
+        } else {
+            raw_content.trim().to_string()
+        }
+    });
+    OpenAiProviderOutputEnvelope {
+        raw_content,
+        reasoning_details: reasoning_details.cloned(),
+        content_without_think_blocks,
+        content_contains_think_blocks,
+        response_format_json_requested,
+        business_json_candidate,
+        business_json_candidate_source,
+        validator_content,
+    }
+}
+
+fn extract_business_json_candidate(text: &str) -> Option<(Option<String>, &'static str)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if serde_json::from_str::<Value>(trimmed).is_ok_and(|value| value.is_object()) {
+        return Some((Some(trimmed.to_string()), "direct_json_content"));
+    }
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .and_then(|value| value.strip_suffix("```"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("```")
+                .and_then(|value| value.strip_suffix("```"))
+        })
+        .map(str::trim);
+    if let Some(unfenced) = unfenced
+        && serde_json::from_str::<Value>(unfenced).is_ok_and(|value| value.is_object())
+    {
+        return Some((Some(unfenced.to_string()), "fenced_json_content"));
+    }
+    first_balanced_json_object_candidate(trimmed)
+        .map(|candidate| (Some(candidate), "embedded_json_object"))
+}
+
+fn remove_think_blocks_for_business_json(text: &str) -> (String, bool) {
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut removed = false;
+    while cursor < text.len() {
+        let Some(start) = find_think_start_tag(text, cursor) else {
+            output.push_str(&text[cursor..]);
+            break;
+        };
+        output.push_str(&text[cursor..start]);
+        removed = true;
+        let Some(start_tag_end_relative) = text[start..].find('>') else {
+            break;
+        };
+        let content_start = start + start_tag_end_relative + 1;
+        let Some(end_relative) = find_ascii_case_insensitive(&text[content_start..], "</think>")
+        else {
+            break;
+        };
+        cursor = content_start + end_relative + "</think>".len();
+    }
+    (output, removed)
+}
+
+fn find_think_start_tag(text: &str, mut cursor: usize) -> Option<usize> {
+    while cursor < text.len() {
+        let relative = find_ascii_case_insensitive(&text[cursor..], "<think")?;
+        let start = cursor + relative;
+        let after = start + "<think".len();
+        let next = text[after..].chars().next();
+        if matches!(next, Some('>' | ' ' | '\t' | '\n' | '\r')) {
+            return Some(start);
+        }
+        cursor = after;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
+fn first_balanced_json_object_candidate(text: &str) -> Option<String> {
+    for (start, ch) in text.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let mut depth = 0_u32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (relative, candidate_ch) in text[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if candidate_ch == '\\' {
+                    escaped = true;
+                } else if candidate_ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match candidate_ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let end = start + relative + candidate_ch.len_utf8();
+                        let candidate = &text[start..end];
+                        if serde_json::from_str::<Value>(candidate)
+                            .is_ok_and(|value| value.is_object())
+                        {
+                            return Some(candidate.to_string());
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn non_empty_sha256(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| format!("sha256:{}", sha256_hex(value)))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4984,6 +5191,154 @@ mod tests {
         assert_eq!(seen_body["stream"], json!(false));
         assert_eq!(seen_body["response_format"]["type"], json!("json_object"));
         assert_eq!(seen_body["reasoning_split"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_extracts_json_after_think_blocks() {
+        let provider_content = "<think>{\"schema_version\":\"reasoning-only\"}</think>\n{\"schema_version\":\"v1\",\"ok\":true}";
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let provider_content = provider_content.to_string();
+                async move {
+                    Json(json!({
+                        "model": "minimax-style-model",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": provider_content
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["content_contains_think_blocks"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_present"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["preserved_raw_fields"]["content"],
+            json!(provider_content)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["raw_fields_embedded_in_validator_audit"],
+            json!(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_preserves_reasoning_details_separately() {
+        let reasoning_details = json!([
+            {"type": "text", "text": "reasoning must remain separate"}
+        ]);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let reasoning_details = reasoning_details.clone();
+                async move {
+                    Json(json!({
+                        "model": "reasoning-split-model",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "{\"schema_version\":\"v1\",\"ok\":true}",
+                                    "reasoning_details": reasoning_details
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        config.reasoning_split = Some(true);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["reasoning_details_present"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["preserved_raw_fields"]["reasoning_details"],
+            json!([{"type": "text", "text": "reasoning must remain separate"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_marks_reasoning_only_without_business_json() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "model": "reasoning-only-model",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "<think>{\"not\":\"business-json\"}</think>",
+                                "reasoning_details": {"format": "interleaved", "items": []}
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "");
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_present"],
+            json!(false)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_source"],
+            json!("business_json_not_found")
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["reasoning_details_present"],
+            json!(true)
+        );
     }
 
     #[tokio::test]

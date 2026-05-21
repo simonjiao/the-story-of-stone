@@ -1193,6 +1193,7 @@ async fn run_question_normalizer_agent(
             &envelope,
             &output.result_summary,
             output.result_ref.as_deref(),
+            Some(&output.metadata),
             &allowed_referents,
         ),
         Err(error) => {
@@ -1217,6 +1218,7 @@ async fn run_question_normalizer_agent(
             &envelope,
             &output.result_summary,
             output.result_ref.as_deref(),
+            Some(&output.metadata),
             &allowed_referents,
         )
         .with_repair_metadata(true, Some(first_error_digest)),
@@ -1326,6 +1328,7 @@ async fn run_conversation_state_agent(
             &envelope,
             &output.result_summary,
             output.result_ref.as_deref(),
+            Some(&output.metadata),
             &validation_context,
         ),
         Err(error) => conversation_state_runtime_error_decision(mode, &envelope, error.to_string()),
@@ -1347,6 +1350,7 @@ async fn run_conversation_state_agent(
             &envelope,
             &output.result_summary,
             output.result_ref.as_deref(),
+            Some(&output.metadata),
             &validation_context,
         )
         .with_repair_metadata(true, Some(first_error_digest)),
@@ -5887,19 +5891,33 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FakeRuntimeClient {
-        outputs: Arc<Mutex<VecDeque<String>>>,
+        outputs: Arc<Mutex<VecDeque<FakeRuntimeOutput>>>,
         inputs: Arc<Mutex<Vec<RuntimeProfileInput>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct FakeRuntimeOutput {
+        result_summary: String,
+        result_ref: Option<String>,
+        metadata: Value,
     }
 
     impl FakeRuntimeClient {
         fn new(outputs: Vec<Value>) -> Self {
+            let outputs = outputs
+                .into_iter()
+                .map(|value| FakeRuntimeOutput {
+                    result_summary: value.to_string(),
+                    result_ref: None,
+                    metadata: json!({"fake_runtime": true}),
+                })
+                .collect::<Vec<_>>();
+            Self::with_outputs(outputs)
+        }
+
+        fn with_outputs(outputs: Vec<FakeRuntimeOutput>) -> Self {
             Self {
-                outputs: Arc::new(Mutex::new(
-                    outputs
-                        .into_iter()
-                        .map(|value| value.to_string())
-                        .collect::<VecDeque<_>>(),
-                )),
+                outputs: Arc::new(Mutex::new(outputs.into_iter().collect::<VecDeque<_>>())),
                 inputs: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -5907,6 +5925,10 @@ mod tests {
         fn profile_inputs(&self) -> Vec<RuntimeProfileInput> {
             self.inputs.lock().expect("fake runtime inputs").clone()
         }
+    }
+
+    fn provider_output_metadata(provider_output: Value) -> Value {
+        json!({ "provider_output": provider_output })
     }
 
     #[async_trait]
@@ -5945,10 +5967,12 @@ mod tests {
                     AgentCoreError::coded(ErrorCode::NotFound, "fake runtime output missing")
                 })?;
             Ok(RuntimeOutput {
-                result_summary: output,
-                result_ref: Some(format!("fake://{}", input.profile_id)),
+                result_summary: output.result_summary,
+                result_ref: output
+                    .result_ref
+                    .or_else(|| Some(format!("fake://{}", input.profile_id))),
                 messages: Vec::new(),
-                metadata: json!({"fake_runtime": true}),
+                metadata: output.metadata,
             })
         }
     }
@@ -6498,6 +6522,98 @@ mod tests {
                 );
             }
         }
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn context_pack_records_provider_features_without_raw_agent_output() {
+        let db_path = temp_context_db_path("provider-features-context");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let summary = json!({
+            "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
+            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "current_topic": "晴雯相关问题",
+            "active_entities": ["晴雯"],
+            "open_questions": ["晴雯后来怎么样？"],
+            "last_answer_boundaries": [],
+            "evidence_package_refs": [],
+            "reviewer_warnings": [],
+            "memory_allowed_as_evidence": false,
+            "summary_confidence": 0.9
+        });
+        let runtime = FakeRuntimeClient::with_outputs(vec![FakeRuntimeOutput {
+            result_summary: summary.to_string(),
+            result_ref: Some(format!(
+                "openai-compatible-network://profiles/{CONVERSATION_STATE_WRITER_PROFILE_ID}/trace-provider-features-context"
+            )),
+            metadata: provider_output_metadata(json!({
+                "schema_version": "openai-compatible-provider-output-v1",
+                "response_format_json_requested": true,
+                "content_present": true,
+                "content_sha256": "sha256:raw",
+                "content_contains_think_blocks": true,
+                "content_without_think_sha256": "sha256:clean",
+                "reasoning_details_present": true,
+                "reasoning_details_sha256": "sha256:reasoning",
+                "business_json_candidate_present": true,
+                "business_json_candidate_sha256": "sha256:candidate",
+                "business_json_candidate_source": "embedded_json_object",
+                "business_json_candidate": summary.to_string(),
+                "validator_content_sha256": "sha256:candidate",
+                "preserved_raw_fields": {
+                    "content": "<think>{\"not\":\"context\"}</think>",
+                    "reasoning_details": {"items": [{"text": "internal reasoning"}]}
+                }
+            })),
+        }]);
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "晴雯后来怎么样？".to_string(),
+        }];
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-provider-features-context",
+                model_id: "tonglingyu",
+                external_user_ref: "user-provider-features-context",
+                external_session_id: "session-provider-features-context",
+                external_message_id: "message-provider-features-context",
+                question: "晴雯后来怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Disabled,
+            LlmMode::Enforced,
+        )
+        .await
+        .expect("context created");
+
+        let agent_audit =
+            &context.context_pack["llm_agent_context_path"]["conversation_state_agent"];
+        assert_eq!(agent_audit["accepted_for_projection"], json!(true));
+        assert_eq!(
+            agent_audit["provider_output_features"]["content_contains_think_blocks"],
+            json!(true)
+        );
+        assert_eq!(
+            agent_audit["provider_output_features"]["reasoning_details_present"],
+            json!(true)
+        );
+        assert_eq!(
+            agent_audit["provider_output_features"]["raw_provider_fields_embedded_in_validator_audit"],
+            json!(false)
+        );
+        let context_text = context.context_pack["llm_agent_context_path"].to_string();
+        assert!(!context_text.contains("<think>"));
+        assert!(!context_text.contains("internal reasoning"));
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["raw_agent_output_embedded"],
+            json!(false)
+        );
         remove_file_db(&db_path);
     }
 
