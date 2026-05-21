@@ -54,6 +54,7 @@ pub(crate) const SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION: &str = "scoped-memory-
 
 const SESSION_SUMMARY_MAX_CHARS: usize = 600;
 const JOURNAL_SUMMARY_MAX_CHARS: usize = 240;
+const CONVERSATION_STATE_BOUNDARY_MAX_CHARS: usize = 160;
 const MEMORY_SUMMARY_MAX_CHARS: usize = 220;
 const MEMORY_RAW_EXCERPT_MAX_CHARS: usize = 420;
 const MEMORY_COLLECTOR_LEASE_NAME: &str = "memory-collector";
@@ -599,13 +600,17 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         resolver = if let Some(sealed) = decision.accepted_resolution() {
             ResolverOutput::from_agent_decision(sealed, Some(decision.audit_json()))
         } else {
+            let audit = decision.audit_json();
+            if question_agent_mode == LlmMode::Enforced {
+                return Err(enforced_llm_agent_rejection(
+                    QUESTION_NORMALIZER_PROFILE_ID,
+                    &audit,
+                    decision.errors(),
+                ));
+            }
             let mut resolver = resolver;
-            resolver.strategy = if question_agent_mode == LlmMode::Shadow {
-                "deterministic_with_llm_shadow".to_string()
-            } else {
-                "llm_agent_rejected_fallback".to_string()
-            };
-            resolver.agent_audit = Some(decision.audit_json());
+            resolver.strategy = "deterministic_with_llm_shadow".to_string();
+            resolver.agent_audit = Some(audit);
             resolver
         };
     }
@@ -632,6 +637,14 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         if let Some(sealed) = decision.accepted_summary() {
             conversation_state_summary = Some(sealed.summary().clone());
             conversation_state_source = "llm_agent_validated";
+        } else if conversation_state_mode == LlmMode::Enforced {
+            return Err(enforced_llm_agent_rejection(
+                CONVERSATION_STATE_WRITER_PROFILE_ID,
+                conversation_state_agent_audit
+                    .as_ref()
+                    .expect("conversation state agent audit was just recorded"),
+                decision.errors(),
+            ));
         }
     }
 
@@ -714,6 +727,11 @@ fn deterministic_conversation_state_summary(
         .boundary
         .as_deref()
         .into_iter()
+        .map(|boundary| bounded_summary(boundary, CONVERSATION_STATE_BOUNDARY_MAX_CHARS))
+        .collect::<Vec<_>>();
+    let required_boundary_refs = required_boundaries
+        .iter()
+        .map(String::as_str)
         .collect::<Vec<_>>();
     let conversation_state_input = ConversationStateInput {
         current_question: input.question,
@@ -724,8 +742,11 @@ fn deterministic_conversation_state_summary(
         reviewer_warnings: &[],
     };
     let summary = write_conversation_state_summary(&conversation_state_input);
-    let validation_context =
-        conversation_state_validation_context(&conversation_state_input, &[], &required_boundaries);
+    let validation_context = conversation_state_validation_context(
+        &conversation_state_input,
+        &[],
+        &required_boundary_refs,
+    );
     let validation = validate_conversation_state_summary(&summary, &validation_context);
     validation.accepted.then_some(summary)
 }
@@ -1231,6 +1252,11 @@ async fn run_conversation_state_agent(
         .boundary
         .as_deref()
         .into_iter()
+        .map(|boundary| bounded_summary(boundary, CONVERSATION_STATE_BOUNDARY_MAX_CHARS))
+        .collect::<Vec<_>>();
+    let required_boundary_refs = required_boundaries
+        .iter()
+        .map(String::as_str)
         .collect::<Vec<_>>();
     let required_entities = resolver
         .referent_bindings
@@ -1248,7 +1274,7 @@ async fn run_conversation_state_agent(
     let validation_context = conversation_state_validation_context(
         &conversation_state_input,
         &required_entities,
-        &required_boundaries,
+        &required_boundary_refs,
     );
     let agent_messages = input
         .messages
@@ -1268,10 +1294,7 @@ async fn run_conversation_state_agent(
         prepared.last_public_answer.evidence_package_refs.clone(),
         Vec::new(),
         resolver.referent_bindings.clone(),
-        required_boundaries
-            .iter()
-            .map(|item| (*item).to_string())
-            .collect(),
+        required_boundaries.clone(),
     );
     let structured_payload = json!(agent_input);
     let input_digest = format!("sha256:{}", digest_json(&structured_payload));
@@ -1377,6 +1400,26 @@ async fn execute_llm_agent_profile(
         .map_err(|error| anyhow!("{error}"))
 }
 
+fn enforced_llm_agent_rejection(
+    profile_id: &str,
+    audit: &Value,
+    errors: &[String],
+) -> anyhow::Error {
+    let decision = audit
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let contract_accepted = audit
+        .get("contract_accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let error_summary = bounded_summary(&errors.join("; "), 360);
+    anyhow!(
+        "llm_agent_enforced_rejected: profile_id={profile_id}; decision={decision}; contract_accepted={contract_accepted}; error_digest={}; error_summary={error_summary}",
+        error_digest(errors)
+    )
+}
+
 fn allowed_referents_for_agent(
     question: &str,
     messages: &[ContextMessage],
@@ -1472,7 +1515,7 @@ fn latest_public_answer_boundary(
     let boundary = metadata
         .get("response")
         .and_then(public_response_boundary)
-        .map(|value| bounded_summary(&value, JOURNAL_SUMMARY_MAX_CHARS));
+        .map(|value| bounded_summary(&value, CONVERSATION_STATE_BOUNDARY_MAX_CHARS));
     let evidence_package_refs = package_id
         .map(|id| format!("package:{id}"))
         .into_iter()
@@ -1484,6 +1527,11 @@ fn latest_public_answer_boundary(
 }
 
 fn public_response_boundary(response: &Value) -> Option<String> {
+    let content = public_response_content(response)?;
+    Some(deterministic_public_answer_boundary(content))
+}
+
+fn public_response_content(response: &Value) -> Option<&str> {
     response
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -1493,7 +1541,110 @@ fn public_response_boundary(response: &Value) -> Option<String> {
                 .and_then(Value::as_str)
         })
         .or_else(|| response.get("content").and_then(Value::as_str))
-        .map(str::to_string)
+        .filter(|content| !content.trim().is_empty())
+}
+
+fn deterministic_public_answer_boundary(content: &str) -> String {
+    let content = compact_boundary_text(content);
+    if content.is_empty() {
+        return "(empty)".to_string();
+    }
+    if is_self_contained_public_boundary(&content)
+        && content.chars().count() <= CONVERSATION_STATE_BOUNDARY_MAX_CHARS
+    {
+        return content;
+    }
+
+    let subject = latest_subject_in_text(&content);
+    let clause = extract_public_answer_boundary_clause(&content);
+    let boundary = match (subject, clause) {
+        (Some(subject), Some(clause)) => format!("上一轮回答围绕{subject}；{clause}"),
+        (Some(subject), None) => {
+            format!("上一轮回答仅限于{subject}相关可追溯文本事实，不作为额外人物定论。")
+        }
+        (None, Some(clause)) => format!("上一轮回答边界：{clause}"),
+        (None, None) => "上一轮回答仅限于已返回的可追溯文本事实，不作为额外定论。".to_string(),
+    };
+    bounded_summary(&boundary, CONVERSATION_STATE_BOUNDARY_MAX_CHARS)
+}
+
+fn compact_boundary_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_self_contained_public_boundary(value: &str) -> bool {
+    value.starts_with("上一轮") && contains_boundary_signal(value)
+}
+
+fn extract_public_answer_boundary_clause(content: &str) -> Option<String> {
+    split_public_answer_sentences(content)
+        .into_iter()
+        .map(|sentence| normalize_public_answer_boundary_clause(&sentence))
+        .find(|sentence| contains_boundary_signal(sentence))
+}
+
+fn split_public_answer_sentences(content: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for ch in content.chars() {
+        current.push(ch);
+        if matches!(ch, '。' | '！' | '!' | '？' | '?' | '；' | ';' | '\n') {
+            let sentence = current.trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence.to_string());
+            }
+            current.clear();
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        sentences.push(tail.to_string());
+    }
+    sentences
+}
+
+fn normalize_public_answer_boundary_clause(sentence: &str) -> String {
+    let mut value = sentence
+        .trim()
+        .trim_matches(|ch| matches!(ch, '。' | '！' | '!' | '？' | '?' | '；' | ';'))
+        .trim();
+    for prefix in [
+        "但需要注意：",
+        "需要注意：",
+        "但需注意：",
+        "需注意：",
+        "注意：",
+    ] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            value = rest.trim();
+            break;
+        }
+    }
+    bounded_summary(value, CONVERSATION_STATE_BOUNDARY_MAX_CHARS)
+}
+
+fn contains_boundary_signal(value: &str) -> bool {
+    [
+        "只依据",
+        "仅依据",
+        "只基于",
+        "仅基于",
+        "只确认",
+        "仅确认",
+        "不能",
+        "不可",
+        "不得",
+        "不把",
+        "不扩展",
+        "不作为",
+        "未说明",
+        "未断言",
+        "版本差异",
+        "证据不足",
+        "需要降级",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 pub(crate) fn append_final_response(
@@ -6041,6 +6192,42 @@ mod tests {
         assert_eq!(metadata["projection_visible"], json!(true));
     }
 
+    #[test]
+    fn public_response_boundary_extracts_short_controlled_boundary() {
+        let full_answer = "尤三姐在可追溯文本中主要以刚烈、有主见的人物形象出现，她与柳湘莲相关情节最能体现其性格。她不是泛泛的陪衬角色，而是带有强烈自尊和决断的人物。但需要注意：这只是基于当前可追溯文本的回答，不能自动扩展到所有版本或续书设定。";
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": full_answer
+                }
+            }]
+        });
+
+        let boundary = public_response_boundary(&response).expect("boundary");
+
+        assert!(boundary.chars().count() <= CONVERSATION_STATE_BOUNDARY_MAX_CHARS);
+        assert_ne!(boundary, full_answer);
+        assert!(boundary.contains("尤三姐"));
+        assert!(boundary.contains("可追溯文本"));
+        assert!(boundary.contains("不能自动扩展"));
+    }
+
+    #[test]
+    fn public_response_boundary_preserves_existing_boundary_statement() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "上一轮只确认晴雯判词位置，未断言结局。"
+                }
+            }]
+        });
+
+        let boundary = public_response_boundary(&response).expect("boundary");
+
+        assert_eq!(boundary, "上一轮只确认晴雯判词位置，未断言结局。");
+        assert!(boundary.chars().count() <= CONVERSATION_STATE_BOUNDARY_MAX_CHARS);
+    }
+
     fn insert_and_apply_test_memory(conn: &Connection, draft: &MemoryCandidateDraft) {
         assert!(
             insert_memory_candidate(conn, draft, "test-admin").expect("insert memory candidate"),
@@ -6198,7 +6385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forbidden_question_agent_output_is_rejected_and_deterministic_survives() {
+    async fn forbidden_question_agent_output_fails_closed_when_enforced() {
         let db_path = temp_context_db_path("question-agent-reject");
         let conn = file_conn(&db_path);
         drop(conn);
@@ -6225,7 +6412,7 @@ mod tests {
             },
         ];
 
-        let context = create_context_for_request_with_agent_runtime_and_modes(
+        let result = create_context_for_request_with_agent_runtime_and_modes(
             &db_path,
             ContextRequestInput {
                 trace_id: "trace-question-agent-reject",
@@ -6242,31 +6429,20 @@ mod tests {
             LlmMode::Enforced,
             LlmMode::Disabled,
         )
-        .await
-        .expect("context created");
+        .await;
 
-        assert_eq!(context.resolved_question, "晴雯最后怎么样？");
-        assert_eq!(
-            context.context_pack["resolver"]["strategy"],
-            json!("llm_agent_rejected_fallback")
-        );
-        assert_eq!(context.context_pack["resolver"]["llm_used"], json!(false));
-        assert_eq!(
-            context.context_pack["resolver"]["agent_invoked"],
-            json!(true)
-        );
-        let errors = context.context_pack["resolver"]["agent_decision"]["errors"]
-            .as_array()
-            .expect("agent errors");
-        assert!(errors.iter().any(|error| {
-            error
-                .as_str()
-                .is_some_and(|text| text.contains("forbidden_field"))
-        }));
-        assert_eq!(
-            context.context_pack["resolver"]["agent_decision"]["raw_output_embedded"],
-            json!(false)
-        );
+        let error = result.expect_err("enforced invalid question agent should fail closed");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("llm_agent_enforced_rejected"));
+        assert!(error_text.contains(QUESTION_NORMALIZER_PROFILE_ID));
+        assert!(error_text.contains("contract_accepted=false"));
+        assert_eq!(runtime.profile_inputs().len(), 2);
+        let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
+        let context_pack_count: i64 = persisted_conn
+            .query_row("SELECT COUNT(*) FROM context_packs", [], |row| row.get(0))
+            .expect("context pack count");
+        assert_eq!(context_pack_count, 0);
+        drop(persisted_conn);
         remove_file_db(&db_path);
     }
 
@@ -6351,6 +6527,57 @@ mod tests {
                 );
             }
         }
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn rejected_conversation_state_agent_fails_closed_when_enforced() {
+        let db_path = temp_context_db_path("conversation-state-agent-reject");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let invalid = json!({
+            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "current_question": "晴雯后来怎么样？",
+            "session_summary": "最近讨论对象：晴雯",
+            "required_active_entities": ["晴雯"]
+        });
+        let runtime = FakeRuntimeClient::new(vec![invalid.clone(), invalid]);
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "晴雯后来怎么样？".to_string(),
+        }];
+
+        let result = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-conversation-state-agent-reject",
+                model_id: "tonglingyu",
+                external_user_ref: "user-conversation-state-agent-reject",
+                external_session_id: "session-conversation-state-agent-reject",
+                external_message_id: "message-conversation-state-agent-reject",
+                question: "晴雯后来怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Disabled,
+            LlmMode::Enforced,
+        )
+        .await;
+
+        let error = result.expect_err("enforced invalid conversation state should fail closed");
+        let error_text = format!("{error:#}");
+        assert!(error_text.contains("llm_agent_enforced_rejected"));
+        assert!(error_text.contains(CONVERSATION_STATE_WRITER_PROFILE_ID));
+        assert!(error_text.contains("contract_accepted=false"));
+        assert_eq!(runtime.profile_inputs().len(), 2);
+        let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
+        let context_pack_count: i64 = persisted_conn
+            .query_row("SELECT COUNT(*) FROM context_packs", [], |row| row.get(0))
+            .expect("context pack count");
+        assert_eq!(context_pack_count, 0);
+        drop(persisted_conn);
         remove_file_db(&db_path);
     }
 

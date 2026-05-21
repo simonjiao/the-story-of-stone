@@ -8417,6 +8417,17 @@ async fn chat_completions(
         Ok(scoped_context) => scoped_context,
         Err(error) => {
             tracing::warn!(%trace_id, error = %error, "context governance failed");
+            if let Ok(conn) = open_db(&state.db) {
+                let _ = insert_audit_event(
+                    &conn,
+                    &trace_id,
+                    "context_governance_failed",
+                    &json!({
+                        "error": error.to_string(),
+                        "local_governance_enforced": true,
+                    }),
+                );
+            }
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "context_governance_failed",
@@ -10347,6 +10358,14 @@ fn new_trace_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        context_governance::RESOLVER_SCHEMA_VERSION,
+        llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+    };
+    use agent_core::{
+        AgentCoreError, CoreResult, ErrorCode, RuntimeOutput, RuntimeProfileInput, RuntimeRunInput,
+        RuntimeSessionInput,
+    };
     use tonglingyu_runtime::{
         KnowledgeItemCreateInput, KnowledgeItemStateUpdateInput, RetrievalFailureListInput,
         RetrievalFailureView, ReviewRecord,
@@ -10530,6 +10549,159 @@ mod tests {
         std::env::temp_dir().join(format!("{label}-{}.db", new_trace_id()))
     }
 
+    struct TestLlmAgentRuntime;
+
+    #[async_trait::async_trait]
+    impl RuntimeClient for TestLlmAgentRuntime {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "test llm agent runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "test llm agent runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let payload = input
+                .messages
+                .get(1)
+                .and_then(|message| serde_json::from_str::<Value>(&message.content).ok())
+                .unwrap_or_else(|| json!({}));
+            let result = match input.profile_id.as_str() {
+                QUESTION_NORMALIZER_PROFILE_ID => test_question_normalizer_output(&payload),
+                CONVERSATION_STATE_WRITER_PROFILE_ID => test_conversation_state_output(&payload),
+                _ => json!({}),
+            };
+            Ok(RuntimeOutput {
+                result_summary: result.to_string(),
+                result_ref: Some(format!("test-llm-agent://{}", input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({"test_llm_agent": true}),
+            })
+        }
+    }
+
+    fn test_question_normalizer_output(payload: &Value) -> Value {
+        let input_context = &payload["input_context"];
+        let current_question = input_context["current_question"]
+            .as_str()
+            .unwrap_or_default();
+        let referent = input_context["allowed_referents"]
+            .as_array()
+            .and_then(|items| items.iter().find_map(Value::as_str))
+            .map(str::to_string)
+            .or_else(|| {
+                infer_test_subject(
+                    input_context["prior_session_summary_for_context_only"]
+                        .as_str()
+                        .unwrap_or_default(),
+                )
+            });
+        let Some(referent) = referent else {
+            return json!({
+                "schema_version": RESOLVER_SCHEMA_VERSION,
+                "resolved_question": current_question,
+                "referent_bindings": [],
+                "used_context_refs": ["current_question"],
+                "confidence": 0.5,
+                "needs_clarification": true,
+                "clarification_question": "请明确你想问哪位人物？",
+                "unsupported_reason": "unresolved_referent"
+            });
+        };
+        let resolved_question = if current_question.contains('她') {
+            current_question.replacen('她', &referent, 1)
+        } else if current_question.contains('他') {
+            current_question.replacen('他', &referent, 1)
+        } else {
+            current_question.to_string()
+        };
+        json!({
+            "schema_version": RESOLVER_SCHEMA_VERSION,
+            "resolved_question": resolved_question,
+            "referent_bindings": [referent],
+            "used_context_refs": ["current_question", "session_summary"],
+            "confidence": 0.91,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null
+        })
+    }
+
+    fn infer_test_subject(text: &str) -> Option<String> {
+        ["尤三姐", "晴雯", "林黛玉", "贾宝玉"]
+            .into_iter()
+            .find(|name| text.contains(name))
+            .map(str::to_string)
+    }
+
+    fn test_conversation_state_output(payload: &Value) -> Value {
+        let input_context = &payload["input_context"];
+        let current_question = input_context["current_question_for_state"]
+            .as_str()
+            .unwrap_or_default();
+        let active_entities =
+            json_string_array(&input_context["must_include_active_entities"], 4, 80);
+        let topic = active_entities
+            .first()
+            .map(|entity| format!("{entity}相关问题"))
+            .unwrap_or_else(|| bounded_test_text(current_question, 80));
+        json!({
+            "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
+            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "current_topic": topic,
+            "active_entities": active_entities,
+            "open_questions": if current_question.trim().is_empty() {
+                Vec::<String>::new()
+            } else {
+                vec![bounded_test_text(current_question, 120)]
+            },
+            "last_answer_boundaries": json_string_array(
+                &input_context["must_preserve_last_answer_boundaries"],
+                4,
+                160
+            ),
+            "evidence_package_refs": json_string_array(
+                &input_context["allowed_evidence_package_refs"],
+                4,
+                160
+            )
+            .into_iter()
+            .filter(|item| item.starts_with("package:"))
+            .collect::<Vec<_>>(),
+            "reviewer_warnings": json_string_array(&input_context["reviewer_warnings"], 4, 120),
+            "memory_allowed_as_evidence": false,
+            "summary_confidence": if active_entities.is_empty() { 0.74 } else { 0.9 }
+        })
+    }
+
+    fn json_string_array(value: &Value, max_items: usize, max_chars: usize) -> Vec<String> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|item| bounded_test_text(item, max_chars))
+            .take(max_items)
+            .collect()
+    }
+
+    fn bounded_test_text(value: &str, max_chars: usize) -> String {
+        value.chars().take(max_chars).collect()
+    }
+
     #[test]
     fn runtime_schema_migrate_command_applies_additive_migrations() {
         let db_path = temp_gateway_db_path("tonglingyu-runtime-schema-migrate");
@@ -10583,11 +10755,7 @@ mod tests {
                 commentary: "honglou-commentary".to_string(),
                 reviewer: "honglou-reviewer".to_string(),
             },
-            llm_agent_runtime: Arc::new(
-                agent_runtime::MinimalRuntimeClient::new("test-llm-agent").with_profile_registry(
-                    RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts()),
-                ),
-            ),
+            llm_agent_runtime: Arc::new(TestLlmAgentRuntime),
             llm_agent_runtime_mode: "minimal-test".to_string(),
             started_at: now_rfc3339(),
         }
@@ -12928,9 +13096,10 @@ USER: 介绍尤三姐
             })),
         )
         .await;
-        assert_eq!(second.status(), StatusCode::OK);
-        let body: Value =
-            serde_json::from_str(&response_text(second).await).expect("response json");
+        let second_status = second.status();
+        let second_text = response_text(second).await;
+        assert_eq!(second_status, StatusCode::OK, "{second_text}");
+        let body: Value = serde_json::from_str(&second_text).expect("response json");
         assert!(body.get("context_pack_id").is_none());
         assert!(body.get("context_pack_ref").is_none());
         assert!(body.get("context_projection_id").is_none());

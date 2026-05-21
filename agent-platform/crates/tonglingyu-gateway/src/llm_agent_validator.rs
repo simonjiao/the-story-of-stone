@@ -276,8 +276,11 @@ pub(crate) fn validate_question_normalizer_runtime_output(
     } else {
         AgentValidationDecision::Rejected
     };
-    let accepted_for_main =
-        mode == LlmMode::Enforced && decision == AgentValidationDecision::Accepted;
+    let accepted_for_main = mode == LlmMode::Enforced
+        && matches!(
+            decision,
+            AgentValidationDecision::Accepted | AgentValidationDecision::Clarify
+        );
     let accepted = accepted_for_main.then_some(SealedQuestionResolution {
         output: parsed_output,
     });
