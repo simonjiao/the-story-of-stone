@@ -6,7 +6,8 @@ use agent_core::{
     RuntimeToolResult, RuntimeToolSpec,
 };
 use agent_runtime::{
-    HermesRuntimeClient, MinimalRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
+    HermesRuntimeClient, HermesRuntimeConfig, MinimalRuntimeClient,
+    OpenAiCompatibleNetworkRuntimeClient, OpenAiCompatibleNetworkRuntimeConfig,
     RuntimeProfileRegistry,
 };
 use anyhow::{Context, Result, anyhow};
@@ -1208,7 +1209,8 @@ impl TonglingyuRuntimeStore {
     ) -> Result<RuntimeWorkflowOutput> {
         let registry =
             RuntimeProfileRegistry::new(agent_runtime_profile_contracts(&input.profiles));
-        let runtime = tonglingyu_agent_runtime_client(mode, self.clone(), registry)?;
+        let runtime =
+            tonglingyu_agent_runtime_client(mode, self.clone(), registry, &input.profiles)?;
         self.execute_workflow_with_agent_runtime_client(input, mode, runtime)
             .await
     }
@@ -1846,6 +1848,9 @@ pub enum TonglingyuAgentRuntimeMode {
 
 impl TonglingyuAgentRuntimeMode {
     pub fn from_env() -> Result<Self> {
+        if let Some(mode) = workflow_agent_runtime_mode_from_role_provider_source(&env_nonempty)? {
+            return Ok(mode);
+        }
         let value = std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE")
             .unwrap_or_else(|_| "minimal".to_string());
         match value.trim().to_ascii_lowercase().as_str() {
@@ -1864,6 +1869,118 @@ impl TonglingyuAgentRuntimeMode {
             Self::Hermes => "hermes",
             Self::OpenAiCompatibleNetwork => "openai-compatible-network",
         }
+    }
+}
+
+const WORKFLOW_AGENT_ROLE_PROVIDER_ENVS: &[&str] = &[
+    "TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER",
+    "TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER",
+    "TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER",
+    "TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER",
+];
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_profile_env_suffix(profile: &str) -> Result<String> {
+    let trimmed = profile.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("agent provider profile name must not be empty"));
+    }
+    let mut output = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_uppercase());
+        } else if ch == '_' || ch == '-' {
+            output.push('_');
+        } else {
+            return Err(anyhow!(
+                "agent provider profile name contains unsupported character: {profile}"
+            ));
+        }
+    }
+    Ok(output)
+}
+
+fn agent_provider_env_name(profile: &str, field: &str) -> Result<String> {
+    Ok(format!(
+        "TONGLINGYU_AGENT_PROVIDER_{}_{}",
+        provider_profile_env_suffix(profile)?,
+        field
+    ))
+}
+
+fn required_agent_provider_env(profile: &str, field: &str) -> Result<String> {
+    required_agent_provider_env_from(profile, field, &env_nonempty)
+}
+
+fn required_agent_provider_env_from(
+    profile: &str,
+    field: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String> {
+    let env_name = agent_provider_env_name(profile, field)?;
+    get_env(&env_name).ok_or_else(|| anyhow!("{env_name} must be configured"))
+}
+
+fn workflow_agent_provider_profile_from_env() -> Result<Option<String>> {
+    workflow_agent_provider_profile_from_source(&env_nonempty)
+}
+
+fn workflow_agent_provider_profile_from_source(
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>> {
+    let configured = WORKFLOW_AGENT_ROLE_PROVIDER_ENVS
+        .iter()
+        .filter_map(|env_name| get_env(env_name).map(|value| (*env_name, value)))
+        .collect::<Vec<_>>();
+    if configured.is_empty() {
+        return Ok(None);
+    }
+    if configured.len() != WORKFLOW_AGENT_ROLE_PROVIDER_ENVS.len() {
+        let missing = WORKFLOW_AGENT_ROLE_PROVIDER_ENVS
+            .iter()
+            .filter(|env_name| get_env(env_name).is_none())
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(anyhow!(
+            "workflow agent role provider config incomplete: missing {}",
+            missing.join(",")
+        ));
+    }
+    let profile = configured[0].1.clone();
+    let mismatched = configured
+        .iter()
+        .filter(|(_, value)| value != &profile)
+        .map(|(env_name, _)| *env_name)
+        .collect::<Vec<_>>();
+    if !mismatched.is_empty() {
+        return Err(anyhow!(
+            "workflow agent role providers must use one provider profile until per-step runtime routing is enabled: {}",
+            mismatched.join(",")
+        ));
+    }
+    Ok(Some(profile))
+}
+
+fn workflow_agent_runtime_mode_from_role_provider_source(
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<TonglingyuAgentRuntimeMode>> {
+    let Some(profile) = workflow_agent_provider_profile_from_source(get_env)? else {
+        return Ok(None);
+    };
+    let backend = required_agent_provider_env_from(&profile, "BACKEND", get_env)?;
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "hermes-agent" | "hermes_agent" => Ok(Some(TonglingyuAgentRuntimeMode::Hermes)),
+        "minimax" => Ok(Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)),
+        "minimal" => Ok(Some(TonglingyuAgentRuntimeMode::Minimal)),
+        other => Err(anyhow!(
+            "unsupported workflow agent provider backend for {profile}: {other}"
+        )),
     }
 }
 
@@ -3794,20 +3911,79 @@ fn tonglingyu_agent_runtime_client(
     mode: TonglingyuAgentRuntimeMode,
     store: TonglingyuRuntimeStore,
     registry: RuntimeProfileRegistry,
+    profiles: &RuntimeWorkflowProfiles,
 ) -> Result<Arc<dyn RuntimeClient>> {
+    let runtime_profile_ids = [
+        profiles.text.as_str(),
+        profiles.commentary.as_str(),
+        profiles.main.as_str(),
+        profiles.reviewer.as_str(),
+    ];
     match mode {
         TonglingyuAgentRuntimeMode::Minimal => Ok(Arc::new(
             MinimalRuntimeClient::default().with_profile_registry(registry),
         )),
-        TonglingyuAgentRuntimeMode::Hermes => Ok(Arc::new(
-            HermesRuntimeClient::from_env()?
-                .with_profile_registry(registry)
-                .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
-        )),
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => Ok(Arc::new(
-            OpenAiCompatibleNetworkRuntimeClient::from_env()?.with_profile_registry(registry),
-        )),
+        TonglingyuAgentRuntimeMode::Hermes => {
+            let client = match workflow_agent_provider_profile_from_env()? {
+                Some(profile) => HermesRuntimeClient::new(hermes_config_from_provider_profile(
+                    &profile,
+                    &runtime_profile_ids,
+                )?)?,
+                None => HermesRuntimeClient::from_env()?,
+            };
+            Ok(Arc::new(
+                client
+                    .with_profile_registry(registry)
+                    .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
+            ))
+        }
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
+            let client = match workflow_agent_provider_profile_from_env()? {
+                Some(profile) => OpenAiCompatibleNetworkRuntimeClient::new(
+                    openai_compatible_config_from_provider_profile(&profile, &runtime_profile_ids)?,
+                )?,
+                None => OpenAiCompatibleNetworkRuntimeClient::from_env()?,
+            };
+            Ok(Arc::new(client.with_profile_registry(registry)))
+        }
     }
+}
+
+fn hermes_config_from_provider_profile(
+    profile: &str,
+    runtime_profiles: &[&str],
+) -> Result<HermesRuntimeConfig> {
+    let base_url = required_agent_provider_env(profile, "BASE_URL")?;
+    let model = required_agent_provider_env(profile, "MODEL")?;
+    let api_key_env = required_agent_provider_env(profile, "API_KEY_ENV")?;
+    let api_key = env_nonempty(&api_key_env)
+        .ok_or_else(|| anyhow!("{api_key_env} must be configured for {profile}"))?;
+    let mut config = HermesRuntimeConfig::new(base_url, model.clone());
+    config.api_key = Some(api_key);
+    config.profile_models = runtime_profiles
+        .iter()
+        .map(|runtime_profile| ((*runtime_profile).to_string(), model.clone()))
+        .collect();
+    Ok(config)
+}
+
+fn openai_compatible_config_from_provider_profile(
+    profile: &str,
+    runtime_profiles: &[&str],
+) -> Result<OpenAiCompatibleNetworkRuntimeConfig> {
+    let base_url = required_agent_provider_env(profile, "BASE_URL")?;
+    let model = required_agent_provider_env(profile, "MODEL")?;
+    let api_key_env = required_agent_provider_env(profile, "API_KEY_ENV")?;
+    let api_key = env_nonempty(&api_key_env)
+        .ok_or_else(|| anyhow!("{api_key_env} must be configured for {profile}"))?;
+    let mut config = OpenAiCompatibleNetworkRuntimeConfig::new(base_url, model.clone());
+    config.api_key = Some(api_key);
+    config.profile_models = runtime_profiles
+        .iter()
+        .map(|runtime_profile| ((*runtime_profile).to_string(), model.clone()))
+        .collect();
+    config.reasoning_split = Some(true);
+    Ok(config)
 }
 
 fn agent_runtime_profile_step_message(
@@ -15572,6 +15748,14 @@ mod tests {
     use super::*;
     use agent_core::{RuntimeOutput, RuntimeRunInput, RuntimeSessionInput};
 
+    fn test_env(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let values = pairs
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        move |name| values.get(name).map(|value| (*value).to_string())
+    }
+
     #[derive(Debug, Default)]
     struct DraftRuntimeClient;
 
@@ -15595,6 +15779,61 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct CalibrationJudgeRuntimeClient;
+
+    #[test]
+    fn workflow_agent_runtime_mode_uses_role_provider_backend_over_legacy_mode() {
+        let env = test_env(&[
+            ("TONGLINGYU_AGENT_RUNTIME_MODE", "openai-compatible-network"),
+            ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling"),
+            ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "hermes_tooling"),
+            ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "hermes_tooling"),
+            ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "hermes_tooling"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_BACKEND",
+                "hermes-agent",
+            ),
+        ]);
+
+        let mode = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect("role provider backend parses");
+
+        assert_eq!(mode, Some(TonglingyuAgentRuntimeMode::Hermes));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_mode_rejects_partial_role_provider_config() {
+        let env = test_env(&[("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling")]);
+
+        let error = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect_err("partial workflow role provider config must fail closed")
+            .to_string();
+
+        assert!(error.contains("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER"));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_mode_rejects_mixed_provider_profiles() {
+        let env = test_env(&[
+            ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling"),
+            ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "hermes_tooling"),
+            ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "minimax_context"),
+            ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "hermes_tooling"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_BACKEND",
+                "hermes-agent",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BACKEND",
+                "minimax",
+            ),
+        ]);
+
+        let error = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect_err("mixed workflow providers are unsupported until per-step routing")
+            .to_string();
+
+        assert!(error.contains("workflow agent role providers must use one provider profile"));
+    }
 
     #[derive(Debug)]
     struct SlowDraftRuntimeClient {

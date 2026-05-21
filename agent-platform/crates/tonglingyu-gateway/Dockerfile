@@ -2,13 +2,15 @@ ARG APP_VERSION=latest
 FROM rust:1.95 AS builder
 
 WORKDIR /workspace
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/target \
-    cargo build --release -p tonglingyu-gateway \
+    cargo build --locked --release -p tonglingyu-gateway \
     && mkdir -p /artifacts \
     && cp /workspace/target/release/tonglingyu-gateway /artifacts/tonglingyu-gateway
 

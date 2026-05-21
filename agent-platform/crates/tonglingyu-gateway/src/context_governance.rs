@@ -66,8 +66,6 @@ const MEMORY_POLICY_MODE_MANUAL: &str = "manual_required";
 const MEMORY_POLICY_MODE_SHADOW: &str = "shadow_only";
 #[cfg(test)]
 const CONVERSATION_STATE_SUMMARY_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_SUMMARY_MODE";
-const QUESTION_NORMALIZER_AGENT_MODE_ENV: &str = "TONGLINGYU_LLM_RESOLVER_AGENT_MODE";
-const CONVERSATION_STATE_AGENT_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_AGENT_MODE";
 const MEMORY_READ_BUDGET_TOTAL: usize = 8;
 const MEMORY_READ_BUDGET_USER_PRIVATE: usize = 4;
 const MEMORY_READ_BUDGET_SHARED: usize = 4;
@@ -4510,25 +4508,11 @@ fn conversation_state_summary_mode() -> LlmMode {
 }
 
 fn question_normalizer_agent_mode() -> LlmMode {
-    llm_agent_mode_from_env(QUESTION_NORMALIZER_AGENT_MODE_ENV)
+    LlmMode::Enforced
 }
 
 fn conversation_state_agent_mode() -> LlmMode {
-    llm_agent_mode_from_env(CONVERSATION_STATE_AGENT_MODE_ENV)
-}
-
-fn llm_agent_mode_from_env(env_name: &str) -> LlmMode {
-    match env::var(env_name) {
-        Ok(value) => llm_agent_mode_from_value(Some(&value)),
-        Err(_) => llm_agent_mode_from_value(None),
-    }
-}
-
-fn llm_agent_mode_from_value(value: Option<&str>) -> LlmMode {
-    value
-        .filter(|mode| !mode.trim().is_empty())
-        .and_then(|mode| LlmMode::parse(mode).ok())
-        .unwrap_or(LlmMode::Enforced)
+    LlmMode::Enforced
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5861,22 +5845,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_agent_mode_defaults_to_enforced_without_weakening_on_empty_or_invalid() {
-        assert_eq!(llm_agent_mode_from_value(None), LlmMode::Enforced);
-        assert_eq!(llm_agent_mode_from_value(Some("")), LlmMode::Enforced);
-        assert_eq!(
-            llm_agent_mode_from_value(Some("invalid")),
-            LlmMode::Enforced
-        );
-        assert_eq!(
-            llm_agent_mode_from_value(Some("disabled")),
-            LlmMode::Disabled
-        );
-        assert_eq!(llm_agent_mode_from_value(Some("shadow")), LlmMode::Shadow);
-        assert_eq!(
-            llm_agent_mode_from_value(Some("enforced")),
-            LlmMode::Enforced
-        );
+    fn production_agent_modes_are_enforced_without_env_switches() {
+        assert_eq!(question_normalizer_agent_mode(), LlmMode::Enforced);
+        assert_eq!(conversation_state_agent_mode(), LlmMode::Enforced);
     }
 
     fn conn() -> Connection {

@@ -409,13 +409,12 @@ memory、evidence 或 context projection。
 
 目标：Gateway 只做编排、验收和审计，不直接充当 Agent。
 
-- [x] 新增独立配置：
-      `TONGLINGYU_LLM_RESOLVER_AGENT_MODE=disabled|shadow|enforced`。
-- [x] 新增独立配置：
-      `TONGLINGYU_CONVERSATION_STATE_AGENT_MODE=disabled|shadow|enforced`。
-- [x] 新增统一 mode gate，默认 `enforced`；显式 `disabled` 只允许作为 gate
-      matrix 的基线/负例，不允许作为生产默认或 gate 后回滚目标；gate 后必须恢复
-      question normalizer enforced + conversation state enforced。
+- [x] 使用 role provider 配置接入真实 Agent：
+      `TONGLINGYU_AGENT_ROLE_QUESTION_NORMALIZER_PROVIDER`。
+- [x] 使用 role provider 配置接入真实 Agent：
+      `TONGLINGYU_AGENT_ROLE_CONVERSATION_STATE_PROVIDER`。
+- [x] 移除 question/conversation Agent mode env 开关；生产路径固定 enforced，
+      provider 必须存在，输出必须经过 validator，拒绝后 fail-closed。
 - [x] `/v1/chat/completions` 主路径必须先执行 deterministic pre-resolver。
 - [x] 只有 allowed trigger 才创建 `question_normalization` Agent request。
 - [x] forbidden trigger 必须记录 audit，并证明 provider-not-called。

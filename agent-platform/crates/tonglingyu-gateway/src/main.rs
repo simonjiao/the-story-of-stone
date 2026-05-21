@@ -1,6 +1,9 @@
-use agent_core::RuntimeClient;
+use agent_core::{
+    AgentCoreError, CoreResult, ErrorCode, RuntimeClient, RuntimeOutput, RuntimeProfileInput,
+    RuntimeRunInput, RuntimeSessionInput,
+};
 use agent_runtime::{
-    HermesRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
+    HermesRuntimeClient, HermesRuntimeConfig, OpenAiCompatibleNetworkRuntimeClient,
     OpenAiCompatibleNetworkRuntimeConfig, RuntimeProfileRegistry,
 };
 use anyhow::{Context, Result, anyhow};
@@ -600,6 +603,8 @@ struct AppState {
     profiles: InternalProfiles,
     llm_agent_runtime: Arc<dyn RuntimeClient>,
     llm_agent_runtime_mode: String,
+    llm_agent_provider_profiles: Value,
+    workflow_agent_provider_profiles: Value,
     started_at: String,
 }
 
@@ -611,79 +616,366 @@ struct InternalProfiles {
     reviewer: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GatewayLlmAgentRuntimeMode {
-    Hermes,
-    OpenAiCompatibleNetwork,
+const TEXT_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER";
+const PACKAGE_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER";
+const DRAFT_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER";
+const REVIEW_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER";
+const QUESTION_NORMALIZER_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_QUESTION_NORMALIZER_PROVIDER";
+const CONVERSATION_STATE_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_CONVERSATION_STATE_PROVIDER";
+
+#[derive(Debug, Clone)]
+struct AgentRoleProviderAssignment {
+    runtime_profile: String,
+    role_env: &'static str,
+    provider_profile: String,
 }
 
-impl GatewayLlmAgentRuntimeMode {
-    fn from_env() -> Result<Self> {
-        let raw = std::env::var("TONGLINGYU_LLM_AGENT_RUNTIME_MODE")
-            .ok()
-            .or_else(|| std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE").ok())
-            .unwrap_or_else(|| "hermes".to_string());
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "hermes" => Ok(Self::Hermes),
-            "openai-compatible-network" | "openai_compatible_network" => {
-                Ok(Self::OpenAiCompatibleNetwork)
-            }
-            "minimal" => Err(anyhow!(
-                "TONGLINGYU_LLM_AGENT_RUNTIME_MODE=minimal is not allowed for enforced LLM Agent"
-            )),
-            other => Err(anyhow!(
-                "unsupported TONGLINGYU_LLM_AGENT_RUNTIME_MODE={other}"
-            )),
-        }
+#[derive(Debug, Clone)]
+struct AgentProviderProfile {
+    name: String,
+    backend: String,
+    base_url: String,
+    model: String,
+    api_key_env: String,
+    api_key: String,
+}
+
+struct ProfileRoutingRuntimeClient {
+    clients_by_profile: BTreeMap<String, Arc<dyn RuntimeClient>>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeClient for ProfileRoutingRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "profile routing runtime only supports profile steps",
+        ))
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Hermes => "hermes",
-            Self::OpenAiCompatibleNetwork => "openai-compatible-network",
-        }
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "profile routing runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let client = self
+            .clients_by_profile
+            .get(&input.profile_id)
+            .cloned()
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    format!(
+                        "LLM Agent provider profile not configured for {}",
+                        input.profile_id
+                    ),
+                )
+            })?;
+        client.execute_profile_step(input).await
     }
 }
 
-fn build_llm_agent_runtime() -> Result<(Arc<dyn RuntimeClient>, String)> {
+fn build_llm_agent_runtime() -> Result<(Arc<dyn RuntimeClient>, String, Value)> {
+    build_llm_agent_runtime_from_source(&env_nonempty)
+}
+
+fn build_llm_agent_runtime_from_source(
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(Arc<dyn RuntimeClient>, String, Value)> {
     let registry = RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts());
-    let mode = GatewayLlmAgentRuntimeMode::from_env()?;
-    match mode {
-        GatewayLlmAgentRuntimeMode::Hermes => Ok((
-            Arc::new(HermesRuntimeClient::from_env()?.with_profile_registry(registry)),
-            mode.as_str().to_string(),
-        )),
-        GatewayLlmAgentRuntimeMode::OpenAiCompatibleNetwork => {
-            let config = OpenAiCompatibleNetworkRuntimeConfig::from_env()?;
-            ensure_llm_agent_openai_profile_models(&config.profile_models)?;
-            Ok((
-                Arc::new(
-                    OpenAiCompatibleNetworkRuntimeClient::new(config)?
-                        .with_profile_registry(registry),
-                ),
-                mode.as_str().to_string(),
+    let assignments = llm_agent_provider_assignments_from_source(get_env)?;
+    let mut profiles_by_provider = BTreeMap::<String, Vec<String>>::new();
+    for assignment in &assignments {
+        profiles_by_provider
+            .entry(assignment.provider_profile.clone())
+            .or_default()
+            .push(assignment.runtime_profile.clone());
+    }
+    let mut clients_by_provider = BTreeMap::<String, Arc<dyn RuntimeClient>>::new();
+    let mut provider_summaries = Vec::new();
+    for (provider_profile, runtime_profiles) in &profiles_by_provider {
+        let profile = AgentProviderProfile::from_source(provider_profile, get_env)?;
+        let client =
+            build_runtime_client_for_agent_provider(&profile, runtime_profiles, registry.clone())?;
+        provider_summaries.push(profile.safe_summary(runtime_profiles));
+        clients_by_provider.insert(provider_profile.clone(), client);
+    }
+    let mut clients_by_profile = BTreeMap::new();
+    for assignment in &assignments {
+        let client = clients_by_provider
+            .get(&assignment.provider_profile)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "provider profile not built: {}",
+                    assignment.provider_profile
+                )
+            })?;
+        clients_by_profile.insert(assignment.runtime_profile.clone(), client);
+    }
+    let provider_config = json!({
+        "object": "tonglingyu.llm_agent_provider_profile_config",
+        "schema_version": 1,
+        "routing_source": "role_provider_profile_env",
+        "role_bindings": assignments.iter().map(|assignment| json!({
+            "runtime_profile": assignment.runtime_profile,
+            "role_env": assignment.role_env,
+            "provider_profile": assignment.provider_profile,
+        })).collect::<Vec<_>>(),
+        "provider_profiles": provider_summaries,
+        "secret_values_printed": false,
+    });
+    Ok((
+        Arc::new(ProfileRoutingRuntimeClient { clients_by_profile }),
+        "provider-profile".to_string(),
+        provider_config,
+    ))
+}
+
+fn build_workflow_agent_runtime_config(profiles: &InternalProfiles) -> Result<Value> {
+    build_workflow_agent_runtime_config_from_source(profiles, &env_nonempty)
+}
+
+fn build_workflow_agent_runtime_config_from_source(
+    profiles: &InternalProfiles,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Value> {
+    let assignments = workflow_agent_provider_assignments_from_source(profiles, get_env)?;
+    let mut profiles_by_provider = BTreeMap::<String, Vec<String>>::new();
+    for assignment in &assignments {
+        profiles_by_provider
+            .entry(assignment.provider_profile.clone())
+            .or_default()
+            .push(assignment.runtime_profile.clone());
+    }
+    if profiles_by_provider.len() > 1 {
+        let provider_names = profiles_by_provider.keys().cloned().collect::<Vec<_>>();
+        return Err(anyhow!(
+            "workflow agent roles must use one provider profile until per-step runtime routing is enabled: {}",
+            provider_names.join(",")
+        ));
+    }
+    let mut provider_summaries = Vec::new();
+    let mut mode = None;
+    let workflow_runtime_profiles = vec![
+        profiles.text.clone(),
+        profiles.commentary.clone(),
+        profiles.main.clone(),
+        profiles.reviewer.clone(),
+    ];
+    for provider_profile in profiles_by_provider.keys() {
+        let profile = AgentProviderProfile::from_source(provider_profile, get_env)?;
+        mode = Some(workflow_agent_runtime_mode_for_provider(&profile)?);
+        provider_summaries.push(profile.safe_summary(&workflow_runtime_profiles));
+    }
+    Ok(json!({
+        "object": "tonglingyu.workflow_agent_provider_profile_config",
+        "schema_version": 1,
+        "mode": mode
+            .ok_or_else(|| anyhow!("workflow agent provider config must not be empty"))?
+            .as_str(),
+        "routing_source": "role_provider_profile_env",
+        "role_bindings": assignments.iter().map(|assignment| json!({
+            "runtime_profile": assignment.runtime_profile,
+            "role_env": assignment.role_env,
+            "provider_profile": assignment.provider_profile,
+        })).collect::<Vec<_>>(),
+        "provider_profiles": provider_summaries,
+        "secret_values_printed": false,
+    }))
+}
+
+impl AgentProviderProfile {
+    fn from_source(name: &str, get_env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        let backend = required_agent_provider_env_from(name, "BACKEND", get_env)?;
+        let base_url = required_agent_provider_env_from(name, "BASE_URL", get_env)?;
+        let model = required_agent_provider_env_from(name, "MODEL", get_env)?;
+        let api_key_env = required_agent_provider_env_from(name, "API_KEY_ENV", get_env)?;
+        let api_key = get_env(&api_key_env)
+            .ok_or_else(|| anyhow!("{api_key_env} must be configured for {name}"))?;
+        Ok(Self {
+            name: name.to_string(),
+            backend,
+            base_url,
+            model,
+            api_key_env,
+            api_key,
+        })
+    }
+
+    fn safe_summary(&self, runtime_profiles: &[String]) -> Value {
+        json!({
+            "name": self.name,
+            "backend": normalized_agent_provider_backend(&self.backend),
+            "base_url_host": host_label_from_url(&self.base_url),
+            "model": self.model,
+            "api_key_env": self.api_key_env,
+            "runtime_profiles": runtime_profiles,
+            "secret_values_printed": false,
+        })
+    }
+}
+
+fn build_runtime_client_for_agent_provider(
+    profile: &AgentProviderProfile,
+    runtime_profiles: &[String],
+    registry: RuntimeProfileRegistry,
+) -> Result<Arc<dyn RuntimeClient>> {
+    match normalized_agent_provider_backend(&profile.backend).as_str() {
+        "hermes-agent" => {
+            let mut config = HermesRuntimeConfig::new(&profile.base_url, &profile.model);
+            config.api_key = Some(profile.api_key.clone());
+            config.profile_models = runtime_profiles
+                .iter()
+                .map(|runtime_profile| (runtime_profile.clone(), profile.model.clone()))
+                .collect();
+            Ok(Arc::new(
+                HermesRuntimeClient::new(config)?.with_profile_registry(registry),
             ))
         }
+        "minimax" => {
+            let mut config =
+                OpenAiCompatibleNetworkRuntimeConfig::new(&profile.base_url, &profile.model);
+            config.api_key = Some(profile.api_key.clone());
+            config.profile_models = runtime_profiles
+                .iter()
+                .map(|runtime_profile| (runtime_profile.clone(), profile.model.clone()))
+                .collect();
+            config.reasoning_split = Some(true);
+            Ok(Arc::new(
+                OpenAiCompatibleNetworkRuntimeClient::new(config)?.with_profile_registry(registry),
+            ))
+        }
+        other => Err(anyhow!(
+            "unsupported agent provider backend for {}: {other}",
+            profile.name
+        )),
     }
 }
 
-fn ensure_llm_agent_openai_profile_models(profile_models: &BTreeMap<String, String>) -> Result<()> {
-    for profile in [
-        QUESTION_NORMALIZER_PROFILE_ID,
-        CONVERSATION_STATE_WRITER_PROFILE_ID,
-    ] {
-        if profile_models
-            .get(profile)
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .is_none()
-        {
+fn workflow_agent_runtime_mode_for_provider(
+    profile: &AgentProviderProfile,
+) -> Result<TonglingyuAgentRuntimeMode> {
+    match normalized_agent_provider_backend(&profile.backend).as_str() {
+        "hermes-agent" => Ok(TonglingyuAgentRuntimeMode::Hermes),
+        "minimax" => Ok(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork),
+        "minimal" => Ok(TonglingyuAgentRuntimeMode::Minimal),
+        other => Err(anyhow!(
+            "unsupported workflow agent provider backend for {}: {other}",
+            profile.name
+        )),
+    }
+}
+
+fn llm_agent_provider_assignments_from_source(
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<AgentRoleProviderAssignment>> {
+    Ok(vec![
+        AgentRoleProviderAssignment {
+            runtime_profile: QUESTION_NORMALIZER_PROFILE_ID.to_string(),
+            role_env: QUESTION_NORMALIZER_PROVIDER_ENV,
+            provider_profile: required_env_value_from(QUESTION_NORMALIZER_PROVIDER_ENV, get_env)?,
+        },
+        AgentRoleProviderAssignment {
+            runtime_profile: CONVERSATION_STATE_WRITER_PROFILE_ID.to_string(),
+            role_env: CONVERSATION_STATE_PROVIDER_ENV,
+            provider_profile: required_env_value_from(CONVERSATION_STATE_PROVIDER_ENV, get_env)?,
+        },
+    ])
+}
+
+fn workflow_agent_provider_assignments_from_source(
+    profiles: &InternalProfiles,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<AgentRoleProviderAssignment>> {
+    Ok(vec![
+        AgentRoleProviderAssignment {
+            runtime_profile: profiles.text.clone(),
+            role_env: TEXT_PROVIDER_ENV,
+            provider_profile: required_env_value_from(TEXT_PROVIDER_ENV, get_env)?,
+        },
+        AgentRoleProviderAssignment {
+            runtime_profile: profiles.main.clone(),
+            role_env: PACKAGE_PROVIDER_ENV,
+            provider_profile: required_env_value_from(PACKAGE_PROVIDER_ENV, get_env)?,
+        },
+        AgentRoleProviderAssignment {
+            runtime_profile: profiles.main.clone(),
+            role_env: DRAFT_PROVIDER_ENV,
+            provider_profile: required_env_value_from(DRAFT_PROVIDER_ENV, get_env)?,
+        },
+        AgentRoleProviderAssignment {
+            runtime_profile: profiles.reviewer.clone(),
+            role_env: REVIEW_PROVIDER_ENV,
+            provider_profile: required_env_value_from(REVIEW_PROVIDER_ENV, get_env)?,
+        },
+    ])
+}
+
+fn required_env_value_from(name: &str, get_env: &dyn Fn(&str) -> Option<String>) -> Result<String> {
+    get_env(name).ok_or_else(|| anyhow!("{name} must be configured"))
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn provider_profile_env_suffix(profile: &str) -> Result<String> {
+    let trimmed = profile.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("agent provider profile name must not be empty"));
+    }
+    let mut output = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_uppercase());
+        } else if ch == '_' || ch == '-' {
+            output.push('_');
+        } else {
             return Err(anyhow!(
-                "AGENT_RUNTIME_OPENAI_PROFILE_MODELS must map {profile}"
+                "agent provider profile name contains unsupported character: {profile}"
             ));
         }
     }
-    Ok(())
+    Ok(output)
+}
+
+fn agent_provider_env_name(profile: &str, field: &str) -> Result<String> {
+    Ok(format!(
+        "TONGLINGYU_AGENT_PROVIDER_{}_{}",
+        provider_profile_env_suffix(profile)?,
+        field
+    ))
+}
+
+fn required_agent_provider_env_from(
+    profile: &str,
+    field: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String> {
+    let env_name = agent_provider_env_name(profile, field)?;
+    required_env_value_from(&env_name, get_env)
+}
+
+fn normalized_agent_provider_backend(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "hermes_agent" | "hermes-agent" => "hermes-agent".to_string(),
+        "minimax" => "minimax".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn host_label_from_url(value: &str) -> String {
+    reqwest::Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "invalid-url".to_string())
 }
 
 #[derive(Debug)]
@@ -1782,7 +2074,15 @@ async fn serve(args: ServeArgs) -> Result<()> {
         let report = prune_gateway_and_runtime_data(&args.db, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
-    let (llm_agent_runtime, llm_agent_runtime_mode) = build_llm_agent_runtime()?;
+    let profiles = InternalProfiles {
+        main: args.profile_main,
+        text: args.profile_text,
+        commentary: args.profile_commentary,
+        reviewer: args.profile_reviewer,
+    };
+    let workflow_agent_provider_profiles = build_workflow_agent_runtime_config(&profiles)?;
+    let (llm_agent_runtime, llm_agent_runtime_mode, llm_agent_provider_profiles) =
+        build_llm_agent_runtime()?;
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
@@ -1805,14 +2105,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
         rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         admin_rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
-        profiles: InternalProfiles {
-            main: args.profile_main,
-            text: args.profile_text,
-            commentary: args.profile_commentary,
-            reviewer: args.profile_reviewer,
-        },
+        profiles,
         llm_agent_runtime,
         llm_agent_runtime_mode,
+        llm_agent_provider_profiles,
+        workflow_agent_provider_profiles,
         started_at: now_rfc3339(),
     });
     if args.memory_collector_background_enabled {
@@ -3988,7 +4285,7 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
         "agent_runtime_plan_gate": agent_runtime_plan_gate,
         "agent_runtime": {
             "mode": agent_runtime_mode.as_str(),
-            "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
             "summary": &workflow.agent_runtime_summary,
         },
         "runtime_step_outputs": workflow.steps,
@@ -5744,12 +6041,13 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             "model": state.model_id,
             "agent_runtime": {
                 "mode": agent_runtime_mode.as_str(),
-                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+                "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
+                "provider_profiles": &state.workflow_agent_provider_profiles,
             },
             "llm_agent_runtime": {
                 "mode": &state.llm_agent_runtime_mode,
-                "mode_env": "TONGLINGYU_LLM_AGENT_RUNTIME_MODE",
-                "fallback_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+                "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
+                "provider_profiles": &state.llm_agent_provider_profiles,
             },
             "rate_limit": {
                 "public_per_minute": state.rate_limit_per_minute,
@@ -9960,12 +10258,13 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "upstream_timeout_secs": state.upstream_timeout_secs,
             "agent_runtime": {
                 "mode": agent_runtime_mode.as_str(),
-                "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+                "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
+                "provider_profiles": &state.workflow_agent_provider_profiles,
             },
             "llm_agent_runtime": {
                 "mode": &state.llm_agent_runtime_mode,
-                "mode_env": "TONGLINGYU_LLM_AGENT_RUNTIME_MODE",
-                "fallback_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+                "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
+                "provider_profiles": &state.llm_agent_provider_profiles,
             },
         },
         "security": {
@@ -10049,7 +10348,7 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         ),
         bounded_metric_enum_label(
             &state.llm_agent_runtime_mode,
-            &["hermes", "openai-compatible-network", "minimal-test"]
+            &["provider-profile", "minimal-test"]
         ),
         state.rate_limit_per_minute,
         state.max_body_bytes,
@@ -10371,6 +10670,23 @@ mod tests {
         RetrievalFailureView, ReviewRecord,
     };
 
+    fn test_env(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        let values = pairs
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        move |name| values.get(name).map(|value| (*value).to_string())
+    }
+
+    fn test_internal_profiles() -> InternalProfiles {
+        InternalProfiles {
+            main: "honglou-main".to_string(),
+            text: "honglou-text".to_string(),
+            commentary: "honglou-commentary".to_string(),
+            reviewer: "honglou-reviewer".to_string(),
+        }
+    }
+
     #[test]
     fn public_completion_strips_cached_runtime_stream_events() {
         let value = completion_value(
@@ -10435,6 +10751,120 @@ mod tests {
         );
         assert_eq!(summary["tool_result_count"], json!(4));
         assert!(latest_agent_runtime_summary(&[]).is_null());
+    }
+
+    #[test]
+    fn llm_agent_runtime_requires_role_provider_config_over_legacy_envs() {
+        let env = test_env(&[
+            (
+                "AGENT_RUNTIME_OPENAI_BASE_URL",
+                "https://api.minimaxi.com/v1",
+            ),
+            ("AGENT_RUNTIME_OPENAI_MODEL", "MiniMax-M2.7"),
+            ("AGENT_RUNTIME_OPENAI_API_KEY", "sk-test"),
+            ("OPENAI_BASE_URL", "https://legacy.invalid/v1"),
+        ]);
+
+        let error = match build_llm_agent_runtime_from_source(&env) {
+            Ok(_) => panic!("legacy runtime env must not configure LLM agent routing"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains(QUESTION_NORMALIZER_PROVIDER_ENV));
+    }
+
+    #[test]
+    fn llm_agent_runtime_builds_minimax_provider_profile_without_secret_summary() {
+        let env = test_env(&[
+            (QUESTION_NORMALIZER_PROVIDER_ENV, "minimax_context"),
+            (CONVERSATION_STATE_PROVIDER_ENV, "minimax_context"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BACKEND",
+                "minimax",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BASE_URL",
+                "https://api.minimaxi.com/v1",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_MODEL",
+                "MiniMax-M2.7",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_API_KEY_ENV",
+                "MINIMAX_API_KEY",
+            ),
+            ("MINIMAX_API_KEY", "sk-test-secret"),
+        ]);
+
+        let (_client, mode, config) =
+            build_llm_agent_runtime_from_source(&env).expect("minimax provider config builds");
+        let serialized = serde_json::to_string(&config).expect("provider config serializes");
+
+        assert_eq!(mode, "provider-profile");
+        assert_eq!(config["provider_profiles"][0]["backend"], json!("minimax"));
+        assert_eq!(
+            config["provider_profiles"][0]["base_url_host"],
+            json!("api.minimaxi.com")
+        );
+        assert!(!serialized.contains("sk-test-secret"));
+        assert_eq!(config["secret_values_printed"], json!(false));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_config_requires_role_providers_over_legacy_mode() {
+        let env = test_env(&[("TONGLINGYU_AGENT_RUNTIME_MODE", "hermes")]);
+
+        let error =
+            build_workflow_agent_runtime_config_from_source(&test_internal_profiles(), &env)
+                .expect_err("legacy runtime mode must not configure gateway workflow routing")
+                .to_string();
+
+        assert!(error.contains(TEXT_PROVIDER_ENV));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_config_builds_hermes_provider_profile_without_secret_summary() {
+        let env = test_env(&[
+            (TEXT_PROVIDER_ENV, "hermes_tooling"),
+            (PACKAGE_PROVIDER_ENV, "hermes_tooling"),
+            (DRAFT_PROVIDER_ENV, "hermes_tooling"),
+            (REVIEW_PROVIDER_ENV, "hermes_tooling"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_BACKEND",
+                "hermes-agent",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_BASE_URL",
+                "http://hermes:8642/v1",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_MODEL",
+                "hermes-agent",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_API_KEY_ENV",
+                "HERMES_API_KEY",
+            ),
+            ("HERMES_API_KEY", "hermes-test-secret"),
+        ]);
+
+        let config =
+            build_workflow_agent_runtime_config_from_source(&test_internal_profiles(), &env)
+                .expect("workflow hermes provider config builds");
+        let serialized = serde_json::to_string(&config).expect("provider config serializes");
+
+        assert_eq!(config["mode"], json!("hermes"));
+        assert_eq!(
+            config["provider_profiles"][0]["backend"],
+            json!("hermes-agent")
+        );
+        assert_eq!(
+            config["provider_profiles"][0]["base_url_host"],
+            json!("hermes")
+        );
+        assert!(!serialized.contains("hermes-test-secret"));
+        assert_eq!(config["secret_values_printed"], json!(false));
     }
 
     fn eval_case_fixture(id: &'static str) -> EvalCase {
@@ -10757,6 +11187,12 @@ mod tests {
             },
             llm_agent_runtime: Arc::new(TestLlmAgentRuntime),
             llm_agent_runtime_mode: "minimal-test".to_string(),
+            llm_agent_provider_profiles: json!({
+                "object": "test.llm_agent_provider_profile_config"
+            }),
+            workflow_agent_provider_profiles: json!({
+                "object": "test.workflow_agent_provider_profile_config"
+            }),
             started_at: now_rfc3339(),
         }
     }
