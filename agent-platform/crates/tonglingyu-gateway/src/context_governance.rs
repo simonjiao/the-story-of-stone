@@ -4376,17 +4376,25 @@ fn conversation_state_summary_mode() -> LlmMode {
 }
 
 fn question_normalizer_agent_mode() -> LlmMode {
-    env::var(QUESTION_NORMALIZER_AGENT_MODE_ENV)
-        .ok()
-        .and_then(|mode| LlmMode::parse(&mode).ok())
-        .unwrap_or(LlmMode::Disabled)
+    llm_agent_mode_from_env(QUESTION_NORMALIZER_AGENT_MODE_ENV)
 }
 
 fn conversation_state_agent_mode() -> LlmMode {
-    env::var(CONVERSATION_STATE_AGENT_MODE_ENV)
-        .ok()
-        .and_then(|mode| LlmMode::parse(&mode).ok())
-        .unwrap_or(LlmMode::Disabled)
+    llm_agent_mode_from_env(CONVERSATION_STATE_AGENT_MODE_ENV)
+}
+
+fn llm_agent_mode_from_env(env_name: &str) -> LlmMode {
+    match env::var(env_name) {
+        Ok(value) => llm_agent_mode_from_value(Some(&value)),
+        Err(_) => llm_agent_mode_from_value(None),
+    }
+}
+
+fn llm_agent_mode_from_value(value: Option<&str>) -> LlmMode {
+    value
+        .filter(|mode| !mode.trim().is_empty())
+        .and_then(|mode| LlmMode::parse(mode).ok())
+        .unwrap_or(LlmMode::Enforced)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5717,6 +5725,25 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
+
+    #[test]
+    fn llm_agent_mode_defaults_to_enforced_without_weakening_on_empty_or_invalid() {
+        assert_eq!(llm_agent_mode_from_value(None), LlmMode::Enforced);
+        assert_eq!(llm_agent_mode_from_value(Some("")), LlmMode::Enforced);
+        assert_eq!(
+            llm_agent_mode_from_value(Some("invalid")),
+            LlmMode::Enforced
+        );
+        assert_eq!(
+            llm_agent_mode_from_value(Some("disabled")),
+            LlmMode::Disabled
+        );
+        assert_eq!(llm_agent_mode_from_value(Some("shadow")), LlmMode::Shadow);
+        assert_eq!(
+            llm_agent_mode_from_value(Some("enforced")),
+            LlmMode::Enforced
+        );
+    }
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().expect("in-memory db");

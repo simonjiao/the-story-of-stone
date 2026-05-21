@@ -293,6 +293,11 @@ pub fn write_llm_release_report(eval_report_path: &Path, report_out: &Path) -> R
                 "context_pack_raw_agent_output_embedded": false,
             },
             "mode_matrix": {
+                "default_modes": {
+                    "question_normalizer": "enforced",
+                    "conversation_state_writer": "enforced",
+                    "rollback_target_must_be_enforced": true,
+                },
                 "required_modes": [
                     "disabled",
                     "two_agent_shadow",
@@ -2032,6 +2037,18 @@ mod tests {
         );
         assert_eq!(
             report["llm_agent"]["mode_matrix"]["target_environment_live_gate_required"],
+            json!(true)
+        );
+        assert_eq!(
+            report["llm_agent"]["mode_matrix"]["default_modes"]["question_normalizer"],
+            json!("enforced")
+        );
+        assert_eq!(
+            report["llm_agent"]["mode_matrix"]["default_modes"]["conversation_state_writer"],
+            json!("enforced")
+        );
+        assert_eq!(
+            report["llm_agent"]["mode_matrix"]["default_modes"]["rollback_target_must_be_enforced"],
             json!(true)
         );
         assert!(

@@ -25,7 +25,8 @@ release readiness 和目标环境 saved validator 还没有针对当前提交重
   report schema。
 - 第 8.3 节 production-ready 声明条件。
 - 第 9 节 S1-S7 阶段化实施边界。
-- 第 10 节默认 disabled、shadow/enforced、fail-closed 和回滚要求。
+- 第 10 节 mode enum、question/context LLM Agent 默认 enforced、通用 LLM 能力保守默认、
+  fail-closed 和回滚要求。
 - 第 13 节最终冻结 checklist：实现证据、目标环境 live gate 和 release readiness report 才能支撑
   production-ready。
 
