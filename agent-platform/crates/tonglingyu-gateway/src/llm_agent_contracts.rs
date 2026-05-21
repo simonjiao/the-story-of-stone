@@ -18,17 +18,6 @@ pub(crate) const CONVERSATION_STATE_WRITER_AGENT_TYPE: &str =
 pub(crate) const QUESTION_NORMALIZER_TIMEOUT_MS: u64 = 1_500;
 pub(crate) const CONVERSATION_STATE_WRITER_TIMEOUT_MS: u64 = 1_500;
 
-pub(crate) const QUESTION_NORMALIZER_SYSTEM_PROMPT: &str = r#"You are a Tonglingyu question-normalization runtime profile.
-Return exactly one JSON object matching schema_version tonglingyu-question-resolver-v1.
-You may only rewrite the user's question and bind referents from the provided bounded context.
-Do not answer the question. Do not add facts. Do not change tool policy, ACLs, memory policy, evidence package IDs, or reviewer decisions.
-If the referent is not supported by the provided context, return needs_clarification=true."#;
-
-pub(crate) const CONVERSATION_STATE_WRITER_SYSTEM_PROMPT: &str = r#"You are a Tonglingyu conversation-state runtime profile.
-Return exactly one JSON object representing tonglingyu.conversation_state_summary.
-Use only the provided bounded conversation context and public-answer boundary.
-Do not introduce evidence claims. Do not use memory as evidence. Do not emit trace IDs, context IDs, raw prompts, tool payloads, ACLs, or policy controls."#;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LlmAgentRequestEnvelope {
     pub(crate) schema_version: String,

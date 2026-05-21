@@ -53,6 +53,7 @@ mod context_governance;
 mod conversation_state;
 mod draft_revision;
 mod llm_agent_contracts;
+mod llm_agent_prompt;
 mod llm_agent_validator;
 mod llm_contracts;
 mod llm_eval;

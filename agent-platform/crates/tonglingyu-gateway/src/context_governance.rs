@@ -19,13 +19,12 @@ use crate::{
     },
     llm_agent_contracts::{
         AgentContextMessage, CONVERSATION_STATE_WRITER_AGENT_TYPE,
-        CONVERSATION_STATE_WRITER_PROFILE_ID, CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
-        CONVERSATION_STATE_WRITER_TIMEOUT_MS, LlmAgentRequestEnvelope,
-        QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
-        QUESTION_NORMALIZER_SYSTEM_PROMPT, QUESTION_NORMALIZER_TIMEOUT_MS,
-        QuestionNormalizerAgentInput, conversation_state_writer_profile_contract,
-        question_normalizer_profile_contract,
+        CONVERSATION_STATE_WRITER_PROFILE_ID, CONVERSATION_STATE_WRITER_TIMEOUT_MS,
+        LlmAgentRequestEnvelope, QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
+        QUESTION_NORMALIZER_TIMEOUT_MS, QuestionNormalizerAgentInput,
+        conversation_state_writer_profile_contract, question_normalizer_profile_contract,
     },
+    llm_agent_prompt::build_llm_agent_provider_prompt,
     llm_agent_validator::{
         ConversationStateValidationDecision, QuestionNormalizerValidationDecision,
         conversation_state_runtime_error_decision, error_digest,
@@ -1164,7 +1163,6 @@ async fn run_question_normalizer_agent(
     let output = execute_llm_agent_profile(
         runtime_client,
         QUESTION_NORMALIZER_PROFILE_ID,
-        QUESTION_NORMALIZER_SYSTEM_PROMPT,
         &envelope,
         None,
     )
@@ -1189,7 +1187,6 @@ async fn run_question_normalizer_agent(
     let repaired = execute_llm_agent_profile(
         runtime_client,
         QUESTION_NORMALIZER_PROFILE_ID,
-        QUESTION_NORMALIZER_SYSTEM_PROMPT,
         &envelope,
         Some(decision.errors()),
     )
@@ -1298,7 +1295,6 @@ async fn run_conversation_state_agent(
     let output = execute_llm_agent_profile(
         runtime_client,
         CONVERSATION_STATE_WRITER_PROFILE_ID,
-        CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
         &envelope,
         None,
     )
@@ -1320,7 +1316,6 @@ async fn run_conversation_state_agent(
     let repaired = execute_llm_agent_profile(
         runtime_client,
         CONVERSATION_STATE_WRITER_PROFILE_ID,
-        CONVERSATION_STATE_WRITER_SYSTEM_PROMPT,
         &envelope,
         Some(decision.errors()),
     )
@@ -1341,7 +1336,6 @@ async fn run_conversation_state_agent(
 async fn execute_llm_agent_profile(
     runtime_client: &dyn RuntimeClient,
     profile_id: &str,
-    system_prompt: &str,
     envelope: &LlmAgentRequestEnvelope,
     repair_errors: Option<&[String]>,
 ) -> Result<RuntimeOutput> {
@@ -1359,24 +1353,13 @@ async fn execute_llm_agent_profile(
             "raw_output_must_not_be_persisted": true,
         }),
     );
-    let user_payload = if let Some(errors) = repair_errors {
-        serde_json::to_string_pretty(&json!({
-            "repair": {
-                "schema_error_digest": error_digest(errors),
-                "schema_error_summary": bounded_summary(&errors.join("; "), 360),
-                "instruction": "Return only a corrected JSON object for the same agent_request. Do not include markdown or explanation."
-            },
-            "agent_request": envelope,
-        }))?
-    } else {
-        serde_json::to_string_pretty(envelope)?
-    };
+    let provider_prompt = build_llm_agent_provider_prompt(profile_id, envelope, repair_errors)?;
     runtime_client
         .execute_profile_step(RuntimeProfileInput {
             profile_id: profile_id.to_string(),
             messages: vec![
-                RuntimeProfileMessage::new("system", system_prompt),
-                RuntimeProfileMessage::new("user", user_payload),
+                RuntimeProfileMessage::new("system", provider_prompt.system_prompt),
+                RuntimeProfileMessage::new("user", provider_prompt.user_payload),
             ],
             metadata: json!({
                 "agent_request_id": &envelope.agent_request_id,
@@ -5783,6 +5766,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct FakeRuntimeClient {
         outputs: Arc<Mutex<VecDeque<String>>>,
+        inputs: Arc<Mutex<Vec<RuntimeProfileInput>>>,
     }
 
     impl FakeRuntimeClient {
@@ -5794,7 +5778,12 @@ mod tests {
                         .map(|value| value.to_string())
                         .collect::<VecDeque<_>>(),
                 )),
+                inputs: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn profile_inputs(&self) -> Vec<RuntimeProfileInput> {
+            self.inputs.lock().expect("fake runtime inputs").clone()
         }
     }
 
@@ -5821,6 +5810,10 @@ mod tests {
             &self,
             input: RuntimeProfileInput,
         ) -> CoreResult<RuntimeOutput> {
+            self.inputs
+                .lock()
+                .expect("fake runtime inputs")
+                .push(input.clone());
             let output = self
                 .outputs
                 .lock()
@@ -6358,6 +6351,135 @@ mod tests {
                 );
             }
         }
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn llm_agent_runtime_receives_role_specific_provider_prompts() {
+        let db_path = temp_context_db_path("llm-agent-provider-prompts");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::new(vec![
+            json!({
+                "schema_version": RESOLVER_SCHEMA_VERSION,
+                "resolved_question": "晴雯后来怎么样？",
+                "referent_bindings": ["晴雯"],
+                "used_context_refs": ["current_question", "session_summary"],
+                "confidence": 0.91,
+                "needs_clarification": false,
+                "clarification_question": null,
+                "unsupported_reason": null
+            }),
+            json!({
+                "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
+                "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+                "current_topic": "晴雯相关问题",
+                "active_entities": ["晴雯"],
+                "open_questions": ["晴雯后来怎么样？"],
+                "last_answer_boundaries": [],
+                "evidence_package_refs": [],
+                "reviewer_warnings": [],
+                "memory_allowed_as_evidence": false,
+                "summary_confidence": 0.9
+            }),
+        ]);
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "介绍晴雯".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "她后来怎么样？".to_string(),
+            },
+        ];
+
+        create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-provider-prompt",
+                model_id: "tonglingyu",
+                external_user_ref: "user-provider-prompt",
+                external_session_id: "session-provider-prompt",
+                external_message_id: "message-provider-prompt",
+                question: "她后来怎么样？",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Enforced,
+        )
+        .await
+        .expect("context created");
+
+        let inputs = runtime.profile_inputs();
+        assert_eq!(inputs.len(), 2);
+        let question_input = &inputs[0];
+        assert_eq!(question_input.profile_id, QUESTION_NORMALIZER_PROFILE_ID);
+        assert!(
+            question_input.messages[0]
+                .content
+                .contains("Role: question_normalizer")
+        );
+        assert!(
+            question_input.messages[0]
+                .content
+                .contains("Do not answer it")
+        );
+        let question_payload: Value =
+            serde_json::from_str(&question_input.messages[1].content).expect("question payload");
+        assert_eq!(
+            question_payload["task"]["role"],
+            json!("question_normalizer")
+        );
+        assert!(question_payload.get("agent_request").is_none());
+        assert!(question_payload.get("structured_payload").is_none());
+        assert!(
+            !question_input.messages[1]
+                .content
+                .contains("trace-provider-prompt")
+        );
+
+        let state_input = &inputs[1];
+        assert_eq!(state_input.profile_id, CONVERSATION_STATE_WRITER_PROFILE_ID);
+        assert!(
+            state_input.messages[0]
+                .content
+                .contains("Role: conversation_state_writer")
+        );
+        assert!(
+            state_input.messages[0]
+                .content
+                .contains("Context-only fields")
+        );
+        let state_payload: Value =
+            serde_json::from_str(&state_input.messages[1].content).expect("state payload");
+        assert_eq!(
+            state_payload["task"]["role"],
+            json!("conversation_state_writer")
+        );
+        assert!(state_payload.get("agent_request").is_none());
+        assert!(state_payload.get("structured_payload").is_none());
+        assert!(
+            state_payload["input_context"]
+                .get("session_summary")
+                .is_none()
+        );
+        assert!(
+            state_payload["output_contract"]["forbidden_output_fields"]
+                .as_array()
+                .expect("forbidden fields")
+                .iter()
+                .any(|field| field.as_str() == Some("session_summary"))
+        );
+        assert!(
+            !state_input.messages[1]
+                .content
+                .contains("trace-provider-prompt")
+        );
+
         remove_file_db(&db_path);
     }
 
