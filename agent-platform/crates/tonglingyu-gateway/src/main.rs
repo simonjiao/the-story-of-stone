@@ -10844,9 +10844,9 @@ mod tests {
             ),
             (
                 "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_API_KEY_ENV",
-                "HERMES_API_KEY",
+                "HERMES_TOOLING_API_KEY",
             ),
-            ("HERMES_API_KEY", "hermes-test-secret"),
+            ("HERMES_TOOLING_API_KEY", "hermes-test-secret"),
         ]);
 
         let config =
