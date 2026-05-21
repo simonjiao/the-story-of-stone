@@ -7,9 +7,28 @@
 
 当前状态：repo-local 真实 LLM Agent context path 已改为生产默认 enforced。Runtime profile
 接入、validator 主路径和 gatekeeper release validators 已落地；历史目标环境 live gate、
-Open WebUI browser review、saved report validator 和 full remote release automation 通过记录仍保留，
+Open WebUI browser review、saved report validator 和 full remote release automation
+通过记录仍保留，
 但它们绑定旧 Story commit / image。当前 HEAD 必须重新部署并重跑 full remote release
 automation 后，才能声明目标环境也已按默认 enforced 闭合。
+
+2026-05-21 设计更新：当前实现不支持“不使用 Hermes Agent 但仍保留真实 LLM Agent”的
+生产闭环。已核对当前代码事实：
+
+- `tonglingyu-gateway` 启动时仍通过 `HermesRuntimeClient::from_env()` 构造
+  `llm_agent_runtime`。
+- compose 中普通回答 upstream 可配置 `TONGLINGYU_UPSTREAM_BASE_URL`，但
+  `TONGLINGYU_UPSTREAM_API_KEY` 当前绑定 `HERMES_API_KEY` 语义。
+- gatekeeper runtime config validator 当前要求
+  `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`、
+  `AGENT_RUNTIME_HERMES_BASE_URL=http://hermes:8642/v1`。
+- 直接 provider probe 只能证明 MiniMax/OpenAI-compatible `/models` 和最小
+  `/chat/completions` 可用；不能证明 AgentRequest、validator 和
+  ContextPackBuilder 闭环已走 direct Runtime Adapter。
+
+因此新增目标不是“把 MiniMax URL 填到 Hermes 配置里”，而是实现网络型
+`openai-compatible-network` Runtime Adapter。完成前，任何 direct provider smoke
+都只能记为 provider connectivity evidence，不能写成真实 Agent direct mode 完成。
 
 已落地的 repo-local 事实：
 
@@ -61,6 +80,12 @@ automation 后，才能声明目标环境也已按默认 enforced 闭合。
       tool policy 或 evidence package。
 - [x] 不接受通过新增一批 if/else 绕过 Runtime profile、AgentRequest、projection
       和 audit contract。
+- [x] 不接受 Gateway 裸调 MiniMax/OpenAI-compatible provider 后声称支持真实 Agent；
+      direct provider 必须先实现为 Runtime Adapter。
+- [x] 不接受把 `/models` 或最小 `/chat/completions` probe 当成 AgentRequest 端到端
+      live gate；它只能证明 provider connectivity。
+- [x] 不接受把 Hermes config 中的 upstream provider 改成 MiniMax 后声称“不使用 Hermes”；
+      只要 `HermesRuntimeClient` 仍在主路径，Agent Runtime 仍然依赖 Hermes。
 - [x] 不接受 shadow/enforced 逻辑分散在多个模块里；必须有统一 mode gate。
 - [x] 不接受 public response 夹带 trace、context、memory、Agent、provider 或 raw
       LLM 输出字段。
@@ -121,19 +146,21 @@ automation 关闭；后续 release 仍必须重新生成当次证据。
 - [x] profile model mapping：确认
       `AGENT_RUNTIME_HERMES_PROFILE_MODELS=tonglingyu-question-normalizer=...,tonglingyu-conversation-state-writer=...`
       在目标环境使用的真实模型名、base URL、API key、network route 和失败回滚值。
-- [x] AgentRequest 对齐方式：确认本次实现是直接复用 `agent_core::AgentRequest`，还是新增
-      `LlmAgentRequestEnvelope` 并逐字段对齐；无论选择哪种，都必须有 serialization /
+- [x] AgentRequest 对齐方式：确认本次实现是直接复用
+      `agent_core::AgentRequest`，还是新增 `LlmAgentRequestEnvelope` 并逐字段对齐；
+      无论选择哪种，都必须有 serialization /
       migration / replay tests。
 - [x] sealed decision 测试方式：确认使用 Rust 可见性单元测试、compile-fail test
       或等价机制，证明 validator 模块外不能构造 accepted decision，且
       ContextPackBuilder 不能接收 raw `serde_json::Value`。
 - [x] authorized memory summary 策略：确认本次是否支持该字段。默认必须 absent；如果支持，
       必须同一轮完成 pre-resolver authorization、脱敏 digest、二次 policy tests 和泄露负例。
-- [x] fault injection 路径：确认 provider timeout、5xx、schema invalid、forbidden field、
-      unknown context ref、schema repair failure 如何在 repo-local、Gateway smoke 和目标 live gate
-      中稳定触发。
-- [x] release artifact schema：确认 LLM Agent release report、mode matrix、live gate report、
-      saved validator report 的字段、digest 规则、case count 规则和 artifact registry 入口。
+- [x] fault injection 路径：确认 provider timeout、5xx、schema invalid、
+      forbidden field、unknown context ref、schema repair failure 如何在 repo-local、
+      Gateway smoke 和目标 live gate 中稳定触发。
+- [x] release artifact schema：确认 LLM Agent release report、mode matrix、
+      live gate report、saved validator report 的字段、digest 规则、case count
+      规则和 artifact registry 入口。
 - [x] rollback 命令：确认 gate 后恢复到 `enforced` mode、profile model mapping、image、
       env 和目标服务重启命令，并要求写入 live gate artifact。
 - [x] raw output 保存策略：确认是否允许 encrypted debug artifact；若没有加密存储、访问控制、
@@ -150,9 +177,11 @@ Open WebUI
       -> deterministic pre-resolver
       -> AgentRequest: question_normalization
           -> Runtime profile: tonglingyu-question-normalizer
+             -> Runtime Adapter: hermes | openai-compatible-network
           -> schema validator / confidence gate / denylist scanner
       -> AgentRequest: conversation_state
           -> Runtime profile: tonglingyu-conversation-state-writer
+             -> Runtime Adapter: hermes | openai-compatible-network
           -> schema validator / boundary validator / leakage scanner
       -> deterministic ContextPackBuilder
           -> active_scopes
@@ -166,6 +195,11 @@ Open WebUI
 
 Open WebUI 仍只看到 `tonglingyu` 一个模型。`tonglingyu-question-normalizer` 和
 `tonglingyu-conversation-state-writer` 是内部 Runtime profile，不是用户可选模型。
+
+`openai-compatible-network` 是网络型 Runtime Adapter。它必须通过 OpenAI-compatible
+`/v1/chat/completions` 执行 AgentRequest，并把网络请求的 timeout、retry、HTTP/error
+分类、provider request id、usage、latency 和 redacted audit 作为 contract 字段保存。
+MiniMax 是该 adapter 的一个 provider 实例，不是单独写死的 Agent 类型。
 
 ## Validator 实现落点
 
@@ -237,7 +271,9 @@ memory、evidence 或 context projection。
       `agent_core::AgentRequest` 字段语义对齐，并在 audit、replay、admin trace digest
       中作为一等对象出现；禁止匿名 JSON、临时函数参数或 provider payload 充当
       Agent request。
-- [x] Agent 通过 Runtime profile 执行，不能由 Gateway 直接裸调 provider。
+- [x] Agent 通过 Runtime profile 执行，不能由 Gateway 直接裸调 provider。若使用
+      MiniMax/OpenAI-compatible 上游，也必须先实现为 `openai-compatible-network`
+      Runtime Adapter。
 - [x] Agent 输入由确定性 projection builder 生成，不能直接传完整
       `ChatCompletionRequest`。
 - [x] Agent 输出是 schema-bound JSON，不能返回自由文本后再解析猜测。
@@ -250,6 +286,58 @@ memory、evidence 或 context projection。
       provider response、Runtime output 或 schema parser output。
 - [x] fake provider 只能用于 contract tests；目标环境必须证明真实 provider / runtime
       agent 被调用。
+- [ ] `openai-compatible-network` Runtime Adapter 支持前，不能声明“无需 Hermes 的真实
+      Agent direct mode”。
+- [ ] direct mode live gate 必须证明 AgentRequest 经过网络 Runtime Adapter、业务
+      validator 和 deterministic ContextPackBuilder；provider smoke 不能替代。
+
+## P1B OpenAI-compatible Network Runtime Adapter 重构
+
+目标：支持不依赖 Hermes Agent 的网络型真实 Agent，但不能降低 Agent 输出控制。
+
+- [ ] 新增 `openai-compatible-network` Runtime Adapter，并实现为 `RuntimeClient`，
+      不能作为 Gateway helper 或普通 upstream provider helper。
+- [ ] Gateway 启动时根据 `TONGLINGYU_AGENT_RUNTIME_MODE` 选择
+      `HermesRuntimeClient` 或 `OpenAiCompatibleNetworkRuntimeClient`；production
+      `enforced` 禁止 `minimal`。
+- [ ] 新增配置：
+      `AGENT_RUNTIME_OPENAI_BASE_URL`、`AGENT_RUNTIME_OPENAI_API_KEY`、
+      `AGENT_RUNTIME_OPENAI_MODEL`、`AGENT_RUNTIME_OPENAI_PROFILE_MODELS`、
+      `AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS`、
+      `AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS`、
+      `AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS`、
+      `AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY`。
+- [ ] `AGENT_RUNTIME_OPENAI_PROFILE_MODELS` 必须覆盖
+      `tonglingyu-question-normalizer` 和 `tonglingyu-conversation-state-writer`；
+      缺任一 profile mapping 必须 fail-closed。
+- [ ] Runtime request 必须由 `LlmAgentRequestEnvelope` 派生，包含 request id、
+      profile id、input digest、projection digest、schema version、trace id 和
+      replay anchor。
+- [ ] Provider payload 只能包含该 profile 的 projection payload 和 JSON schema 指令；
+      禁止传完整 Open WebUI history、完整 context pack、raw memory、tool policy、
+      admin trace 或 evidence package。
+- [ ] 网络请求必须实现 connect timeout、read timeout、total deadline、
+      request cancellation、bounded retry with jitter、per-profile concurrency limit
+      和 provider unhealthy 窗口。
+- [ ] 429、MiniMax 529 / `overloaded_error`、5xx、auth、DNS、TLS、connection reset、
+      deadline exceeded、schema invalid 和 safety refusal 必须有不同 error type。
+- [ ] retry 只允许用于 `rate_limited`、`provider_overloaded`、`provider_unavailable`
+      和 `connection_error`；schema invalid 只能走 schema repair，repair 后仍必须重新 validator。
+- [ ] Adapter report/audit 必须记录 provider request id、attempt count、latency、usage、
+      model、error type、input/output digest 和 `secret_values_printed=false`。
+- [ ] API key、raw prompt、raw response body、完整 provider error body 不得进入普通日志、
+      metrics、public response、release report stdout tail 或 saved validator artifact。
+- [ ] Adapter accepted JSON 仍只是候选；`ContextPackBuilder` 只能消费 validator sealed
+      decision，不能消费 adapter parsed JSON。
+- [ ] Contract tests 必须使用 fake/replay network provider 覆盖 pass、timeout、429、
+      529 overloaded、5xx、connection error、auth error、schema invalid、repair success、
+      repair failed、forbidden field 和 low confidence。
+- [ ] Live gate 必须真实调用目标 provider，并分别证明 minimal provider smoke、
+      question normalizer direct Agent、conversation state direct Agent、
+      malformed output negative case 和 provider-not-called negative case。
+- [ ] Gate 超时必须有总预算；任何 live gate 不得因 provider 长时间无响应无限挂起。
+- [ ] Saved validator 必须能重放 direct adapter 的 AgentRequest digest、decision digest、
+      context pack digest 和 runtime identity。
 
 ## 非目标和禁止边界
 
@@ -280,12 +368,14 @@ memory、evidence 或 context projection。
 - [x] 定义 `QuestionNormalizationAgentInput`，只允许：
       `current_question`、bounded recent user messages、bounded recent assistant messages、
       `prior_subject`、deterministic `session_summary`、trigger、schema version。
-- [x] `authorized_memory_summary` 不属于默认字段。若本次实现需要该字段，必须同一轮完成
-      pre-resolver authorization、脱敏 digest、二次 policy tests 和泄露负例；否则该字段
+- [x] `authorized_memory_summary` 不属于默认字段。若本次实现需要该字段，
+      必须同一轮完成 pre-resolver authorization、脱敏 digest、二次 policy tests
+      和泄露负例；否则该字段
       必须在 schema、fixture、runtime payload 中全部 absent。
 - [x] 定义 `QuestionNormalizationAgentOutput`，只允许：
-      `resolved_question`、`referent_bindings`、`used_context_refs`、`confidence`、
-      `needs_clarification`、`clarification_question`、`unsupported_reason`、schema version。
+      `resolved_question`、`referent_bindings`、`used_context_refs`、
+      `confidence`、`needs_clarification`、`clarification_question`、
+      `unsupported_reason`、schema version。
 - [x] 定义 `ConversationStateAgentInput`，只允许：
       current question、bounded recent messages、deterministic session summary、上一轮公开
       answer boundary、authorized package refs 摘要。
@@ -420,6 +510,25 @@ run 内的运行门控，不是分批实现理由。
 - [x] live gate 输出 artifact：case id、trace id、mode、Agent request id、decision、
       input/output digest、latency、error rate、rollback command、image id、commit。
 
+### P5B Direct Network Runtime 目标环境接入
+
+- [ ] compose 支持 `TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network`。
+- [ ] compose 支持 `TONGLINGYU_UPSTREAM_API_KEY=${LOCAL_OPENAI_API_KEY}` 或等价 direct
+      upstream key 配置，不能继续把普通 answer upstream key 固定为 `HERMES_API_KEY`。
+- [ ] Hermes service 在 direct mode 下必须可选；runtime config validator 不能继续要求
+      Hermes service、Hermes config 或 `AGENT_RUNTIME_HERMES_*`。
+- [ ] gatekeeper `verify-tonglingyu-runtime-config.sh` 必须按 mode 分支校验：
+      `hermes` 校验 Hermes；`openai-compatible-network` 校验 direct network runtime；
+      `minimal` 在 production enforced 中失败。
+- [ ] gatekeeper remote deploy 必须在 direct mode 下跳过 Hermes config render/recreate，
+      并运行 direct provider live probe。
+- [ ] direct mode release run 必须证明目标环境中 Hermes 容器停止或不被 Gateway Agent
+      runtime 使用；否则不能声称“不使用 Hermes Agent”。
+- [ ] Direct live gates 必须覆盖短请求、长上下文请求、并发两个内部 profile、provider 529、
+      connection error 和 timeout，总耗时必须有上限。
+- [ ] Direct mode 失败报告必须区分 provider connectivity ok、provider overloaded、
+      Gateway adapter bug、validator rejection 和 ContextPackBuilder rejection。
+
 ## P6 Release Readiness
 
 目标：release readiness 必须把真实 Agent 作为 required gate。
@@ -446,15 +555,17 @@ run 内的运行门控，不是分批实现理由。
 
 目标：把真实 Agent 接入拆成可执行工作包，但这些工作包必须在同一轮实现、验证和提交。
 
-- [x] W1 Contract：新增并贯穿 `LlmAgentRequestEnvelope`、agent input/output schema、
-      sealed output decision enum、audit event、replay anchor 和 migration/serialization tests。
+- [x] W1 Contract：新增并贯穿 `LlmAgentRequestEnvelope`、agent input/output
+      schema、sealed output decision enum、audit event、replay anchor 和
+      migration/serialization tests。
 - [x] W2 Runtime：注册两个 Runtime profile，绑定 profile contract、adapter contract、
       timeout、tool policy、model mapping 和 provider error taxonomy。
 - [x] W3 Validator：新增统一 Gateway 业务 validator，覆盖 question normalization 和
       conversation state 输出，并复用/迁移现有 `llm_resolver` 与 `conversation_state`
       合同校验；validator 必须是唯一能构造 accepted decision 的模块。
-- [x] W4 Gateway：替换 Gateway helper 调用，接入 deterministic pre-resolver、统一 mode gate、
-      accepted/rejected decision、clarification、fail-closed 和 provider-not-called audit。
+- [x] W4 Gateway：替换 Gateway helper 调用，接入 deterministic pre-resolver、
+      统一 mode gate、accepted/rejected decision、clarification、fail-closed 和
+      provider-not-called audit。
 - [x] W5 Context：重构 ContextPackBuilder，只消费 accepted deterministic/Agent result，
       并把 Agent decision digest 纳入 context pack / projection replay digest；删除或封闭
       任何接收 raw Agent JSON / raw provider response 的构造入口。
@@ -479,8 +590,12 @@ run 内的运行门控，不是分批实现理由。
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p agent-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-runtime`
 - [x] `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
-- [x] `cargo clippy --manifest-path agent-platform/Cargo.toml --workspace --all-targets -- -D warnings`
-- [x] `cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- llm-eval --fixture-dir agent-platform/crates/tonglingyu-gateway/evals/fixtures --report-out agent-platform/crates/tonglingyu-gateway/evals/reports/llm-eval.json --fail-on-hard-gate`
+- [x] Cargo clippy workspace gate：
+      `cargo clippy --manifest-path agent-platform/Cargo.toml --workspace --all-targets`
+      with `-- -D warnings`
+- [x] Tonglingyu gateway LLM eval gate：
+      `cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+      with `-- llm-eval --fixture-dir ... --report-out ... --fail-on-hard-gate`
 - [x] `agent-platform/scripts/tonglingyu-gateway-smoke.sh`
 - [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-release-report.sh <llm-release-report.json>`
 - [x] gatekeeper `deploy/scripts/verify-tonglingyu-llm-agent-live-gate.sh` 已接入 release
@@ -500,7 +615,8 @@ run 内的运行门控，不是分批实现理由。
 - [x] 只完成 question normalizer，conversation state writer 未接入或未验证。
 - [x] 只完成 shadow，enforced accepted/rejected/fail-closed gate 未通过。
 - [x] 只跑 fake provider，目标环境真实 provider / runtime agent 未被调用。
-- [x] 只跑 repo-local tests，缺 strict live gate、release readiness 或 saved validator artifact。
+- [x] 只跑 repo-local tests，缺 strict live gate、release readiness 或 saved
+      validator artifact。
 - [x] 只创建验证脚本或 release report schema，但没有真实运行结果和 validator 消费记录。
 - [x] artifact 缺 digest、commit、image、case count、mode matrix 或 rollback command。
 - [x] ContextPackBuilder 仍能从 raw Agent output、raw parser output 或 `serde_json::Value`

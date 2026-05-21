@@ -95,6 +95,64 @@ Runtime Agent 不负责：
 3. 不执行写入类外部动作；当前通灵玉生产路径只允许 read-only tools。
 4. 不绕过 Gateway 的单入口、模型隐藏、reviewer 强制和审计要求。
 
+## Runtime Adapter 类型边界
+
+Runtime Adapter 是 AgentRequest 的执行边界，不是 Gateway 内部 helper，也不是
+普通 answer upstream 的同义词。生产配置必须显式声明 adapter 类型，并由
+gatekeeper 按类型验证。
+
+### `hermes`
+
+`hermes` 是当前已实现的生产 Runtime Adapter。它通过 Hermes Agent API server 执行
+profile，可承载工具调用、profile workflow、Hermes transcript 和 Runtime tool
+audit。当前 `tonglingyu-gateway` 启动时的 LLM Agent runtime 仍由
+`HermesRuntimeClient::from_env()` 构造；因此在未完成后续重构前，目标环境
+question normalizer / conversation state writer 的真实 Agent 路径仍依赖 Hermes。
+
+### `openai-compatible-network`
+
+`openai-compatible-network` 是新增目标 adapter，不是当前已实现事实。它的目标是通过
+OpenAI-compatible `/v1/chat/completions` 网络请求执行受控内部 Agent，例如
+`tonglingyu-question-normalizer` 和 `tonglingyu-conversation-state-writer`。MiniMax
+只是第一个 provider；设计必须同时适用于其他 OpenAI-compatible provider。
+
+该 adapter 只能提供“受控 JSON 候选生成”能力，不能等价替代 Hermes 的工具执行、
+skill 调用、browser workflow、profile tool loop 或 Hermes transcript。若某个 profile
+需要 read-only tool call、output_ref 绑定或 Runtime tool audit，该 profile 仍必须走
+`hermes` 或后续专门实现的 tool-capable adapter。
+
+`openai-compatible-network` 必须满足：
+
+1. 输入必须是 `AgentRequest` / `LlmAgentRequestEnvelope` 派生的 profile payload，
+   不能直接接收完整 Open WebUI history 或 public `ChatCompletionRequest`。
+2. 输出必须是 schema-bound JSON candidate，只能进入业务 validator，不能直接进入
+   `ContextPackBuilder`、scope、tool policy、memory、evidence package 或 reviewer。
+3. 网络请求必须是一等对象：connect timeout、read timeout、total deadline、
+   request cancellation、bounded retry、jitter、429/529/5xx 分类、provider request id、
+   latency、usage 和 redacted audit 必须进入 adapter contract。
+4. 每个 profile 必须有独立 timeout、max tokens、model mapping、并发限制和失败策略；
+   不能让一个全局 OpenAI key 配置隐式决定所有 profile 行为。
+5. adapter 失败只能产生 `candidate_unavailable`、clarification 或 fail-closed；
+   production `enforced` 模式禁止静默回退到 `disabled` 或 `minimal`。
+
+### `minimal`
+
+`minimal` 只用于本地 contract、dry-run 和负例测试。生产 `enforced` 路径不得把
+`minimal` 描述为真实 Agent，也不得在 live gate 失败后自动切回 `minimal`。
+
+### 普通 answer upstream 与 Agent Runtime 的区别
+
+Gateway 普通回答的 `TONGLINGYU_UPSTREAM_BASE_URL` 可以直连 OpenAI-compatible
+上游模型；这只影响最终 chat completion 的生成后端，不等于 question normalizer /
+conversation state writer 已经有真实 Agent Runtime。若要“不使用 Hermes Agent”，必须同时
+完成：
+
+1. 普通 answer upstream 可独立使用 `LOCAL_OPENAI_*` / direct provider key；
+2. LLM Agent Runtime 使用 `openai-compatible-network` adapter；
+3. gatekeeper runtime config validator 支持并验证 direct mode；
+4. release live gates 证明 direct mode 的 AgentRequest、validator、ContextPackBuilder
+   闭环真实执行。
+
 ## 领域 Read-only Tools
 
 目标工具矩阵如下：

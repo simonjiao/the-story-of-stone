@@ -1041,6 +1041,87 @@ Provider adapter 测试要求：
 3. contract tests 默认使用 fake/replay provider，不访问网络。
 4. 真实 provider smoke 只能作为阶段 gate 附加项，不能替代 contract tests。
 
+### 10.1.1 OpenAI-compatible Network Agent Runtime Contract
+
+`LlmProviderClient` 只是底层网络 provider 客户端；它不能直接被 Gateway 业务路径调用。
+若要不依赖 Hermes Agent，必须新增 `openai-compatible-network` Runtime Adapter，并把它作为
+`RuntimeClient` 的一种实现接入 `AgentRequest -> Runtime Adapter -> validator` 链路。
+
+该 adapter 的请求对象必须包含：
+
+1. `agent_request_id`
+2. `agent_type`
+3. `agent_request_type`
+4. `profile_id`
+5. `runtime_adapter = openai-compatible-network`
+6. `provider_kind`
+7. `base_url_host`
+8. `model`
+9. `input_digest`
+10. `projection_digest`
+11. `schema_name`
+12. `schema_version`
+13. `connect_timeout_ms`
+14. `read_timeout_ms`
+15. `total_deadline_ms`
+16. `max_tokens`
+17. `temperature`
+18. `retry_policy_id`
+19. `trace_id`
+20. `replay_anchor`
+
+该 adapter 的响应对象必须包含：
+
+1. `status = accepted_json | rejected_json | provider_failed | deadline_exceeded`
+2. `raw_response_sha256`
+3. `parsed_json`
+4. `provider_request_id`
+5. `provider_model`
+6. `finish_reason`
+7. `usage`
+8. `latency_ms`
+9. `attempt_count`
+10. `error_type`
+11. `http_status_class`
+12. `secret_values_printed = false`
+
+网络请求要求：
+
+1. 连接建立必须有独立 connect timeout；读响应必须有独立 read timeout；整体执行必须受
+   total deadline 控制。
+2. `429`、MiniMax `529` / `overloaded_error`、`5xx`、连接重置、DNS/TLS 失败、JSON body
+   非法和 provider refusal 必须分开归类。
+3. retry 只能针对 `rate_limited`、`provider_overloaded`、`provider_unavailable` 和
+   `connection_error`，且必须有 bounded attempt、jitter 和总 deadline；schema invalid
+   不能靠网络 retry 解决，只能进入 schema repair。
+4. 每个 profile 必须有并发上限；question normalizer 和 conversation state writer 不能因
+   上游拥塞无限排队。
+5. provider unhealthy 必须被短期标记，后续请求在窗口内 fail-fast 或降级到明确
+   `candidate_unavailable`；不能让 public request 长时间挂起。
+6. API key、raw prompt、raw response body、完整 provider error body 不得进入普通日志、
+   metrics、public response、release report stdout tail 或 saved validator artifact。
+7. direct provider smoke 只证明 provider 可用；只有通过 AgentRequest、validator 和
+   ContextPackBuilder 的端到端 gate，才证明 `openai-compatible-network` Runtime Adapter 可用。
+
+配置要求：
+
+```env
+TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network
+AGENT_RUNTIME_OPENAI_BASE_URL=https://api.minimaxi.com/v1
+AGENT_RUNTIME_OPENAI_API_KEY=<secret>
+AGENT_RUNTIME_OPENAI_MODEL=MiniMax-M2.7
+AGENT_RUNTIME_OPENAI_PROFILE_MODELS=tonglingyu-question-normalizer=MiniMax-M2.7,tonglingyu-conversation-state-writer=MiniMax-M2.7
+AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS=1500
+AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS=5000
+AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS=8000
+AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY=2
+```
+
+这些配置不得复用 `HERMES_API_KEY` 语义；也不得要求 Hermes service、Hermes config 或
+`AGENT_RUNTIME_HERMES_*` 存在。gatekeeper 必须按 `TONGLINGYU_AGENT_RUNTIME_MODE`
+分支验证：`hermes` 验证 Hermes，`openai-compatible-network` 验证 direct network agent，
+`minimal` 在 production enforced 中 fail。
+
 ### 10.2 Provider / Runtime Failure Policy
 
 Timeout：
@@ -1067,6 +1148,17 @@ Provider error 枚举：
 8. `budget_exceeded`
 9. `profile_missing`
 10. `projection_digest_mismatch`
+11. `connection_error`
+12. `tls_error`
+13. `dns_error`
+14. `provider_overloaded`
+15. `provider_unhealthy`
+16. `deadline_exceeded`
+
+MiniMax `529 overloaded_error` 必须归类为 `provider_overloaded`，不是 schema error、
+validator rejection 或业务回答失败。`provider_overloaded` 可以触发 bounded retry；
+重试耗尽后只能产生明确的 upstream unavailable / candidate unavailable 结果，不能把
+失败包装成 accepted Agent decision。
 
 降级矩阵：
 
