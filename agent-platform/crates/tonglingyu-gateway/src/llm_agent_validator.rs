@@ -499,6 +499,7 @@ fn question_audit(
         "raw_output_sha256": raw_output_sha256,
         "raw_output_embedded": false,
         "output_ref": output_ref,
+        "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
@@ -533,10 +534,20 @@ fn conversation_state_audit(
         "raw_output_sha256": raw_output_sha256,
         "raw_output_embedded": false,
         "output_ref": output_ref,
+        "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
     })
+}
+
+fn runtime_adapter_from_output_ref(output_ref: Option<&str>) -> &'static str {
+    match output_ref.unwrap_or_default() {
+        value if value.starts_with("openai-compatible-network://") => "openai-compatible-network",
+        value if value.starts_with("hermes://") => "hermes",
+        value if value.starts_with("result://") => "minimal",
+        _ => "unknown",
+    }
 }
 
 fn parse_agent_json(raw_output: &str) -> Result<(Value, bool), String> {

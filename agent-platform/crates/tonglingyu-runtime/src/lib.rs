@@ -5,7 +5,10 @@ use agent_core::{
     RuntimeStepPlanOwner, RuntimeToolCall, RuntimeToolExecutor, RuntimeToolPolicy,
     RuntimeToolResult, RuntimeToolSpec,
 };
-use agent_runtime::{HermesRuntimeClient, MinimalRuntimeClient, RuntimeProfileRegistry};
+use agent_runtime::{
+    HermesRuntimeClient, MinimalRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
+    RuntimeProfileRegistry,
+};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use ferrous_opencc::{OpenCC, config::BuiltinConfig};
@@ -1838,6 +1841,7 @@ pub enum TonglingyuAgentRuntimeMode {
     #[default]
     Minimal,
     Hermes,
+    OpenAiCompatibleNetwork,
 }
 
 impl TonglingyuAgentRuntimeMode {
@@ -1847,6 +1851,9 @@ impl TonglingyuAgentRuntimeMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "" | "minimal" => Ok(Self::Minimal),
             "hermes" => Ok(Self::Hermes),
+            "openai-compatible-network" | "openai_compatible_network" => {
+                Ok(Self::OpenAiCompatibleNetwork)
+            }
             other => Err(anyhow!("unsupported TONGLINGYU_AGENT_RUNTIME_MODE={other}")),
         }
     }
@@ -1855,6 +1862,7 @@ impl TonglingyuAgentRuntimeMode {
         match self {
             Self::Minimal => "minimal",
             Self::Hermes => "hermes",
+            Self::OpenAiCompatibleNetwork => "openai-compatible-network",
         }
     }
 }
@@ -3796,6 +3804,9 @@ fn tonglingyu_agent_runtime_client(
                 .with_profile_registry(registry)
                 .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
         )),
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => Ok(Arc::new(
+            OpenAiCompatibleNetworkRuntimeClient::from_env()?.with_profile_registry(registry),
+        )),
     }
 }
 
@@ -4075,6 +4086,9 @@ fn agent_runtime_execution_summary(
         && review_local_enforced;
     let profile_execution_status = match mode {
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
+            "openai_compatible_network_profile_observed_without_runtime_tools"
+        }
         TonglingyuAgentRuntimeMode::Hermes if hermes_content_execution_complete => {
             "hermes_profile_observed_with_local_governance"
         }

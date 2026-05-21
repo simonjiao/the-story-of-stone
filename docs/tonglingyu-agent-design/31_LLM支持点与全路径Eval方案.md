@@ -1107,6 +1107,7 @@ Provider adapter 测试要求：
 
 ```env
 TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network
+TONGLINGYU_LLM_AGENT_RUNTIME_MODE=openai-compatible-network
 AGENT_RUNTIME_OPENAI_BASE_URL=https://api.minimaxi.com/v1
 AGENT_RUNTIME_OPENAI_API_KEY=<secret>
 AGENT_RUNTIME_OPENAI_MODEL=MiniMax-M2.7
@@ -1114,13 +1115,18 @@ AGENT_RUNTIME_OPENAI_PROFILE_MODELS=tonglingyu-question-normalizer=MiniMax-M2.7,
 AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS=1500
 AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS=5000
 AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS=8000
+AGENT_RUNTIME_OPENAI_MAX_TOKENS=768
 AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY=2
+AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON=true
+AGENT_RUNTIME_OPENAI_REASONING_SPLIT=true
 ```
 
 这些配置不得复用 `HERMES_API_KEY` 语义；也不得要求 Hermes service、Hermes config 或
-`AGENT_RUNTIME_HERMES_*` 存在。gatekeeper 必须按 `TONGLINGYU_AGENT_RUNTIME_MODE`
-分支验证：`hermes` 验证 Hermes，`openai-compatible-network` 验证 direct network agent，
-`minimal` 在 production enforced 中 fail。
+`AGENT_RUNTIME_HERMES_*` 存在。Gateway 的 question normalizer / conversation state
+writer 以 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 为一等 mode，并在未显式设置时才从
+`TONGLINGYU_AGENT_RUNTIME_MODE` fallback。gatekeeper 必须分别验证 workflow runtime mode
+和 LLM Agent runtime mode：`hermes` 验证 Hermes，`openai-compatible-network`
+验证 direct network agent，`minimal` 在 production enforced 中 fail。
 
 ### 10.2 Provider / Runtime Failure Policy
 

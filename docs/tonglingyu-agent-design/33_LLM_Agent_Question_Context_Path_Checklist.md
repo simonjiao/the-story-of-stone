@@ -12,23 +12,16 @@ Open WebUI browser review、saved report validator 和 full remote release autom
 但它们绑定旧 Story commit / image。当前 HEAD 必须重新部署并重跑 full remote release
 automation 后，才能声明目标环境也已按默认 enforced 闭合。
 
-2026-05-21 设计更新：当前实现不支持“不使用 Hermes Agent 但仍保留真实 LLM Agent”的
-生产闭环。已核对当前代码事实：
+2026-05-21 实现更新：repo-local 已新增网络型
+`openai-compatible-network` Runtime Adapter。Gateway 的 question normalizer /
+conversation state writer 现在通过 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 选择
+`HermesRuntimeClient` 或 `OpenAiCompatibleNetworkRuntimeClient`，未显式设置时才从
+`TONGLINGYU_AGENT_RUNTIME_MODE` fallback。gatekeeper runtime config validator
+已按 mode 分支校验 Hermes/direct 配置。
 
-- `tonglingyu-gateway` 启动时仍通过 `HermesRuntimeClient::from_env()` 构造
-  `llm_agent_runtime`。
-- compose 中普通回答 upstream 可配置 `TONGLINGYU_UPSTREAM_BASE_URL`，但
-  `TONGLINGYU_UPSTREAM_API_KEY` 当前绑定 `HERMES_API_KEY` 语义。
-- gatekeeper runtime config validator 当前要求
-  `TONGLINGYU_AGENT_RUNTIME_MODE=hermes`、
-  `AGENT_RUNTIME_HERMES_BASE_URL=http://hermes:8642/v1`。
-- 直接 provider probe 只能证明 MiniMax/OpenAI-compatible `/models` 和最小
-  `/chat/completions` 可用；不能证明 AgentRequest、validator 和
-  ContextPackBuilder 闭环已走 direct Runtime Adapter。
-
-因此新增目标不是“把 MiniMax URL 填到 Hermes 配置里”，而是实现网络型
-`openai-compatible-network` Runtime Adapter。完成前，任何 direct provider smoke
-都只能记为 provider connectivity evidence，不能写成真实 Agent direct mode 完成。
+仍不能提前宣布完成的部分：目标环境 full remote release automation 尚未在当前 HEAD
+重跑；direct provider smoke 仍只能证明 provider connectivity，不能替代
+AgentRequest、runtime adapter、validator 和 ContextPackBuilder 端到端证据。
 
 已落地的 repo-local 事实：
 
@@ -286,7 +279,7 @@ memory、evidence 或 context projection。
       provider response、Runtime output 或 schema parser output。
 - [x] fake provider 只能用于 contract tests；目标环境必须证明真实 provider / runtime
       agent 被调用。
-- [ ] `openai-compatible-network` Runtime Adapter 支持前，不能声明“无需 Hermes 的真实
+- [x] `openai-compatible-network` Runtime Adapter 支持前，不能声明“无需 Hermes 的真实
       Agent direct mode”。
 - [ ] direct mode live gate 必须证明 AgentRequest 经过网络 Runtime Adapter、业务
       validator 和 deterministic ContextPackBuilder；provider smoke 不能替代。
@@ -295,43 +288,50 @@ memory、evidence 或 context projection。
 
 目标：支持不依赖 Hermes Agent 的网络型真实 Agent，但不能降低 Agent 输出控制。
 
-- [ ] 新增 `openai-compatible-network` Runtime Adapter，并实现为 `RuntimeClient`，
+- [x] 新增 `openai-compatible-network` Runtime Adapter，并实现为 `RuntimeClient`，
       不能作为 Gateway helper 或普通 upstream provider helper。
-- [ ] Gateway 启动时根据 `TONGLINGYU_AGENT_RUNTIME_MODE` 选择
-      `HermesRuntimeClient` 或 `OpenAiCompatibleNetworkRuntimeClient`；production
-      `enforced` 禁止 `minimal`。
-- [ ] 新增配置：
+- [x] Gateway 启动时根据 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 选择
+      `HermesRuntimeClient` 或 `OpenAiCompatibleNetworkRuntimeClient`；未设置时从
+      `TONGLINGYU_AGENT_RUNTIME_MODE` fallback；production `enforced` 禁止 `minimal`。
+- [x] 新增配置：
       `AGENT_RUNTIME_OPENAI_BASE_URL`、`AGENT_RUNTIME_OPENAI_API_KEY`、
       `AGENT_RUNTIME_OPENAI_MODEL`、`AGENT_RUNTIME_OPENAI_PROFILE_MODELS`、
       `AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS`、
       `AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS`、
       `AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS`、
-      `AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY`。
-- [ ] `AGENT_RUNTIME_OPENAI_PROFILE_MODELS` 必须覆盖
+      `AGENT_RUNTIME_OPENAI_MAX_TOKENS`、
+      `AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY`、
+      `AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON=true`，以及 provider-specific
+      controlled-output 开关，例如 MiniMax `AGENT_RUNTIME_OPENAI_REASONING_SPLIT=true`。
+- [x] `AGENT_RUNTIME_OPENAI_PROFILE_MODELS` 必须覆盖
       `tonglingyu-question-normalizer` 和 `tonglingyu-conversation-state-writer`；
       缺任一 profile mapping 必须 fail-closed。
-- [ ] Runtime request 必须由 `LlmAgentRequestEnvelope` 派生，包含 request id、
+- [x] Runtime request 必须由 `LlmAgentRequestEnvelope` 派生，包含 request id、
       profile id、input digest、projection digest、schema version、trace id 和
       replay anchor。
-- [ ] Provider payload 只能包含该 profile 的 projection payload 和 JSON schema 指令；
+- [x] Provider payload 只能包含该 profile 的 projection payload 和 JSON schema 指令；
       禁止传完整 Open WebUI history、完整 context pack、raw memory、tool policy、
       admin trace 或 evidence package。
-- [ ] 网络请求必须实现 connect timeout、read timeout、total deadline、
+- [x] 网络请求必须实现 connect timeout、read timeout、total deadline、
       request cancellation、bounded retry with jitter、per-profile concurrency limit
       和 provider unhealthy 窗口。
-- [ ] 429、MiniMax 529 / `overloaded_error`、5xx、auth、DNS、TLS、connection reset、
+- [x] 429、MiniMax 529 / `overloaded_error`、5xx、auth、DNS、TLS、connection reset、
       deadline exceeded、schema invalid 和 safety refusal 必须有不同 error type。
-- [ ] retry 只允许用于 `rate_limited`、`provider_overloaded`、`provider_unavailable`
+- [x] retry 只允许用于 `rate_limited`、`provider_overloaded`、`provider_unavailable`
       和 `connection_error`；schema invalid 只能走 schema repair，repair 后仍必须重新 validator。
-- [ ] Adapter report/audit 必须记录 provider request id、attempt count、latency、usage、
+- [x] Direct provider live probe 必须真实调用 OpenAI-compatible provider，并证明两个内部
+      profile 都能返回可解析 JSON；HTTP 200 但非 JSON 不能视为通过。
+- [x] Adapter report/audit 必须记录 provider request id、attempt count、latency、usage、
       model、error type、input/output digest 和 `secret_values_printed=false`。
-- [ ] API key、raw prompt、raw response body、完整 provider error body 不得进入普通日志、
+- [x] API key、raw prompt、raw response body、完整 provider error body 不得进入普通日志、
       metrics、public response、release report stdout tail 或 saved validator artifact。
-- [ ] Adapter accepted JSON 仍只是候选；`ContextPackBuilder` 只能消费 validator sealed
+- [x] Adapter accepted JSON 仍只是候选；`ContextPackBuilder` 只能消费 validator sealed
       decision，不能消费 adapter parsed JSON。
 - [ ] Contract tests 必须使用 fake/replay network provider 覆盖 pass、timeout、429、
       529 overloaded、5xx、connection error、auth error、schema invalid、repair success、
-      repair failed、forbidden field 和 low confidence。
+      repair failed、forbidden field 和 low confidence。Repo-local adapter tests 已覆盖
+      pass、timeout、429、529 overloaded、5xx、connection error、auth error 和 malformed
+      provider JSON；repair/forbidden/low confidence 仍需 validator 端到端 contract。
 - [ ] Live gate 必须真实调用目标 provider，并分别证明 minimal provider smoke、
       question normalizer direct Agent、conversation state direct Agent、
       malformed output negative case 和 provider-not-called negative case。
@@ -512,16 +512,20 @@ run 内的运行门控，不是分批实现理由。
 
 ### P5B Direct Network Runtime 目标环境接入
 
-- [ ] compose 支持 `TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network`。
-- [ ] compose 支持 `TONGLINGYU_UPSTREAM_API_KEY=${LOCAL_OPENAI_API_KEY}` 或等价 direct
+- [x] compose 支持 `TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network`。
+- [x] compose 支持 `TONGLINGYU_UPSTREAM_API_KEY=${LOCAL_OPENAI_API_KEY}` 或等价 direct
       upstream key 配置，不能继续把普通 answer upstream key 固定为 `HERMES_API_KEY`。
-- [ ] Hermes service 在 direct mode 下必须可选；runtime config validator 不能继续要求
-      Hermes service、Hermes config 或 `AGENT_RUNTIME_HERMES_*`。
-- [ ] gatekeeper `verify-tonglingyu-runtime-config.sh` 必须按 mode 分支校验：
+- [ ] Hermes service 在 direct mode 下必须可选；runtime config validator 已不再要求
+      Hermes config 或 `AGENT_RUNTIME_HERMES_*`，但 compose service 仍需通过 target
+      release run 证明可停用或不被 Gateway Agent runtime 使用。
+- [x] gatekeeper `verify-tonglingyu-runtime-config.sh` 必须按 mode 分支校验：
       `hermes` 校验 Hermes；`openai-compatible-network` 校验 direct network runtime；
       `minimal` 在 production enforced 中失败。
-- [ ] gatekeeper remote deploy 必须在 direct mode 下跳过 Hermes config render/recreate，
-      并运行 direct provider live probe。
+- [x] gatekeeper remote deploy 必须在 direct mode 下跳过 Hermes config render/recreate，
+      不得因为 Hermes 旧配置触发重建。
+- [x] gatekeeper 提供 direct OpenAI-compatible Agent provider live probe；本地已用
+      MiniMax `MiniMax-M2.7` 验证两个内部 profile 都返回可解析 JSON，报告不打印 SK、
+      raw prompt 或 raw provider body。
 - [ ] direct mode release run 必须证明目标环境中 Hermes 容器停止或不被 Gateway Agent
       runtime 使用；否则不能声称“不使用 Hermes Agent”。
 - [ ] Direct live gates 必须覆盖短请求、长上下文请求、并发两个内部 profile、provider 529、

@@ -21,13 +21,14 @@ use futures_util::StreamExt;
 use reqwest::{StatusCode as ReqwestStatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex, sync::Semaphore};
 
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeProfileRegistry {
@@ -1096,6 +1097,533 @@ impl HermesRuntimeClient {
             self.audit_sink.append_runtime_event(failure_event).await?;
         }
         Err(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatibleNetworkRuntimeConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub profile_models: BTreeMap<String, String>,
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    pub total_deadline: Duration,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub max_attempts: usize,
+    pub retry_base_delay: Duration,
+    pub unhealthy_window: Duration,
+    pub max_concurrency: usize,
+    pub response_format_json: bool,
+    pub reasoning_split: Option<bool>,
+}
+
+impl OpenAiCompatibleNetworkRuntimeConfig {
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            base_url: trim_base_url(base_url.into()),
+            api_key: None,
+            model: model.into(),
+            profile_models: BTreeMap::new(),
+            connect_timeout: Duration::from_millis(1500),
+            read_timeout: Duration::from_millis(5000),
+            total_deadline: Duration::from_millis(8000),
+            max_tokens: 768,
+            temperature: 0.0,
+            max_attempts: 2,
+            retry_base_delay: Duration::from_millis(120),
+            unhealthy_window: Duration::from_secs(5),
+            max_concurrency: 2,
+            response_format_json: true,
+            reasoning_split: None,
+        }
+    }
+
+    pub fn from_env() -> CoreResult<Self> {
+        let base_url = env_nonempty("AGENT_RUNTIME_OPENAI_BASE_URL")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_BASE_URL"))
+            .or_else(|| env_nonempty("OPENAI_BASE_URL"))
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "AGENT_RUNTIME_OPENAI_BASE_URL must be configured",
+                )
+            })?;
+        let model = env_nonempty("AGENT_RUNTIME_OPENAI_MODEL")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_MODEL"))
+            .or_else(|| env_nonempty("OPENAI_MODEL"))
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "AGENT_RUNTIME_OPENAI_MODEL must be configured",
+                )
+            })?;
+        let mut config = Self::new(base_url, model);
+        config.api_key = env_nonempty("AGENT_RUNTIME_OPENAI_API_KEY")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_API_KEY"))
+            .or_else(|| env_nonempty("OPENAI_API_KEY"));
+        config.profile_models = env_nonempty("AGENT_RUNTIME_OPENAI_PROFILE_MODELS")
+            .map(|value| parse_profile_models(&value))
+            .unwrap_or_default();
+        config.connect_timeout = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS",
+            config.connect_timeout.as_millis() as u64,
+        ));
+        config.read_timeout = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS",
+            config.read_timeout.as_millis() as u64,
+        ));
+        config.total_deadline = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS",
+            config.total_deadline.as_millis() as u64,
+        ));
+        config.max_tokens = env_u64("AGENT_RUNTIME_OPENAI_MAX_TOKENS", config.max_tokens as u64)
+            .min(u32::MAX as u64) as u32;
+        config.temperature = env_f32("AGENT_RUNTIME_OPENAI_TEMPERATURE", config.temperature);
+        config.max_attempts =
+            env_usize("AGENT_RUNTIME_OPENAI_MAX_ATTEMPTS", config.max_attempts).max(1);
+        config.retry_base_delay = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_RETRY_BASE_DELAY_MS",
+            config.retry_base_delay.as_millis() as u64,
+        ));
+        config.unhealthy_window = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_UNHEALTHY_WINDOW_MS",
+            config.unhealthy_window.as_millis() as u64,
+        ));
+        config.max_concurrency = env_usize(
+            "AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY",
+            config.max_concurrency,
+        )
+        .max(1);
+        config.response_format_json = env_bool(
+            "AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON",
+            config.response_format_json,
+        );
+        config.reasoning_split = env_optional_bool("AGENT_RUNTIME_OPENAI_REASONING_SPLIT");
+        if config.api_key.as_deref().unwrap_or_default().is_empty() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Unauthorized,
+                "AGENT_RUNTIME_OPENAI_API_KEY must be configured",
+            ));
+        }
+        Ok(config)
+    }
+
+    pub fn model_for_profile(&self, runtime_profile: &str) -> String {
+        self.profile_models
+            .get(runtime_profile)
+            .or_else(|| {
+                runtime_profile
+                    .rsplit_once(':')
+                    .and_then(|(_, suffix)| self.profile_models.get(suffix))
+            })
+            .cloned()
+            .unwrap_or_else(|| self.model.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct OpenAiCompatibleNetworkRuntimeClient {
+    config: OpenAiCompatibleNetworkRuntimeConfig,
+    client: reqwest::Client,
+    registry: RuntimeProfileRegistry,
+    audit_sink: Arc<dyn RuntimeAuditSink>,
+    default_limiter: Arc<Semaphore>,
+    profile_limiters: Arc<BTreeMap<String, Arc<Semaphore>>>,
+    unhealthy_until: Arc<Mutex<Option<Instant>>>,
+}
+
+impl OpenAiCompatibleNetworkRuntimeClient {
+    pub fn new(config: OpenAiCompatibleNetworkRuntimeConfig) -> CoreResult<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(config.connect_timeout)
+            .read_timeout(config.read_timeout)
+            .timeout(config.total_deadline)
+            .build()
+            .map_err(runtime_error)?;
+        let default_limiter = Arc::new(Semaphore::new(config.max_concurrency));
+        let profile_limiters = config
+            .profile_models
+            .keys()
+            .map(|profile| {
+                (
+                    profile.clone(),
+                    Arc::new(Semaphore::new(config.max_concurrency)),
+                )
+            })
+            .collect();
+        Ok(Self {
+            config,
+            client,
+            registry: RuntimeProfileRegistry::default(),
+            audit_sink: Arc::new(NoopRuntimeAuditSink),
+            default_limiter,
+            profile_limiters: Arc::new(profile_limiters),
+            unhealthy_until: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn from_env() -> CoreResult<Self> {
+        let mut client = Self::new(OpenAiCompatibleNetworkRuntimeConfig::from_env()?)?;
+        if let Ok(path) = std::env::var("AGENT_RUNTIME_AUDIT_LOG")
+            && !path.trim().is_empty()
+        {
+            client.audit_sink = Arc::new(JsonlRuntimeAuditSink::new(path));
+        }
+        Ok(client)
+    }
+
+    pub fn with_profile_registry(mut self, registry: RuntimeProfileRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn RuntimeAuditSink>) -> Self {
+        self.audit_sink = audit_sink;
+        self
+    }
+
+    async fn execute_profile_step_inner(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<RuntimeOutput> {
+        self.ensure_provider_healthy().await?;
+        let limiter = self
+            .profile_limiters
+            .get(&input.profile_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_limiter.clone());
+        let _permit = limiter
+            .acquire_owned()
+            .await
+            .map_err(|_| runtime_failure("OpenAI-compatible Runtime concurrency limiter closed"))?;
+
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&input.profile_id));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_profile_contract_payload(&input),
+            &input.requested_tools,
+            &input.profile_id,
+        )?;
+        let mut effective_contract = contract.clone();
+        let mut requested_tools = input.requested_tools.clone();
+        if let (Some(contract), Some(step)) =
+            (effective_contract.as_mut(), input.runtime_step.as_ref())
+        {
+            if step.tool_policy.has_rules() {
+                requested_tools = step
+                    .tool_policy
+                    .effective_tools_for_request(&input.requested_tools);
+                step.tool_policy
+                    .validate_requested_tools(&requested_tools)?;
+                contract.tool_policy = step.tool_policy.clone();
+            }
+            if !json_schema_is_empty(&step.output_contract) {
+                contract.output_schema = step.output_contract.clone();
+            }
+        }
+        let started = Instant::now();
+        let model = self.config.model_for_profile(&input.profile_id);
+        let (content, metadata) = self
+            .chat_completion_with_retry(&input, &model, &requested_tools, started)
+            .await?;
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: content,
+                result_ref: Some(format!(
+                    "openai-compatible-network://profiles/{}/{}",
+                    input.profile_id, input.trace_id
+                )),
+                messages: Vec::new(),
+                metadata,
+            },
+            effective_contract.as_ref(),
+            &requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn chat_completion_with_retry(
+        &self,
+        input: &RuntimeProfileInput,
+        model: &str,
+        requested_tools: &[String],
+        started: Instant,
+    ) -> CoreResult<(String, Value)> {
+        let mut last_error_type = "provider_unavailable";
+        for attempt in 1..=self.config.max_attempts {
+            if started.elapsed() >= self.config.total_deadline {
+                self.mark_provider_unhealthy().await;
+                return Err(openai_runtime_error(
+                    "deadline_exceeded",
+                    "OpenAI-compatible Runtime deadline exceeded",
+                ));
+            }
+            match self
+                .send_chat_completion(input, model, requested_tools, attempt, started)
+                .await
+            {
+                Ok(output) => {
+                    self.clear_provider_unhealthy().await;
+                    return Ok(output);
+                }
+                Err(error) => {
+                    last_error_type = error.error_type;
+                    if error.mark_unhealthy {
+                        self.mark_provider_unhealthy().await;
+                    }
+                    if attempt >= self.config.max_attempts || !error.retryable {
+                        return Err(openai_runtime_error(error.error_type, error.safe_message));
+                    }
+                    let delay = retry_delay(
+                        self.config.retry_base_delay,
+                        attempt,
+                        &input.trace_id,
+                        &input.profile_id,
+                    );
+                    if started.elapsed().saturating_add(delay) >= self.config.total_deadline {
+                        return Err(openai_runtime_error(
+                            "deadline_exceeded",
+                            "OpenAI-compatible Runtime deadline exceeded",
+                        ));
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        Err(openai_runtime_error(
+            last_error_type,
+            "OpenAI-compatible Runtime provider unavailable",
+        ))
+    }
+
+    async fn send_chat_completion(
+        &self,
+        input: &RuntimeProfileInput,
+        model: &str,
+        requested_tools: &[String],
+        attempt: usize,
+        started: Instant,
+    ) -> Result<(String, Value), OpenAiRuntimeAttemptError> {
+        let request = OpenAiCompatibleChatCompletionRequest {
+            model: model.to_string(),
+            messages: input
+                .messages
+                .iter()
+                .map(|message| OpenAiCompatibleChatMessage {
+                    role: message.role.clone(),
+                    content: message.content.clone(),
+                })
+                .collect(),
+            stream: false,
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+            response_format: self
+                .config
+                .response_format_json
+                .then(|| json!({"type": "json_object"})),
+            reasoning_split: self.config.reasoning_split,
+        };
+        let url = openai_chat_url(&self.config.base_url).map_err(|_| {
+            OpenAiRuntimeAttemptError::fatal(
+                "invalid_runtime_url",
+                "OpenAI-compatible Runtime URL was invalid",
+            )
+        })?;
+        let mut builder = self
+            .client
+            .post(url)
+            .header("x-agent-trace-id", &input.trace_id)
+            .json(&request);
+        if let Some(api_key) = &self.config.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(classify_openai_reqwest_error)?;
+        let status = response.status();
+        let response_provider_request_id = provider_request_id(response.headers());
+        let body_text = response
+            .text()
+            .await
+            .map_err(classify_openai_reqwest_error)?;
+        if !status.is_success() {
+            return Err(classify_openai_http_error(status, &body_text));
+        }
+        let raw_response_sha256 = sha256_hex(&body_text);
+        let body = serde_json::from_str::<OpenAiCompatibleChatCompletionResponse>(&body_text)
+            .map_err(|_| {
+                OpenAiRuntimeAttemptError::fatal(
+                    "provider_malformed_json",
+                    "OpenAI-compatible Runtime response was malformed",
+                )
+            })?;
+        let provider_request_id = response_provider_request_id.or_else(|| body.id.clone());
+        let choice = body.choices.first().ok_or_else(|| {
+            OpenAiRuntimeAttemptError::fatal(
+                "provider_malformed_json",
+                "OpenAI-compatible Runtime response did not include a choice",
+            )
+        })?;
+        if choice
+            .message
+            .refusal
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(OpenAiRuntimeAttemptError::fatal(
+                "safety_refusal",
+                "OpenAI-compatible Runtime returned a safety refusal",
+            ));
+        }
+        let content = choice
+            .message
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                OpenAiRuntimeAttemptError::fatal(
+                    "provider_empty_content",
+                    "OpenAI-compatible Runtime response did not include assistant content",
+                )
+            })?
+            .to_string();
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let input_digest = input
+            .metadata
+            .get("input_digest")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let projection_digest = input
+            .metadata
+            .get("projection_digest")
+            .cloned()
+            .unwrap_or(Value::Null);
+        metrics::counter!(
+            metric_names::RUNTIME_CALL_TOTAL,
+            "runtime" => "openai_compatible_network"
+        )
+        .increment(1);
+        metrics::histogram!(
+            metric_names::RUNTIME_DURATION_SECONDS,
+            "runtime" => "openai_compatible_network"
+        )
+        .record(started.elapsed().as_secs_f64());
+        let content_json_digest = serde_json::from_str::<Value>(&content)
+            .ok()
+            .map(|value| sha256_json(&value));
+        Ok((
+            content,
+            json!({
+                "runtime": "openai-compatible-network",
+                "runtime_adapter": "openai-compatible-network",
+                "runtime_profile": &input.profile_id,
+                "provider_kind": "openai_compatible",
+                "input_digest": input_digest,
+                "projection_digest": projection_digest,
+                "base_url_host": base_url_host(&self.config.base_url),
+                "provider_request_id": provider_request_id,
+                "provider_model": body.model.unwrap_or_else(|| model.to_string()),
+                "finish_reason": choice.finish_reason.clone().unwrap_or_else(|| "unknown".to_string()),
+                "usage": body.usage.unwrap_or_else(|| json!({})),
+                "latency_ms": latency_ms,
+                "attempt_count": attempt,
+                "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
+                "parsed_json_sha256": content_json_digest.map(|value| format!("sha256:{value}")),
+                "tool_calling_supported": false,
+                "requested_tools_exposed_as_text": !requested_tools.is_empty(),
+                "requested_tool_count": requested_tools.len(),
+                "trace_id": &input.trace_id,
+                "read_only": true,
+                "secret_values_printed": false,
+            }),
+        ))
+    }
+
+    async fn ensure_provider_healthy(&self) -> CoreResult<()> {
+        let mut guard = self.unhealthy_until.lock().await;
+        if let Some(deadline) = *guard {
+            if deadline <= Instant::now() {
+                *guard = None;
+                return Ok(());
+            }
+            return Err(openai_runtime_error(
+                "provider_unhealthy",
+                "OpenAI-compatible Runtime provider is temporarily unhealthy",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn mark_provider_unhealthy(&self) {
+        if self.config.unhealthy_window.is_zero() {
+            return;
+        }
+        let mut guard = self.unhealthy_until.lock().await;
+        *guard = Some(Instant::now() + self.config.unhealthy_window);
+    }
+
+    async fn clear_provider_unhealthy(&self) {
+        let mut guard = self.unhealthy_until.lock().await;
+        *guard = None;
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for OpenAiCompatibleNetworkRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "OpenAI-compatible Runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "OpenAI-compatible Runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let profile_id = input.profile_id.clone();
+        let trace_id = input.trace_id.clone();
+        let result = self.execute_profile_step_inner(input).await;
+        let event = match &result {
+            Ok(output) => json!({
+                "event": "runtime_profile_step",
+                "runtime_adapter": "openai-compatible-network",
+                "profile_id": profile_id,
+                "trace_id": trace_id,
+                "status": "accepted_json",
+                "result_ref": output.result_ref,
+                "provider_request_id": output.metadata.get("provider_request_id").cloned().unwrap_or(Value::Null),
+                "provider_model": output.metadata.get("provider_model").cloned().unwrap_or(Value::Null),
+                "latency_ms": output.metadata.get("latency_ms").cloned().unwrap_or(Value::Null),
+                "attempt_count": output.metadata.get("attempt_count").cloned().unwrap_or(Value::Null),
+                "input_digest": output.metadata.get("input_digest").cloned().unwrap_or(Value::Null),
+                "raw_response_sha256": output.metadata.get("raw_response_sha256").cloned().unwrap_or(Value::Null),
+                "secret_values_printed": false,
+            }),
+            Err(error) => json!({
+                "event": "runtime_profile_step",
+                "runtime_adapter": "openai-compatible-network",
+                "profile_id": profile_id,
+                "trace_id": trace_id,
+                "status": "provider_failed",
+                "error_code": error.code().as_str(),
+                "error_type": openai_error_type_from_message(&error.to_string()),
+                "secret_values_printed": false,
+            }),
+        };
+        let _ = self.audit_sink.append_runtime_event(event).await;
+        result
     }
 }
 
@@ -3213,6 +3741,294 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn env_optional_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().and_then(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(matches!(normalized.as_str(), "1" | "true" | "yes" | "on"))
+        }
+    })
+}
+
+fn openai_chat_url(base_url: &str) -> CoreResult<Url> {
+    Url::parse(&format!("{base_url}/chat/completions"))
+        .map_err(|_| runtime_failure("invalid OpenAI-compatible Runtime URL"))
+}
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn sha256_json(value: &Value) -> String {
+    let encoded = serde_json::to_vec(value).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+fn base_url_host(base_url: &str) -> String {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    [
+        "x-request-id",
+        "x-minimax-request-id",
+        "x-trace-id",
+        "cf-ray",
+    ]
+    .iter()
+    .find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn retry_delay(base: Duration, attempt: usize, trace_id: &str, profile_id: &str) -> Duration {
+    let digest = Sha256::digest(format!("{trace_id}:{profile_id}:{attempt}").as_bytes());
+    let jitter_ms = u64::from(digest[0] % 19);
+    base.saturating_mul(attempt as u32)
+        .saturating_add(Duration::from_millis(jitter_ms))
+}
+
+fn openai_runtime_error(error_type: &str, safe_message: &str) -> AgentCoreError {
+    let code = match error_type {
+        "auth_error" => ErrorCode::Unauthorized,
+        "rate_limited" => ErrorCode::RateLimited,
+        "provider_overloaded"
+        | "provider_unavailable"
+        | "provider_unhealthy"
+        | "deadline_exceeded"
+        | "connection_error"
+        | "tls_error"
+        | "dns_error"
+        | "provider_malformed_json"
+        | "provider_empty_content"
+        | "safety_refusal" => ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
+    };
+    AgentCoreError::coded(code, format!("{safe_message} ({error_type})"))
+}
+
+fn openai_error_type_from_message(message: &str) -> &'static str {
+    for error_type in [
+        "auth_error",
+        "rate_limited",
+        "provider_overloaded",
+        "provider_unavailable",
+        "provider_unhealthy",
+        "deadline_exceeded",
+        "connection_error",
+        "tls_error",
+        "dns_error",
+        "provider_malformed_json",
+        "provider_empty_content",
+        "safety_refusal",
+        "invalid_runtime_url",
+    ] {
+        if message.contains(error_type) {
+            return error_type;
+        }
+    }
+    "provider_failed"
+}
+
+#[derive(Debug)]
+struct OpenAiRuntimeAttemptError {
+    error_type: &'static str,
+    safe_message: &'static str,
+    retryable: bool,
+    mark_unhealthy: bool,
+}
+
+impl OpenAiRuntimeAttemptError {
+    fn retryable(error_type: &'static str, safe_message: &'static str) -> Self {
+        Self {
+            error_type,
+            safe_message,
+            retryable: true,
+            mark_unhealthy: matches!(
+                error_type,
+                "provider_overloaded" | "provider_unavailable" | "connection_error"
+            ),
+        }
+    }
+
+    fn fatal(error_type: &'static str, safe_message: &'static str) -> Self {
+        Self {
+            error_type,
+            safe_message,
+            retryable: false,
+            mark_unhealthy: matches!(
+                error_type,
+                "provider_overloaded" | "provider_unavailable" | "deadline_exceeded"
+            ),
+        }
+    }
+}
+
+fn classify_openai_reqwest_error(error: reqwest::Error) -> OpenAiRuntimeAttemptError {
+    if error.is_timeout() {
+        metrics::counter!(
+            metric_names::RUNTIME_TIMEOUT_TOTAL,
+            "runtime" => "openai_compatible_network"
+        )
+        .increment(1);
+        return OpenAiRuntimeAttemptError::retryable(
+            "deadline_exceeded",
+            "OpenAI-compatible Runtime deadline exceeded",
+        );
+    }
+    if error.is_connect() {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("dns") {
+            return OpenAiRuntimeAttemptError::fatal(
+                "dns_error",
+                "OpenAI-compatible Runtime DNS lookup failed",
+            );
+        }
+        if message.contains("tls") || message.contains("certificate") {
+            return OpenAiRuntimeAttemptError::fatal(
+                "tls_error",
+                "OpenAI-compatible Runtime TLS handshake failed",
+            );
+        }
+        return OpenAiRuntimeAttemptError::retryable(
+            "connection_error",
+            "OpenAI-compatible Runtime connection failed",
+        );
+    }
+    OpenAiRuntimeAttemptError::retryable(
+        "connection_error",
+        "OpenAI-compatible Runtime request failed",
+    )
+}
+
+fn classify_openai_http_error(
+    status: ReqwestStatusCode,
+    body_text: &str,
+) -> OpenAiRuntimeAttemptError {
+    let lower = body_text.to_ascii_lowercase();
+    match status.as_u16() {
+        401 | 403 => OpenAiRuntimeAttemptError::fatal(
+            "auth_error",
+            "OpenAI-compatible Runtime authentication failed",
+        ),
+        429 => OpenAiRuntimeAttemptError::retryable(
+            "rate_limited",
+            "OpenAI-compatible Runtime rate limited request",
+        ),
+        529 => OpenAiRuntimeAttemptError::retryable(
+            "provider_overloaded",
+            "OpenAI-compatible Runtime provider overloaded",
+        ),
+        500..=599 if lower.contains("overloaded") => OpenAiRuntimeAttemptError::retryable(
+            "provider_overloaded",
+            "OpenAI-compatible Runtime provider overloaded",
+        ),
+        500..=599 => OpenAiRuntimeAttemptError::retryable(
+            "provider_unavailable",
+            "OpenAI-compatible Runtime provider unavailable",
+        ),
+        _ if lower.contains("refusal") || lower.contains("safety") => {
+            OpenAiRuntimeAttemptError::fatal(
+                "safety_refusal",
+                "OpenAI-compatible Runtime returned a safety refusal",
+            )
+        }
+        _ => OpenAiRuntimeAttemptError::fatal(
+            "provider_unavailable",
+            "OpenAI-compatible Runtime provider unavailable",
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCompatibleChatCompletionRequest {
+    model: String,
+    messages: Vec<OpenAiCompatibleChatMessage>,
+    stream: bool,
+    temperature: f32,
+    max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_format: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_split: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCompatibleChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleChatCompletionResponse {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    choices: Vec<OpenAiCompatibleChoice>,
+    #[serde(default)]
+    usage: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleChoice {
+    message: OpenAiCompatibleAssistantMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleAssistantMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    refusal: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HermesChatCompletionRequest {
     model: String,
@@ -3442,6 +4258,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
+    type SeenOpenAiRequest = (Arc<Mutex<Option<Value>>>, Arc<Mutex<Option<String>>>);
 
     #[test]
     fn summarize_json_omits_values_and_object_keys() {
@@ -3668,6 +4485,47 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    fn openai_test_runtime_config(
+        base_url: String,
+        max_attempts: usize,
+    ) -> OpenAiCompatibleNetworkRuntimeConfig {
+        OpenAiCompatibleNetworkRuntimeConfig {
+            base_url,
+            api_key: Some("test-key".to_string()),
+            model: "direct-test-model".to_string(),
+            profile_models: BTreeMap::new(),
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
+            total_deadline: Duration::from_millis(500),
+            max_tokens: 128,
+            temperature: 0.0,
+            max_attempts,
+            retry_base_delay: Duration::from_millis(1),
+            unhealthy_window: Duration::from_millis(10),
+            max_concurrency: 1,
+            response_format_json: false,
+            reasoning_split: None,
+        }
+    }
+
+    fn openai_test_profile_input() -> RuntimeProfileInput {
+        RuntimeProfileInput {
+            profile_id: "direct-test-profile".to_string(),
+            messages: vec![RuntimeProfileMessage::new(
+                "user",
+                "{\"normalized_question\":\"secret prompt should not leak\"}",
+            )],
+            metadata: json!({
+                "input_digest": "sha256:test-input",
+                "projection_digest": "sha256:test-projection"
+            }),
+            profile_contract: None,
+            runtime_step: None,
+            requested_tools: Vec::new(),
+            trace_id: new_trace_id(),
+        }
     }
 
     #[tokio::test]
@@ -4017,6 +4875,371 @@ mod tests {
         assert_eq!(output.result_summary, "runtime ok");
         assert_eq!(output.metadata["runtime"], "hermes");
         assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_executes_profile_step_with_profile_model() {
+        let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let seen_trace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State((seen, seen_trace)): State<SeenOpenAiRequest>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        *seen.lock().unwrap() = Some(body.clone());
+                        *seen_trace.lock().unwrap() = headers
+                            .get("x-agent-trace-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        assert!(headers.get("authorization").is_some());
+                        Json(json!({
+                            "id": "provider-request-1",
+                            "model": "direct-profile-model",
+                            "choices": [
+                                {
+                                    "finish_reason": "stop",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "{\"schema_version\":\"v1\",\"ok\":true}"
+                                    }
+                                }
+                            ],
+                            "usage": {"prompt_tokens": 11, "completion_tokens": 7}
+                        }))
+                    },
+                ),
+            )
+            .with_state((seen.clone(), seen_trace.clone()));
+        let mut profile_models = BTreeMap::new();
+        profile_models.insert(
+            "test-direct-profile".to_string(),
+            "direct-profile-model".to_string(),
+        );
+        let runtime =
+            OpenAiCompatibleNetworkRuntimeClient::new(OpenAiCompatibleNetworkRuntimeConfig {
+                base_url: spawn_server(app).await,
+                api_key: Some("test-key".to_string()),
+                model: "fallback-model".to_string(),
+                profile_models,
+                connect_timeout: Duration::from_millis(500),
+                read_timeout: Duration::from_millis(500),
+                total_deadline: Duration::from_secs(2),
+                max_tokens: 128,
+                temperature: 0.0,
+                max_attempts: 1,
+                retry_base_delay: Duration::from_millis(1),
+                unhealthy_window: Duration::from_millis(0),
+                max_concurrency: 1,
+                response_format_json: true,
+                reasoning_split: Some(true),
+            })
+            .unwrap();
+        let trace_id = new_trace_id();
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-direct-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "return json"),
+                    RuntimeProfileMessage::new("user", "{\"input\":true}"),
+                ],
+                metadata: json!({
+                    "input_digest": "sha256:test-input",
+                    "projection_digest": "sha256:test-projection"
+                }),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: trace_id.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(output.metadata["runtime"], "openai-compatible-network");
+        assert_eq!(
+            output.metadata["runtime_adapter"],
+            "openai-compatible-network"
+        );
+        assert_eq!(output.metadata["provider_model"], "direct-profile-model");
+        assert_eq!(output.metadata["input_digest"], json!("sha256:test-input"));
+        assert_eq!(
+            output.metadata["projection_digest"],
+            json!("sha256:test-projection")
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(1));
+        assert_eq!(output.metadata["secret_values_printed"], json!(false));
+        assert_eq!(output.metadata["tool_calling_supported"], json!(false));
+        assert_eq!(
+            output.metadata["requested_tools_exposed_as_text"],
+            json!(true)
+        );
+        assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+        let seen_body = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen_body["model"], json!("direct-profile-model"));
+        assert_eq!(seen_body["stream"], json!(false));
+        assert_eq!(seen_body["response_format"]["type"], json!("json_object"));
+        assert_eq!(seen_body["reasoning_split"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_529_overloaded() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>| async move {
+                        let call = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        if call == 1 {
+                            (
+                                StatusCode::from_u16(529).unwrap(),
+                                Json(json!({
+                                    "error": {
+                                        "type": "overloaded_error",
+                                        "message": "provider overloaded"
+                                    }
+                                })),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(json!({
+                                    "model": "retry-model",
+                                    "choices": [
+                                        {
+                                            "finish_reason": "stop",
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                            }
+                                        }
+                                    ]
+                                })),
+                            )
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let runtime =
+            OpenAiCompatibleNetworkRuntimeClient::new(OpenAiCompatibleNetworkRuntimeConfig {
+                base_url: spawn_server(app).await,
+                api_key: Some("test-key".to_string()),
+                model: "retry-model".to_string(),
+                profile_models: BTreeMap::new(),
+                connect_timeout: Duration::from_millis(500),
+                read_timeout: Duration::from_millis(500),
+                total_deadline: Duration::from_secs(2),
+                max_tokens: 128,
+                temperature: 0.0,
+                max_attempts: 2,
+                retry_base_delay: Duration::from_millis(1),
+                unhealthy_window: Duration::from_millis(100),
+                max_concurrency: 1,
+                response_format_json: false,
+                reasoning_split: None,
+            })
+            .unwrap();
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "retry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "{}")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"retried\":true}"
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(2));
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_429_and_5xx_without_raw_error_body() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let calls = Arc::new(Mutex::new(0usize));
+            let app = Router::new()
+                .route(
+                    "/chat/completions",
+                    post(
+                        |State((calls, status)): State<(Arc<Mutex<usize>>, StatusCode)>| async move {
+                            let call = {
+                                let mut calls = calls.lock().unwrap();
+                                *calls += 1;
+                                *calls
+                            };
+                            if call == 1 {
+                                (
+                                    status,
+                                    Json(json!({
+                                        "error": {
+                                            "message": "raw upstream body must not leak"
+                                        }
+                                    })),
+                                )
+                            } else {
+                                (
+                                    StatusCode::OK,
+                                    Json(json!({
+                                        "model": "direct-test-model",
+                                        "choices": [
+                                            {
+                                                "finish_reason": "stop",
+                                                "message": {
+                                                    "role": "assistant",
+                                                    "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                                }
+                                            }
+                                        ]
+                                    })),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .with_state((calls.clone(), status));
+            let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+                spawn_server(app).await,
+                2,
+            ))
+            .unwrap();
+
+            let output = runtime
+                .execute_profile_step(openai_test_profile_input())
+                .await
+                .unwrap();
+
+            assert_eq!(
+                output.result_summary,
+                "{\"schema_version\":\"v1\",\"retried\":true}"
+            );
+            assert_eq!(output.metadata["attempt_count"], json!(2));
+            assert_eq!(*calls.lock().unwrap(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_auth_error_is_not_retried_or_leaked() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
+                    *calls.lock().unwrap() += 1;
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "raw-provider-secret-body should stay out of errors",
+                    )
+                }),
+            )
+            .with_state(calls.clone());
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            3,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::Unauthorized);
+        assert!(error.to_string().contains("auth_error"));
+        assert!(!error.to_string().contains("raw-provider-secret-body"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_rejects_malformed_json_without_leaking_body() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (StatusCode::OK, "raw malformed provider response") }),
+        );
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            1,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("provider_malformed_json"));
+        assert!(
+            !error
+                .to_string()
+                .contains("raw malformed provider response")
+        );
+        assert!(!error.to_string().contains("secret prompt should not leak"));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_maps_timeout_without_leaking_prompt() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "too late"}}
+                    ]
+                }))
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.read_timeout = Duration::from_millis(5);
+        config.total_deadline = Duration::from_millis(20);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("deadline_exceeded"));
+        assert!(!error.to_string().contains("secret prompt should not leak"));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_maps_connection_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            format!("http://{addr}"),
+            1,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("connection_error"));
     }
 
     #[tokio::test]

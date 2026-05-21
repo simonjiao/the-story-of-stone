@@ -1,5 +1,8 @@
 use agent_core::RuntimeClient;
-use agent_runtime::{HermesRuntimeClient, RuntimeProfileRegistry};
+use agent_runtime::{
+    HermesRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
+    OpenAiCompatibleNetworkRuntimeConfig, RuntimeProfileRegistry,
+};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
@@ -595,6 +598,7 @@ struct AppState {
     retention_days: u32,
     profiles: InternalProfiles,
     llm_agent_runtime: Arc<dyn RuntimeClient>,
+    llm_agent_runtime_mode: String,
     started_at: String,
 }
 
@@ -604,6 +608,81 @@ struct InternalProfiles {
     text: String,
     commentary: String,
     reviewer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayLlmAgentRuntimeMode {
+    Hermes,
+    OpenAiCompatibleNetwork,
+}
+
+impl GatewayLlmAgentRuntimeMode {
+    fn from_env() -> Result<Self> {
+        let raw = std::env::var("TONGLINGYU_LLM_AGENT_RUNTIME_MODE")
+            .ok()
+            .or_else(|| std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE").ok())
+            .unwrap_or_else(|| "hermes".to_string());
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "hermes" => Ok(Self::Hermes),
+            "openai-compatible-network" | "openai_compatible_network" => {
+                Ok(Self::OpenAiCompatibleNetwork)
+            }
+            "minimal" => Err(anyhow!(
+                "TONGLINGYU_LLM_AGENT_RUNTIME_MODE=minimal is not allowed for enforced LLM Agent"
+            )),
+            other => Err(anyhow!(
+                "unsupported TONGLINGYU_LLM_AGENT_RUNTIME_MODE={other}"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hermes => "hermes",
+            Self::OpenAiCompatibleNetwork => "openai-compatible-network",
+        }
+    }
+}
+
+fn build_llm_agent_runtime() -> Result<(Arc<dyn RuntimeClient>, String)> {
+    let registry = RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts());
+    let mode = GatewayLlmAgentRuntimeMode::from_env()?;
+    match mode {
+        GatewayLlmAgentRuntimeMode::Hermes => Ok((
+            Arc::new(HermesRuntimeClient::from_env()?.with_profile_registry(registry)),
+            mode.as_str().to_string(),
+        )),
+        GatewayLlmAgentRuntimeMode::OpenAiCompatibleNetwork => {
+            let config = OpenAiCompatibleNetworkRuntimeConfig::from_env()?;
+            ensure_llm_agent_openai_profile_models(&config.profile_models)?;
+            Ok((
+                Arc::new(
+                    OpenAiCompatibleNetworkRuntimeClient::new(config)?
+                        .with_profile_registry(registry),
+                ),
+                mode.as_str().to_string(),
+            ))
+        }
+    }
+}
+
+fn ensure_llm_agent_openai_profile_models(profile_models: &BTreeMap<String, String>) -> Result<()> {
+    for profile in [
+        QUESTION_NORMALIZER_PROFILE_ID,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+    ] {
+        if profile_models
+            .get(profile)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Err(anyhow!(
+                "AGENT_RUNTIME_OPENAI_PROFILE_MODELS must map {profile}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1702,9 +1781,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         let report = prune_gateway_and_runtime_data(&args.db, args.retention_days, false)?;
         tracing::info!(retention_days = args.retention_days, %report, "pruned tonglingyu runtime data");
     }
-    let llm_agent_runtime = HermesRuntimeClient::from_env()?.with_profile_registry(
-        RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts()),
-    );
+    let (llm_agent_runtime, llm_agent_runtime_mode) = build_llm_agent_runtime()?;
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
@@ -1733,7 +1810,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
             commentary: args.profile_commentary,
             reviewer: args.profile_reviewer,
         },
-        llm_agent_runtime: Arc::new(llm_agent_runtime),
+        llm_agent_runtime,
+        llm_agent_runtime_mode,
         started_at: now_rfc3339(),
     });
     if args.memory_collector_background_enabled {
@@ -5666,6 +5744,11 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             "agent_runtime": {
                 "mode": agent_runtime_mode.as_str(),
                 "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
+            "llm_agent_runtime": {
+                "mode": &state.llm_agent_runtime_mode,
+                "mode_env": "TONGLINGYU_LLM_AGENT_RUNTIME_MODE",
+                "fallback_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
             },
             "rate_limit": {
                 "public_per_minute": state.rate_limit_per_minute,
@@ -9867,6 +9950,11 @@ fn load_metrics(state: &AppState) -> Result<Value> {
                 "mode": agent_runtime_mode.as_str(),
                 "mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
             },
+            "llm_agent_runtime": {
+                "mode": &state.llm_agent_runtime_mode,
+                "mode_env": "TONGLINGYU_LLM_AGENT_RUNTIME_MODE",
+                "fallback_mode_env": "TONGLINGYU_AGENT_RUNTIME_MODE",
+            },
         },
         "security": {
             "gateway_key_count": state.gateway_api_keys.len(),
@@ -9942,8 +10030,15 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
     lines.push(format!(
-        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
-        bounded_metric_enum_label(agent_runtime_mode.as_str(), &["minimal", "hermes"]),
+        "tonglingyu_gateway_info{{agent_runtime_mode=\"{}\",llm_agent_runtime_mode=\"{}\",rate_limit_per_minute=\"{}\",max_body_bytes=\"{}\"}} 1",
+        bounded_metric_enum_label(
+            agent_runtime_mode.as_str(),
+            &["minimal", "hermes", "openai-compatible-network"]
+        ),
+        bounded_metric_enum_label(
+            &state.llm_agent_runtime_mode,
+            &["hermes", "openai-compatible-network", "minimal-test"]
+        ),
         state.rate_limit_per_minute,
         state.max_body_bytes,
     ));
@@ -10492,6 +10587,7 @@ mod tests {
                     RuntimeProfileRegistry::new(tonglingyu_llm_agent_profile_contracts()),
                 ),
             ),
+            llm_agent_runtime_mode: "minimal-test".to_string(),
             started_at: now_rfc3339(),
         }
     }
