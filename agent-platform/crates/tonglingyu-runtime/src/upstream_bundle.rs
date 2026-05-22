@@ -202,6 +202,23 @@ pub(crate) fn extract_upstream_bundle_draft(
             ..rejected_bundle("json", Some("source_scope_policy_mismatch"))
         };
     }
+    let coverage_status = object
+        .get("coverage_assessment")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let evidence_hint_count = object
+        .get("evidence_hints")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    let retrieval_repair_recommended = object
+        .get("retrieval_repair")
+        .and_then(|value| value.get("recommended"))
+        .and_then(Value::as_bool);
+    let out_of_scope_hint_count = object
+        .get("out_of_scope_hints")
+        .and_then(Value::as_array)
+        .map(Vec::len);
     let Some(draft_candidate) = object.get("draft_candidate").and_then(Value::as_object) else {
         return UpstreamBundleDraftExtraction {
             package_id,
@@ -269,29 +286,32 @@ pub(crate) fn extract_upstream_bundle_draft(
             ..rejected_bundle("json", Some("draft_uses_unscoped_later_forty"))
         };
     }
+    if coverage_status.as_deref() != Some("passed") {
+        let rejected_reason = if coverage_status.is_some() {
+            "coverage_assessment_not_passed"
+        } else {
+            "coverage_assessment_status_missing"
+        };
+        return UpstreamBundleDraftExtraction {
+            package_id: candidate_package_id,
+            claim_statement_count,
+            coverage_status,
+            evidence_hint_count,
+            retrieval_repair_recommended,
+            out_of_scope_hint_count,
+            ..rejected_bundle("json", Some(rejected_reason))
+        };
+    }
     UpstreamBundleDraftExtraction {
         draft_answer,
         result_format: "json",
         package_id: candidate_package_id,
         claim_statement_count,
         rejected_reason: None,
-        coverage_status: object
-            .get("coverage_assessment")
-            .and_then(|value| value.get("status"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        evidence_hint_count: object
-            .get("evidence_hints")
-            .and_then(Value::as_array)
-            .map(Vec::len),
-        retrieval_repair_recommended: object
-            .get("retrieval_repair")
-            .and_then(|value| value.get("recommended"))
-            .and_then(Value::as_bool),
-        out_of_scope_hint_count: object
-            .get("out_of_scope_hints")
-            .and_then(Value::as_array)
-            .map(Vec::len),
+        coverage_status,
+        evidence_hint_count,
+        retrieval_repair_recommended,
+        out_of_scope_hint_count,
     }
 }
 

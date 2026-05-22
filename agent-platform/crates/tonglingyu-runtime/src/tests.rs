@@ -5836,6 +5836,12 @@ fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections()
         "draft_uses_unscoped_later_forty"
     )));
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "coverage_assessment_not_passed"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "coverage_assessment_status_missing"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "claim_evidence_refs_unavailable"
     )));
     assert!(!agent_runtime_draft_rejection_completes_governance(Some(
@@ -6106,6 +6112,65 @@ fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
         "draft_uses_unscoped_later_forty"
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_partial_coverage_count_draft() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text"), sample_card("commentary")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
+            "draft_candidate": {
+                "draft_answer": "通灵宝玉在前八十回里，通常可明确算作丢失/失而复得的情节主要有两次。",
+                "package_id": package_id,
+                "claim_statements": [{
+                    "text": "前八十回里，通灵宝玉可概括为有两次主要的丢失/失而复得情节。",
+                    "evidence_refs": evidence_ids(&workflow.package.cards),
+                }],
+            },
+            "coverage_assessment": {
+                "status": "partial",
+                "missing_in_scope_slots": ["计数口径和事件边界仍缺少本地证据覆盖。"],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {
+                "recommended": false,
+                "queries": [],
+            },
+            "out_of_scope_hints": [],
+        }))
+        .expect("partial coverage bundle serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("partial coverage draft rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("coverage_assessment_not_passed")
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_coverage_status"],
+        "partial"
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "coverage_assessment_not_passed"
     );
 }
 

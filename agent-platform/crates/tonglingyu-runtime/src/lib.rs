@@ -4392,6 +4392,8 @@ fn agent_runtime_draft_rejection_completes_governance(reason: Option<&str>) -> b
                 | "draft_stops_for_user_opt_in"
                 | "draft_missing_later_forty_boundary"
                 | "draft_uses_unscoped_later_forty"
+                | "coverage_assessment_not_passed"
+                | "coverage_assessment_status_missing"
                 | "claim_evidence_refs_unavailable"
         )
     )
