@@ -4251,12 +4251,17 @@ fn agent_runtime_execution_summary(
     let draft_consumed = application.is_some_and(|value| value.draft_consumed);
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
+    let local_answer_used_for_final_answer = mode == TonglingyuAgentRuntimeMode::Hermes
+        && !content_used_for_final_answer
+        && workflow.answer_source == "runtime_local_profile";
     let draft_governance_completed = application.is_some_and(|value| {
         value.draft_consumed
             || value.rejected_reason == Some("draft_claim_exceeds_evidence_boundary")
     });
+    let evidence_governance_completed =
+        evidence_matches_local || local_answer_used_for_final_answer;
     let hermes_content_execution_complete = mode == TonglingyuAgentRuntimeMode::Hermes
-        && evidence_matches_local
+        && evidence_governance_completed
         && package_matches_local
         && draft_governance_completed
         && review_local_enforced;
@@ -4653,9 +4658,11 @@ fn apply_agent_runtime_content_outputs(
     }
 
     let draft = extraction.draft_answer?;
-    if let Some(reason) =
-        agent_runtime_draft_evidence_boundary_rejection(&draft, &workflow.package.cards)
-    {
+    if let Some(reason) = agent_runtime_draft_evidence_boundary_rejection(
+        &workflow.package.question,
+        &draft,
+        &workflow.package.cards,
+    ) {
         if let Some(step) = workflow.steps.get_mut(draft_step_index) {
             step.output["agent_runtime_draft_consumed"] = json!(false);
             step.output["agent_runtime_result_format"] = json!(extraction.result_format);
@@ -4749,6 +4756,7 @@ fn apply_agent_runtime_content_outputs(
 }
 
 fn agent_runtime_draft_evidence_boundary_rejection(
+    question: &str,
     draft: &str,
     cards: &[EvidenceCard],
 ) -> Option<&'static str> {
@@ -4761,6 +4769,12 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         .collect::<Vec<_>>()
         .join("\n");
     let draft_text = normalize_text(draft);
+    if asks_tonglingyu_loss_event(question, &normalize_query(question))
+        && tonglingyu_multiple_loss_claim(&draft_text)
+        && !tonglingyu_multiple_loss_directly_supported(cards)
+    {
+        return Some("draft_claim_exceeds_evidence_boundary");
+    }
     for term in [
         "出身",
         "亲戚",
@@ -4776,6 +4790,44 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         }
     }
     None
+}
+
+fn tonglingyu_multiple_loss_claim(draft_text: &str) -> bool {
+    [
+        "至少两次",
+        "至少二次",
+        "两次",
+        "二次",
+        "2次",
+        "多次",
+        "不止一次",
+        "不只一次",
+        "并不是只丢过一次",
+        "不是只丢过一次",
+        "并非只丢失过一次",
+        "并非只丢过一次",
+    ]
+    .iter()
+    .any(|term| draft_text.contains(term))
+}
+
+fn tonglingyu_multiple_loss_directly_supported(cards: &[EvidenceCard]) -> bool {
+    let evidence_text = cards
+        .iter()
+        .map(|card| normalize_text(&card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    [
+        "两次失玉",
+        "二次失玉",
+        "两次丢玉",
+        "二次丢玉",
+        "第二次失玉",
+        "再次失玉",
+        "再次丢玉",
+    ]
+    .iter()
+    .any(|term| evidence_text.contains(term))
 }
 
 fn extract_agent_runtime_draft(
@@ -14226,6 +14278,9 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
     if question.contains("通灵玉") || question.contains("通靈玉") {
         claims.push("通灵玉相关回答必须回到第八回等具体文本证据，并区分正文与脂批。".to_string());
     }
+    if asks_tonglingyu_loss_event(question, &normalize_query(question)) {
+        claims.push("通灵宝玉失玉次数必须区分物件失玉、后文送回/追认和贾宝玉本人行踪，不能把送回或人物出走计作新的失玉。".to_string());
+    }
     if cards.iter().any(|card| card.evidence_type == "commentary") {
         claims.push("命中的脂批材料只能作为脂批或版本线索，不能当作正文事实。".to_string());
     }
@@ -14348,6 +14403,9 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if let Some(answer) = character_intro_answer(question, package) {
         return answer;
     }
+    if let Some(answer) = tonglingyu_loss_count_answer(question, package) {
+        return answer;
+    }
     let mut answer = String::new();
     if package.knowledge_state_summary.human_marked_count > 0 {
         answer.push_str("人工标记资料显示，可以这样回答：\n\n");
@@ -14371,6 +14429,83 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         ));
     }
     answer
+}
+
+fn tonglingyu_loss_count_answer(question: &str, package: &EvidencePackage) -> Option<String> {
+    let normalized = normalize_query(question);
+    if !asks_tonglingyu_loss_event(question, &normalized) {
+        return None;
+    }
+    let loss_cards = package
+        .cards
+        .iter()
+        .filter(|card| tonglingyu_loss_event_card(card))
+        .take(3)
+        .collect::<Vec<_>>();
+    if loss_cards.is_empty() {
+        return None;
+    }
+    let recovery_cards = package
+        .cards
+        .iter()
+        .filter(|card| tonglingyu_recovery_or_return_card(card))
+        .take(2)
+        .collect::<Vec<_>>();
+    let mut answer =
+        "按“通灵宝玉这个物件失去/找不着”的口径，当前证据能稳妥确认的是一次：第九十四回的失玉。"
+            .to_string();
+    if recovery_cards.is_empty() {
+        answer.push_str("本次证据包没有给出第二处可独立计数的失玉事件，所以不能说成“至少两次”。");
+    } else {
+        answer.push_str(
+            "后文“送玉来”“那年失玉”等材料是在追认和送回这一次失玉，不应再计作一次新的丢失。",
+        );
+    }
+    answer.push_str("\n\n依据（原文引文保留来源字形）：\n");
+    let mut seen = BTreeSet::new();
+    let mut evidence_index = 1;
+    for card in loss_cards.into_iter().chain(recovery_cards.into_iter()) {
+        if !seen.insert(card.evidence_id.clone()) {
+            continue;
+        }
+        answer.push_str(&format!(
+            "{}. {}：{}\n",
+            evidence_index, card.source_title, card.text
+        ));
+        evidence_index += 1;
+    }
+    Some(answer)
+}
+
+fn tonglingyu_loss_event_card(card: &EvidenceCard) -> bool {
+    let title = normalize_title(&card.source_title);
+    let text = normalize_text(&card.text);
+    title.contains("第094回")
+        || title.contains("第九十四回")
+        || title.contains("九十四")
+        || text.contains("失宝玉")
+        || text.contains("失玉通灵知奇祸")
+        || text.contains("那块玉真丢")
+        || text.contains("玉丢了")
+        || (text.contains("那块玉呢") && text.contains("踪影全无"))
+        || (text.contains("通灵宝玉") && text.contains("踪影全无"))
+}
+
+fn tonglingyu_recovery_or_return_card(card: &EvidenceCard) -> bool {
+    let title = normalize_title(&card.source_title);
+    let text = normalize_text(&card.text);
+    title.contains("第115回")
+        || title.contains("第一百十五回")
+        || title.contains("第116回")
+        || title.contains("第一百十六回")
+        || title.contains("一百一十六")
+        || text.contains("送玉来")
+        || text.contains("宝玉回来了")
+        || text.contains("那年丢了玉")
+        || text.contains("那年失玉")
+        || text.contains("头里丢的时候")
+        || text.contains("和尚取去")
+        || text.contains("仍把那玉交给宝钗")
 }
 
 fn character_intro_answer(question: &str, package: &EvidencePackage) -> Option<String> {
@@ -14985,6 +15120,35 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
             push_term(&mut terms, term);
         }
     }
+    if asks_tonglingyu_loss_event(question, &normalized) {
+        for term in [
+            "失寶玉",
+            "失宝玉",
+            "失玉",
+            "通靈知奇禍",
+            "通灵知奇祸",
+            "那塊玉",
+            "那块玉",
+            "玉丟了",
+            "玉丢了",
+            "玉不見",
+            "玉不见",
+            "送玉來",
+            "送玉来",
+            "寶玉回來了",
+            "宝玉回来了",
+            "那年丟了玉",
+            "那年丢了玉",
+            "那年失玉",
+            "頭裡丟的時候",
+            "头里丢的时候",
+            "和尚取去",
+            "得通靈幻境悟仙緣",
+            "得通灵幻境悟仙缘",
+        ] {
+            push_term(&mut terms, term);
+        }
+    }
     if question.contains("顽石") || question.contains("頑石") {
         push_term(&mut terms, "石頭");
         push_term(&mut terms, "石头");
@@ -15044,6 +15208,34 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
         push_term(&mut terms, question);
     }
     Ok(ExtractedQueryTerms { terms, aliases })
+}
+
+fn asks_tonglingyu_loss_event(question: &str, normalized: &str) -> bool {
+    let mentions_tonglingyu = question.contains("通灵宝玉")
+        || question.contains("通靈寶玉")
+        || question.contains("通灵玉")
+        || question.contains("通靈玉")
+        || normalized.contains("通灵宝玉")
+        || normalized.contains("通灵玉");
+    if !mentions_tonglingyu {
+        return false;
+    }
+    let asks_loss = question.contains('丢')
+        || question.contains('丟')
+        || question.contains('失')
+        || question.contains("不见")
+        || question.contains("不見")
+        || question.contains("遗失")
+        || question.contains("遺失")
+        || normalized.contains('丢')
+        || normalized.contains('失')
+        || normalized.contains("不见");
+    let asks_count = question.contains("几次")
+        || question.contains("幾次")
+        || question.contains("多少次")
+        || normalized.contains("几次")
+        || normalized.contains("多少次");
+    asks_loss || asks_count
 }
 
 fn expand_canonical_person_terms(
@@ -16712,6 +16904,22 @@ mod tests {
         vec![vow, death]
     }
 
+    fn lost_jade_test_cards() -> Vec<EvidenceCard> {
+        let mut loss = sample_card("base_text");
+        loss.evidence_id = "ev-lost-jade-94".to_string();
+        loss.source_title = "紅樓夢/第094回".to_string();
+        loss.block_id = "block-lost-jade-94".to_string();
+        loss.text = "襲人見寶玉脖子上沒有挂著，便問：“那塊玉呢？”襲人回看桌上并沒有玉，便向各處找尋，蹤影全無。王夫人問：“那塊玉真丟了么？”".to_string();
+        loss.evidence_level = "正文直接".to_string();
+        let mut returned = sample_card("base_text");
+        returned.evidence_id = "ev-lost-jade-return".to_string();
+        returned.source_title = "紅樓夢/第116回".to_string();
+        returned.block_id = "block-lost-jade-return".to_string();
+        returned.text = "王夫人等放心，只叫人仍把那玉交給寶釵給他帶上。寶釵道：“頭里丟的時候，必是那和尚取去的。”襲人麝月道：“那年丟了玉。”".to_string();
+        returned.evidence_level = "正文直接".to_string();
+        vec![loss, returned]
+    }
+
     fn yousanjie_test_package() -> EvidencePackage {
         let cards = yousanjie_test_cards();
         EvidencePackage {
@@ -16758,10 +16966,12 @@ mod tests {
         let cards = yousanjie_test_cards();
 
         let rejected = agent_runtime_draft_evidence_boundary_rejection(
+            "介绍尤三姐",
             "尤三姐出身柳湘莲一支亲戚关系，并反抗封建礼教。",
             &cards,
         );
         let accepted = agent_runtime_draft_evidence_boundary_rejection(
+            "介绍尤三姐",
             "尤三姐与柳湘莲婚约、自尽情节相连。",
             &cards,
         );
@@ -17365,6 +17575,101 @@ mod tests {
     }
 
     #[test]
+    fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
+        let conn = Connection::open_in_memory().expect("in-memory sqlite");
+        init_runtime_schema(&conn).expect("runtime schema");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        for (block_id, block_index, kind, text) in [
+            (
+                "quality-block-lost-jade-heading",
+                1_i64,
+                "heading",
+                "第九十四回 宴海棠賈母賞花妖 失寶玉通靈知奇禍",
+            ),
+            (
+                "quality-block-lost-jade-body",
+                2_i64,
+                "paragraph",
+                "襲人見寶玉脖子上沒有挂著，便問：“那塊玉呢？”寶玉道：“才剛忙亂換衣，摘下來放在炕桌上，我沒有帶。”襲人回看桌上并沒有玉，便向各處找尋，蹤影全無。眾人又道：“你二哥哥的玉丟了，你瞧見了沒有？”",
+            ),
+            (
+                "quality-block-jade-inscription-distractor",
+                3_i64,
+                "paragraph",
+                "通靈寶玉正面鐫著“莫失莫忘，仙壽恒昌”，反面又有“一除邪祟，二療冤疾，三知禍福”。",
+            ),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO blocks (
+                    block_id, source_id, section_id, source_title, normalized_source_title,
+                    source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                    evidence_type, chapter_no
+                ) VALUES (?1, 'quality-source', 'quality-section-lost-jade',
+                    '紅樓夢/第九十四回', ?2, 'https://example.test/source/94',
+                    1, ?3, ?4, NULL, ?5, ?6, 'base_text', 94)
+                "#,
+                params![
+                    block_id,
+                    normalize_title("紅樓夢/第九十四回"),
+                    block_index,
+                    kind,
+                    text,
+                    normalize_text(text),
+                ],
+            )
+            .expect("insert lost jade block");
+        }
+
+        let output = execute_tool(
+            &conn,
+            TonglingyuToolCall::TextSearch {
+                question: "通灵宝玉丢了几次".to_string(),
+                limit: 3,
+                required_evidence_types: vec!["base_text".to_string()],
+            },
+        )
+        .expect("search executes");
+
+        let TonglingyuToolOutput::EvidenceCards {
+            cards,
+            quality_report,
+            ..
+        } = output
+        else {
+            panic!("expected evidence cards");
+        };
+        assert!(
+            cards
+                .iter()
+                .any(|card| card.block_id == "quality-block-lost-jade-body"),
+            "loss-count query should retrieve the 第九十四回 lost-jade body evidence"
+        );
+        assert!(
+            quality_report
+                .expanded_terms
+                .iter()
+                .any(|term| term == "失寶玉")
+        );
+        assert!(
+            quality_report
+                .expanded_terms
+                .iter()
+                .any(|term| term == "玉丢了")
+        );
+    }
+
+    #[test]
     fn text_search_prefers_full_normalized_character_match_over_short_alias_only() {
         let conn = Connection::open_in_memory().expect("in-memory sqlite");
         init_runtime_schema(&conn).expect("runtime schema");
@@ -17605,6 +17910,33 @@ mod tests {
         assert!(answer.contains("湘雲"));
         assert!(!answer.contains("證據"));
         assert!(!answer.contains(&package.package_id));
+    }
+
+    #[test]
+    fn local_answer_counts_tonglingyu_lost_jade_once_from_loss_and_return_evidence() {
+        let package = EvidencePackage {
+            package_id: "pkg-lost-jade-answer-test".to_string(),
+            trace_id: "trace-lost-jade-answer-test".to_string(),
+            question: "通灵宝玉丢了几次".to_string(),
+            cards: lost_jade_test_cards(),
+            claims: vec!["通灵宝玉失玉次数必须区分物件失玉和后文送回/追认。".to_string()],
+            claim_evidence_map: Vec::new(),
+            review: ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: Vec::new(),
+                summary: "reviewer 通过。".to_string(),
+            },
+            knowledge_state_summary: KnowledgeStateSummary::default(),
+        };
+
+        let answer = local_answer("通灵宝玉丢了几次", &package);
+
+        assert!(answer.contains("一次"));
+        assert!(answer.contains("第九十四回"));
+        assert!(answer.contains("送回这一次失玉"));
+        assert!(!answer.contains("至少两次"));
+        assert!(answer.contains("那塊玉真丟了么"));
     }
 
     #[test]
@@ -20923,6 +21255,51 @@ mod tests {
         assert_eq!(
             workflow.steps[1].output["draft_source"],
             "agent_runtime_hermes_profile"
+        );
+    }
+
+    #[test]
+    fn hermes_mode_rejects_tonglingyu_multiple_loss_count_without_direct_evidence() {
+        let mut workflow = runtime_draft_workflow(
+            lost_jade_test_cards(),
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        workflow.question = "通灵宝玉丢了几次".to_string();
+        workflow.package.question = workflow.question.clone();
+        let local = local_answer(&workflow.question, &workflow.package);
+        workflow.draft_answer = local.clone();
+        workflow.final_answer = local.clone();
+        let package_id = workflow.package.package_id.clone();
+        workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "draft_candidate": {
+                    "draft_answer": "通灵宝玉并非只丢过一次，较稳妥的说法是至少两次。",
+                    "package_id": package_id,
+                    "claim_statements": ["通灵宝玉至少丢过两次。"],
+                }
+            }))
+            .expect("structured draft serializes")
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("runtime draft rejected");
+
+        assert!(!application.draft_consumed);
+        assert_eq!(
+            application.rejected_reason,
+            Some("draft_claim_exceeds_evidence_boundary")
+        );
+        assert!(workflow.final_answer.contains("一次"));
+        assert!(!workflow.final_answer.contains("至少两次"));
+        assert_eq!(
+            workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+            "draft_claim_exceeds_evidence_boundary"
         );
     }
 

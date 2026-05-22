@@ -58,7 +58,7 @@ impl LlmAgentPromptRole {
                 "Normalize the user question. Do not answer it. Only bind referents from input_context.allowed_referents. If the referent is unsupported, set needs_clarification=true."
             }
             Self::ConversationStateWriter => {
-                "Write compact conversation state. Context-only fields such as prior_session_summary_for_context_only, must_include_active_entities, and current_question_for_state are constraints, not output field names."
+                "Write compact conversation state. Context-only fields such as prior_session_summary_for_context_only, must_include_active_entities, and current_question_for_state are constraints, not output field names. If input_context.must_preserve_last_answer_boundaries is non-empty, copy every string from it verbatim into output last_answer_boundaries; do not summarize, translate, or omit those boundary strings."
             }
         }
     }
@@ -268,6 +268,7 @@ fn provider_output_contract(role: LlmAgentPromptRole) -> Value {
                     "last_answer_boundaries": {
                         "type": "array",
                         "maxItems": 4,
+                        "description": "Must include every string from input_context.must_preserve_last_answer_boundaries verbatim when that input array is non-empty.",
                         "items": {"type": "string", "maxLength": 160}
                     },
                     "evidence_package_refs": {
@@ -295,7 +296,7 @@ fn repair_prompt(repair_errors: Option<&[String]>) -> Value {
     json!({
         "previous_validation_error_digest": error_digest(errors),
         "previous_validation_error_summary": bounded_summary(&errors.join("; "), 360),
-        "retry_instruction": "Return a corrected object matching output_contract.json_schema. Do not echo input_context fields unless they are explicitly listed in output_contract.allowed_output_fields."
+        "retry_instruction": "Return a corrected object matching output_contract.json_schema. Do not echo input_context fields unless they are explicitly listed in output_contract.allowed_output_fields. If the error summary includes last_answer_boundary_lost, copy every string from input_context.must_preserve_last_answer_boundaries verbatim into output last_answer_boundaries."
     })
 }
 
@@ -406,6 +407,11 @@ mod tests {
                 .contains("Role: conversation_state_writer")
         );
         assert!(state_prompt.system_prompt.contains("Context-only fields"));
+        assert!(
+            state_prompt
+                .system_prompt
+                .contains("copy every string from it verbatim")
+        );
     }
 
     #[test]
@@ -458,6 +464,15 @@ mod tests {
             payload["input_context"]["must_include_active_entities"],
             json!(["晴雯"])
         );
+        assert!(
+            payload["output_contract"]["json_schema"]["properties"]["last_answer_boundaries"]
+                ["description"]
+                .as_str()
+                .is_some_and(|value| {
+                    value.contains("must_preserve_last_answer_boundaries")
+                        && value.contains("verbatim")
+                })
+        );
     }
 
     #[test]
@@ -484,6 +499,11 @@ mod tests {
             payload["repair"]["previous_validation_error_summary"]
                 .as_str()
                 .is_some_and(|value| value.contains("session_summary"))
+        );
+        assert!(
+            payload["repair"]["retry_instruction"]
+                .as_str()
+                .is_some_and(|value| value.contains("last_answer_boundary_lost"))
         );
         assert!(payload.get("agent_request").is_none());
         assert_eq!(
