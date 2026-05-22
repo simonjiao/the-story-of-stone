@@ -2030,7 +2030,11 @@ fn workflow_agent_runtime_mode_from_role_provider_source(
     let backend = required_agent_provider_env_from(&profile, "BACKEND", get_env)?;
     match backend.trim().to_ascii_lowercase().as_str() {
         "hermes-agent" | "hermes_agent" => Ok(Some(TonglingyuAgentRuntimeMode::Hermes)),
-        "minimax" => Ok(Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)),
+        "openai-compatible-network"
+        | "openai_compatible_network"
+        | "openai-compatible"
+        | "openai_compatible"
+        | "minimax" => Ok(Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)),
         "minimal" => Ok(Some(TonglingyuAgentRuntimeMode::Minimal)),
         other => Err(anyhow!(
             "unsupported workflow agent provider backend for {profile}: {other}"
@@ -4210,9 +4214,44 @@ fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
         "executed_profile_step_count": 0,
         "tool_result_count": 0,
         "tool_audit_event_count": 0,
+        "profile_observation_complete": false,
         "hermes_content_execution_complete": false,
         "local_governance_enforced": true,
     })
+}
+
+fn agent_runtime_profile_observation_mode(mode: TonglingyuAgentRuntimeMode) -> bool {
+    matches!(
+        mode,
+        TonglingyuAgentRuntimeMode::Hermes | TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork
+    )
+}
+
+fn agent_runtime_profile_content_source(mode: TonglingyuAgentRuntimeMode, suffix: &str) -> String {
+    let source = match mode {
+        TonglingyuAgentRuntimeMode::Hermes => "hermes",
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai-compatible",
+        TonglingyuAgentRuntimeMode::Minimal => "minimal",
+    };
+    format!("agent-runtime-{source}-{suffix}")
+}
+
+fn agent_runtime_profile_answer_source(mode: TonglingyuAgentRuntimeMode, suffix: &str) -> String {
+    let source = match mode {
+        TonglingyuAgentRuntimeMode::Hermes => "hermes",
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai_compatible",
+        TonglingyuAgentRuntimeMode::Minimal => "minimal",
+    };
+    format!("agent_runtime_{source}_profile_{suffix}")
+}
+
+fn agent_runtime_profile_draft_source(mode: TonglingyuAgentRuntimeMode) -> String {
+    let source = match mode {
+        TonglingyuAgentRuntimeMode::Hermes => "hermes",
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai_compatible",
+        TonglingyuAgentRuntimeMode::Minimal => "minimal",
+    };
+    format!("agent_runtime_{source}_profile")
 }
 
 fn agent_runtime_step_failure_allows_local_answer(
@@ -4254,6 +4293,7 @@ fn agent_runtime_local_answer_fallback_summary(
         "draft_consumed": false,
         "draft_governance_completed": true,
         "content_used_for_final_answer": false,
+        "profile_observation_complete": false,
         "hermes_content_execution_complete": false,
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
@@ -4353,7 +4393,7 @@ fn agent_runtime_execution_summary(
     let draft_consumed = application.is_some_and(|value| value.draft_consumed);
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
-    let local_answer_used_for_final_answer = mode == TonglingyuAgentRuntimeMode::Hermes
+    let local_answer_used_for_final_answer = agent_runtime_profile_observation_mode(mode)
         && !content_used_for_final_answer
         && workflow.answer_source == "runtime_local_profile";
     let draft_governance_completed = application.is_some_and(|value| {
@@ -4362,17 +4402,25 @@ fn agent_runtime_execution_summary(
     });
     let evidence_governance_completed =
         evidence_matches_local || local_answer_used_for_final_answer;
-    let hermes_content_execution_complete = mode == TonglingyuAgentRuntimeMode::Hermes
+    let profile_observation_complete = agent_runtime_profile_observation_mode(mode)
         && evidence_governance_completed
         && package_matches_local
         && draft_governance_completed
         && review_local_enforced;
+    let hermes_content_execution_complete =
+        mode == TonglingyuAgentRuntimeMode::Hermes && profile_observation_complete;
     let profile_execution_status = match mode {
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
-            "openai_compatible_network_profile_observed_without_runtime_tools"
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork if profile_observation_complete => {
+            "openai_compatible_profile_observed_with_local_governance"
         }
-        TonglingyuAgentRuntimeMode::Hermes if hermes_content_execution_complete => {
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork if draft_consumed => {
+            "openai_compatible_profile_partial_with_local_governance"
+        }
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
+            "openai_compatible_profile_incomplete_local_governance"
+        }
+        TonglingyuAgentRuntimeMode::Hermes if profile_observation_complete => {
             "hermes_profile_observed_with_local_governance"
         }
         TonglingyuAgentRuntimeMode::Hermes if draft_consumed => {
@@ -4395,6 +4443,7 @@ fn agent_runtime_execution_summary(
         "draft_governance_completed": draft_governance_completed,
         "content_used_for_final_answer": content_used_for_final_answer,
         "review_local_enforced": review_local_enforced,
+        "profile_observation_complete": profile_observation_complete,
         "hermes_content_execution_complete": hermes_content_execution_complete,
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
@@ -4416,6 +4465,22 @@ fn validate_agent_runtime_execution_summary(
     mode: TonglingyuAgentRuntimeMode,
     summary: &Value,
 ) -> Result<()> {
+    let status = summary
+        .get("profile_execution_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if mode == TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork {
+        let complete = summary
+            .get("profile_observation_complete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if complete && status == "openai_compatible_profile_observed_with_local_governance" {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "OpenAI-compatible runtime profile observation incomplete: {status}"
+        ));
+    }
     if mode != TonglingyuAgentRuntimeMode::Hermes {
         return Ok(());
     }
@@ -4423,10 +4488,6 @@ fn validate_agent_runtime_execution_summary(
         .get("hermes_content_execution_complete")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let status = summary
-        .get("profile_execution_status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
     let tool_result_count = summary
         .get("tool_result_count")
         .and_then(Value::as_u64)
@@ -4452,7 +4513,7 @@ fn apply_agent_runtime_evidence_outputs(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
 ) -> Vec<AgentRuntimeEvidenceObservation> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes {
+    if !agent_runtime_profile_observation_mode(mode) {
         return Vec::new();
     }
     let mut observations = Vec::new();
@@ -4502,7 +4563,10 @@ fn apply_agent_runtime_evidence_outputs(
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_source".to_string(),
-                json!("agent-runtime-hermes-evidence-observation"),
+                json!(agent_runtime_profile_content_source(
+                    mode,
+                    "evidence-observation"
+                )),
             );
             agent_runtime.insert(
                 "evidence_observation".to_string(),
@@ -4609,7 +4673,7 @@ fn apply_agent_runtime_package_output(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
 ) -> Option<AgentRuntimePackageObservation> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes {
+    if !agent_runtime_profile_observation_mode(mode) {
         return None;
     }
     let (package_step_index, summary) =
@@ -4642,7 +4706,10 @@ fn apply_agent_runtime_package_output(
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_source".to_string(),
-                json!("agent-runtime-hermes-package-observation"),
+                json!(agent_runtime_profile_content_source(
+                    mode,
+                    "package-observation"
+                )),
             );
             agent_runtime.insert(
                 "package_observation".to_string(),
@@ -4710,7 +4777,7 @@ fn apply_agent_runtime_content_outputs(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
 ) -> Option<AgentRuntimeContentApplication> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes {
+    if !agent_runtime_profile_observation_mode(mode) {
         return None;
     }
     let (draft_step_index, extraction) =
@@ -4745,7 +4812,10 @@ fn apply_agent_runtime_content_outputs(
             {
                 agent_runtime.insert(
                     "content_source".to_string(),
-                    json!("agent-runtime-hermes-profile-rejected"),
+                    json!(agent_runtime_profile_content_source(
+                        mode,
+                        "profile-rejected"
+                    )),
                 );
                 agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
                 agent_runtime.insert(
@@ -4785,7 +4855,10 @@ fn apply_agent_runtime_content_outputs(
             {
                 agent_runtime.insert(
                     "content_source".to_string(),
-                    json!("agent-runtime-hermes-profile-evidence-boundary-rejected"),
+                    json!(agent_runtime_profile_content_source(
+                        mode,
+                        "profile-evidence-boundary-rejected"
+                    )),
                 );
                 agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
                 agent_runtime.insert(
@@ -4814,12 +4887,13 @@ fn apply_agent_runtime_content_outputs(
     workflow.final_answer = enforce_review(draft, &workflow.package);
     let content_used_for_final_answer = workflow.package.review.status == "passed";
     workflow.answer_source = if content_used_for_final_answer {
-        "agent_runtime_hermes_profile_with_local_review".to_string()
+        agent_runtime_profile_answer_source(mode, "with_local_review")
     } else {
-        "agent_runtime_hermes_profile_rejected_by_local_review".to_string()
+        agent_runtime_profile_answer_source(mode, "rejected_by_local_review")
     };
+    let draft_source = agent_runtime_profile_draft_source(mode);
     if let Some(step) = workflow.steps.get_mut(draft_step_index) {
-        step.output["answer_source"] = json!("agent_runtime_hermes_profile");
+        step.output["answer_source"] = json!(&draft_source);
         step.output["agent_runtime_draft_consumed"] = json!(true);
         step.output["agent_runtime_content_used_for_final_answer"] =
             json!(content_used_for_final_answer);
@@ -4830,7 +4904,7 @@ fn apply_agent_runtime_content_outputs(
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_source".to_string(),
-                json!("agent-runtime-hermes-profile"),
+                json!(agent_runtime_profile_content_source(mode, "profile")),
             );
             agent_runtime.insert(
                 "content_used_for_final_answer".to_string(),
@@ -4856,7 +4930,7 @@ fn apply_agent_runtime_content_outputs(
         .iter_mut()
         .find(|step| step.operation == "review_answer")
     {
-        step.output["draft_source"] = json!("agent_runtime_hermes_profile");
+        step.output["draft_source"] = json!(&draft_source);
         step.output["final_answer_source"] = json!(&workflow.answer_source);
         step.output["local_reviewer_enforced"] = json!(true);
     }
@@ -5131,7 +5205,7 @@ fn apply_agent_runtime_reviewer_output(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
 ) -> Option<AgentRuntimeReviewObservation> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes {
+    if !agent_runtime_profile_observation_mode(mode) {
         return None;
     }
     let (review_step_index, summary) =
@@ -5173,7 +5247,10 @@ fn apply_agent_runtime_reviewer_output(
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_source".to_string(),
-                json!("agent-runtime-hermes-review-observation"),
+                json!(agent_runtime_profile_content_source(
+                    mode,
+                    "review-observation"
+                )),
             );
             agent_runtime.insert(
                 "review_observation".to_string(),
@@ -16167,6 +16244,28 @@ mod tests {
     }
 
     #[test]
+    fn workflow_agent_runtime_mode_accepts_openai_compatible_provider_backend() {
+        let env = test_env(&[
+            ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "openai_profile"),
+            ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "openai_profile"),
+            ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "openai_profile"),
+            ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "openai_profile"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
+                "openai-compatible-network",
+            ),
+        ]);
+
+        let mode = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect("openai-compatible provider backend parses");
+
+        assert_eq!(
+            mode,
+            Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+        );
+    }
+
+    #[test]
     fn workflow_agent_runtime_mode_rejects_partial_role_provider_config() {
         let env = test_env(&[("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling")]);
 
@@ -22439,6 +22538,120 @@ mod tests {
                 && event["payload"]["hermes_content_execution_complete"] == json!(true)
                 && event["payload"]["tool_result_count"] == json!(4)
                 && event["payload"]["tool_audit_event_count"] == json!(4)
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-openai-compatible-profile-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let workflow = store
+            .execute_workflow_with_agent_runtime_client(
+                test_workflow_input(
+                    "trace-openai-compatible-profile-test",
+                    "通灵玉是什么？",
+                    2,
+                    vec!["base_text".to_string()],
+                ),
+                TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+                Arc::new(NoToolRuntimeClient),
+            )
+            .await
+            .expect("openai-compatible profile workflow executes");
+
+        assert_eq!(workflow.package.review.status, "needs_revision");
+        assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
+        assert!(!workflow.final_answer.contains("Hermes full workflow draft"));
+        assert_eq!(
+            workflow.answer_source,
+            "agent_runtime_openai_compatible_profile_rejected_by_local_review"
+        );
+        let draft_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "draft_answer")
+            .expect("draft step");
+        let draft_agent_runtime = draft_step.agent_runtime.as_ref().unwrap();
+        assert_eq!(
+            draft_agent_runtime["content_source"],
+            json!("agent-runtime-openai-compatible-profile")
+        );
+        assert_eq!(draft_agent_runtime["tool_result_count"], json!(0));
+        assert_eq!(draft_agent_runtime["tool_audit_event_count"], json!(0));
+        assert_eq!(
+            draft_step.output["answer_source"],
+            "agent_runtime_openai_compatible_profile"
+        );
+        let text_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "text_evidence_search")
+            .expect("text evidence step");
+        assert_eq!(
+            text_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-openai-compatible-evidence-observation")
+        );
+        let package_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "evidence_package_create")
+            .expect("package step");
+        assert_eq!(
+            package_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-openai-compatible-package-observation")
+        );
+        let review_step = workflow
+            .steps
+            .iter()
+            .find(|step| step.operation == "review_answer")
+            .expect("review step");
+        assert_eq!(
+            review_step.agent_runtime.as_ref().unwrap()["content_source"],
+            json!("agent-runtime-openai-compatible-review-observation")
+        );
+        assert_eq!(
+            review_step.output["draft_source"],
+            "agent_runtime_openai_compatible_profile"
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_execution_status"],
+            "openai_compatible_profile_observed_with_local_governance"
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_observation_complete"],
+            json!(true)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["hermes_content_execution_complete"],
+            json!(false)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["tool_result_count"],
+            json!(0)
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["tool_audit_event_count"],
+            json!(0)
+        );
+        let events = store
+            .audit_events_for_trace(&workflow.trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_summarized"
+                && event["payload"]["profile_execution_status"]
+                    == json!("openai_compatible_profile_observed_with_local_governance")
+                && event["payload"]["profile_observation_complete"] == json!(true)
+                && event["payload"]["hermes_content_execution_complete"] == json!(false)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

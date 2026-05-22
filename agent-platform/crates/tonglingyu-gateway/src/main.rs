@@ -836,7 +836,7 @@ fn build_runtime_client_for_agent_provider(
                 HermesRuntimeClient::new(config)?.with_profile_registry(registry),
             ))
         }
-        "minimax" => {
+        "openai-compatible-network" | "minimax" => {
             let mut config =
                 OpenAiCompatibleNetworkRuntimeConfig::new(&profile.base_url, &profile.model);
             config.api_key = Some(profile.api_key.clone());
@@ -861,7 +861,9 @@ fn workflow_agent_runtime_mode_for_provider(
 ) -> Result<TonglingyuAgentRuntimeMode> {
     match normalized_agent_provider_backend(&profile.backend).as_str() {
         "hermes-agent" => Ok(TonglingyuAgentRuntimeMode::Hermes),
-        "minimax" => Ok(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork),
+        "openai-compatible-network" | "minimax" => {
+            Ok(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+        }
         "minimal" => Ok(TonglingyuAgentRuntimeMode::Minimal),
         other => Err(anyhow!(
             "unsupported workflow agent provider backend for {}: {other}",
@@ -966,6 +968,10 @@ fn required_agent_provider_env_from(
 fn normalized_agent_provider_backend(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "hermes_agent" | "hermes-agent" => "hermes-agent".to_string(),
+        "openai_compatible_network" | "openai-compatible-network" => {
+            "openai-compatible-network".to_string()
+        }
+        "openai_compatible" | "openai-compatible" => "openai-compatible-network".to_string(),
         "minimax" => "minimax".to_string(),
         other => other.to_string(),
     }
@@ -10864,6 +10870,51 @@ mod tests {
             json!("hermes")
         );
         assert!(!serialized.contains("hermes-test-secret"));
+        assert_eq!(config["secret_values_printed"], json!(false));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_config_builds_openai_compatible_provider_profile_without_secret_summary()
+     {
+        let env = test_env(&[
+            (TEXT_PROVIDER_ENV, "openai_profile"),
+            (PACKAGE_PROVIDER_ENV, "openai_profile"),
+            (DRAFT_PROVIDER_ENV, "openai_profile"),
+            (REVIEW_PROVIDER_ENV, "openai_profile"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
+                "openai-compatible-network",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
+                "http://sub2api:8080/v1",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL",
+                "gpt-5.4-mini",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_KEY_ENV",
+                "OPENAI_COMPATIBLE_API_KEY",
+            ),
+            ("OPENAI_COMPATIBLE_API_KEY", "openai-compatible-test-secret"),
+        ]);
+
+        let config =
+            build_workflow_agent_runtime_config_from_source(&test_internal_profiles(), &env)
+                .expect("workflow openai-compatible provider config builds");
+        let serialized = serde_json::to_string(&config).expect("provider config serializes");
+
+        assert_eq!(config["mode"], json!("openai-compatible-network"));
+        assert_eq!(
+            config["provider_profiles"][0]["backend"],
+            json!("openai-compatible-network")
+        );
+        assert_eq!(
+            config["provider_profiles"][0]["base_url_host"],
+            json!("sub2api")
+        );
+        assert!(!serialized.contains("openai-compatible-test-secret"));
         assert_eq!(config["secret_values_printed"], json!(false));
     }
 
