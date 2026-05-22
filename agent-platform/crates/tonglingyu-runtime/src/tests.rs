@@ -1,4 +1,3 @@
-
 use super::*;
 use agent_core::{RuntimeOutput, RuntimeRunInput, RuntimeSessionInput};
 
@@ -2253,20 +2252,95 @@ fn redacted_query_terms_hash_sensitive_patterns() {
 #[test]
 fn required_exact_terms_protect_core_eval_targets() {
     assert_eq!(
-        required_exact_terms("通灵玉上的字是什么？"),
-        vec!["莫失莫忘", "一除邪祟"]
+        required_exact_terms("通灵玉上的字是什么？").expect("exact terms"),
+        vec!["莫失莫忘".to_string(), "一除邪祟".to_string()]
     );
     assert_eq!(
-        required_exact_terms("青埂峰和顽石在哪里出现？"),
-        vec!["青埂"]
+        required_exact_terms("青埂峰和顽石在哪里出现？").expect("exact terms"),
+        vec!["青埂".to_string()]
     );
     assert_eq!(
-        required_exact_terms("一百二十回本第八回通灵玉在哪里？"),
-        vec!["第八回"]
+        required_exact_terms("一百二十回本第八回通灵玉在哪里？").expect("exact terms"),
+        vec!["第八回".to_string()]
     );
     assert_eq!(
-        required_exact_terms("后四十回从哪里开始？"),
-        vec!["第八十一"]
+        required_exact_terms("后四十回从哪里开始？").expect("exact terms"),
+        vec!["第八十一".to_string()]
+    );
+}
+
+#[test]
+fn query_expansion_catalog_cache_hot_reloads_external_file() {
+    let catalog_path = std::env::temp_dir().join(format!(
+        "tonglingyu-query-expansions-{}.json",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let initial_catalog = r#"{
+        "schema_version": "tonglingyu.query_expansions.v1",
+        "catalog_version": "test.1",
+        "entries": [
+            {
+                "id": "test:hot-reload",
+                "trigger": { "any": ["热加载问题"] },
+                "terms": ["初始热词"]
+            }
+        ]
+    }"#;
+    let updated_catalog = r#"{
+        "schema_version": "tonglingyu.query_expansions.v1",
+        "catalog_version": "test.2",
+        "entries": [
+            {
+                "id": "test:hot-reload",
+                "trigger": { "any": ["热加载问题"] },
+                "terms": ["更新热词"]
+            }
+        ]
+    }"#;
+
+    std::fs::write(&catalog_path, initial_catalog).expect("write initial catalog");
+    let mut cache = QueryExpansionCatalogCache::default();
+    let catalog = cache
+        .catalog(Some(catalog_path.clone()))
+        .expect("load initial catalog");
+    let normalized = normalize_query("热加载问题");
+    let mut terms = Vec::new();
+    apply_query_expansion_terms(&catalog, "热加载问题", &normalized, &mut terms);
+    assert_eq!(terms, vec!["初始热词".to_string()]);
+
+    std::fs::write(&catalog_path, updated_catalog).expect("write updated catalog");
+    cache.modified = Some(std::time::SystemTime::UNIX_EPOCH);
+    let catalog = cache
+        .catalog(Some(catalog_path.clone()))
+        .expect("reload updated catalog");
+    let mut terms = Vec::new();
+    apply_query_expansion_terms(&catalog, "热加载问题", &normalized, &mut terms);
+    assert_eq!(terms, vec!["更新热词".to_string()]);
+
+    std::fs::remove_file(catalog_path).expect("remove catalog");
+}
+
+#[test]
+fn query_expansion_catalog_rejects_invalid_schema() {
+    let err = parse_query_expansion_catalog(
+        r#"{"schema_version":"wrong","catalog_version":"test","entries":[]}"#,
+    )
+    .expect_err("invalid schema rejected");
+    assert!(
+        err.to_string()
+            .contains("query expansion catalog schema_version must be")
+    );
+}
+
+#[test]
+fn query_expansion_catalog_requires_catalog_version() {
+    let err = parse_query_expansion_catalog(
+        r#"{"schema_version":"tonglingyu.query_expansions.v1","catalog_version":"","entries":[]}"#,
+    )
+    .expect_err("empty catalog version rejected");
+    assert!(
+        err.to_string()
+            .contains("query expansion catalog catalog_version is required")
     );
 }
 

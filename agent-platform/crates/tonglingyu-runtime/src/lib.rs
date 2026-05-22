@@ -23,8 +23,8 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
-    time::Instant,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Instant, SystemTime},
 };
 use time::OffsetDateTime;
 
@@ -96,6 +96,10 @@ pub const RUNTIME_WORKFLOW_PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v
 pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report-v1";
 pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
+pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
+
+const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
+const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
 
 pub trait TextNormalizer {
     fn normalize_for_search(&self, input: &str) -> String;
@@ -128,6 +132,7 @@ impl TextNormalizer for OpenCcTextNormalizer {
 
 static TEXT_NORMALIZER: OpenCcTextNormalizer = OpenCcTextNormalizer;
 static T2S_OPENCC: OnceLock<OpenCC> = OnceLock::new();
+static QUERY_EXPANSION_CATALOG_CACHE: OnceLock<Mutex<QueryExpansionCatalogCache>> = OnceLock::new();
 
 fn text_normalizer() -> &'static dyn TextNormalizer {
     &TEXT_NORMALIZER
@@ -13636,10 +13641,7 @@ fn search_evidence_result(
 ) -> Result<SearchEvidenceResult> {
     let extracted_query_terms = extract_query_terms(conn, question)?;
     let terms = extracted_query_terms.terms;
-    let exact_terms = required_exact_terms(question)
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let exact_terms = required_exact_terms(question)?;
     let mut scored: BTreeMap<String, (i64, EvidenceCard)> = BTreeMap::new();
     let mut candidate_block_ids = BTreeSet::new();
     let mut match_channel_blocks = BTreeMap::<String, BTreeSet<String>>::new();
@@ -14879,32 +14881,254 @@ struct ExtractedQueryTerms {
     aliases: Vec<String>,
 }
 
-fn required_exact_terms(question: &str) -> Vec<&'static str> {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryExpansionCatalog {
+    schema_version: String,
+    catalog_version: String,
+    #[serde(default)]
+    entries: Vec<QueryExpansionEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryExpansionEntry {
+    id: String,
+    trigger: QueryExpansionTrigger,
+    #[serde(default)]
+    terms: Vec<String>,
+    #[serde(default)]
+    exact_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryExpansionTrigger {
+    #[serde(default)]
+    any: Vec<String>,
+    #[serde(default)]
+    all: Vec<String>,
+    #[serde(default)]
+    all_any: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct QueryExpansionCatalogCache {
+    path: Option<PathBuf>,
+    modified: Option<SystemTime>,
+    len: u64,
+    catalog: QueryExpansionCatalog,
+}
+
+impl Default for QueryExpansionCatalogCache {
+    fn default() -> Self {
+        Self {
+            path: None,
+            modified: None,
+            len: 0,
+            catalog: parse_query_expansion_catalog(DEFAULT_QUERY_EXPANSIONS_JSON)
+                .expect("embedded query expansion catalog must parse"),
+        }
+    }
+}
+
+impl QueryExpansionCatalogCache {
+    fn catalog(&mut self, path: Option<PathBuf>) -> Result<QueryExpansionCatalog> {
+        let Some(path) = path else {
+            if self.path.is_some() {
+                *self = Self::default();
+            }
+            return Ok(self.catalog.clone());
+        };
+        let metadata = fs::metadata(&path).with_context(|| {
+            format!(
+                "{}={} is not readable",
+                QUERY_EXPANSIONS_PATH_ENV,
+                path.display()
+            )
+        })?;
+        let modified = metadata.modified().ok();
+        let len = metadata.len();
+        if self.path.as_ref() == Some(&path) && self.modified == modified && self.len == len {
+            return Ok(self.catalog.clone());
+        }
+        let source = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "{}={} could not be read",
+                QUERY_EXPANSIONS_PATH_ENV,
+                path.display()
+            )
+        })?;
+        let catalog = parse_query_expansion_catalog(&source).with_context(|| {
+            format!(
+                "{}={} is not a valid query expansion catalog",
+                QUERY_EXPANSIONS_PATH_ENV,
+                path.display()
+            )
+        })?;
+        self.path = Some(path);
+        self.modified = modified;
+        self.len = len;
+        self.catalog = catalog.clone();
+        Ok(catalog)
+    }
+}
+
+fn configured_query_expansions_path() -> Option<PathBuf> {
+    std::env::var(QUERY_EXPANSIONS_PATH_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn query_expansion_catalog() -> Result<QueryExpansionCatalog> {
+    let path = configured_query_expansions_path();
+    let cache = QUERY_EXPANSION_CATALOG_CACHE
+        .get_or_init(|| Mutex::new(QueryExpansionCatalogCache::default()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow!("query expansion catalog cache is poisoned"))?;
+    cache.catalog(path)
+}
+
+fn parse_query_expansion_catalog(source: &str) -> Result<QueryExpansionCatalog> {
+    let catalog: QueryExpansionCatalog =
+        serde_json::from_str(source).context("query expansion catalog must be JSON")?;
+    if catalog.schema_version != QUERY_EXPANSIONS_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "query expansion catalog schema_version must be {}",
+            QUERY_EXPANSIONS_SCHEMA_VERSION
+        ));
+    }
+    if catalog.catalog_version.trim().is_empty() {
+        return Err(anyhow!(
+            "query expansion catalog catalog_version is required"
+        ));
+    }
+    for entry in &catalog.entries {
+        if entry.id.trim().is_empty() {
+            return Err(anyhow!("query expansion entry id is required"));
+        }
+        if entry.terms.is_empty() && entry.exact_terms.is_empty() {
+            return Err(anyhow!(
+                "query expansion entry {} must define terms or exact_terms",
+                entry.id
+            ));
+        }
+        if entry.terms.iter().all(|term| term.trim().is_empty())
+            && entry.exact_terms.iter().all(|term| term.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "query expansion entry {} must define non-empty terms or exact_terms",
+                entry.id
+            ));
+        }
+        if entry.trigger.any.is_empty()
+            && entry.trigger.all.is_empty()
+            && entry.trigger.all_any.is_empty()
+        {
+            return Err(anyhow!(
+                "query expansion entry {} must define a trigger",
+                entry.id
+            ));
+        }
+        for alternatives in &entry.trigger.all_any {
+            if alternatives.is_empty() {
+                return Err(anyhow!(
+                    "query expansion entry {} has an empty all_any trigger group",
+                    entry.id
+                ));
+            }
+            if alternatives.iter().all(|term| term.trim().is_empty()) {
+                return Err(anyhow!(
+                    "query expansion entry {} has an all_any trigger group without non-empty terms",
+                    entry.id
+                ));
+            }
+        }
+    }
+    Ok(catalog)
+}
+
+fn required_exact_terms(question: &str) -> Result<Vec<String>> {
+    let catalog = query_expansion_catalog()?;
+    let normalized = normalize_query(question);
     let mut terms = Vec::new();
-    let normalized = normalize_text(question);
-    if normalized.contains("通灵玉") && normalized.contains('字') {
-        terms.push("莫失莫忘");
-        terms.push("一除邪祟");
+    apply_query_expansion_exact_terms(&catalog, question, &normalized, &mut terms);
+    Ok(terms)
+}
+
+fn apply_query_expansion_terms(
+    catalog: &QueryExpansionCatalog,
+    question: &str,
+    normalized: &str,
+    terms: &mut Vec<String>,
+) {
+    for entry in &catalog.entries {
+        if query_expansion_entry_matches(entry, question, normalized) {
+            for term in &entry.terms {
+                push_term(terms, term);
+            }
+        }
     }
-    if normalized.contains("青埂") {
-        terms.push("青埂");
+}
+
+fn apply_query_expansion_exact_terms(
+    catalog: &QueryExpansionCatalog,
+    question: &str,
+    normalized: &str,
+    terms: &mut Vec<String>,
+) {
+    for entry in &catalog.entries {
+        if query_expansion_entry_matches(entry, question, normalized) {
+            for term in &entry.exact_terms {
+                push_term(terms, term);
+            }
+        }
     }
-    if normalized.contains("第八回") {
-        terms.push("第八回");
+}
+
+fn query_expansion_entry_matches(
+    entry: &QueryExpansionEntry,
+    question: &str,
+    normalized: &str,
+) -> bool {
+    if !entry.trigger.any.is_empty()
+        && !entry
+            .trigger
+            .any
+            .iter()
+            .any(|term| query_matches_expansion_term(question, normalized, term))
+    {
+        return false;
     }
-    if normalized.contains("第八十回") {
-        terms.push("第八十");
+    if !entry
+        .trigger
+        .all
+        .iter()
+        .all(|term| query_matches_expansion_term(question, normalized, term))
+    {
+        return false;
     }
-    if normalized.contains("第八十一回") || normalized.contains("后四十") {
-        terms.push("第八十一");
+    if !entry.trigger.all_any.iter().all(|alternatives| {
+        alternatives
+            .iter()
+            .any(|term| query_matches_expansion_term(question, normalized, term))
+    }) {
+        return false;
     }
-    if question.contains("寳玉") {
-        terms.push("寳玉");
+    !entry.trigger.any.is_empty()
+        || !entry.trigger.all.is_empty()
+        || !entry.trigger.all_any.is_empty()
+}
+
+fn query_matches_expansion_term(question: &str, normalized: &str, term: &str) -> bool {
+    let term = term.trim();
+    if term.is_empty() {
+        return false;
     }
-    if question.contains("寳釵") {
-        terms.push("寳釵");
-    }
-    terms
+    question.contains(term) || normalized.contains(&normalize_query(term))
 }
 
 fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQueryTerms> {
@@ -14912,163 +15136,8 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
     let mut aliases = Vec::new();
     let mut canonical_person_ids = Vec::new();
     let normalized = normalize_query(question);
-    let seed_terms = [
-        ("通灵玉", "通靈玉"),
-        ("通灵宝玉", "通靈寶玉"),
-        ("莫失莫忘", "莫失莫忘"),
-        ("仙寿恒昌", "仙壽恒昌"),
-        ("一除邪祟", "一除邪祟"),
-        ("二疗冤疾", "二療冤疾"),
-        ("三知祸福", "三知禍福"),
-        ("石头", "石頭"),
-        ("顽石", "頑石"),
-        ("寳玉", "寳玉"),
-        ("青埂峰", "青埂峰"),
-        ("金陵十二钗", "金陵十二釵"),
-        ("判词", "判詞"),
-        ("葬花", "葬花"),
-        ("好了歌", "好了歌"),
-        ("太虚幻境", "太虛幻境"),
-        ("脂批", "脂批"),
-        ("甲戌", "甲戌"),
-        ("程甲", "程甲"),
-        ("程乙", "程乙"),
-        ("前八十回", "前八十回"),
-        ("后四十回", "後四十回"),
-        ("第八十一回", "第八十一回"),
-        ("宝玉", "寶玉"),
-        ("黛玉", "黛玉"),
-        ("宝钗", "寶釵"),
-        ("凤姐", "鳳姐"),
-        ("贾母", "賈母"),
-        ("袭人", "襲人"),
-        ("李纨", "李紈"),
-        ("女娲", "女媧"),
-        ("补天", "補天"),
-        ("甄士隐", "甄士隱"),
-        ("贾雨村", "賈雨村"),
-        ("冷子兴", "冷子興"),
-        ("刘姥姥", "劉姥姥"),
-        ("大观园", "大觀園"),
-        ("怡红院", "怡紅院"),
-        ("潇湘馆", "瀟湘館"),
-        ("蘅芜苑", "蘅蕪苑"),
-        ("荣国府", "榮國府"),
-        ("宁国府", "寧國府"),
-        ("贾府", "賈府"),
-        ("薛蟠", "薛蟠"),
-        ("香菱", "香菱"),
-        ("平儿", "平兒"),
-        ("尤氏", "尤氏"),
-        ("贾琏", "賈璉"),
-        ("秦钟", "秦鐘"),
-        ("北静王", "北靜王"),
-        ("金陵", "金陵"),
-        ("红楼梦", "紅樓夢"),
-        ("风月宝鉴", "風月寶鑒"),
-        ("芙蓉女儿", "芙蓉女兒"),
-        ("桃花社", "桃花社"),
-        ("海棠", "海棠"),
-        ("菊花", "菊花"),
-        ("灯谜", "燈謎"),
-        ("省亲", "省親"),
-        ("第八回", "第八回"),
-        ("第一回", "第一回"),
-        ("脂砚斋", "脂硯齋"),
-    ];
-    for (simple, traditional) in seed_terms {
-        if question.contains(simple)
-            || question.contains(traditional)
-            || normalized.contains(&normalize_query(simple))
-        {
-            push_term(&mut terms, simple);
-            push_term(&mut terms, traditional);
-        }
-    }
-    let asks_inscription = question.contains('字')
-        || question.contains("铭")
-        || question.contains("銘")
-        || question.contains("写")
-        || question.contains("寫");
-    let asks_tonglingyu =
-        question.contains("通灵玉") || question.contains("通靈玉") || normalized.contains("通灵玉");
-    if asks_inscription && asks_tonglingyu {
-        for term in [
-            "莫失莫忘",
-            "仙寿恒昌",
-            "仙壽恒昌",
-            "一除邪祟",
-            "二疗冤疾",
-            "二療冤疾",
-            "三知祸福",
-            "三知禍福",
-        ] {
-            push_term(&mut terms, term);
-        }
-    }
-    if asks_tonglingyu_loss_event(question, &normalized) {
-        for term in [
-            "失寶玉",
-            "失宝玉",
-            "失玉",
-            "良兒偷玉",
-            "良儿偷玉",
-            "甄宝玉送玉",
-            "掃雪拾玉",
-            "扫雪拾玉",
-            "良兒",
-            "良儿",
-            "偷玉",
-            "偷玉的人",
-            "通靈知奇禍",
-            "通灵知奇祸",
-            "那塊玉",
-            "那块玉",
-            "玉丟了",
-            "玉丢了",
-            "玉不見",
-            "玉不见",
-            "送玉來",
-            "送玉来",
-            "送玉來的和尚",
-            "送玉来的和尚",
-            "送玉的和尚",
-            "送玉的和尙",
-            "我是送玉来的",
-            "甄寳玉送玉",
-            "甄寶玉送玉",
-            "寶玉回來了",
-            "宝玉回来了",
-            "那年丟了玉",
-            "那年丢了玉",
-            "那年失玉",
-            "頭裡丟的時候",
-            "头里丢的时候",
-            "和尚取去",
-            "雪深了",
-            "雪化盡了",
-            "雪化尽了",
-            "丢在草根底下",
-            "揀了起來",
-            "捡了起来",
-            "爭去拾玉",
-            "争去拾玉",
-            "拾玉",
-            "得通靈幻境悟仙緣",
-            "得通灵幻境悟仙缘",
-        ] {
-            push_term(&mut terms, term);
-        }
-    }
-    if question.contains("顽石") || question.contains("頑石") {
-        push_term(&mut terms, "石頭");
-        push_term(&mut terms, "石头");
-    }
-    if question.contains("后四十") || question.contains("後四十") {
-        push_term(&mut terms, "第八十一回");
-        push_term(&mut terms, "第081回");
-        push_term(&mut terms, "八十一");
-    }
+    let catalog = query_expansion_catalog()?;
+    apply_query_expansion_terms(&catalog, question, &normalized, &mut terms);
 
     let mut stmt = conn.prepare(
         "SELECT alias, normalized_alias, person_id FROM aliases ORDER BY LENGTH(alias) DESC, alias",

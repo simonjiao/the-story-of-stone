@@ -1445,3 +1445,14 @@ report 中。
     release automation 才能声明当前版本目标环境完成。
     本节点完成不改变非目标边界：LLM Agent 不是事实来源，不能决定 reviewer
     裁决、ACL、scope grant、tool policy、memory 读取面或 evidence package 写入。
+16. 2026-05-22 已完成 `tonglingyu-runtime` 查询扩展词迁出代码切片：
+    runtime 内置默认 `query_expansions.json`，并支持通过
+    `TONGLINGYU_QUERY_EXPANSIONS_PATH` 指向外部 JSON catalog；检索路径会在每次
+    query expansion 读取前检查外部文件路径、mtime 和文件长度，变化后同步重读并
+    替换内存缓存。catalog schema 支持 `catalog_version`、`any`、`all`、`all_any`
+    触发条件，通灵玉铭文、失玉事件、后四十回起点、青埂和章节 exact term 保护均迁入 catalog。
+    外部 catalog 解析失败时 fail-closed，不静默回退旧缓存或默认目录。已通过
+    `cargo test -p tonglingyu-runtime --lib`、`cargo clippy -p tonglingyu-runtime --all-targets -- -D warnings`
+    和 `git diff --check`。该结果只证明 repo-local
+    热加载机制和默认目录有效；目标环境是否使用外部目录、mtime 更新是否在 live
+    trace 中生效，仍需部署后用实际请求验证。

@@ -1,0 +1,431 @@
+{
+  "schema_version": "tonglingyu.query_expansions.v1",
+  "catalog_version": "2026-05-22.1",
+  "entries": [
+    {
+      "id": "core:tonglingyu",
+      "trigger": { "any": ["通灵玉", "通靈玉"] },
+      "terms": ["通灵玉", "通靈玉"]
+    },
+    {
+      "id": "core:tonglingbao",
+      "trigger": { "any": ["通灵宝玉", "通靈寶玉"] },
+      "terms": ["通灵宝玉", "通靈寶玉"]
+    },
+    {
+      "id": "tonglingyu:inscription",
+      "trigger": {
+        "all_any": [
+          ["通灵宝玉", "通靈寶玉", "通灵玉", "通靈玉"],
+          ["字", "铭", "銘", "写", "寫"]
+        ]
+      },
+      "terms": [
+        "莫失莫忘",
+        "仙寿恒昌",
+        "仙壽恒昌",
+        "一除邪祟",
+        "二疗冤疾",
+        "二療冤疾",
+        "三知祸福",
+        "三知禍福"
+      ],
+      "exact_terms": ["莫失莫忘", "一除邪祟"]
+    },
+    {
+      "id": "tonglingyu:loss-event",
+      "trigger": {
+        "all_any": [
+          ["通灵宝玉", "通靈寶玉", "通灵玉", "通靈玉"],
+          ["丢", "丟", "失", "不见", "不見", "遗失", "遺失", "几次", "幾次", "多少次"]
+        ]
+      },
+      "terms": [
+        "失寶玉",
+        "失宝玉",
+        "失玉",
+        "良兒偷玉",
+        "良儿偷玉",
+        "甄宝玉送玉",
+        "甄寶玉送玉",
+        "甄寳玉送玉",
+        "掃雪拾玉",
+        "扫雪拾玉",
+        "良兒",
+        "良儿",
+        "偷玉",
+        "偷玉的人",
+        "通靈知奇禍",
+        "通灵知奇祸",
+        "那塊玉",
+        "那块玉",
+        "玉丟了",
+        "玉丢了",
+        "玉不見",
+        "玉不见",
+        "送玉來",
+        "送玉来",
+        "送玉來的和尚",
+        "送玉来的和尚",
+        "送玉的和尚",
+        "送玉的和尙",
+        "我是送玉来的",
+        "寶玉回來了",
+        "宝玉回来了",
+        "那年丟了玉",
+        "那年丢了玉",
+        "那年失玉",
+        "頭裡丟的時候",
+        "头里丢的时候",
+        "和尚取去",
+        "雪深了",
+        "雪化盡了",
+        "雪化尽了",
+        "丢在草根底下",
+        "揀了起來",
+        "捡了起来",
+        "爭去拾玉",
+        "争去拾玉",
+        "拾玉",
+        "得通靈幻境悟仙緣",
+        "得通灵幻境悟仙缘"
+      ]
+    },
+    {
+      "id": "topic:stone",
+      "trigger": { "any": ["顽石", "頑石"] },
+      "terms": ["顽石", "頑石", "石头", "石頭"]
+    },
+    {
+      "id": "topic:later-forty-start",
+      "trigger": { "any": ["后四十", "後四十"] },
+      "terms": ["第八十一回", "第081回", "八十一"],
+      "exact_terms": ["第八十一"]
+    },
+    {
+      "id": "exact:qinggeng",
+      "trigger": { "any": ["青埂"] },
+      "terms": ["青埂峰", "青埂"],
+      "exact_terms": ["青埂"]
+    },
+    {
+      "id": "exact:chapter-eight",
+      "trigger": { "any": ["第八回"] },
+      "terms": ["第八回"],
+      "exact_terms": ["第八回"]
+    },
+    {
+      "id": "exact:chapter-eighty",
+      "trigger": { "any": ["第八十回"] },
+      "terms": ["第八十回"],
+      "exact_terms": ["第八十"]
+    },
+    {
+      "id": "exact:archaic-baoyu",
+      "trigger": { "any": ["寳玉"] },
+      "terms": ["寳玉"],
+      "exact_terms": ["寳玉"]
+    },
+    {
+      "id": "exact:archaic-baochai",
+      "trigger": { "any": ["寳釵"] },
+      "terms": ["寳釵"],
+      "exact_terms": ["寳釵"]
+    },
+    {
+      "id": "core:inscription-moshimowang",
+      "trigger": { "any": ["莫失莫忘"] },
+      "terms": ["莫失莫忘"]
+    },
+    {
+      "id": "core:inscription-xianshouhengchang",
+      "trigger": { "any": ["仙寿恒昌", "仙壽恒昌"] },
+      "terms": ["仙寿恒昌", "仙壽恒昌"]
+    },
+    {
+      "id": "core:inscription-exorcism",
+      "trigger": { "any": ["一除邪祟"] },
+      "terms": ["一除邪祟"]
+    },
+    {
+      "id": "core:inscription-healing",
+      "trigger": { "any": ["二疗冤疾", "二療冤疾"] },
+      "terms": ["二疗冤疾", "二療冤疾"]
+    },
+    {
+      "id": "core:inscription-forecast",
+      "trigger": { "any": ["三知祸福", "三知禍福"] },
+      "terms": ["三知祸福", "三知禍福"]
+    },
+    {
+      "id": "core:shitouchapter",
+      "trigger": { "any": ["石头", "石頭"] },
+      "terms": ["石头", "石頭"]
+    },
+    {
+      "id": "core:archaic-baoyu",
+      "trigger": { "any": ["寳玉"] },
+      "terms": ["寳玉"]
+    },
+    {
+      "id": "core:qinggengfeng",
+      "trigger": { "any": ["青埂峰"] },
+      "terms": ["青埂峰"]
+    },
+    {
+      "id": "core:jinling-twelve",
+      "trigger": { "any": ["金陵十二钗", "金陵十二釵"] },
+      "terms": ["金陵十二钗", "金陵十二釵"]
+    },
+    {
+      "id": "core:judgment",
+      "trigger": { "any": ["判词", "判詞"] },
+      "terms": ["判词", "判詞"]
+    },
+    {
+      "id": "core:burying-flowers",
+      "trigger": { "any": ["葬花"] },
+      "terms": ["葬花"]
+    },
+    {
+      "id": "core:haolege",
+      "trigger": { "any": ["好了歌"] },
+      "terms": ["好了歌"]
+    },
+    {
+      "id": "core:taixu",
+      "trigger": { "any": ["太虚幻境", "太虛幻境"] },
+      "terms": ["太虚幻境", "太虛幻境"]
+    },
+    {
+      "id": "core:zhifou",
+      "trigger": { "any": ["脂批"] },
+      "terms": ["脂批"]
+    },
+    {
+      "id": "core:jiaxu",
+      "trigger": { "any": ["甲戌"] },
+      "terms": ["甲戌"]
+    },
+    {
+      "id": "core:chengjia",
+      "trigger": { "any": ["程甲"] },
+      "terms": ["程甲"]
+    },
+    {
+      "id": "core:chengyi",
+      "trigger": { "any": ["程乙"] },
+      "terms": ["程乙"]
+    },
+    {
+      "id": "core:first-eighty",
+      "trigger": { "any": ["前八十回"] },
+      "terms": ["前八十回"]
+    },
+    {
+      "id": "core:later-forty",
+      "trigger": { "any": ["后四十回", "後四十回"] },
+      "terms": ["后四十回", "後四十回"]
+    },
+    {
+      "id": "core:chapter-eighty-one",
+      "trigger": { "any": ["第八十一回"] },
+      "terms": ["第八十一回"]
+    },
+    {
+      "id": "person:baoyu",
+      "trigger": { "any": ["宝玉", "寶玉"] },
+      "terms": ["宝玉", "寶玉"]
+    },
+    {
+      "id": "person:daiyu",
+      "trigger": { "any": ["黛玉"] },
+      "terms": ["黛玉"]
+    },
+    {
+      "id": "person:baochai",
+      "trigger": { "any": ["宝钗", "寶釵"] },
+      "terms": ["宝钗", "寶釵"]
+    },
+    {
+      "id": "person:fengjie",
+      "trigger": { "any": ["凤姐", "鳳姐"] },
+      "terms": ["凤姐", "鳳姐"]
+    },
+    {
+      "id": "person:jiamu",
+      "trigger": { "any": ["贾母", "賈母"] },
+      "terms": ["贾母", "賈母"]
+    },
+    {
+      "id": "person:xiren",
+      "trigger": { "any": ["袭人", "襲人"] },
+      "terms": ["袭人", "襲人"]
+    },
+    {
+      "id": "person:liwan",
+      "trigger": { "any": ["李纨", "李紈"] },
+      "terms": ["李纨", "李紈"]
+    },
+    {
+      "id": "topic:nuwa",
+      "trigger": { "any": ["女娲", "女媧"] },
+      "terms": ["女娲", "女媧"]
+    },
+    {
+      "id": "topic:butian",
+      "trigger": { "any": ["补天", "補天"] },
+      "terms": ["补天", "補天"]
+    },
+    {
+      "id": "person:zhenshiyin",
+      "trigger": { "any": ["甄士隐", "甄士隱"] },
+      "terms": ["甄士隐", "甄士隱"]
+    },
+    {
+      "id": "person:jiayucun",
+      "trigger": { "any": ["贾雨村", "賈雨村"] },
+      "terms": ["贾雨村", "賈雨村"]
+    },
+    {
+      "id": "person:lengzixing",
+      "trigger": { "any": ["冷子兴", "冷子興"] },
+      "terms": ["冷子兴", "冷子興"]
+    },
+    {
+      "id": "person:liulaolao",
+      "trigger": { "any": ["刘姥姥", "劉姥姥"] },
+      "terms": ["刘姥姥", "劉姥姥"]
+    },
+    {
+      "id": "place:daguanyuan",
+      "trigger": { "any": ["大观园", "大觀園"] },
+      "terms": ["大观园", "大觀園"]
+    },
+    {
+      "id": "place:yihongyuan",
+      "trigger": { "any": ["怡红院", "怡紅院"] },
+      "terms": ["怡红院", "怡紅院"]
+    },
+    {
+      "id": "place:xiaoxiangguan",
+      "trigger": { "any": ["潇湘馆", "瀟湘館"] },
+      "terms": ["潇湘馆", "瀟湘館"]
+    },
+    {
+      "id": "place:hengwuyuan",
+      "trigger": { "any": ["蘅芜苑", "蘅蕪苑"] },
+      "terms": ["蘅芜苑", "蘅蕪苑"]
+    },
+    {
+      "id": "place:rongguofu",
+      "trigger": { "any": ["荣国府", "榮國府"] },
+      "terms": ["荣国府", "榮國府"]
+    },
+    {
+      "id": "place:ningguofu",
+      "trigger": { "any": ["宁国府", "寧國府"] },
+      "terms": ["宁国府", "寧國府"]
+    },
+    {
+      "id": "place:jiafu",
+      "trigger": { "any": ["贾府", "賈府"] },
+      "terms": ["贾府", "賈府"]
+    },
+    {
+      "id": "person:xuepan",
+      "trigger": { "any": ["薛蟠"] },
+      "terms": ["薛蟠"]
+    },
+    {
+      "id": "person:xiangling",
+      "trigger": { "any": ["香菱"] },
+      "terms": ["香菱"]
+    },
+    {
+      "id": "person:pinger",
+      "trigger": { "any": ["平儿", "平兒"] },
+      "terms": ["平儿", "平兒"]
+    },
+    {
+      "id": "person:youshi",
+      "trigger": { "any": ["尤氏"] },
+      "terms": ["尤氏"]
+    },
+    {
+      "id": "person:jialian",
+      "trigger": { "any": ["贾琏", "賈璉"] },
+      "terms": ["贾琏", "賈璉"]
+    },
+    {
+      "id": "person:qinzhong",
+      "trigger": { "any": ["秦钟", "秦鐘"] },
+      "terms": ["秦钟", "秦鐘"]
+    },
+    {
+      "id": "person:beijingwang",
+      "trigger": { "any": ["北静王", "北靜王"] },
+      "terms": ["北静王", "北靜王"]
+    },
+    {
+      "id": "place:jinling",
+      "trigger": { "any": ["金陵"] },
+      "terms": ["金陵"]
+    },
+    {
+      "id": "work:hongloumeng",
+      "trigger": { "any": ["红楼梦", "紅樓夢"] },
+      "terms": ["红楼梦", "紅樓夢"]
+    },
+    {
+      "id": "object:fengyuebaojian",
+      "trigger": { "any": ["风月宝鉴", "風月寶鑒"] },
+      "terms": ["风月宝鉴", "風月寶鑒"]
+    },
+    {
+      "id": "poem:furongnuer",
+      "trigger": { "any": ["芙蓉女儿", "芙蓉女兒"] },
+      "terms": ["芙蓉女儿", "芙蓉女兒"]
+    },
+    {
+      "id": "topic:taohuashe",
+      "trigger": { "any": ["桃花社"] },
+      "terms": ["桃花社"]
+    },
+    {
+      "id": "topic:haitang",
+      "trigger": { "any": ["海棠"] },
+      "terms": ["海棠"]
+    },
+    {
+      "id": "topic:juhua",
+      "trigger": { "any": ["菊花"] },
+      "terms": ["菊花"]
+    },
+    {
+      "id": "topic:dengmi",
+      "trigger": { "any": ["灯谜", "燈謎"] },
+      "terms": ["灯谜", "燈謎"]
+    },
+    {
+      "id": "topic:shengqin",
+      "trigger": { "any": ["省亲", "省親"] },
+      "terms": ["省亲", "省親"]
+    },
+    {
+      "id": "chapter:eight",
+      "trigger": { "any": ["第八回"] },
+      "terms": ["第八回"]
+    },
+    {
+      "id": "chapter:one",
+      "trigger": { "any": ["第一回"] },
+      "terms": ["第一回"]
+    },
+    {
+      "id": "person:zhiyanzhai",
+      "trigger": { "any": ["脂砚斋", "脂硯齋"] },
+      "terms": ["脂砚斋", "脂硯齋"]
+    }
+  ]
+}
