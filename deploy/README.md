@@ -7,7 +7,7 @@ source repository.
 
 ## What Stays Here
 
-- `docker-compose.yml`: local stack definition for Hermes, Tonglingyu Gateway,
+- `docker-compose.yml`: local stack definition for Tonglingyu Gateway,
   Open WebUI, and Cloudflare Tunnel.
 - `scripts/start-local-stack.sh`: local start/rebuild wrapper.
 - `scripts/lib/`: shared layout and env-file loading helpers used by the local
@@ -24,9 +24,9 @@ TONGLINGYU_DEPLOY_ENV_FILE=/path/to/deploy/.env \
   ./scripts/start-local-stack.sh
 ```
 
-Runtime data directories must be provided by env (`HERMES_DATA_DIR`,
-`OPEN_WEBUI_DATA_DIR`, `TONGLINGYU_DATA_DIR`). Do not keep runtime artifacts
-under this source repo's `deploy/`.
+Runtime data directories must be provided by env (`OPEN_WEBUI_DATA_DIR`,
+`TONGLINGYU_DATA_DIR`). Do not keep runtime artifacts under this source repo's
+`deploy/`.
 
 Useful options:
 
@@ -41,7 +41,7 @@ The local wrapper reads the current project version from `../VERSION`, exports
 it as `TONGLINGYU_VERSION`, builds `tonglingyu-gateway`, and starts the compose
 stack. It does not bump versions, create release evidence, or run production
 gates.
-The compose fallback tag is `latest` by design, so a missing
+The compose default image tag is `latest` by design, so a missing
 `TONGLINGYU_VERSION` cannot look like a numeric release version.
 
 ## Versioning

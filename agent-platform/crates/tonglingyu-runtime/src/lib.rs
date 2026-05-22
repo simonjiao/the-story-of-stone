@@ -1215,7 +1215,7 @@ impl TonglingyuRuntimeStore {
             .await
     }
 
-    async fn execute_workflow_with_agent_runtime_client(
+    pub async fn execute_workflow_with_agent_runtime_client(
         &self,
         input: RuntimeWorkflowInput,
         mode: TonglingyuAgentRuntimeMode,
@@ -1234,28 +1234,6 @@ impl TonglingyuRuntimeStore {
         )
         .await
         {
-            if agent_runtime_step_failure_allows_local_answer(&workflow, mode, &error) {
-                workflow.agent_runtime_summary = agent_runtime_local_answer_fallback_summary(
-                    mode,
-                    &workflow,
-                    "agent_runtime_step_execution",
-                    &error,
-                );
-                workflow.stream_events = workflow_stream_events(
-                    &workflow.trace_id,
-                    &input.profiles.main,
-                    &workflow.package.package_id,
-                    &workflow.final_answer,
-                    &workflow.steps,
-                );
-                self.record_agent_runtime_local_answer_fallback(
-                    &workflow,
-                    mode,
-                    "agent_runtime_step_execution",
-                    &error,
-                );
-                return Ok(workflow);
-            }
             self.record_agent_runtime_rejection(
                 &workflow,
                 mode,
@@ -1426,38 +1404,6 @@ impl TonglingyuRuntimeStore {
                     "profile_step_count": workflow.steps.len(),
                     "executed_profile_step_count": executed_profile_step_count,
                     "error": error.to_string(),
-                    "local_governance_enforced": true,
-                }),
-            );
-        }
-    }
-
-    fn record_agent_runtime_local_answer_fallback(
-        &self,
-        workflow: &RuntimeWorkflowOutput,
-        mode: TonglingyuAgentRuntimeMode,
-        failure_stage: &str,
-        error: &anyhow::Error,
-    ) {
-        if let Ok(conn) = self.open_connection() {
-            let _ = append_runtime_audit_event(
-                &conn,
-                &workflow.trace_id,
-                "agent_runtime_profile_local_answer_fallback",
-                &json!({
-                    "runtime_mode": mode.as_str(),
-                    "failure_stage": failure_stage,
-                    "profile_step_count": workflow.steps.len(),
-                    "executed_profile_step_count": workflow
-                        .steps
-                        .iter()
-                        .filter(|step| step.agent_runtime.is_some())
-                        .count(),
-                    "answer_source": &workflow.answer_source,
-                    "package_id": &workflow.package.package_id,
-                    "review_status": &workflow.package.review.status,
-                    "error": error.to_string(),
-                    "fallback_reason": "agent_runtime_timeout_local_answerable",
                     "local_governance_enforced": true,
                 }),
             );
@@ -1905,15 +1851,16 @@ impl TonglingyuAgentRuntimeMode {
         if let Some(mode) = workflow_agent_runtime_mode_from_role_provider_source(&env_nonempty)? {
             return Ok(mode);
         }
-        let value = std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE")
-            .unwrap_or_else(|_| "minimal".to_string());
-        match value.trim().to_ascii_lowercase().as_str() {
-            "" | "minimal" => Ok(Self::Minimal),
-            "hermes" => Ok(Self::Hermes),
-            "openai-compatible-network" | "openai_compatible_network" => {
-                Ok(Self::OpenAiCompatibleNetwork)
-            }
-            other => Err(anyhow!("unsupported TONGLINGYU_AGENT_RUNTIME_MODE={other}")),
+        let value = std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE").unwrap_or_default();
+        match value.trim() {
+            "" => Err(anyhow!(
+                "workflow agent role provider config is required: {}",
+                WORKFLOW_AGENT_ROLE_PROVIDER_ENVS.join(",")
+            )),
+            "openai-compatible-network" => Ok(Self::OpenAiCompatibleNetwork),
+            other => Err(anyhow!(
+                "TONGLINGYU_AGENT_RUNTIME_MODE={other} is not supported for workflow runtime; configure role provider backend openai-compatible-network"
+            )),
         }
     }
 
@@ -2028,17 +1975,13 @@ fn workflow_agent_runtime_mode_from_role_provider_source(
         return Ok(None);
     };
     let backend = required_agent_provider_env_from(&profile, "BACKEND", get_env)?;
-    match backend.trim().to_ascii_lowercase().as_str() {
-        "hermes-agent" | "hermes_agent" => Ok(Some(TonglingyuAgentRuntimeMode::Hermes)),
-        "openai-compatible-network"
-        | "openai_compatible_network"
-        | "openai-compatible"
-        | "openai_compatible"
-        | "minimax" => Ok(Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)),
-        "minimal" => Ok(Some(TonglingyuAgentRuntimeMode::Minimal)),
-        other => Err(anyhow!(
-            "unsupported workflow agent provider backend for {profile}: {other}"
-        )),
+    let backend = backend.trim();
+    if backend == "openai-compatible-network" {
+        Ok(Some(TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork))
+    } else {
+        Err(anyhow!(
+            "workflow agent provider {profile} must use backend openai-compatible-network; got {backend}"
+        ))
     }
 }
 
@@ -4215,7 +4158,7 @@ fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
         "tool_result_count": 0,
         "tool_audit_event_count": 0,
         "profile_observation_complete": false,
-        "hermes_content_execution_complete": false,
+        "profile_content_execution_complete": false,
         "local_governance_enforced": true,
     })
 }
@@ -4252,55 +4195,6 @@ fn agent_runtime_profile_draft_source(mode: TonglingyuAgentRuntimeMode) -> Strin
         TonglingyuAgentRuntimeMode::Minimal => "minimal",
     };
     format!("agent_runtime_{source}_profile")
-}
-
-fn agent_runtime_step_failure_allows_local_answer(
-    workflow: &RuntimeWorkflowOutput,
-    mode: TonglingyuAgentRuntimeMode,
-    error: &anyhow::Error,
-) -> bool {
-    mode == TonglingyuAgentRuntimeMode::Hermes
-        && agent_runtime_step_failure_is_timeout(error)
-        && workflow.answer_source == "runtime_local_profile"
-        && workflow.package.review.status == "passed"
-        && tonglingyu_loss_count_answer(&workflow.question, &workflow.package).is_some()
-}
-
-fn agent_runtime_step_failure_is_timeout(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    message.contains("Hermes Runtime timed out")
-        || message.contains("runtime timed out")
-        || message.contains("request timed out")
-}
-
-fn agent_runtime_local_answer_fallback_summary(
-    mode: TonglingyuAgentRuntimeMode,
-    workflow: &RuntimeWorkflowOutput,
-    failure_stage: &str,
-    error: &anyhow::Error,
-) -> Value {
-    json!({
-        "mode": mode.as_str(),
-        "profile_execution_status": "hermes_profile_timeout_local_answer_fallback",
-        "profile_step_count": workflow.steps.len(),
-        "executed_profile_step_count": workflow
-            .steps
-            .iter()
-            .filter(|step| step.agent_runtime.is_some())
-            .count(),
-        "tool_result_count": 0,
-        "tool_audit_event_count": 0,
-        "draft_consumed": false,
-        "draft_governance_completed": true,
-        "content_used_for_final_answer": false,
-        "profile_observation_complete": false,
-        "hermes_content_execution_complete": false,
-        "local_governance_enforced": true,
-        "answer_source": &workflow.answer_source,
-        "failure_stage": failure_stage,
-        "fallback_reason": "agent_runtime_timeout_local_answerable",
-        "error": error.to_string(),
-    })
 }
 
 fn agent_runtime_execution_summary(
@@ -4407,8 +4301,8 @@ fn agent_runtime_execution_summary(
         && package_matches_local
         && draft_governance_completed
         && review_local_enforced;
-    let hermes_content_execution_complete =
-        mode == TonglingyuAgentRuntimeMode::Hermes && profile_observation_complete;
+    let profile_content_execution_complete =
+        agent_runtime_profile_observation_mode(mode) && profile_observation_complete;
     let profile_execution_status = match mode {
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork if profile_observation_complete => {
@@ -4444,7 +4338,7 @@ fn agent_runtime_execution_summary(
         "content_used_for_final_answer": content_used_for_final_answer,
         "review_local_enforced": review_local_enforced,
         "profile_observation_complete": profile_observation_complete,
-        "hermes_content_execution_complete": hermes_content_execution_complete,
+        "profile_content_execution_complete": profile_content_execution_complete,
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
     })
@@ -4485,7 +4379,7 @@ fn validate_agent_runtime_execution_summary(
         return Ok(());
     }
     let complete = summary
-        .get("hermes_content_execution_complete")
+        .get("profile_content_execution_complete")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let tool_result_count = summary
@@ -16224,7 +16118,7 @@ mod tests {
     struct CalibrationJudgeRuntimeClient;
 
     #[test]
-    fn workflow_agent_runtime_mode_uses_role_provider_backend_over_legacy_mode() {
+    fn workflow_agent_runtime_mode_rejects_hermes_provider_backend() {
         let env = test_env(&[
             ("TONGLINGYU_AGENT_RUNTIME_MODE", "openai-compatible-network"),
             ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling"),
@@ -16237,10 +16131,12 @@ mod tests {
             ),
         ]);
 
-        let mode = workflow_agent_runtime_mode_from_role_provider_source(&env)
-            .expect("role provider backend parses");
+        let error = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect_err("workflow role provider backend must reject Hermes")
+            .to_string();
 
-        assert_eq!(mode, Some(TonglingyuAgentRuntimeMode::Hermes));
+        assert!(error.contains("openai-compatible-network"));
+        assert!(error.contains("hermes-agent"));
     }
 
     #[test]
@@ -16298,6 +16194,27 @@ mod tests {
             .to_string();
 
         assert!(error.contains("workflow agent role providers must use one provider profile"));
+    }
+
+    #[test]
+    fn workflow_agent_runtime_mode_rejects_minimax_provider_backend() {
+        let env = test_env(&[
+            ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "minimax_workflow"),
+            ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "minimax_workflow"),
+            ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "minimax_workflow"),
+            ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "minimax_workflow"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_BACKEND",
+                "minimax",
+            ),
+        ]);
+
+        let error = workflow_agent_runtime_mode_from_role_provider_source(&env)
+            .expect_err("workflow role provider backend must reject MiniMax")
+            .to_string();
+
+        assert!(error.contains("openai-compatible-network"));
+        assert!(error.contains("minimax"));
     }
 
     #[derive(Debug)]
@@ -22333,7 +22250,7 @@ mod tests {
             json!(workflow.steps.len())
         );
         assert_eq!(
-            workflow.agent_runtime_summary["hermes_content_execution_complete"],
+            workflow.agent_runtime_summary["profile_content_execution_complete"],
             json!(false)
         );
         let conn = store.open_connection().expect("runtime conn");
@@ -22489,7 +22406,7 @@ mod tests {
             "hermes_profile_observed_with_local_governance"
         );
         assert_eq!(
-            workflow.agent_runtime_summary["hermes_content_execution_complete"],
+            workflow.agent_runtime_summary["profile_content_execution_complete"],
             json!(true)
         );
         assert_eq!(
@@ -22535,7 +22452,7 @@ mod tests {
             event["event_type"] == "agent_runtime_profile_execution_summarized"
                 && event["payload"]["profile_execution_status"]
                     == json!("hermes_profile_observed_with_local_governance")
-                && event["payload"]["hermes_content_execution_complete"] == json!(true)
+                && event["payload"]["profile_content_execution_complete"] == json!(true)
                 && event["payload"]["tool_result_count"] == json!(4)
                 && event["payload"]["tool_audit_event_count"] == json!(4)
         }));
@@ -22632,8 +22549,8 @@ mod tests {
             json!(true)
         );
         assert_eq!(
-            workflow.agent_runtime_summary["hermes_content_execution_complete"],
-            json!(false)
+            workflow.agent_runtime_summary["profile_content_execution_complete"],
+            json!(true)
         );
         assert_eq!(
             workflow.agent_runtime_summary["tool_result_count"],
@@ -22651,7 +22568,7 @@ mod tests {
                 && event["payload"]["profile_execution_status"]
                     == json!("openai_compatible_profile_observed_with_local_governance")
                 && event["payload"]["profile_observation_complete"] == json!(true)
-                && event["payload"]["hermes_content_execution_complete"] == json!(false)
+                && event["payload"]["profile_content_execution_complete"] == json!(true)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -22814,7 +22731,7 @@ mod tests {
             event["event_type"] == "agent_runtime_profile_execution_summarized"
                 && event["payload"]["profile_execution_status"]
                     == json!("hermes_profile_incomplete_local_governance")
-                && event["payload"]["hermes_content_execution_complete"] == json!(false)
+                && event["payload"]["profile_content_execution_complete"] == json!(false)
         }));
         assert!(events.iter().any(|event| {
             event["event_type"] == "agent_runtime_profile_execution_rejected"
@@ -22868,7 +22785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hermes_workflow_uses_local_lost_jade_answer_when_profile_times_out() {
+    async fn hermes_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
         let db_path = std::env::temp_dir().join(format!(
             "tonglingyu-runtime-hermes-timeout-local-loss-answer-{}.db",
             uuid::Uuid::now_v7().simple()
@@ -22881,7 +22798,7 @@ mod tests {
             seed_lost_jade_runtime_blocks(&conn);
         }
         let trace_id = "trace-hermes-timeout-local-loss-answer-test";
-        let workflow = store
+        let error = store
             .execute_workflow_with_agent_runtime_client(
                 test_workflow_input(
                     trace_id,
@@ -22893,28 +22810,22 @@ mod tests {
                 Arc::new(TimeoutProfileRuntimeClient),
             )
             .await
-            .expect("local lost-jade answer should survive Hermes timeout");
+            .expect_err("Hermes timeout must fail closed even when local evidence is answerable");
 
-        assert_eq!(workflow.answer_source, "runtime_local_profile");
-        assert!(workflow.final_answer.contains("一次"));
-        assert!(!workflow.final_answer.contains("如果你愿意"));
-        assert_eq!(
-            workflow.agent_runtime_summary["profile_execution_status"],
-            json!("hermes_profile_timeout_local_answer_fallback")
-        );
-        assert_eq!(
-            workflow.agent_runtime_summary["fallback_reason"],
-            json!("agent_runtime_timeout_local_answerable")
-        );
+        assert!(error.to_string().contains("Hermes Runtime timed out"));
         let events = store
             .audit_events_for_trace(trace_id)
             .expect("audit events");
         assert!(events.iter().any(|event| {
-            event["event_type"] == "agent_runtime_profile_local_answer_fallback"
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
                 && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
-                && event["payload"]["fallback_reason"]
-                    == json!("agent_runtime_timeout_local_answerable")
+                && event["payload"]["runtime_mode"] == json!("hermes")
         }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["event_type"] == "agent_runtime_profile_local_answer_fallback")
+        );
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
@@ -22985,7 +22896,7 @@ mod tests {
             event["event_type"] == "agent_runtime_profile_execution_summarized"
                 && event["payload"]["profile_execution_status"]
                     == json!("hermes_profile_observed_with_local_governance")
-                && event["payload"]["hermes_content_execution_complete"] == json!(true)
+                && event["payload"]["profile_content_execution_complete"] == json!(true)
                 && event["payload"]["tool_result_count"] == json!(4)
                 && event["payload"]["tool_audit_event_count"] == json!(0)
         }));
