@@ -143,6 +143,13 @@ abstraction.
 
 ## Tests and Verification
 
+- Rust module tests must live in a separate test module file instead of growing
+  inline `#[cfg(test)] mod tests { ... }` blocks inside production modules. Wire
+  them from the module with `#[cfg(test)] mod tests;`, using `tests.rs` or
+  `tests/mod.rs` in the corresponding module directory.
+- When changing an existing Rust module that already has inline tests, do not add
+  more inline test bodies there. Move the touched tests into the separate test
+  module file as part of the change.
 - For Rust-only changes, start with the smallest crate-level `cargo fmt`,
   `cargo clippy`, and `cargo test` command that covers the touched crate.
 - Broaden to the full `agent-platform` workspace when shared models, traits,
