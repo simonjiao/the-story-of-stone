@@ -2787,11 +2787,11 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
             }),
             output_contract: json!({
                 "required": ["evidence_observation"],
-                "evidence_observation_required": ["commentary_refs", "commentary_analysis", "base_text_limits"],
-                "must_label": ["commentary", "version_note"]
+                "evidence_observation_required": ["commentary_refs", "commentary_analysis", "scope_notes"],
+                "commentary_evidence_rank": "first_class"
             }),
             safety_contract: json!({
-                "cannot_prove_base_text_fact_alone": true,
+                "commentary_can_support_answer": true,
                 "no_secret_access": true,
                 "no_write_tools": true
             }),
@@ -3346,9 +3346,9 @@ pub fn execute_runtime_workflow(
                 "card_count": commentary_cards.len(),
                 "evidence_ids": evidence_ids(&commentary_cards),
                 "evidence_types": evidence_types(&commentary_cards),
-                "base_text_limits": "commentary evidence cannot prove base text facts alone",
+                "scope_notes": "commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope",
                 "quality_report": &commentary_quality_report,
-                }),
+            }),
                 context: &input.context,
             },
         )?);
@@ -4096,7 +4096,7 @@ fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[...],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer. Do not add another result_summary key."
         }
         "commentary_evidence_search" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[...],\"commentary_analysis\":\"...\",\"base_text_limits\":\"...\"}}. commentary_refs must come from step_output_json.evidence_ids; do not prove base-text facts from commentary alone. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[...],\"commentary_analysis\":\"...\",\"scope_notes\":\"...\"}}. commentary_refs must come from step_output_json.evidence_ids; commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
         }
         "evidence_package_create" => {
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"...\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
@@ -4910,37 +4910,26 @@ fn extract_agent_runtime_draft(
     expected_package_id: &str,
 ) -> AgentRuntimeDraftExtraction {
     let trimmed = result_summary.trim();
-    let Some(value) = parse_agent_runtime_summary_value(trimmed) else {
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
         return AgentRuntimeDraftExtraction {
-            draft_answer: Some(trimmed.to_string()),
-            result_format: "text",
+            draft_answer: None,
+            result_format: "invalid",
             package_id: None,
             claim_statement_count: None,
-            rejected_reason: None,
+            rejected_reason: Some("invalid_json_draft"),
         };
     };
-
-    if let Some(text) = value
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: Some(text.to_string()),
-            result_format: "json_string",
-            package_id: None,
-            claim_statement_count: None,
-            rejected_reason: None,
-        };
-    }
-
-    let Some(object) = object_or_named_child(&value, "draft_candidate") else {
+    let Some(object) = value
+        .as_object()
+        .and_then(|object| object.get("draft_candidate"))
+        .and_then(Value::as_object)
+    else {
         return AgentRuntimeDraftExtraction {
             draft_answer: None,
             result_format: "json",
             package_id: None,
             claim_statement_count: None,
-            rejected_reason: Some("unsupported_json_draft"),
+            rejected_reason: Some("draft_candidate_missing"),
         };
     };
     let package_id = object
@@ -4949,16 +4938,12 @@ fn extract_agent_runtime_draft(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let claim_statement_count = object
-        .get("claim_statements")
-        .and_then(Value::as_array)
-        .map(Vec::len);
     if package_id.is_none() {
         return AgentRuntimeDraftExtraction {
             draft_answer: None,
             result_format: "json",
             package_id,
-            claim_statement_count,
+            claim_statement_count: None,
             rejected_reason: Some("package_id_missing"),
         };
     }
@@ -4970,13 +4955,25 @@ fn extract_agent_runtime_draft(
             draft_answer: None,
             result_format: "json",
             package_id,
-            claim_statement_count,
+            claim_statement_count: None,
             rejected_reason: Some("package_id_mismatch"),
+        };
+    }
+    let claim_statement_count = object
+        .get("claim_statements")
+        .and_then(Value::as_array)
+        .map(Vec::len);
+    if claim_statement_count.is_none() {
+        return AgentRuntimeDraftExtraction {
+            draft_answer: None,
+            result_format: "json",
+            package_id,
+            claim_statement_count,
+            rejected_reason: Some("claim_statements_missing"),
         };
     }
     let draft_answer = object
         .get("draft_answer")
-        .or_else(|| object.get("answer"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -14207,7 +14204,7 @@ fn retrieval_recommended_follow_up(issues: &[String]) -> Vec<String> {
 
 fn usage_limit_for_unknown_source(source_id: &str) -> String {
     if source_id.contains("zhiyanzhai") || source_id.contains("jiaxu") {
-        "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。".to_string()
+        "可作为默认回答证据；与前八十回正文同属 in-scope，后四十回材料仍需显式授权。".to_string()
     } else {
         "可作为正文或版本对照证据候选；不声明完成学术校勘。".to_string()
     }
@@ -14351,7 +14348,10 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
     }
     let mut claims = Vec::new();
     if question.contains("通灵玉") || question.contains("通靈玉") {
-        claims.push("通灵玉相关回答必须回到第八回等具体文本证据，并区分正文与脂批。".to_string());
+        claims.push(
+            "通灵玉相关回答必须回到可追溯证据；前八十回正文与脂批同属默认可用证据范围。"
+                .to_string(),
+        );
     }
     if asks_tonglingyu_loss_event(question, &normalize_query(question)) {
         claims.push("通灵宝玉失玉次数必须按当前证据包命中的事件线索说明范围，区分失玉、偷玉、送回、拾得、追述等事件类型。".to_string());
@@ -14363,7 +14363,7 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
         );
     }
     if cards.iter().any(|card| card.evidence_type == "commentary") {
-        claims.push("命中的脂批材料只能作为脂批或版本线索，不能当作正文事实。".to_string());
+        claims.push("命中的脂批材料可作为默认回答证据，证据来源层记录为脂批。".to_string());
     }
     if cards.iter().any(|card| card.evidence_type == "base_text") {
         claims.push("命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string());
@@ -14384,12 +14384,6 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     }
     let asks_commentary_material =
         question.contains("脂批") || question.contains("脂評") || question.contains("甲戌");
-    let asks_body_text_fact = question.contains("正文")
-        || question.contains("情节")
-        || (!asks_commentary_material && question.contains("原文"));
-    if cards.iter().all(|card| card.evidence_type == "commentary") && asks_body_text_fact {
-        issues.push("当前证据全为脂批，不能回答为正文直接事实。".to_string());
-    }
     if cards_include_later_forty(cards)
         && !claims
             .iter()
@@ -15389,10 +15383,10 @@ fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) 
     let (mut support_scope, mut unsupported_scope, evidence_level, confidence) = match evidence_type
     {
         "commentary" => (
-            "可支持脂批、评语或版本线索层面的说明；必须标注为脂批来源。".to_string(),
-            "不能单独证明正文事实，也不能扩展为所有版本共同结论。".to_string(),
-            "脂批提示".to_string(),
-            "medium".to_string(),
+            "可作为默认回答证据；与前八十回正文同属 in-scope，证据来源层记录为脂批。".to_string(),
+            "不能扩展为后四十回材料或所有版本共同结论。".to_string(),
+            "脂批证据".to_string(),
+            "high".to_string(),
         ),
         "version_note" => (
             "可支持版本边界、整理来源或版本系统说明。".to_string(),
@@ -15598,7 +15592,7 @@ fn version_system(source_id: &str) -> &'static str {
 
 fn usage_limit(source_category: &str) -> &'static str {
     if source_category == "commentary_material" {
-        "只能作为脂批、版本或评语证据候选；不能单独证明正文事实。"
+        "可作为默认回答证据；与前八十回正文同属 in-scope，后四十回材料仍需显式授权。"
     } else {
         "可作为正文或版本对照证据候选；不声明完成学术校勘。"
     }

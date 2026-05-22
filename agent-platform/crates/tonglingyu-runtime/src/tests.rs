@@ -475,7 +475,7 @@ impl RuntimeClient for DraftRuntimeClient {
                         "evidence_observation": {
                             "commentary_refs": evidence_ids_from_step_message(&message),
                             "commentary_analysis": "Hermes observed commentary evidence refs",
-                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                            "scope_notes": "commentary is first-class evidence within the default pre-80 scope",
                         }
                     }))
                     .expect("commentary evidence output serializes"),
@@ -566,7 +566,7 @@ impl RuntimeClient for NoToolRuntimeClient {
                         "evidence_observation": {
                             "commentary_refs": evidence_ids_from_step_message(&message),
                             "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
-                            "base_text_limits": "commentary cannot prove base-text facts alone",
+                            "scope_notes": "commentary is first-class evidence within the default pre-80 scope",
                         }
                     }))
                     .expect("commentary evidence output serializes"),
@@ -5400,19 +5400,13 @@ fn reviewer_blocks_no_evidence() {
 }
 
 #[test]
-fn reviewer_blocks_commentary_only_body_claim() {
+fn reviewer_allows_commentary_only_body_claim() {
     let cards = vec![sample_card("commentary")];
     let question = "只根据脂批原文说明正文事实可以吗？";
     let claims = claims_from_cards(question, &cards);
     let review = review(question, &cards, &claims);
-    assert_eq!(review.status, "needs_revision");
-    assert_eq!(review.severity, "medium");
-    assert!(
-        review
-            .issues
-            .iter()
-            .any(|issue| issue.contains("当前证据全为脂批"))
-    );
+    assert_eq!(review.status, "passed");
+    assert!(review.issues.is_empty());
 }
 
 #[test]
@@ -5783,9 +5777,11 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
         serde_json::to_string(&json!({
-            "draft_answer": "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
-            "package_id": package_id,
-            "claim_statements": ["结构化 claim"],
+            "draft_candidate": {
+                "draft_answer": "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
+                "package_id": package_id,
+                "claim_statements": ["结构化 claim"],
+            }
         }))
         .expect("structured draft serializes")
     );
@@ -5812,7 +5808,136 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
 }
 
 #[test]
-fn hermes_mode_accepts_nested_result_summary_draft_with_matching_package() {
+fn hermes_mode_rejects_plain_text_draft_summary() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let original_draft = workflow.draft_answer.clone();
+    let original_final = workflow.final_answer.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!("Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。");
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("plain text runtime draft rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(application.result_format, "invalid");
+    assert_eq!(application.rejected_reason, Some("invalid_json_draft"));
+    assert_eq!(workflow.draft_answer, original_draft);
+    assert_eq!(workflow.final_answer, original_final);
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "invalid_json_draft"
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "draft_answer": "直接对象草稿不应被消费。",
+            "package_id": package_id,
+            "claim_statements": ["direct claim"],
+        }))
+        .expect("direct draft serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("direct object runtime draft rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(application.result_format, "json");
+    assert_eq!(application.rejected_reason, Some("draft_candidate_missing"));
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "draft_candidate_missing"
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_draft_candidate_without_claim_statements() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "draft_candidate": {
+                "draft_answer": "缺少 claim_statements 的草稿不应被消费。",
+                "package_id": package_id,
+            }
+        }))
+        .expect("draft candidate serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("draft candidate without claims rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("claim_statements_missing")
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_draft_candidate_answer_alias() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "draft_candidate": {
+                "answer": "answer 别名不应被当作 draft_answer。",
+                "package_id": package_id,
+                "claim_statements": ["alias claim"],
+            }
+        }))
+        .expect("draft candidate serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("draft candidate answer alias rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(application.rejected_reason, Some("draft_answer_missing"));
+}
+
+#[test]
+fn hermes_mode_rejects_nested_result_summary_draft() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -5839,17 +5964,14 @@ fn hermes_mode_accepts_nested_result_summary_draft_with_matching_package() {
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
-            .expect("nested structured runtime draft consumed");
+            .expect("nested structured runtime draft rejected");
 
-    assert!(application.draft_consumed);
+    assert!(!application.draft_consumed);
     assert_eq!(application.result_format, "json");
+    assert_eq!(application.rejected_reason, Some("draft_candidate_missing"));
     assert_eq!(
-        workflow.draft_answer,
-        "嵌套 Hermes 草稿：必须引用本地证据包。"
-    );
-    assert_eq!(
-        workflow.steps[0].output["agent_runtime_claim_statement_count"],
-        json!(1)
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "draft_candidate_missing"
     );
 }
 
@@ -5868,9 +5990,11 @@ fn hermes_mode_rejects_structured_draft_with_wrong_package() {
     let original_final = workflow.final_answer.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
         serde_json::to_string(&json!({
-            "draft_answer": "错误 package 的 Hermes 草稿不应被消费。",
-            "package_id": "pkg-other",
-            "claim_statements": ["wrong package claim"],
+            "draft_candidate": {
+                "draft_answer": "错误 package 的 Hermes 草稿不应被消费。",
+                "package_id": "pkg-other",
+                "claim_statements": ["wrong package claim"],
+            }
         }))
         .expect("structured draft serializes")
     );
@@ -6140,7 +6264,14 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
                     "client": "hermes",
                     "status": "executed",
                     "content_used_for_final_answer": false,
-                    "result_summary": "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+                    "result_summary": serde_json::to_string(&json!({
+                        "draft_candidate": {
+                            "draft_answer": "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+                            "package_id": "pkg-runtime-draft-test",
+                            "claim_statements": ["Hermes profile 草稿绑定本地证据包。"],
+                        }
+                    }))
+                    .expect("runtime draft summary serializes"),
                 })),
             },
             RuntimeWorkflowStepReport {
