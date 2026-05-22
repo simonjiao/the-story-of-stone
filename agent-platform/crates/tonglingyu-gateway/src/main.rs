@@ -2,9 +2,11 @@ use agent_core::{
     AgentCoreError, CoreResult, ErrorCode, RuntimeClient, RuntimeOutput, RuntimeProfileInput,
     RuntimeRunInput, RuntimeSessionInput,
 };
+#[cfg(test)]
+use agent_runtime::MinimalRuntimeClient;
 use agent_runtime::{
-    MinimalRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
-    OpenAiCompatibleNetworkRuntimeConfig, RuntimeProfileRegistry,
+    OpenAiCompatibleNetworkRuntimeClient, OpenAiCompatibleNetworkRuntimeConfig,
+    RuntimeProfileRegistry,
 };
 use anyhow::{Context, Result, anyhow};
 use axum::{

@@ -261,7 +261,7 @@ pub(crate) fn extract_upstream_bundle_draft(
         };
     }
     if !expected_policy.later_forty_allowed
-        && draft_mentions_specific_later_forty_material(draft_answer.as_deref().unwrap_or(""))
+        && draft_mentions_unscoped_later_forty_material(draft_answer.as_deref().unwrap_or(""))
     {
         return UpstreamBundleDraftExtraction {
             package_id: candidate_package_id,
@@ -434,16 +434,31 @@ fn invalid_claim_statements(
     None
 }
 
-fn draft_mentions_specific_later_forty_material(draft: &str) -> bool {
+fn draft_mentions_unscoped_later_forty_material(draft: &str) -> bool {
     let draft = normalize_text(draft);
+    let compact_draft = draft.split_whitespace().collect::<String>();
     [
+        "后四十",
+        "後四十",
+        "后四十回",
+        "後四十回",
+        "后40",
+        "後40",
+        "后40回",
+        "後40回",
+        "一百二十回",
         "第八十一回",
         "第九十回",
         "第九十四回",
         "第94回",
         "第094回",
         "一百二十回本",
+        "120回",
+        "120回本",
+        "程高",
         "程高本",
+        "程甲",
+        "程乙",
         "高鹗",
         "高鶚",
         "扫雪",
@@ -453,5 +468,5 @@ fn draft_mentions_specific_later_forty_material(draft: &str) -> bool {
         "甄寶玉送玉",
     ]
     .iter()
-    .any(|term| draft.contains(term))
+    .any(|term| draft.contains(term) || compact_draft.contains(term))
 }

@@ -6074,6 +6074,42 @@ fn hermes_mode_rejects_default_scope_draft_using_later_forty_material() {
 }
 
 #[test]
+fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "通灵宝玉在前八十回中至少有两次；若把后四十回算进去，还会有更多相关情节。",
+            "默认范围内不应泛化引用后四十回。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("generic unscoped later-forty draft rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_uses_unscoped_later_forty")
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "draft_uses_unscoped_later_forty"
+    );
+}
+
+#[test]
 fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
