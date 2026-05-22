@@ -4256,7 +4256,7 @@ fn agent_runtime_execution_summary(
         && workflow.answer_source == "runtime_local_profile";
     let draft_governance_completed = application.is_some_and(|value| {
         value.draft_consumed
-            || value.rejected_reason == Some("draft_claim_exceeds_evidence_boundary")
+            || agent_runtime_draft_rejection_completes_governance(value.rejected_reason)
     });
     let evidence_governance_completed =
         evidence_matches_local || local_answer_used_for_final_answer;
@@ -4297,6 +4297,17 @@ fn agent_runtime_execution_summary(
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
     })
+}
+
+fn agent_runtime_draft_rejection_completes_governance(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some(
+            "draft_claim_exceeds_evidence_boundary"
+                | "draft_stops_for_user_opt_in"
+                | "draft_declines_answer_despite_local_evidence"
+        )
+    )
 }
 
 fn validate_agent_runtime_execution_summary(
@@ -4769,11 +4780,20 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         .collect::<Vec<_>>()
         .join("\n");
     let draft_text = normalize_text(draft);
+    if draft_stops_for_user_opt_in(&draft_text) {
+        return Some("draft_stops_for_user_opt_in");
+    }
     if asks_tonglingyu_loss_event(question, &normalize_query(question))
         && tonglingyu_multiple_loss_claim(&draft_text)
         && !tonglingyu_multiple_loss_directly_supported(cards)
     {
         return Some("draft_claim_exceeds_evidence_boundary");
+    }
+    if asks_tonglingyu_loss_event(question, &normalize_query(question))
+        && cards.iter().any(tonglingyu_loss_event_card)
+        && tonglingyu_loss_count_nonanswer(&draft_text)
+    {
+        return Some("draft_declines_answer_despite_local_evidence");
     }
     for term in [
         "出身",
@@ -4790,6 +4810,47 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         }
     }
     None
+}
+
+fn draft_stops_for_user_opt_in(draft_text: &str) -> bool {
+    [
+        "如果你愿意",
+        "若你愿意",
+        "如果您愿意",
+        "若您愿意",
+        "我可以继续",
+        "我可以接着",
+        "可以继续按",
+        "需要我继续",
+        "要不要我",
+        "是否需要我",
+        "你可以继续",
+        "如果需要我可以",
+        "如需我可以",
+        "如需继续",
+        "如果需要继续",
+    ]
+    .iter()
+    .any(|term| draft_text.contains(term))
+}
+
+fn tonglingyu_loss_count_nonanswer(draft_text: &str) -> bool {
+    [
+        "不能稳妥地概括成",
+        "还不能稳妥地概括成",
+        "不能稳妥概括成",
+        "不能给出一个确定次数",
+        "不宜先给出一个确定次数",
+        "不宜给出一个确定次数",
+        "不宜先给出确定次数",
+        "需要先把原著里符合",
+        "需要先逐条界定",
+    ]
+    .iter()
+    .any(|term| draft_text.contains(term))
+        || (draft_text.contains("需要先")
+            && draft_text.contains("丢失")
+            && draft_text.contains("再统计"))
 }
 
 fn tonglingyu_multiple_loss_claim(draft_text: &str) -> bool {
@@ -21301,6 +21362,93 @@ mod tests {
             workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
             "draft_claim_exceeds_evidence_boundary"
         );
+    }
+
+    #[test]
+    fn runtime_rejects_user_opt_in_continuation_draft() {
+        let rejected = agent_runtime_draft_evidence_boundary_rejection(
+            "通灵宝玉丢了几次",
+            "就目前这组可追溯事实来看，通灵宝玉不能稳妥地概括成“明确丢了几次”。如果你愿意，我可以继续按可核实情节帮你逐段梳理哪些算“丢失”。",
+            &lost_jade_test_cards(),
+        );
+
+        assert_eq!(rejected, Some("draft_stops_for_user_opt_in"));
+    }
+
+    #[test]
+    fn runtime_rejects_lost_jade_nonanswer_when_local_evidence_supports_count() {
+        let rejected = agent_runtime_draft_evidence_boundary_rejection(
+            "通灵宝玉丢了几次",
+            "继续梳理的话，按目前这组可追溯事实，通灵宝玉还不能稳妥地概括成“明确丢了几次”。更稳妥的说法是：需要先把原著里符合“丢失”定义的具体情节逐条界定，再统计；在没有完成这一步之前，不宜先给出一个确定次数。",
+            &lost_jade_test_cards(),
+        );
+
+        assert_eq!(
+            rejected,
+            Some("draft_declines_answer_despite_local_evidence")
+        );
+    }
+
+    #[test]
+    fn hermes_mode_rejects_user_opt_in_continuation_draft() {
+        let mut workflow = runtime_draft_workflow(
+            lost_jade_test_cards(),
+            ReviewRecord {
+                status: "passed".to_string(),
+                severity: "none".to_string(),
+                issues: vec![],
+                summary: "reviewer passed".to_string(),
+            },
+        );
+        workflow.question = "通灵宝玉丢了几次".to_string();
+        workflow.package.question = workflow.question.clone();
+        let local = local_answer(&workflow.question, &workflow.package);
+        workflow.draft_answer = local.clone();
+        workflow.final_answer = local.clone();
+        let package_id = workflow.package.package_id.clone();
+        workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+            serde_json::to_string(&json!({
+                "draft_candidate": {
+                    "draft_answer": "就目前这组可追溯事实来看，通灵宝玉不能稳妥地概括成“明确丢了几次”。如果你愿意，我可以继续按可核实情节帮你逐段梳理哪些算“丢失”。",
+                    "package_id": package_id,
+                    "claim_statements": ["通灵宝玉失玉次数需要继续梳理后再确定。"],
+                }
+            }))
+            .expect("structured draft serializes")
+        );
+
+        let application =
+            apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+                .expect("runtime draft rejected");
+
+        assert!(!application.draft_consumed);
+        assert_eq!(
+            application.rejected_reason,
+            Some("draft_stops_for_user_opt_in")
+        );
+        assert!(workflow.final_answer.contains("一次"));
+        assert!(!workflow.final_answer.contains("如果你愿意"));
+        assert!(!workflow.final_answer.contains("我可以继续"));
+        assert_eq!(
+            workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+            "draft_stops_for_user_opt_in"
+        );
+    }
+
+    #[test]
+    fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections() {
+        assert!(agent_runtime_draft_rejection_completes_governance(Some(
+            "draft_claim_exceeds_evidence_boundary"
+        )));
+        assert!(agent_runtime_draft_rejection_completes_governance(Some(
+            "draft_stops_for_user_opt_in"
+        )));
+        assert!(agent_runtime_draft_rejection_completes_governance(Some(
+            "draft_declines_answer_despite_local_evidence"
+        )));
+        assert!(!agent_runtime_draft_rejection_completes_governance(Some(
+            "package_id_mismatch"
+        )));
     }
 
     #[test]
