@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 
-EXPECTED_PROJECT_VERSION = "0.3.1"
+EXPECTED_PROJECT_VERSION = "0.3.2"
 EXPECTED_VERSION_FALLBACK = "latest"
 REPO_DIR = Path(__file__).resolve().parents[1]
 VERSION_SCRIPT = REPO_DIR / "scripts/version.py"
