@@ -1394,6 +1394,10 @@ impl TonglingyuRuntimeStore {
                 .iter()
                 .filter(|step| step.agent_runtime.is_some())
                 .count();
+            let provider_diagnostic = error
+                .downcast_ref::<AgentCoreError>()
+                .and_then(|error| error.diagnostic().cloned())
+                .unwrap_or(Value::Null);
             let _ = append_runtime_audit_event(
                 &conn,
                 &workflow.trace_id,
@@ -1404,6 +1408,7 @@ impl TonglingyuRuntimeStore {
                     "profile_step_count": workflow.steps.len(),
                     "executed_profile_step_count": executed_profile_step_count,
                     "error": error.to_string(),
+                    "provider_diagnostic": provider_diagnostic,
                     "local_governance_enforced": true,
                 }),
             );
@@ -16112,6 +16117,9 @@ mod tests {
     struct FailingProfileRuntimeClient;
 
     #[derive(Debug, Default)]
+    struct DiagnosticFailingProfileRuntimeClient;
+
+    #[derive(Debug, Default)]
     struct TimeoutProfileRuntimeClient;
 
     #[derive(Debug, Default)]
@@ -16980,6 +16988,53 @@ mod tests {
             Err(AgentCoreError::coded(
                 ErrorCode::InternalError,
                 format!("profile {} backend unavailable", input.profile_id),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeClient for DiagnosticFailingProfileRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "diagnostic-failing-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "diagnostic-failing-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded_with_diagnostic(
+                ErrorCode::InternalError,
+                format!(
+                    "OpenAI-compatible Runtime response did not include assistant content for {} (provider_empty_content)",
+                    input.profile_id
+                ),
+                json!({
+                    "schema_version": "openai-compatible-provider-diagnostic-v1",
+                    "error_type": "provider_empty_content",
+                    "attempt": 2,
+                    "retryable": true,
+                    "status_code": 200,
+                    "provider_model": "direct-test-model",
+                    "choice_count": 1,
+                    "content_present": true,
+                    "content_len": 0,
+                    "raw_response_body_embedded": false,
+                    "raw_content_embedded": false,
+                    "secret_values_printed": false,
+                }),
             ))
         }
     }
@@ -22778,6 +22833,49 @@ mod tests {
                 && event["payload"]["runtime_mode"] == json!("hermes")
                 && event["payload"]["profile_step_count"].as_u64().unwrap_or(0) > 0
                 && event["payload"]["executed_profile_step_count"] == json!(0)
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_workflow_audits_provider_diagnostic_on_profile_failure() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-openai-profile-diagnostic-failure-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let trace_id = "trace-openai-profile-diagnostic-failure-test";
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
+                TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+                Arc::new(DiagnosticFailingProfileRuntimeClient),
+            )
+            .await
+            .expect_err("OpenAI-compatible profile diagnostic failure must fail closed");
+
+        assert!(error.to_string().contains("provider_empty_content"));
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
+                && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
+                && event["payload"]["runtime_mode"] == json!("openai-compatible-network")
+                && event["payload"]["provider_diagnostic"]["schema_version"]
+                    == json!("openai-compatible-provider-diagnostic-v1")
+                && event["payload"]["provider_diagnostic"]["error_type"]
+                    == json!("provider_empty_content")
+                && event["payload"]["provider_diagnostic"]["raw_response_body_embedded"]
+                    == json!(false)
+                && event["payload"]["provider_diagnostic"]["raw_content_embedded"] == json!(false)
+                && event["payload"]["provider_diagnostic"]["secret_values_printed"] == json!(false)
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

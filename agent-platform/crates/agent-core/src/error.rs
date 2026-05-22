@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,13 @@ pub enum AgentCoreError {
     #[error("{code:?}: {message}")]
     Coded { code: ErrorCode, message: String },
 
+    #[error("{code:?}: {message}")]
+    CodedDiagnostic {
+        code: ErrorCode,
+        message: String,
+        diagnostic: Value,
+    },
+
     #[error("invalid transition for {entity}: {from} -> {to}")]
     InvalidTransition {
         entity: &'static str,
@@ -83,11 +91,31 @@ impl AgentCoreError {
         }
     }
 
+    pub fn coded_with_diagnostic(
+        code: ErrorCode,
+        message: impl Into<String>,
+        diagnostic: Value,
+    ) -> Self {
+        Self::CodedDiagnostic {
+            code,
+            message: message.into(),
+            diagnostic,
+        }
+    }
+
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Coded { code, .. } => *code,
+            Self::CodedDiagnostic { code, .. } => *code,
             Self::InvalidTransition { .. } => ErrorCode::Conflict,
             Self::InvalidEnum { .. } | Self::InvalidResourceRef(_) => ErrorCode::Conflict,
+        }
+    }
+
+    pub fn diagnostic(&self) -> Option<&Value> {
+        match self {
+            Self::CodedDiagnostic { diagnostic, .. } => Some(diagnostic),
+            _ => None,
         }
     }
 }

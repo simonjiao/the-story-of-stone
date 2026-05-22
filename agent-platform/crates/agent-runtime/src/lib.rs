@@ -1355,29 +1355,51 @@ impl OpenAiCompatibleNetworkRuntimeClient {
         started: Instant,
     ) -> CoreResult<(String, Value)> {
         let mut last_error_type = "provider_unavailable";
+        let mut attempt_failures = Vec::new();
         for attempt in 1..=self.config.max_attempts {
             if started.elapsed() >= self.config.total_deadline {
                 self.mark_provider_unhealthy().await;
-                return Err(openai_runtime_error(
+                return Err(openai_runtime_error_with_diagnostic(
                     "deadline_exceeded",
                     "OpenAI-compatible Runtime deadline exceeded",
+                    openai_attempt_failure_diagnostic("deadline_exceeded", None, &attempt_failures),
                 ));
             }
             match self
                 .send_chat_completion(input, model, requested_tools, attempt, started)
                 .await
             {
-                Ok(output) => {
+                Ok(mut output) => {
                     self.clear_provider_unhealthy().await;
+                    if !attempt_failures.is_empty()
+                        && let Value::Object(metadata) = &mut output.1
+                    {
+                        metadata.insert(
+                            "previous_attempt_failures".to_string(),
+                            Value::Array(attempt_failures),
+                        );
+                    }
                     return Ok(output);
                 }
                 Err(error) => {
                     last_error_type = error.error_type;
+                    let current_diagnostic = error.diagnostic.clone();
+                    if let Some(diagnostic) = current_diagnostic.clone() {
+                        attempt_failures.push(diagnostic);
+                    }
                     if error.mark_unhealthy {
                         self.mark_provider_unhealthy().await;
                     }
                     if attempt >= self.config.max_attempts || !error.retryable {
-                        return Err(openai_runtime_error(error.error_type, error.safe_message));
+                        return Err(openai_runtime_error_with_diagnostic(
+                            error.error_type,
+                            error.safe_message,
+                            openai_attempt_failure_diagnostic(
+                                error.error_type,
+                                current_diagnostic,
+                                &attempt_failures,
+                            ),
+                        ));
                     }
                     let delay = retry_delay(
                         self.config.retry_base_delay,
@@ -1386,18 +1408,24 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                         &input.profile_id,
                     );
                     if started.elapsed().saturating_add(delay) >= self.config.total_deadline {
-                        return Err(openai_runtime_error(
+                        return Err(openai_runtime_error_with_diagnostic(
                             "deadline_exceeded",
                             "OpenAI-compatible Runtime deadline exceeded",
+                            openai_attempt_failure_diagnostic(
+                                "deadline_exceeded",
+                                current_diagnostic,
+                                &attempt_failures,
+                            ),
                         ));
                     }
                     tokio::time::sleep(delay).await;
                 }
             }
         }
-        Err(openai_runtime_error(
+        Err(openai_runtime_error_with_diagnostic(
             last_error_type,
             "OpenAI-compatible Runtime provider unavailable",
+            openai_attempt_failure_diagnostic(last_error_type, None, &attempt_failures),
         ))
     }
 
@@ -1456,14 +1484,23 @@ impl OpenAiCompatibleNetworkRuntimeClient {
             return Err(classify_openai_http_error(status, &body_text));
         }
         let raw_response_sha256 = sha256_hex(&body_text);
-        let body = serde_json::from_str::<OpenAiCompatibleChatCompletionResponse>(&body_text)
-            .map_err(|_| {
-                OpenAiRuntimeAttemptError::fatal(
-                    "provider_malformed_json",
-                    "OpenAI-compatible Runtime response was malformed",
-                )
-            })?;
+        let body_value = serde_json::from_str::<Value>(&body_text).map_err(|_| {
+            OpenAiRuntimeAttemptError::fatal(
+                "provider_malformed_json",
+                "OpenAI-compatible Runtime response was malformed",
+            )
+        })?;
+        let body =
+            serde_json::from_value::<OpenAiCompatibleChatCompletionResponse>(body_value.clone())
+                .map_err(|_| {
+                    OpenAiRuntimeAttemptError::fatal(
+                        "provider_malformed_json",
+                        "OpenAI-compatible Runtime response was malformed",
+                    )
+                })?;
         let provider_request_id = response_provider_request_id.or_else(|| body.id.clone());
+        let provider_model = body.model.clone().unwrap_or_else(|| model.to_string());
+        let provider_usage = body.usage.clone().unwrap_or_else(|| json!({}));
         let choice = body.choices.first().ok_or_else(|| {
             OpenAiRuntimeAttemptError::fatal(
                 "provider_malformed_json",
@@ -1484,10 +1521,23 @@ impl OpenAiCompatibleNetworkRuntimeClient {
         let raw_content = choice.message.content.as_deref().unwrap_or_default();
         let reasoning_details = choice.message.reasoning_details.clone();
         if raw_content.trim().is_empty() && reasoning_details.is_none() {
-            return Err(OpenAiRuntimeAttemptError::fatal(
+            let diagnostic = openai_empty_content_diagnostic(OpenAiEmptyContentDiagnosticInput {
+                body: &body_value,
+                status_code: status.as_u16(),
+                provider_request_id: provider_request_id.as_deref(),
+                provider_model: &provider_model,
+                attempt,
+                raw_response_sha256: &raw_response_sha256,
+                latency_ms: started.elapsed().as_millis() as u64,
+                base_url_host: &base_url_host(&self.config.base_url),
+                response_format_json_requested: self.config.response_format_json,
+                requested_tool_count: requested_tools.len(),
+            });
+            return Err(OpenAiRuntimeAttemptError::retryable(
                 "provider_empty_content",
                 "OpenAI-compatible Runtime response did not include assistant content",
-            ));
+            )
+            .with_diagnostic(diagnostic));
         }
         let provider_output = openai_provider_output_envelope(
             raw_content,
@@ -1533,9 +1583,9 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "projection_digest": projection_digest,
                 "base_url_host": base_url_host(&self.config.base_url),
                 "provider_request_id": provider_request_id,
-                "provider_model": body.model.unwrap_or_else(|| model.to_string()),
+                "provider_model": provider_model,
                 "finish_reason": choice.finish_reason.clone().unwrap_or_else(|| "unknown".to_string()),
-                "usage": body.usage.unwrap_or_else(|| json!({})),
+                "usage": provider_usage,
                 "latency_ms": latency_ms,
                 "attempt_count": attempt,
                 "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
@@ -1624,6 +1674,7 @@ impl RuntimeClient for OpenAiCompatibleNetworkRuntimeClient {
                 "status": "provider_failed",
                 "error_code": error.code().as_str(),
                 "error_type": openai_error_type_from_message(&error.to_string()),
+                "provider_diagnostic": error.diagnostic().cloned().unwrap_or(Value::Null),
                 "secret_values_printed": false,
             }),
         };
@@ -3829,6 +3880,135 @@ fn provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     })
 }
 
+struct OpenAiEmptyContentDiagnosticInput<'a> {
+    body: &'a Value,
+    status_code: u16,
+    provider_request_id: Option<&'a str>,
+    provider_model: &'a str,
+    attempt: usize,
+    raw_response_sha256: &'a str,
+    latency_ms: u64,
+    base_url_host: &'a str,
+    response_format_json_requested: bool,
+    requested_tool_count: usize,
+}
+
+fn openai_empty_content_diagnostic(input: OpenAiEmptyContentDiagnosticInput<'_>) -> Value {
+    let choice_count = input
+        .body
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let first_choice = input
+        .body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let first_message = first_choice.and_then(|choice| choice.get("message"));
+    let message_keys = first_message
+        .and_then(Value::as_object)
+        .map(|message| {
+            let mut keys = message.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys
+        })
+        .unwrap_or_default();
+    let content_value = first_message.and_then(|message| message.get("content"));
+    let content_len = content_value
+        .and_then(Value::as_str)
+        .map(|value| value.chars().count())
+        .unwrap_or(0);
+
+    json!({
+        "schema_version": "openai-compatible-provider-diagnostic-v1",
+        "error_type": "provider_empty_content",
+        "attempt": input.attempt,
+        "retryable": true,
+        "status_code": input.status_code,
+        "provider_request_id": input.provider_request_id,
+        "provider_model": input.provider_model,
+        "choice_count": choice_count,
+        "finish_reason": first_choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        "message_keys": message_keys,
+        "content_present": content_value.is_some(),
+        "content_non_empty": provider_field_has_value(content_value),
+        "content_len": content_len,
+        "reasoning_details_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("reasoning_details"))
+        ),
+        "reasoning_content_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("reasoning_content"))
+        ),
+        "refusal_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("refusal"))
+        ),
+        "usage": input.body.get("usage").cloned().unwrap_or(Value::Null),
+        "raw_response_sha256": format!("sha256:{}", input.raw_response_sha256),
+        "latency_ms": input.latency_ms,
+        "base_url_host": input.base_url_host,
+        "response_format_json_requested": input.response_format_json_requested,
+        "requested_tool_count": input.requested_tool_count,
+        "raw_response_body_embedded": false,
+        "raw_content_embedded": false,
+        "secret_values_printed": false,
+    })
+}
+
+fn provider_field_has_value(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Null) | None => false,
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(Value::Object(values)) => !values.is_empty(),
+        Some(Value::Bool(_)) | Some(Value::Number(_)) => true,
+    }
+}
+
+fn openai_attempt_failure_diagnostic(
+    error_type: &str,
+    current_diagnostic: Option<Value>,
+    attempt_failures: &[Value],
+) -> Option<Value> {
+    if current_diagnostic.is_none() && attempt_failures.is_empty() {
+        return None;
+    }
+    let mut diagnostic = current_diagnostic.unwrap_or_else(|| {
+        json!({
+            "schema_version": "openai-compatible-runtime-failure-v1",
+            "error_type": error_type,
+            "secret_values_printed": false,
+        })
+    });
+    if let Value::Object(map) = &mut diagnostic {
+        map.entry("schema_version".to_string())
+            .or_insert_with(|| Value::String("openai-compatible-runtime-failure-v1".to_string()));
+        map.insert("final_error_type".to_string(), json!(error_type));
+        map.insert(
+            "attempt_failure_count".to_string(),
+            json!(attempt_failures.len()),
+        );
+        map.insert(
+            "attempt_failures".to_string(),
+            Value::Array(attempt_failures.to_vec()),
+        );
+        map.insert("secret_values_printed".to_string(), json!(false));
+        Some(diagnostic)
+    } else {
+        Some(json!({
+            "schema_version": "openai-compatible-runtime-failure-v1",
+            "error_type": error_type,
+            "current_diagnostic": diagnostic,
+            "attempt_failure_count": attempt_failures.len(),
+            "attempt_failures": attempt_failures,
+            "secret_values_printed": false,
+        }))
+    }
+}
+
 fn retry_delay(base: Duration, attempt: usize, trace_id: &str, profile_id: &str) -> Duration {
     let digest = Sha256::digest(format!("{trace_id}:{profile_id}:{attempt}").as_bytes());
     let jitter_ms = u64::from(digest[0] % 19);
@@ -3853,6 +4033,33 @@ fn openai_runtime_error(error_type: &str, safe_message: &str) -> AgentCoreError 
         _ => ErrorCode::InternalError,
     };
     AgentCoreError::coded(code, format!("{safe_message} ({error_type})"))
+}
+
+fn openai_runtime_error_with_diagnostic(
+    error_type: &str,
+    safe_message: &str,
+    diagnostic: Option<Value>,
+) -> AgentCoreError {
+    let code = match error_type {
+        "auth_error" => ErrorCode::Unauthorized,
+        "rate_limited" => ErrorCode::RateLimited,
+        "provider_overloaded"
+        | "provider_unavailable"
+        | "provider_unhealthy"
+        | "deadline_exceeded"
+        | "connection_error"
+        | "tls_error"
+        | "dns_error"
+        | "provider_malformed_json"
+        | "provider_empty_content"
+        | "safety_refusal" => ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
+    };
+    let message = format!("{safe_message} ({error_type})");
+    match diagnostic {
+        Some(diagnostic) => AgentCoreError::coded_with_diagnostic(code, message, diagnostic),
+        None => AgentCoreError::coded(code, message),
+    }
 }
 
 fn openai_error_type_from_message(message: &str) -> &'static str {
@@ -3884,6 +4091,7 @@ struct OpenAiRuntimeAttemptError {
     safe_message: &'static str,
     retryable: bool,
     mark_unhealthy: bool,
+    diagnostic: Option<Value>,
 }
 
 impl OpenAiRuntimeAttemptError {
@@ -3896,6 +4104,7 @@ impl OpenAiRuntimeAttemptError {
                 error_type,
                 "provider_overloaded" | "provider_unavailable" | "connection_error"
             ),
+            diagnostic: None,
         }
     }
 
@@ -3908,7 +4117,13 @@ impl OpenAiRuntimeAttemptError {
                 error_type,
                 "provider_overloaded" | "provider_unavailable" | "deadline_exceeded"
             ),
+            diagnostic: None,
         }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: Value) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
     }
 }
 
@@ -5488,6 +5703,162 @@ mod tests {
             assert_eq!(output.metadata["attempt_count"], json!(2));
             assert_eq!(*calls.lock().unwrap(), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_empty_content_with_diagnostic() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
+                    let call = {
+                        let mut calls = calls.lock().unwrap();
+                        *calls += 1;
+                        *calls
+                    };
+                    if call == 1 {
+                        Json(json!({
+                            "id": "empty-1",
+                            "model": "direct-test-model",
+                            "metadata_secret": "SECRET_PROVIDER_EMPTY_BODY",
+                            "choices": [
+                                {
+                                    "finish_reason": "stop",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": ""
+                                    }
+                                }
+                            ],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 4}
+                        }))
+                    } else {
+                        Json(json!({
+                            "id": "ok-2",
+                            "model": "direct-test-model",
+                            "choices": [
+                                {
+                                    "finish_reason": "stop",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                    }
+                                }
+                            ],
+                            "usage": {"prompt_tokens": 5, "completion_tokens": 31}
+                        }))
+                    }
+                }),
+            )
+            .with_state(calls.clone());
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            2,
+        ))
+        .unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"retried\":true}"
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(2));
+        let failure = &output.metadata["previous_attempt_failures"][0];
+        assert_eq!(
+            failure["schema_version"],
+            json!("openai-compatible-provider-diagnostic-v1")
+        );
+        assert_eq!(failure["error_type"], json!("provider_empty_content"));
+        assert_eq!(failure["attempt"], json!(1));
+        assert_eq!(failure["retryable"], json!(true));
+        assert_eq!(failure["status_code"], json!(200));
+        assert_eq!(failure["provider_request_id"], json!("empty-1"));
+        assert_eq!(failure["provider_model"], json!("direct-test-model"));
+        assert_eq!(failure["choice_count"], json!(1));
+        assert_eq!(failure["finish_reason"], json!("stop"));
+        assert_eq!(failure["message_keys"], json!(["content", "role"]));
+        assert_eq!(failure["content_present"], json!(true));
+        assert_eq!(failure["content_non_empty"], json!(false));
+        assert_eq!(failure["content_len"], json!(0));
+        assert_eq!(failure["raw_response_body_embedded"], json!(false));
+        assert_eq!(failure["raw_content_embedded"], json!(false));
+        assert_eq!(failure["secret_values_printed"], json!(false));
+        let encoded = serde_json::to_string(&output.metadata).unwrap();
+        assert!(!encoded.contains("SECRET_PROVIDER_EMPTY_BODY"));
+        assert!(!encoded.contains("secret prompt should not leak"));
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_reports_empty_content_diagnostic_after_retries() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
+                    let call = {
+                        let mut calls = calls.lock().unwrap();
+                        *calls += 1;
+                        *calls
+                    };
+                    Json(json!({
+                        "id": format!("empty-{call}"),
+                        "model": "direct-test-model",
+                        "metadata_secret": "SECRET_REPEATED_EMPTY_BODY",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": ""
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 4}
+                    }))
+                }),
+            )
+            .with_state(calls.clone());
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            2,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("provider_empty_content"));
+        let diagnostic = error.diagnostic().expect("empty-content diagnostic");
+        assert_eq!(
+            diagnostic["schema_version"],
+            json!("openai-compatible-provider-diagnostic-v1")
+        );
+        assert_eq!(diagnostic["error_type"], json!("provider_empty_content"));
+        assert_eq!(
+            diagnostic["final_error_type"],
+            json!("provider_empty_content")
+        );
+        assert_eq!(diagnostic["attempt"], json!(2));
+        assert_eq!(diagnostic["attempt_failure_count"], json!(2));
+        assert_eq!(diagnostic["attempt_failures"].as_array().unwrap().len(), 2);
+        assert_eq!(diagnostic["attempt_failures"][0]["attempt"], json!(1));
+        assert_eq!(diagnostic["attempt_failures"][1]["attempt"], json!(2));
+        assert_eq!(diagnostic["raw_response_body_embedded"], json!(false));
+        assert_eq!(diagnostic["raw_content_embedded"], json!(false));
+        assert_eq!(diagnostic["secret_values_printed"], json!(false));
+        let encoded = serde_json::to_string(diagnostic).unwrap();
+        assert!(!encoded.contains("SECRET_REPEATED_EMPTY_BODY"));
+        assert!(!encoded.contains("secret prompt should not leak"));
+        assert_eq!(*calls.lock().unwrap(), 2);
     }
 
     #[tokio::test]
