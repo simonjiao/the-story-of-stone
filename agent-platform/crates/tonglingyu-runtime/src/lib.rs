@@ -1234,6 +1234,28 @@ impl TonglingyuRuntimeStore {
         )
         .await
         {
+            if agent_runtime_step_failure_allows_local_answer(&workflow, mode, &error) {
+                workflow.agent_runtime_summary = agent_runtime_local_answer_fallback_summary(
+                    mode,
+                    &workflow,
+                    "agent_runtime_step_execution",
+                    &error,
+                );
+                workflow.stream_events = workflow_stream_events(
+                    &workflow.trace_id,
+                    &input.profiles.main,
+                    &workflow.package.package_id,
+                    &workflow.final_answer,
+                    &workflow.steps,
+                );
+                self.record_agent_runtime_local_answer_fallback(
+                    &workflow,
+                    mode,
+                    "agent_runtime_step_execution",
+                    &error,
+                );
+                return Ok(workflow);
+            }
             self.record_agent_runtime_rejection(
                 &workflow,
                 mode,
@@ -1404,6 +1426,38 @@ impl TonglingyuRuntimeStore {
                     "profile_step_count": workflow.steps.len(),
                     "executed_profile_step_count": executed_profile_step_count,
                     "error": error.to_string(),
+                    "local_governance_enforced": true,
+                }),
+            );
+        }
+    }
+
+    fn record_agent_runtime_local_answer_fallback(
+        &self,
+        workflow: &RuntimeWorkflowOutput,
+        mode: TonglingyuAgentRuntimeMode,
+        failure_stage: &str,
+        error: &anyhow::Error,
+    ) {
+        if let Ok(conn) = self.open_connection() {
+            let _ = append_runtime_audit_event(
+                &conn,
+                &workflow.trace_id,
+                "agent_runtime_profile_local_answer_fallback",
+                &json!({
+                    "runtime_mode": mode.as_str(),
+                    "failure_stage": failure_stage,
+                    "profile_step_count": workflow.steps.len(),
+                    "executed_profile_step_count": workflow
+                        .steps
+                        .iter()
+                        .filter(|step| step.agent_runtime.is_some())
+                        .count(),
+                    "answer_source": &workflow.answer_source,
+                    "package_id": &workflow.package.package_id,
+                    "review_status": &workflow.package.review.status,
+                    "error": error.to_string(),
+                    "fallback_reason": "agent_runtime_timeout_local_answerable",
                     "local_governance_enforced": true,
                 }),
             );
@@ -4158,6 +4212,54 @@ fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
         "tool_audit_event_count": 0,
         "hermes_content_execution_complete": false,
         "local_governance_enforced": true,
+    })
+}
+
+fn agent_runtime_step_failure_allows_local_answer(
+    workflow: &RuntimeWorkflowOutput,
+    mode: TonglingyuAgentRuntimeMode,
+    error: &anyhow::Error,
+) -> bool {
+    mode == TonglingyuAgentRuntimeMode::Hermes
+        && agent_runtime_step_failure_is_timeout(error)
+        && workflow.answer_source == "runtime_local_profile"
+        && workflow.package.review.status == "passed"
+        && tonglingyu_loss_count_answer(&workflow.question, &workflow.package).is_some()
+}
+
+fn agent_runtime_step_failure_is_timeout(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("Hermes Runtime timed out")
+        || message.contains("runtime timed out")
+        || message.contains("request timed out")
+}
+
+fn agent_runtime_local_answer_fallback_summary(
+    mode: TonglingyuAgentRuntimeMode,
+    workflow: &RuntimeWorkflowOutput,
+    failure_stage: &str,
+    error: &anyhow::Error,
+) -> Value {
+    json!({
+        "mode": mode.as_str(),
+        "profile_execution_status": "hermes_profile_timeout_local_answer_fallback",
+        "profile_step_count": workflow.steps.len(),
+        "executed_profile_step_count": workflow
+            .steps
+            .iter()
+            .filter(|step| step.agent_runtime.is_some())
+            .count(),
+        "tool_result_count": 0,
+        "tool_audit_event_count": 0,
+        "draft_consumed": false,
+        "draft_governance_completed": true,
+        "content_used_for_final_answer": false,
+        "hermes_content_execution_complete": false,
+        "local_governance_enforced": true,
+        "answer_source": &workflow.answer_source,
+        "failure_stage": failure_stage,
+        "fallback_reason": "agent_runtime_timeout_local_answerable",
+        "error": error.to_string(),
     })
 }
 
@@ -16031,6 +16133,9 @@ mod tests {
     struct FailingProfileRuntimeClient;
 
     #[derive(Debug, Default)]
+    struct TimeoutProfileRuntimeClient;
+
+    #[derive(Debug, Default)]
     struct CalibrationJudgeRuntimeClient;
 
     #[test]
@@ -16856,6 +16961,36 @@ mod tests {
     }
 
     #[async_trait]
+    impl RuntimeClient for TimeoutProfileRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "timeout-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "timeout-profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            _input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "Hermes Runtime timed out",
+            ))
+        }
+    }
+
+    #[async_trait]
     impl RuntimeClient for SlowDraftRuntimeClient {
         async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
             DraftRuntimeClient.execute_run(input).await
@@ -16979,6 +17114,57 @@ mod tests {
         returned.text = "王夫人等放心，只叫人仍把那玉交給寶釵給他帶上。寶釵道：“頭里丟的時候，必是那和尚取去的。”襲人麝月道：“那年丟了玉。”".to_string();
         returned.evidence_level = "正文直接".to_string();
         vec![loss, returned]
+    }
+
+    fn seed_lost_jade_runtime_blocks(conn: &Connection) {
+        seed_retrieval_quality_source(
+            conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        for (block_id, source_title, chapter_no, block_index, text) in [
+            (
+                "quality-block-lost-jade-body",
+                "紅樓夢/第九十四回",
+                94_i64,
+                2_i64,
+                "襲人見寶玉脖子上沒有挂著，便問：“那塊玉呢？”襲人回看桌上并沒有玉，便向各處找尋，蹤影全無。王夫人問：“那塊玉真丟了么？”",
+            ),
+            (
+                "quality-block-lost-jade-return",
+                "紅樓夢/第一百十六回",
+                116_i64,
+                3_i64,
+                "王夫人等放心，只叫人仍把那玉交給寶釵給他帶上。寶釵道：“頭里丟的時候，必是那和尚取去的。”襲人麝月道：“那年丟了玉。”",
+            ),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO blocks (
+                    block_id, source_id, section_id, source_title, normalized_source_title,
+                    source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                    evidence_type, chapter_no
+                ) VALUES (?1, 'quality-source', 'quality-section-lost-jade',
+                    ?2, ?3, 'https://example.test/source/lost-jade',
+                    1, ?4, 'paragraph', NULL, ?5, ?6, 'base_text', ?7)
+                "#,
+                params![
+                    block_id,
+                    source_title,
+                    normalize_title(source_title),
+                    block_index,
+                    text,
+                    normalize_text(text),
+                    chapter_no,
+                ],
+            )
+            .expect("insert lost jade runtime block");
+        }
     }
 
     fn yousanjie_test_package() -> EvidencePackage {
@@ -22443,6 +22629,93 @@ mod tests {
                 && event["payload"]["runtime_mode"] == json!("hermes")
                 && event["payload"]["profile_step_count"].as_u64().unwrap_or(0) > 0
                 && event["payload"]["executed_profile_step_count"] == json!(0)
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_uses_local_lost_jade_answer_when_profile_times_out() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-timeout-local-loss-answer-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_runtime_schema(&conn).expect("runtime schema");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+            seed_lost_jade_runtime_blocks(&conn);
+        }
+        let trace_id = "trace-hermes-timeout-local-loss-answer-test";
+        let workflow = store
+            .execute_workflow_with_agent_runtime_client(
+                test_workflow_input(
+                    trace_id,
+                    "通灵宝玉丢了几次",
+                    4,
+                    vec!["base_text".to_string()],
+                ),
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(TimeoutProfileRuntimeClient),
+            )
+            .await
+            .expect("local lost-jade answer should survive Hermes timeout");
+
+        assert_eq!(workflow.answer_source, "runtime_local_profile");
+        assert!(workflow.final_answer.contains("一次"));
+        assert!(!workflow.final_answer.contains("如果你愿意"));
+        assert_eq!(
+            workflow.agent_runtime_summary["profile_execution_status"],
+            json!("hermes_profile_timeout_local_answer_fallback")
+        );
+        assert_eq!(
+            workflow.agent_runtime_summary["fallback_reason"],
+            json!("agent_runtime_timeout_local_answerable")
+        );
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_local_answer_fallback"
+                && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
+                && event["payload"]["fallback_reason"]
+                    == json!("agent_runtime_timeout_local_answerable")
+        }));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn hermes_workflow_still_fails_closed_on_timeout_without_local_loss_answer() {
+        let db_path = std::env::temp_dir().join(format!(
+            "tonglingyu-runtime-hermes-timeout-no-local-answer-{}.db",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let store = TonglingyuRuntimeStore::new(db_path.clone());
+        {
+            let conn = store.open_connection().expect("runtime conn");
+            init_knowledge_base_schema(&conn).expect("kb schema");
+        }
+        let trace_id = "trace-hermes-timeout-no-local-answer-test";
+        let error = store
+            .execute_workflow_with_agent_runtime_client(
+                test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
+                TonglingyuAgentRuntimeMode::Hermes,
+                Arc::new(TimeoutProfileRuntimeClient),
+            )
+            .await
+            .expect_err("Hermes timeout should fail closed without a deterministic local answer");
+
+        assert!(error.to_string().contains("Hermes Runtime timed out"));
+        let events = store
+            .audit_events_for_trace(trace_id)
+            .expect("audit events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "agent_runtime_profile_execution_rejected"
+                && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
         }));
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
