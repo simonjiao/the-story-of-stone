@@ -4945,6 +4945,10 @@ fn tonglingyu_loss_count_nonanswer(draft_text: &str) -> bool {
         "不宜先给出一个确定次数",
         "不宜给出一个确定次数",
         "不宜先给出确定次数",
+        "没有一个固定的标准答案",
+        "没有固定的标准答案",
+        "没有明确的标准答案",
+        "没有明确标准答案",
         "需要先把原著里符合",
         "需要先逐条界定",
     ]
@@ -4963,12 +4967,16 @@ fn tonglingyu_multiple_loss_claim(draft_text: &str) -> bool {
         "二次",
         "2次",
         "多次",
+        "若干次",
+        "数次",
         "不止一次",
         "不只一次",
         "并不是只丢过一次",
         "不是只丢过一次",
         "并非只丢失过一次",
         "并非只丢过一次",
+        "一次明显的丢失以及若干次",
+        "一次明显丢失以及若干次",
     ]
     .iter()
     .any(|term| draft_text.contains(term))
@@ -21573,6 +21581,17 @@ mod tests {
             rejected,
             Some("draft_declines_answer_despite_local_evidence")
         );
+    }
+
+    #[test]
+    fn runtime_rejects_lost_jade_fuzzy_multiple_count_draft() {
+        let rejected = agent_runtime_draft_evidence_boundary_rejection(
+            "通灵宝玉丢了几次",
+            "通灵宝玉在《红楼梦》中并没有一个固定的“丢了几次”的标准答案；通常可概括为一次明显的丢失，以及若干次与遗失、失而复得相关的情节变动。",
+            &lost_jade_test_cards(),
+        );
+
+        assert_eq!(rejected, Some("draft_claim_exceeds_evidence_boundary"));
     }
 
     #[test]
