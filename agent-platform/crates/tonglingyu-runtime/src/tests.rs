@@ -6175,6 +6175,39 @@ fn hermes_mode_rejects_partial_coverage_count_draft() {
 }
 
 #[test]
+fn hermes_mode_allows_default_scope_pre80_chengjia_source_label() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "程甲本五十二回的前八十回正文证据可作为默认范围内材料使用。",
+            "程甲本五十二回属于前八十回正文证据。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("pre-80 Chengjia source label accepted");
+
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_consumed"],
+        json!(true)
+    );
+}
+
+#[test]
 fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
