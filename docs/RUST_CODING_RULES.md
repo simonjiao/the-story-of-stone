@@ -60,6 +60,16 @@ abstraction.
 - Do not let web framework, database, queue, telemetry, or deployment concerns
   define core model semantics.
 
+## Module Organization
+
+- Large, relatively independent Rust features must live in a dedicated module or
+  module directory instead of expanding a crate root or unrelated module. Move
+  coherent groups of types, helpers, tests, and private functions together when
+  the feature can be reasoned about independently.
+- Prefer a small public module facade plus private submodules for substantial
+  behavior. Keep cross-module APIs typed and domain-shaped; do not expose broad
+  catch-all helpers just to share implementation details.
+
 ## Error and Result Style
 
 - Use `CoreResult<T>` and `AgentCoreError` for domain and contract failures.
