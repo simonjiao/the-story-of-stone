@@ -4874,6 +4874,32 @@ fn resolve_question(
     messages: &[ContextMessage],
     prior_subject: Option<&str>,
 ) -> ResolverOutput {
+    if is_continue_only_question(question) {
+        if let Some(resolved_question) = latest_prior_user_question(messages, question) {
+            return ResolverOutput {
+                resolved_question,
+                referent_bindings: Vec::new(),
+                used_context_refs: vec!["session_history".to_string()],
+                confidence: 0.88,
+                needs_clarification: false,
+                clarification_question: None,
+                unsupported_reason: None,
+                strategy: "deterministic_rules".to_string(),
+                agent_audit: None,
+            };
+        }
+        return ResolverOutput {
+            resolved_question: question.to_string(),
+            referent_bindings: Vec::new(),
+            used_context_refs: Vec::new(),
+            confidence: 0.2,
+            needs_clarification: true,
+            clarification_question: Some("请说明要继续回答哪个问题。".to_string()),
+            unsupported_reason: Some("unresolved_continuation".to_string()),
+            strategy: "deterministic_rules".to_string(),
+            agent_audit: None,
+        };
+    }
     let current_subject = latest_subject_in_text(question);
     if let Some(subject) = current_subject {
         return ResolverOutput {
@@ -4930,6 +4956,37 @@ fn resolve_question(
         strategy: "deterministic_rules".to_string(),
         agent_audit: None,
     }
+}
+
+fn is_continue_only_question(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "继续" | "繼續" | "继续回答" | "繼續回答" | "接着" | "接著" | "接着说" | "接著說"
+    )
+}
+
+fn latest_prior_user_question(
+    messages: &[ContextMessage],
+    current_question: &str,
+) -> Option<String> {
+    let mut skipped_current = false;
+    messages.iter().rev().find_map(|message| {
+        if message.role != "user" {
+            return None;
+        }
+        let content = message.content.trim();
+        if !skipped_current && content == current_question.trim() {
+            skipped_current = true;
+            return None;
+        }
+        if content.is_empty()
+            || is_continue_only_question(content)
+            || is_openwebui_metadata_prompt(content)
+        {
+            return None;
+        }
+        Some(content.to_string())
+    })
 }
 
 fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> String {
@@ -6302,6 +6359,41 @@ mod tests {
         assert_eq!(resolved.resolved_question, "尤三姐最后怎么样？");
         assert!(!resolved.needs_clarification);
         assert!(resolved.confidence >= 0.75);
+    }
+
+    #[test]
+    fn resolver_binds_continue_only_turn_to_prior_user_question() {
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "通灵宝玉丢了几次".to_string(),
+            },
+            ContextMessage {
+                role: "assistant".to_string(),
+                content: "如果你愿意，我可以继续梳理。".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "继续".to_string(),
+            },
+        ];
+
+        let resolved = resolve_question("继续", &messages, None);
+
+        assert_eq!(resolved.resolved_question, "通灵宝玉丢了几次");
+        assert!(!resolved.needs_clarification);
+        assert_eq!(resolved.used_context_refs, vec!["session_history"]);
+    }
+
+    #[test]
+    fn unresolved_continue_only_turn_fails_closed() {
+        let resolved = resolve_question("继续", &[], None);
+
+        assert!(resolved.needs_clarification);
+        assert_eq!(
+            resolved.unsupported_reason.as_deref(),
+            Some("unresolved_continuation")
+        );
     }
 
     #[test]
