@@ -479,15 +479,16 @@ impl RuntimeClient for DraftRuntimeClient {
                         }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => serde_json::to_string(&json!({
-                        "draft_candidate": {
-                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
-                            "package_id": package_id_from_step_message(&message)
-                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                            "claim_statements": ["Hermes full workflow draft claim"],
-                        }
-                    }))
-                    .expect("draft output serializes"),
+                    "draft_answer" => upstream_bundle_summary_with_policy(
+                        source_scope_policy_from_step_message(&message),
+                        &package_id_from_step_message(&message)
+                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                        &package_id_from_step_message(&message)
+                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                        &format!("Hermes full workflow draft from {operation}. context={message}"),
+                        "Hermes full workflow draft claim",
+                        evidence_ids_from_step_message(&message),
+                    ),
                     "evidence_package_create" => serde_json::to_string(&json!({
                         "package_observation": {
                             "package_id": package_id_from_step_message(&message)
@@ -570,15 +571,16 @@ impl RuntimeClient for NoToolRuntimeClient {
                         }
                     }))
                     .expect("commentary evidence output serializes"),
-                    "draft_answer" => serde_json::to_string(&json!({
-                        "draft_candidate": {
-                            "draft_answer": format!("Hermes full workflow draft from {operation}. context={message}"),
-                            "package_id": package_id_from_step_message(&message)
-                                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                            "claim_statements": ["Hermes full workflow draft claim"],
-                        }
-                    }))
-                    .expect("draft output serializes"),
+                    "draft_answer" => upstream_bundle_summary_with_policy(
+                        source_scope_policy_from_step_message(&message),
+                        &package_id_from_step_message(&message)
+                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                        &package_id_from_step_message(&message)
+                            .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
+                        &format!("Hermes full workflow draft from {operation}. context={message}"),
+                        "Hermes full workflow draft claim",
+                        evidence_ids_from_step_message(&message),
+                    ),
                     "evidence_package_create" => serde_json::to_string(&json!({
                         "package_observation": {
                             "package_id": package_id_from_step_message(&message)
@@ -963,6 +965,12 @@ fn package_id_from_step_message(message: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn source_scope_policy_from_step_message(message: &str) -> Value {
+    step_output_from_message(message)
+        .and_then(|value| value.get("source_scope_policy").cloned())
+        .unwrap_or_else(|| json!(source_scope_policy_for_question("")))
+}
+
 fn evidence_ids_from_step_message(message: &str) -> Vec<String> {
     step_output_from_message(message)
         .and_then(|value| {
@@ -977,6 +985,76 @@ fn evidence_ids_from_step_message(message: &str) -> Vec<String> {
                 })
         })
         .unwrap_or_default()
+}
+
+fn upstream_bundle_summary(
+    question: &str,
+    package_id: &str,
+    draft_answer: &str,
+    claim_text: &str,
+    evidence_refs: Vec<String>,
+) -> String {
+    upstream_bundle_summary_with_policy(
+        json!(source_scope_policy_for_question(question)),
+        package_id,
+        package_id,
+        draft_answer,
+        claim_text,
+        evidence_refs,
+    )
+}
+
+fn upstream_bundle_summary_with_candidate_package(
+    question: &str,
+    bundle_package_id: &str,
+    candidate_package_id: &str,
+    draft_answer: &str,
+    claim_text: &str,
+    evidence_refs: Vec<String>,
+) -> String {
+    upstream_bundle_summary_with_policy(
+        json!(source_scope_policy_for_question(question)),
+        bundle_package_id,
+        candidate_package_id,
+        draft_answer,
+        claim_text,
+        evidence_refs,
+    )
+}
+
+fn upstream_bundle_summary_with_policy(
+    source_scope_policy: Value,
+    bundle_package_id: &str,
+    candidate_package_id: &str,
+    draft_answer: &str,
+    claim_text: &str,
+    evidence_refs: Vec<String>,
+) -> String {
+    serde_json::to_string(&json!({
+        "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+        "package_id": bundle_package_id,
+        "source_scope_policy": source_scope_policy,
+        "draft_candidate": {
+            "draft_answer": draft_answer,
+            "package_id": candidate_package_id,
+            "claim_statements": [{
+                "text": claim_text,
+                "evidence_refs": evidence_refs,
+            }],
+        },
+        "coverage_assessment": {
+            "status": "passed",
+            "missing_in_scope_slots": [],
+            "out_of_scope_slots": [],
+        },
+        "evidence_hints": [],
+        "retrieval_repair": {
+            "recommended": false,
+            "queries": [],
+        },
+        "out_of_scope_hints": [],
+    }))
+    .expect("upstream bundle serializes")
 }
 
 fn sample_card(evidence_type: &str) -> EvidenceCard {
@@ -5393,6 +5471,38 @@ fn parses_chapter_numbers() {
 }
 
 #[test]
+fn source_scope_filter_excludes_later_forty_by_default_and_allows_explicit_scope() {
+    let mut pre_80 = sample_card("base_text");
+    pre_80.evidence_id = "ev-pre-80".to_string();
+    pre_80.source_title = "紅樓夢/第080回".to_string();
+    let mut later_40 = sample_card("base_text");
+    later_40.evidence_id = "ev-later-40".to_string();
+    later_40.source_title = "紅樓夢/第094回".to_string();
+
+    let default_scope =
+        filter_cards_for_source_scope("通灵宝玉丢了几次", vec![pre_80.clone(), later_40.clone()]);
+    assert_eq!(
+        evidence_ids(&default_scope.included_cards),
+        vec!["ev-pre-80"]
+    );
+    assert!(!default_scope.report.policy.later_forty_allowed);
+    assert_eq!(default_scope.report.out_of_scope_hints.len(), 1);
+    assert_eq!(
+        default_scope.report.out_of_scope_hints[0].evidence_id,
+        "ev-later-40"
+    );
+
+    let explicit_scope =
+        filter_cards_for_source_scope("按后四十回材料，通灵宝玉丢了几次", vec![later_40]);
+    assert_eq!(
+        evidence_ids(&explicit_scope.included_cards),
+        vec!["ev-later-40"]
+    );
+    assert!(explicit_scope.report.policy.later_forty_allowed);
+    assert!(explicit_scope.report.out_of_scope_hints.is_empty());
+}
+
+#[test]
 fn reviewer_blocks_no_evidence() {
     let review = review("黛玉结局是什么", &[], &[]);
     assert_eq!(review.status, "needs_revision");
@@ -5605,22 +5715,20 @@ fn hermes_mode_does_not_use_loss_count_oracle_to_reject_multiple_count_draft() {
             summary: "reviewer passed".to_string(),
         },
     );
-    workflow.question = "通灵宝玉丢了几次".to_string();
+    workflow.question = "按后四十回材料，通灵宝玉丢了几次".to_string();
     workflow.package.question = workflow.question.clone();
     let local = local_answer(&workflow.question, &workflow.package);
     workflow.draft_answer = local.clone();
     workflow.final_answer = local.clone();
     let package_id = workflow.package.package_id.clone();
-    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-            serde_json::to_string(&json!({
-                "draft_candidate": {
-                    "draft_answer": "若把后四十回材料单独标明，通灵宝玉并非只丢过一次，较稳妥的说法是至少两次。",
-                    "package_id": package_id,
-                    "claim_statements": ["后四十回材料显示，通灵宝玉至少丢过两次。"],
-                }
-            }))
-            .expect("structured draft serializes")
-        );
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "若把后四十回材料单独标明，通灵宝玉并非只丢过一次，较稳妥的说法是至少两次。",
+            "后四十回材料显示，通灵宝玉至少丢过两次。",
+            evidence_ids(&workflow.package.cards),
+        ));
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
@@ -5686,15 +5794,14 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
     workflow.final_answer = local.clone();
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-            serde_json::to_string(&json!({
-                "draft_candidate": {
-                    "draft_answer": "就目前这组可追溯事实来看，通灵宝玉不能稳妥地概括成“明确丢了几次”。如果你愿意，我可以继续按可核实情节帮你逐段梳理哪些算“丢失”。",
-                    "package_id": package_id,
-                    "claim_statements": ["通灵宝玉失玉次数需要继续梳理后再确定。"],
-                }
-            }))
-            .expect("structured draft serializes")
-        );
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "就目前这组可追溯事实来看，通灵宝玉不能稳妥地概括成“明确丢了几次”。如果你愿意，我可以继续按可核实情节帮你逐段梳理哪些算“丢失”。",
+            "通灵宝玉失玉次数需要继续梳理后再确定。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
@@ -5725,6 +5832,12 @@ fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections()
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "draft_missing_later_forty_boundary"
     )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "draft_uses_unscoped_later_forty"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "claim_evidence_refs_unavailable"
+    )));
     assert!(!agent_runtime_draft_rejection_completes_governance(Some(
         "package_id_mismatch"
     )));
@@ -5733,7 +5846,7 @@ fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections()
 #[test]
 fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
     let mut workflow = runtime_draft_workflow(
-        Vec::new(),
+        vec![sample_card("base_text")],
         ReviewRecord {
             status: "needs_revision".to_string(),
             severity: "high".to_string(),
@@ -5741,6 +5854,16 @@ fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
             summary: "reviewer requires downgrade".to_string(),
         },
     );
+
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "Hermes profile 草稿绑定本地证据包。",
+            evidence_ids(&workflow.package.cards),
+        ));
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
@@ -5775,16 +5898,14 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
         },
     );
     let package_id = workflow.package.package_id.clone();
-    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-        serde_json::to_string(&json!({
-            "draft_candidate": {
-                "draft_answer": "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
-                "package_id": package_id,
-                "claim_statements": ["结构化 claim"],
-            }
-        }))
-        .expect("structured draft serializes")
-    );
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "结构化 claim",
+            evidence_ids(&workflow.package.cards),
+        ));
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
@@ -5804,6 +5925,45 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
     assert_eq!(
         workflow.steps[0].output["agent_runtime_claim_statement_count"],
         json!(1)
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_bare_draft_candidate_without_upstream_bundle() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "draft_candidate": {
+                "draft_answer": "裸 draft_candidate 不应绕过 upstream bundle。",
+                "package_id": package_id,
+                "claim_statements": [{
+                    "text": "裸草稿 claim",
+                    "evidence_refs": evidence_ids(&workflow.package.cards),
+                }],
+            }
+        }))
+        .expect("bare draft candidate serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("bare draft candidate rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(application.result_format, "json");
+    assert_eq!(application.rejected_reason, Some("bundle_schema_missing"));
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "bundle_schema_missing"
     );
 }
 
@@ -5839,6 +5999,81 @@ fn hermes_mode_rejects_plain_text_draft_summary() {
 }
 
 #[test]
+fn hermes_mode_rejects_upstream_bundle_with_scope_policy_mismatch() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary_with_policy(
+            json!(source_scope_policy_for_question(
+                "按后四十回材料，通灵宝玉丢了几次"
+            )),
+            &package_id,
+            &package_id,
+            "错误 scope policy 的草稿不应被消费。",
+            "scope policy mismatch claim",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("scope policy mismatch rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("source_scope_policy_mismatch")
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "source_scope_policy_mismatch"
+    );
+}
+
+#[test]
+fn hermes_mode_rejects_default_scope_draft_using_later_forty_material() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "第九十四回扫雪拾玉可以直接证明通灵宝玉又失而复得。",
+            "默认范围内不应使用后四十回具体情节。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("unscoped later-forty draft rejected");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_uses_unscoped_later_forty")
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "draft_uses_unscoped_later_forty"
+    );
+}
+
+#[test]
 fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
@@ -5865,10 +6100,10 @@ fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
 
     assert!(!application.draft_consumed);
     assert_eq!(application.result_format, "json");
-    assert_eq!(application.rejected_reason, Some("draft_candidate_missing"));
+    assert_eq!(application.rejected_reason, Some("bundle_schema_missing"));
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
-        "draft_candidate_missing"
+        "bundle_schema_missing"
     );
 }
 
@@ -5886,10 +6121,24 @@ fn hermes_mode_rejects_draft_candidate_without_claim_statements() {
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
         serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
             "draft_candidate": {
                 "draft_answer": "缺少 claim_statements 的草稿不应被消费。",
                 "package_id": package_id,
-            }
+            },
+            "coverage_assessment": {
+                "status": "passed",
+                "missing_in_scope_slots": [],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {
+                "recommended": false,
+                "queries": [],
+            },
+            "out_of_scope_hints": [],
         }))
         .expect("draft candidate serializes")
     );
@@ -5919,11 +6168,28 @@ fn hermes_mode_rejects_draft_candidate_answer_alias() {
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
         serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
             "draft_candidate": {
                 "answer": "answer 别名不应被当作 draft_answer。",
                 "package_id": package_id,
-                "claim_statements": ["alias claim"],
-            }
+                "claim_statements": [{
+                    "text": "alias claim",
+                    "evidence_refs": evidence_ids(&workflow.package.cards),
+                }],
+            },
+            "coverage_assessment": {
+                "status": "passed",
+                "missing_in_scope_slots": [],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {
+                "recommended": false,
+                "queries": [],
+            },
+            "out_of_scope_hints": [],
         }))
         .expect("draft candidate serializes")
     );
@@ -5968,10 +6234,10 @@ fn hermes_mode_rejects_nested_result_summary_draft() {
 
     assert!(!application.draft_consumed);
     assert_eq!(application.result_format, "json");
-    assert_eq!(application.rejected_reason, Some("draft_candidate_missing"));
+    assert_eq!(application.rejected_reason, Some("bundle_schema_missing"));
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
-        "draft_candidate_missing"
+        "bundle_schema_missing"
     );
 }
 
@@ -5988,16 +6254,16 @@ fn hermes_mode_rejects_structured_draft_with_wrong_package() {
     );
     let original_draft = workflow.draft_answer.clone();
     let original_final = workflow.final_answer.clone();
-    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-        serde_json::to_string(&json!({
-            "draft_candidate": {
-                "draft_answer": "错误 package 的 Hermes 草稿不应被消费。",
-                "package_id": "pkg-other",
-                "claim_statements": ["wrong package claim"],
-            }
-        }))
-        .expect("structured draft serializes")
-    );
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary_with_candidate_package(
+            &workflow.question,
+            &package_id,
+            "pkg-other",
+            "错误 package 的 Hermes 草稿不应被消费。",
+            "wrong package claim",
+            evidence_ids(&workflow.package.cards),
+        ));
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
@@ -6236,6 +6502,13 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
         knowledge_state_summary: KnowledgeStateSummary::default(),
         review,
     };
+    let default_draft_summary = upstream_bundle_summary(
+        &package.question,
+        &package.package_id,
+        "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+        "Hermes profile 草稿绑定本地证据包。",
+        evidence_ids(&package.cards),
+    );
     RuntimeWorkflowOutput {
         trace_id: package.trace_id.clone(),
         question: package.question.clone(),
@@ -6264,14 +6537,7 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
                     "client": "hermes",
                     "status": "executed",
                     "content_used_for_final_answer": false,
-                    "result_summary": serde_json::to_string(&json!({
-                        "draft_candidate": {
-                            "draft_answer": "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
-                            "package_id": "pkg-runtime-draft-test",
-                            "claim_statements": ["Hermes profile 草稿绑定本地证据包。"],
-                        }
-                    }))
-                    .expect("runtime draft summary serializes"),
+                    "result_summary": default_draft_summary,
                 })),
             },
             RuntimeWorkflowStepReport {
@@ -6375,6 +6641,16 @@ async fn runtime_store_executes_workflow_step_envelopes_through_agent_runtime() 
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_mode(
@@ -6465,7 +6741,7 @@ async fn runtime_store_executes_workflow_step_envelopes_through_agent_runtime() 
 }
 
 #[tokio::test]
-async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
+async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     let db_path = std::env::temp_dir().join(format!(
         "tonglingyu-runtime-hermes-draft-{}.db",
         uuid::Uuid::now_v7().simple()
@@ -6474,6 +6750,16 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
@@ -6489,13 +6775,13 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
         .await
         .expect("workflow executes");
 
-    assert_eq!(workflow.package.review.status, "needs_revision");
+    assert_eq!(workflow.package.review.status, "passed");
     assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
     assert!(workflow.draft_answer.contains(&workflow.package.package_id));
-    assert!(!workflow.final_answer.contains("Hermes full workflow draft"));
+    assert!(workflow.final_answer.contains("Hermes full workflow draft"));
     assert_eq!(
         workflow.answer_source,
-        "agent_runtime_hermes_profile_rejected_by_local_review"
+        "agent_runtime_hermes_profile_with_local_review"
     );
     let draft_step = workflow
         .steps
@@ -6504,7 +6790,7 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
         .expect("draft step");
     assert_eq!(
         draft_step.agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
-        json!(false)
+        json!(true)
     );
     let draft_agent_runtime = draft_step.agent_runtime.as_ref().unwrap();
     assert_eq!(
@@ -6555,7 +6841,7 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
     );
     assert_eq!(
         review_step.agent_runtime.as_ref().unwrap()["review_observation"]["local_reviewer_override"],
-        json!(true)
+        json!(false)
     );
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "step_completed"
@@ -6580,14 +6866,14 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "step_completed"
             && event.metadata["agent_runtime"]["review_observation"]["local_reviewer_override"]
-                == json!(true)
+                == json!(false)
     }));
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "content_delta"
             && event
                 .content_delta
                 .as_deref()
-                .is_some_and(|chunk| chunk.contains("证据不足"))
+                .is_some_and(|chunk| chunk.contains("Hermes full workflow draft"))
     }));
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
@@ -6603,7 +6889,7 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
     );
     assert_eq!(
         workflow.agent_runtime_summary["content_used_for_final_answer"],
-        json!(false)
+        json!(true)
     );
     assert_eq!(
         workflow.agent_runtime_summary["tool_result_count"],
@@ -6618,7 +6904,7 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
         .expect("audit events");
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_draft_consumed"
-            && event["payload"]["content_used_for_final_answer"] == json!(false)
+            && event["payload"]["content_used_for_final_answer"] == json!(true)
     }));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_step_executed"
@@ -6634,7 +6920,7 @@ async fn runtime_store_consumes_hermes_draft_candidate_through_full_workflow() {
     }));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_review_observed"
-            && event["payload"]["local_reviewer_override"] == json!(true)
+            && event["payload"]["local_reviewer_override"] == json!(false)
     }));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_summarized"
@@ -6659,6 +6945,16 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
@@ -6674,12 +6970,12 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
         .await
         .expect("openai-compatible profile workflow executes");
 
-    assert_eq!(workflow.package.review.status, "needs_revision");
+    assert_eq!(workflow.package.review.status, "passed");
     assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
-    assert!(!workflow.final_answer.contains("Hermes full workflow draft"));
+    assert!(workflow.final_answer.contains("Hermes full workflow draft"));
     assert_eq!(
         workflow.answer_source,
-        "agent_runtime_openai_compatible_profile_rejected_by_local_review"
+        "agent_runtime_openai_compatible_profile_with_local_review"
     );
     let draft_step = workflow
         .steps

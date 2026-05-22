@@ -28,6 +28,14 @@ use std::{
 };
 use time::OffsetDateTime;
 
+mod upstream_bundle;
+
+use upstream_bundle::{
+    UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, extract_upstream_bundle_draft,
+    filter_cards_for_source_scope, source_scope_policy_for_question, source_title_in_later_forty,
+    text_mentions_later_forty_boundary,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceCard {
     pub evidence_id: String,
@@ -2809,8 +2817,22 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "forbidden": ["skip_reviewer", "disable_reviewer", "system_prompt"]
             }),
             output_contract: json!({
-                "required": ["draft_candidate"],
+                "required": [
+                    "schema_version",
+                    "package_id",
+                    "source_scope_policy",
+                    "draft_candidate",
+                    "coverage_assessment",
+                    "evidence_hints",
+                    "retrieval_repair",
+                    "out_of_scope_hints"
+                ],
+                "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+                "package_id_source": "current_evidence_package",
+                "source_scope_policy_source": "step_output_json.source_scope_policy",
                 "draft_candidate_required": ["draft_answer", "package_id", "claim_statements"],
+                "claim_statement_required": ["text", "evidence_refs"],
+                "evidence_refs_source": "current_evidence_package_only",
                 "must_include": ["support_scope", "unsupported_scope"]
             }),
             safety_contract: json!({
@@ -3354,13 +3376,15 @@ pub fn execute_runtime_workflow(
         )?);
     }
 
+    let source_scope_filter = filter_cards_for_source_scope(&input.question, cards);
+    let source_scope_report = source_scope_filter.report;
     let package_started = Instant::now();
     let package = match execute_tool(
         conn,
         TonglingyuToolCall::EvidencePackageCreate {
             trace_id: input.trace_id.clone(),
             question: input.question.clone(),
-            cards,
+            cards: source_scope_filter.included_cards,
         },
     )? {
         TonglingyuToolOutput::EvidencePackage { package, .. } => *package,
@@ -3398,6 +3422,8 @@ pub fn execute_runtime_workflow(
             "card_count": package.cards.len(),
             "claim_count": package.claims.len(),
             "review_status": &package.review.status,
+            "source_scope_policy": &source_scope_report.policy,
+            "out_of_scope_hints": &source_scope_report.out_of_scope_hints,
             }),
             context: &input.context,
         },
@@ -3421,8 +3447,11 @@ pub fn execute_runtime_workflow(
             output: json!({
             "object": "tonglingyu.draft_answer",
             "package_id": &package.package_id,
+            "evidence_ids": evidence_ids(&package.cards),
             "claim_statements": &package.claims,
             "answer_source": "runtime_local_profile",
+            "source_scope_policy": &source_scope_report.policy,
+            "out_of_scope_hints": &source_scope_report.out_of_scope_hints,
             }),
             context: &input.context,
         },
@@ -4072,6 +4101,16 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         "claim_count": step.output.get("claim_count").cloned().unwrap_or(Value::Null),
         "evidence_ids": evidence_ids,
         "evidence_types": evidence_types,
+        "source_scope_policy": step
+            .output
+            .get("source_scope_policy")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "out_of_scope_hints": step
+            .output
+            .get("out_of_scope_hints")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
         "review_status": step
             .output
             .get("review_status")
@@ -4087,7 +4126,7 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[...]}}. package_id must match step_output_json.package_id; local reviewer remains required. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{...copy step_output_json.source_scope_policy exactly...},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. package_id values must match step_output_json.package_id; evidence_refs must come from step_output_json.evidence_ids; do not put later-forty material in draft_answer unless source_scope_policy.later_forty_allowed is true. local reviewer remains required. Do not add another result_summary key."
         }
         "review_answer" => {
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -4112,15 +4151,6 @@ struct AgentRuntimeContentApplication {
     draft_consumed: bool,
     content_used_for_final_answer: bool,
     result_format: &'static str,
-    rejected_reason: Option<&'static str>,
-}
-
-#[derive(Debug, Clone)]
-struct AgentRuntimeDraftExtraction {
-    draft_answer: Option<String>,
-    result_format: &'static str,
-    package_id: Option<String>,
-    claim_statement_count: Option<usize>,
     rejected_reason: Option<&'static str>,
 }
 
@@ -4361,6 +4391,8 @@ fn agent_runtime_draft_rejection_completes_governance(reason: Option<&str>) -> b
             "draft_claim_exceeds_evidence_boundary"
                 | "draft_stops_for_user_opt_in"
                 | "draft_missing_later_forty_boundary"
+                | "draft_uses_unscoped_later_forty"
+                | "claim_evidence_refs_unavailable"
         )
     )
 }
@@ -4702,7 +4734,17 @@ fn apply_agent_runtime_content_outputs(
                     .filter(|value| !value.is_empty())?;
                 Some((
                     index,
-                    extract_agent_runtime_draft(summary, &workflow.package.package_id),
+                    extract_upstream_bundle_draft(
+                        summary,
+                        &workflow.package.package_id,
+                        &source_scope_policy_for_question(&workflow.question),
+                        &workflow
+                            .package
+                            .cards
+                            .iter()
+                            .map(|card| card.evidence_id.clone())
+                            .collect::<BTreeSet<_>>(),
+                    ),
                 ))
             })?;
 
@@ -4712,6 +4754,11 @@ fn apply_agent_runtime_content_outputs(
             step.output["agent_runtime_result_format"] = json!(extraction.result_format);
             step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
             step.output["agent_runtime_package_id"] = json!(extraction.package_id);
+            step.output["agent_runtime_coverage_status"] = json!(extraction.coverage_status);
+            step.output["agent_runtime_evidence_hint_count"] =
+                json!(extraction.evidence_hint_count);
+            step.output["agent_runtime_out_of_scope_hint_count"] =
+                json!(extraction.out_of_scope_hint_count);
             if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
             {
                 agent_runtime.insert(
@@ -4805,6 +4852,12 @@ fn apply_agent_runtime_content_outputs(
         step.output["agent_runtime_package_id"] = json!(extraction.package_id);
         step.output["agent_runtime_claim_statement_count"] =
             json!(extraction.claim_statement_count);
+        step.output["agent_runtime_coverage_status"] = json!(extraction.coverage_status);
+        step.output["agent_runtime_evidence_hint_count"] = json!(extraction.evidence_hint_count);
+        step.output["agent_runtime_retrieval_repair_recommended"] =
+            json!(extraction.retrieval_repair_recommended);
+        step.output["agent_runtime_out_of_scope_hint_count"] =
+            json!(extraction.out_of_scope_hint_count);
         if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
             agent_runtime.insert(
                 "content_source".to_string(),
@@ -4823,6 +4876,10 @@ fn apply_agent_runtime_content_outputs(
                     "result_format": extraction.result_format,
                     "package_id": extraction.package_id,
                     "claim_statement_count": extraction.claim_statement_count,
+                    "coverage_status": extraction.coverage_status,
+                    "evidence_hint_count": extraction.evidence_hint_count,
+                    "retrieval_repair_recommended": extraction.retrieval_repair_recommended,
+                    "out_of_scope_hint_count": extraction.out_of_scope_hint_count,
                     "draft_consumed": true,
                     "content_used_for_final_answer": content_used_for_final_answer,
                 }),
@@ -4903,93 +4960,6 @@ fn draft_stops_for_user_opt_in(draft_text: &str) -> bool {
     ]
     .iter()
     .any(|term| draft_text.contains(term))
-}
-
-fn extract_agent_runtime_draft(
-    result_summary: &str,
-    expected_package_id: &str,
-) -> AgentRuntimeDraftExtraction {
-    let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: None,
-            result_format: "invalid",
-            package_id: None,
-            claim_statement_count: None,
-            rejected_reason: Some("invalid_json_draft"),
-        };
-    };
-    let Some(object) = value
-        .as_object()
-        .and_then(|object| object.get("draft_candidate"))
-        .and_then(Value::as_object)
-    else {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: None,
-            result_format: "json",
-            package_id: None,
-            claim_statement_count: None,
-            rejected_reason: Some("draft_candidate_missing"),
-        };
-    };
-    let package_id = object
-        .get("package_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    if package_id.is_none() {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: None,
-            result_format: "json",
-            package_id,
-            claim_statement_count: None,
-            rejected_reason: Some("package_id_missing"),
-        };
-    }
-    if package_id
-        .as_deref()
-        .is_some_and(|value| value != expected_package_id)
-    {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: None,
-            result_format: "json",
-            package_id,
-            claim_statement_count: None,
-            rejected_reason: Some("package_id_mismatch"),
-        };
-    }
-    let claim_statement_count = object
-        .get("claim_statements")
-        .and_then(Value::as_array)
-        .map(Vec::len);
-    if claim_statement_count.is_none() {
-        return AgentRuntimeDraftExtraction {
-            draft_answer: None,
-            result_format: "json",
-            package_id,
-            claim_statement_count,
-            rejected_reason: Some("claim_statements_missing"),
-        };
-    }
-    let draft_answer = object
-        .get("draft_answer")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    let rejected_reason = if draft_answer.is_some() {
-        None
-    } else {
-        Some("draft_answer_missing")
-    };
-    AgentRuntimeDraftExtraction {
-        draft_answer,
-        result_format: "json",
-        package_id,
-        claim_statement_count,
-        rejected_reason,
-    }
 }
 
 fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
@@ -14517,18 +14487,6 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
 
 fn cards_include_later_forty(cards: &[EvidenceCard]) -> bool {
     cards.iter().any(evidence_card_is_later_forty)
-}
-
-fn evidence_card_is_later_forty(card: &EvidenceCard) -> bool {
-    source_title_in_later_forty(&card.source_title)
-}
-
-fn source_title_in_later_forty(source_title: &str) -> bool {
-    extract_chapter_no(source_title).is_some_and(|chapter_no| chapter_no >= 81)
-}
-
-fn text_mentions_later_forty_boundary(text: &str) -> bool {
-    text.contains("后四十") || text.contains("後四十")
 }
 
 fn evidence_card_source_label(card: &EvidenceCard) -> String {

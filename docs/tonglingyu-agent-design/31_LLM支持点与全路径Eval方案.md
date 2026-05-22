@@ -543,10 +543,12 @@ Draft 输入不能包含：
   "package_id": "package:...",
   "resolved_question": "晴雯的判词和晴雯结局有什么关系？",
   "source_scope_policy": {
+    "schema_version": "tonglingyu-source-scope-policy-v1",
     "default_answer_scope": "pre_80_text_and_commentary",
-    "allowed_source_layers": ["base_text_pre_80", "commentary"],
+    "allowed_source_layers": ["base_text_pre_80", "commentary", "version_note"],
     "excluded_unless_user_explicit": ["base_text_later_40"],
-    "commentary_evidence_rank": "first_class"
+    "commentary_evidence_rank": "first_class",
+    "later_forty_allowed": false
   },
   "draft_candidate": {
     "draft_answer": "候选回答正文",
@@ -575,19 +577,22 @@ Draft 输入不能包含：
 Draft acceptance gate：
 
 1. `package_id` 与 `draft_candidate.package_id` 都必须等于当前 package。
-2. `draft_candidate.draft_answer` 必须非空。
-3. `draft_candidate.claim_statements` 必须存在。
-4. 每个 claim 的 evidence refs 必须来自当前 package。
-5. 不得引用 package 外 evidence refs。
-6. 不得包含 trace/context/memory/internal fields。
-7. 必须进入 reviewer，不得直接进入用户响应。
-8. 默认 scope 只允许前八十回正文与脂批；用户未显式指定版本时，后四十回只能进入
+2. `schema_version` 必须是 `tonglingyu-upstream-bundle-v1`。
+3. `source_scope_policy` 必须与本地 step 输出的 policy 精确一致，不能额外打开后四十回。
+4. `draft_candidate.draft_answer` 必须非空。
+5. `draft_candidate.claim_statements` 必须存在，且每个 claim 必须包含非空 `text`
+   与 `evidence_refs`。
+6. 每个 claim 的 evidence refs 必须来自当前 package。
+7. 不得引用 package 外 evidence refs。
+8. 不得包含 trace/context/memory/internal fields。
+9. 必须进入 reviewer，不得直接进入用户响应。
+10. 默认 scope 只允许前八十回正文、脂批/评语与版本说明；用户未显式指定版本时，后四十回只能进入
    `out_of_scope_hints` 或 retrieval repair 记录，不能进入 `draft_answer`。
 
-Runtime draft 接收层只接受结构化 `draft_candidate`；纯文本、JSON string、未包裹
-`draft_candidate` 的直接对象，以及二次嵌套 `result_summary` 都不能作为候选 draft
-进入本地 reviewer。`draft_candidate` 必须使用 `draft_answer`、`package_id`、
-`claim_statements` 这些契约字段，不能用兼容别名替代。
+Runtime draft 接收层只接受完整 upstream bundle；纯文本、裸 `draft_candidate`、
+未带 bundle schema 的直接对象，以及二次嵌套 `result_summary` 都不能作为候选 draft
+进入本地 reviewer。bundle 内的 `draft_candidate` 必须使用 `draft_answer`、
+`package_id`、`claim_statements` 这些契约字段，不能用兼容别名替代。
 
 #### 6.4.2 D9：Reviewer 冲突矩阵
 
