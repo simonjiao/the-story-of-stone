@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.query_expansions.v1",
-  "catalog_version": "2026-05-23.1",
+  "catalog_version": "2026-05-23.2",
   "entries": [
     {
       "id": "core:tonglingyu",
@@ -91,6 +91,12 @@
         "得通灵幻境悟仙缘"
       ],
       "exact_terms": [
+        "良兒偷玉",
+        "良儿偷玉",
+        "甄寶玉送玉",
+        "甄宝玉送玉",
+        "伏甄寶玉送玉",
+        "伏甄宝玉送玉",
         "鳳姐掃雪拾玉",
         "凤姐扫雪拾玉",
         "這便是鳳姐掃雪拾玉之處",

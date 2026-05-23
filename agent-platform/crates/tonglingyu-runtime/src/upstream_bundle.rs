@@ -127,12 +127,13 @@ pub(crate) fn filter_cards_for_source_scope(
 }
 
 pub(crate) fn evidence_card_source_layer(card: &EvidenceCard) -> &'static str {
-    if evidence_card_is_later_forty(card) {
-        "base_text_later_40"
-    } else if card.evidence_type == "commentary" {
+    if card.evidence_type == "commentary" {
         "commentary"
     } else if card.evidence_type == "version_note" {
         "version_note"
+    } else if evidence_card_is_later_forty(card) || base_text_card_contains_later_forty_marker(card)
+    {
+        "base_text_later_40"
     } else {
         "base_text_pre_80"
     }
@@ -144,6 +145,16 @@ pub(crate) fn evidence_card_is_later_forty(card: &EvidenceCard) -> bool {
 
 pub(crate) fn source_title_in_later_forty(source_title: &str) -> bool {
     extract_chapter_no(source_title).is_some_and(|chapter_no| chapter_no >= 81)
+}
+
+fn base_text_card_contains_later_forty_marker(card: &EvidenceCard) -> bool {
+    card.evidence_type == "base_text" && text_contains_later_forty_chapter_marker(&card.text)
+}
+
+fn text_contains_later_forty_chapter_marker(text: &str) -> bool {
+    text.char_indices()
+        .filter(|(_, ch)| *ch == '第')
+        .any(|(index, _)| extract_chapter_no(&text[index..]).is_some_and(|number| number >= 81))
 }
 
 pub(crate) fn text_mentions_later_forty_boundary(text: &str) -> bool {
@@ -478,11 +489,6 @@ fn draft_mentions_unscoped_later_forty_material(draft: &str) -> bool {
         "程高本",
         "高鹗",
         "高鶚",
-        "扫雪",
-        "掃雪",
-        "拾玉",
-        "甄宝玉送玉",
-        "甄寶玉送玉",
     ]
     .iter()
     .any(|term| draft.contains(term) || compact_draft.contains(term))

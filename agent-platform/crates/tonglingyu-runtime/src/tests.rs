@@ -1120,6 +1120,25 @@ fn lost_jade_test_cards() -> Vec<EvidenceCard> {
     vec![loss, returned]
 }
 
+fn in_scope_lost_jade_event_cards() -> Vec<EvidenceCard> {
+    let mut lianger = sample_card("base_text");
+    lianger.evidence_id = "ev-lianger-stole-jade".to_string();
+    lianger.source_title = "紅樓夢/第五十二回".to_string();
+    lianger.block_id = "block-lianger-stole-jade".to_string();
+    lianger.text = "平兒道：“寶玉是偏在你們身上留心用意、爭勝要強的，那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。”".to_string();
+    let mut zhen = sample_card("commentary");
+    zhen.evidence_id = "ev-zhen-baoyu-delivers-jade".to_string();
+    zhen.source_title = "脂硯齋重評石頭記/第十八回".to_string();
+    zhen.block_id = "block-zhen-baoyu-delivers-jade".to_string();
+    zhen.text = "第三齣《仙緣》；{{~|【庚辰雙行夾批：《邯鄲夢》中伏甄寶玉送玉。】}}".to_string();
+    let mut fengjie = sample_card("commentary");
+    fengjie.evidence_id = "ev-fengjie-snow-pickup-jade".to_string();
+    fengjie.source_title = "脂硯齋重評石頭記/第二十三回".to_string();
+    fengjie.block_id = "block-fengjie-snow-pickup-jade".to_string();
+    fengjie.text = "剛至穿堂門前，{{~|【庚辰雙行夾批：妙！這便是鳳姐掃雪拾玉之處，一絲不亂。】}}只見襲人倚門立在那裡。".to_string();
+    vec![lianger, zhen, fengjie]
+}
+
 fn seed_lost_jade_runtime_blocks(conn: &Connection) {
     seed_retrieval_quality_source(
         conn,
@@ -1915,6 +1934,16 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
             "只見那和尚道：“施主們，我是送玉来的。”說着，把那塊玉擎着道：“快把銀子拿出來，我好救他。”和尚哈哈大笑，手拿着玉在寳玉耳邊呌道：“寶玉，寳玉，你的寳玉囬來了。”".to_string(),
         ),
         (
+            "quality-block-zhen-baoyu-delivers-jade-commentary",
+            "quality-source-zhiyanzhai",
+            "脂硯齋重評石頭記/第十八回",
+            18_i64,
+            8_i64,
+            "paragraph",
+            "commentary",
+            "第三齣《仙緣》；{{~|【庚辰雙行夾批：《邯鄲夢》中伏甄寶玉送玉。】}}".to_string(),
+        ),
+        (
             "quality-block-snow-pickup-cover-story",
             "quality-source",
             "紅樓夢/第五十二回",
@@ -2010,6 +2039,12 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
     assert!(
         cards
             .iter()
+            .any(|card| card.block_id == "quality-block-zhen-baoyu-delivers-jade-commentary"),
+        "loss-count query should retrieve 甄宝玉送玉 commentary evidence"
+    );
+    assert!(
+        cards
+            .iter()
             .any(|card| card.block_id == "quality-block-snow-pickup-cover-story"),
         "loss-count query should retrieve snow-pickup recall evidence"
     );
@@ -2058,6 +2093,12 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
             .expanded_terms
             .iter()
             .any(|term| term == "掃雪拾玉")
+    );
+    assert!(
+        quality_report
+            .protected_terms
+            .iter()
+            .any(|term| term == "甄寶玉送玉")
     );
     assert!(
         quality_report
@@ -5663,6 +5704,8 @@ fn retrieval_failure_rolls_back_when_audit_append_fails() {
 fn parses_chapter_numbers() {
     assert_eq!(extract_chapter_no("紅樓夢/第015回"), Some(15));
     assert_eq!(extract_chapter_no("脂硯齋重評石頭記/第一回"), Some(1));
+    assert_eq!(extract_chapter_no("紅樓夢（程甲本）/九十五"), Some(95));
+    assert_eq!(extract_chapter_no("紅樓夢（程甲本）/一百一十五"), Some(115));
     assert_eq!(
         extract_chapter_no("紅樓夢_程乙本_第一百十一回_至第一百二十回"),
         Some(111)
@@ -5701,6 +5744,42 @@ fn source_scope_filter_excludes_later_forty_by_default_and_allows_explicit_scope
     );
     assert!(explicit_scope.report.policy.later_forty_allowed);
     assert!(explicit_scope.report.out_of_scope_hints.is_empty());
+}
+
+#[test]
+fn source_scope_filter_excludes_later_forty_navigation_but_keeps_commentary_foreshadowing() {
+    let mut navigation = sample_card("base_text");
+    navigation.evidence_id = "ev-navigation-later-forty".to_string();
+    navigation.source_title = "紅樓夢（程甲本）".to_string();
+    navigation.text = "[[/九十四|第九十四回]] 晏海棠賈母賞花妖 失寶玉通靈知奇禍\n[[/一百一十五|第一百一十五回]] 惑偏私惜春矢素志 證同類寶玉失相知".to_string();
+    let mut commentary = sample_card("commentary");
+    commentary.evidence_id = "ev-commentary-foreshadowing".to_string();
+    commentary.source_title = "脂硯齋重評石頭記/第十八回".to_string();
+    commentary.text =
+        "第三齣《仙緣》；{{~|【庚辰雙行夾批：《邯鄲夢》中伏甄寶玉送玉。】}}".to_string();
+
+    let default_scope =
+        filter_cards_for_source_scope("通灵宝玉丢了几次", vec![navigation.clone(), commentary]);
+
+    assert_eq!(
+        evidence_ids(&default_scope.included_cards),
+        vec!["ev-commentary-foreshadowing"]
+    );
+    assert_eq!(
+        default_scope.report.out_of_scope_hints[0].evidence_id,
+        "ev-navigation-later-forty"
+    );
+    assert_eq!(
+        default_scope.report.out_of_scope_hints[0].source_layer,
+        "base_text_later_40"
+    );
+
+    let explicit_scope =
+        filter_cards_for_source_scope("按后四十回材料说明通灵宝玉丢失", vec![navigation]);
+    assert_eq!(
+        evidence_ids(&explicit_scope.included_cards),
+        vec!["ev-navigation-later-forty"]
+    );
 }
 
 #[test]
@@ -5978,6 +6057,62 @@ fn runtime_accepts_lost_jade_fuzzy_multiple_count_draft_with_later_forty_boundar
 }
 
 #[test]
+fn runtime_rejects_loss_count_draft_that_understates_in_scope_event_evidence() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "通灵宝玉在前八十回中，明确算作丢失的次数通常可概括为 1 次。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_count_conflicts_with_evidence_events"));
+}
+
+#[test]
+fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_forty_scope() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按当前证据包的默认范围，可以说至少有三处可追溯线索：良儿偷玉、脂批伏甄宝玉送玉、脂批称凤姐扫雪拾玉；其中后两处来自脂批伏笔，不等于使用续书正文。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, None);
+}
+
+#[test]
+fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowing() {
+    let mut workflow = runtime_draft_workflow(
+        in_scope_lost_jade_event_cards(),
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "通灵宝玉丢了几次".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "按当前证据包的默认范围，可以说至少有三处可追溯线索：良儿偷玉、脂批伏甄宝玉送玉、脂批称凤姐扫雪拾玉。",
+            "默认范围内的正文和脂批证据支持至少三处失玉线索。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("commentary foreshadowing draft consumed");
+
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
+    assert!(workflow.final_answer.contains("三处"));
+    assert!(workflow.final_answer.contains("凤姐扫雪拾玉"));
+}
+
+#[test]
 fn hermes_mode_rejects_user_opt_in_continuation_draft() {
     let mut workflow = runtime_draft_workflow(
         lost_jade_test_cards(),
@@ -6035,6 +6170,9 @@ fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections()
     )));
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "draft_uses_unscoped_later_forty"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "draft_count_conflicts_with_evidence_events"
     )));
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "coverage_assessment_not_passed"
