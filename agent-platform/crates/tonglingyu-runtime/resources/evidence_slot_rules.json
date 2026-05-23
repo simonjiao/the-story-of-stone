@@ -1,13 +1,13 @@
 {
   "schema_version": "tonglingyu.evidence_slot_rules.v1",
-  "catalog_version": "2026-05-23.1",
+  "catalog_version": "2026-05-23.2",
   "count_bases": [
     {
       "id": "direct_loss",
-      "label": "直接丢失/被盗",
+      "label": "明确失玉/被盗",
       "question_terms": ["丢", "丟", "失", "不见", "不見", "遗失", "遺失"],
       "answer_unit": "处",
-      "answer_noun": "直接丢失证据"
+      "answer_noun": "明确失玉证据"
     }
   ],
   "slots": [
@@ -29,8 +29,8 @@
       "id": "fengjie_snow_pickup_jade",
       "label": "凤姐扫雪拾玉",
       "role": "recovery_or_lost_and_found_clue",
-      "counts_as": ["related_loss_clue", "recovery_clue"],
-      "display_group": "related_clue"
+      "counts_as": ["direct_loss", "recovery_clue"],
+      "display_group": "direct_evidence"
     },
     {
       "id": "later_forty_lost_jade",

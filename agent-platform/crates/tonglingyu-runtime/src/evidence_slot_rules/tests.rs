@@ -5,12 +5,16 @@ fn default_catalog_marks_zhen_baoyu_as_related_not_direct_loss() {
     let rules = evidence_slot_rules_for_ids(&[
         "lianger_stole_jade".to_string(),
         "zhen_baoyu_delivers_jade".to_string(),
+        "fengjie_snow_pickup_jade".to_string(),
     ])
     .expect("slot rules");
 
     assert!(rules[0].counts_as.contains(&"direct_loss".to_string()));
     assert_eq!(rules[1].role, "suspected_transfer_related_to_loss");
     assert!(!rules[1].counts_as.contains(&"direct_loss".to_string()));
+    assert_eq!(rules[2].role, "recovery_or_lost_and_found_clue");
+    assert!(rules[2].counts_as.contains(&"direct_loss".to_string()));
+    assert!(rules[2].counts_as.contains(&"recovery_clue".to_string()));
 }
 
 #[test]

@@ -2517,11 +2517,11 @@ fn local_answer_uses_slot_semantics_for_lost_jade_count() {
 
     let answer = local_answer("通灵宝玉丢了几次", &package);
 
-    assert!(answer.contains("直接支持一处"));
+    assert!(answer.contains("直接支持两处"));
     assert!(answer.contains("良儿偷玉"));
     assert!(answer.contains("甄宝玉送玉"));
     assert!(answer.contains("凤姐扫雪拾玉"));
-    assert!(answer.contains("广义失玉线索"));
+    assert!(answer.contains("按“拾玉/失而复得”计入明确失玉"));
     assert!(answer.contains("不能直接计入次数"));
     assert!(!answer.contains("目前能支持回答的主要材料如下"));
     assert!(!answer.contains("直接支持三处"));
@@ -6443,7 +6443,7 @@ fn runtime_accepts_lost_jade_fuzzy_multiple_count_draft_with_later_forty_boundar
 fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是第五十二回良儿偷玉这一处；脂批第十八回甄宝玉送玉、脂批第二十三回凤姐扫雪拾玉只是相关线索。",
+        "通灵宝玉在前八十回正文与脂批范围内，能按明确失玉/被盗计入两处：第五十二回良儿偷玉、脂批第二十三回凤姐扫雪拾玉；脂批第十八回甄宝玉送玉只是疑似流转线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6454,7 +6454,7 @@ fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
 fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按“直接丢失/被盗”口径，通灵宝玉明确算作丢失 1 次：证据槽位是「lianger_stole_jade（良儿偷玉）」；另有相关线索「zhen_baoyu_delivers_jade（伏甄宝玉送玉）」和「fengjie_snow_pickup_jade（凤姐扫雪拾玉）」可作旁证，但不计入直接次数。",
+        "按“明确失玉/被盗”口径，通灵宝玉明确算作丢失 2 次：证据槽位是「lianger_stole_jade（良儿偷玉）」和「fengjie_snow_pickup_jade（凤姐扫雪拾玉）」；另有相关线索「zhen_baoyu_delivers_jade（伏甄宝玉送玉）」可作旁证，但不计入直接次数。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6465,7 +6465,7 @@ fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
 fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按所给在范围内证据，通灵宝玉“直接丢失/被盗”可确认有 1 次；另有若干相关线索，但不计入直接丢失次数。",
+        "按所给在范围内证据，通灵宝玉“明确失玉/被盗”可确认有 2 次；另有疑似流转线索，但不计入明确失玉次数。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6476,7 +6476,7 @@ fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
 fn runtime_rejects_loss_count_draft_without_embedded_source_cues() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是良儿偷玉这一处；甄宝玉送玉、凤姐扫雪拾玉只是相关线索。",
+        "通灵宝玉在前八十回正文与脂批范围内，能按明确失玉/被盗计入两处：良儿偷玉、凤姐扫雪拾玉；甄宝玉送玉只是疑似流转线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6487,7 +6487,7 @@ fn runtime_rejects_loss_count_draft_without_embedded_source_cues() {
 fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按前八十回正文与脂批可见的证据，通灵宝玉明确涉及丢失相关情节共2次：良儿偷玉和凤姐扫雪拾玉。",
+        "按前八十回正文与脂批可见的证据，通灵宝玉明确涉及丢失相关情节共3次：良儿偷玉、凤姐扫雪拾玉和甄宝玉送玉。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6498,7 +6498,7 @@ fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
 fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_forty_scope() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按当前证据包的默认范围，可以说至少有三处可追溯线索：第五十二回良儿偷玉、脂批第十八回伏甄宝玉送玉、脂批第二十三回称凤姐扫雪拾玉；其中后两处来自脂批伏笔，不等于使用续书正文。",
+        "按当前证据包的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6523,8 +6523,8 @@ fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowi
         upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "按当前证据包的默认范围，可以说至少有三处可追溯线索：第五十二回良儿偷玉、脂批第十八回伏甄宝玉送玉、脂批第二十三回称凤姐扫雪拾玉。",
-            "默认范围内的正文和脂批证据支持至少三处失玉线索。",
+            "按当前证据包的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
+            "默认范围内的正文和脂批证据支持两处明确失玉证据，并保留一条疑似流转线索。",
             evidence_ids(&workflow.package.cards),
         )
     );
@@ -6535,7 +6535,7 @@ fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowi
 
     assert!(application.draft_consumed);
     assert_eq!(application.rejected_reason, None);
-    assert!(workflow.final_answer.contains("三处"));
+    assert!(workflow.final_answer.contains("两处"));
     assert!(workflow.final_answer.contains("凤姐扫雪拾玉"));
 }
 

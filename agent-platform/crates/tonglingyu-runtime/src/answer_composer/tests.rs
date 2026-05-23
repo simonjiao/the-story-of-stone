@@ -3,10 +3,10 @@ use super::*;
 fn count_basis() -> EvidenceSlotCountBasis {
     EvidenceSlotCountBasis {
         id: "direct_loss".to_string(),
-        label: "直接丢失/被盗".to_string(),
+        label: "明确失玉/被盗".to_string(),
         question_terms: vec!["丢".to_string()],
         answer_unit: "处".to_string(),
-        answer_noun: "直接丢失证据".to_string(),
+        answer_noun: "明确失玉证据".to_string(),
     }
 }
 
@@ -64,7 +64,7 @@ fn composer_counts_direct_slots_and_separates_related_clues() {
                 "fengjie_snow_pickup_jade",
                 "凤姐扫雪拾玉",
                 "recovery_or_lost_and_found_clue",
-                &["related_loss_clue", "recovery_clue"],
+                &["direct_loss", "recovery_clue"],
                 "commentary",
                 "凤姐扫雪拾玉。",
             ),
@@ -80,11 +80,12 @@ fn composer_counts_direct_slots_and_separates_related_clues() {
     )
     .expect("composed answer");
 
-    assert!(answer.contains("严格按“直接丢失/被盗”口径"));
-    assert!(answer.contains("直接支持一处"));
+    assert!(answer.contains("严格按“明确失玉/被盗”口径"));
+    assert!(answer.contains("直接支持两处"));
     assert!(answer.contains("良儿偷玉"));
-    assert!(answer.contains("广义失玉线索"));
+    assert!(answer.contains("按“拾玉/失而复得”计入明确失玉"));
     assert!(answer.contains("凤姐扫雪拾玉"));
+    assert!(!answer.contains("广义失玉线索"));
     assert!(answer.contains("不能直接计入次数"));
     assert!(answer.contains("甄宝玉送玉"));
 }
@@ -113,7 +114,7 @@ fn composer_strips_internal_markup_from_public_quotes() {
             "fengjie_snow_pickup_jade",
             "凤姐扫雪拾玉",
             "recovery_or_lost_and_found_clue",
-            &["related_loss_clue", "recovery_clue"],
+            &["direct_loss", "recovery_clue"],
             "commentary",
             "剛至穿堂門前，{{~|【庚辰雙行夾批：妙！這便是凤姐扫雪拾玉之處，一絲不亂。】}}<br>只見襲人倚門立在那裡。",
         )],

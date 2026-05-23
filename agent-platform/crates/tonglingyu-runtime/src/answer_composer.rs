@@ -52,6 +52,11 @@ pub(crate) fn compose_slot_count_answer(
     let direct = representative_matches(slot_matches, |item| {
         item.counts_as.iter().any(|basis| basis == &active_basis.id)
     });
+    let direct_recovery = direct
+        .iter()
+        .filter(|item| is_recovery_clue(item))
+        .cloned()
+        .collect::<Vec<_>>();
     let related = representative_matches(slot_matches, |item| {
         !item.counts_as.iter().any(|basis| basis == &active_basis.id)
             && item.display_group != "unclassified"
@@ -96,6 +101,14 @@ pub(crate) fn compose_slot_count_answer(
         answer.push_str("回答仍按证据来源层标注。");
     } else {
         answer.push_str("后四十回未纳入，除非用户明确要求。");
+    }
+
+    if !direct_recovery.is_empty() {
+        answer.push_str(&format!(
+            "\n\n其中{}按“拾玉/失而复得”计入明确失玉：{}；它能证明曾经失玉，但不补出丢失经过。",
+            chinese_number(direct_recovery.len()),
+            related_labels_with_roles(&direct_recovery)
+        ));
     }
 
     if !recovery.is_empty() {
