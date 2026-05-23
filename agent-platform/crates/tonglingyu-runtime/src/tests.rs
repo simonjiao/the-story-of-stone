@@ -2543,6 +2543,69 @@ fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
 }
 
 #[test]
+fn agent_runtime_step_message_compacts_context_projection_payload() {
+    let mut projection = test_runtime_projection(
+        "trace-compact-context",
+        "context-pack://test/compact",
+        "honglou-main",
+        "他是谁？",
+        Some("最近讨论对象：贾宝玉；最近用户问题：他是谁？".to_string()),
+        vec!["tonglingyu.evidence.package.read".to_string()],
+    );
+    projection.projection_payload["llm_agent_context_path"] = json!({
+        "raw_provider_audit": "x".repeat(20_000),
+        "validator_trace": "y".repeat(20_000)
+    });
+    projection.projection_payload["resolver"] = json!({
+        "strategy": "llm_agent_enforced",
+        "needs_clarification": false,
+        "resolved_question": "贾宝玉是谁？",
+        "referent_bindings": ["贾宝玉"],
+        "used_context_refs": ["prior_subject", "current_question"],
+        "agent_decision": {"raw": "z".repeat(20_000)}
+    });
+    let step = RuntimeWorkflowStepReport {
+        step_id: "step-03-draft-answer".to_string(),
+        profile: "honglou-main".to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "draft_answer".to_string(),
+        status: "completed".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+        tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+        input_ref: Some("result://runtime-profiles/honglou-main".to_string()),
+        output_ref: "runtime://test/step-03-draft-answer".to_string(),
+        duration_ms: 1,
+        trace_id: "trace-compact-context".to_string(),
+        output: json!({
+            "object": "tonglingyu.draft_answer",
+            "package_id": "pkg-compact-context",
+            "evidence_ids": [],
+            "evidence_brief": [],
+            "source_scope_policy": source_scope_policy_for_question("他是谁？"),
+        }),
+        agent_runtime: None,
+    };
+
+    let message = agent_runtime_profile_step_message(
+        "trace-compact-context",
+        &step,
+        &projection,
+        agent_runtime_result_summary_contract(&step),
+    );
+
+    assert!(
+        message.content.len() < 8192,
+        "runtime profile message should stay inside safety budget: {}",
+        message.content.len()
+    );
+    assert!(message.content.contains("贾宝玉是谁"));
+    assert!(message.content.contains("projection_payload_sha256"));
+    assert!(!message.content.contains(&"x".repeat(128)));
+    assert!(!message.content.contains(&"z".repeat(128)));
+}
+
+#[test]
 fn trim_text_around_locates_normalized_focus_without_mutating_raw_text() {
     let text = format!("{}史湘雲問道：“寶玉哥哥不在家么？”", "甲".repeat(300));
 

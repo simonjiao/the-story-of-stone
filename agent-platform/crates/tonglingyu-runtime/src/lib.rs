@@ -4055,8 +4055,9 @@ fn agent_runtime_profile_step_message(
             operation = &step.operation,
             context_projection_ref = &projection.context_projection_ref,
             context_projection_digest = &projection.context_projection_digest,
-            context_projection_payload = serde_json::to_string(&projection.projection_payload)
-                .unwrap_or_else(|_| "{}".to_string()),
+            context_projection_payload =
+                serde_json::to_string(&context_projection_message_payload(projection))
+                    .unwrap_or_else(|_| "{}".to_string()),
             input_ref = step.input_ref.as_deref().unwrap_or("none"),
             output_ref = &step.output_ref,
             allowed_tools = step.allowed_tools.join(","),
@@ -4065,6 +4066,52 @@ fn agent_runtime_profile_step_message(
                 .unwrap_or_else(|_| "{}".to_string()),
         ),
     )
+}
+
+fn context_projection_message_payload(projection: &RuntimeContextProjection) -> Value {
+    let payload = &projection.projection_payload;
+    let resolver = payload.get("resolver").unwrap_or(&Value::Null);
+    json!({
+        "object": "tonglingyu.context_projection_message_payload",
+        "context_projection_ref": &projection.context_projection_ref,
+        "context_projection_digest": &projection.context_projection_digest,
+        "projection_payload_sha256": hash_json(payload),
+        "consumer_name": &projection.consumer_name,
+        "visible_question": json_trimmed_string(payload, "visible_question", 512),
+        "resolved_question": resolver
+            .get("resolved_question")
+            .and_then(Value::as_str)
+            .map(|value| trim_text(value, 512)),
+        "session_summary": json_trimmed_string(payload, "session_summary", 512),
+        "memory_usage_summary": payload
+            .get("memory_usage_summary")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "resolver": json!({
+            "strategy": resolver.get("strategy").cloned().unwrap_or(Value::Null),
+            "needs_clarification": resolver
+                .get("needs_clarification")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "referent_bindings": resolver
+                .get("referent_bindings")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+            "used_context_refs": resolver
+                .get("used_context_refs")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        }),
+        "allowed_tools": &projection.allowed_tools,
+        "forbidden_tools": &projection.forbidden_tools,
+    })
+}
+
+fn json_trimmed_string(value: &Value, key: &str, max_chars: usize) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|item| trim_text(item, max_chars))
 }
 
 fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
