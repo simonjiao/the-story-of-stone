@@ -6442,11 +6442,22 @@ fn runtime_accepts_lost_jade_fuzzy_multiple_count_draft_with_later_forty_boundar
 fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "通灵宝玉在前八十回中，明确算作丢失的次数通常可概括为 1 次。",
+        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是良儿偷玉这一处；甄宝玉送玉、凤姐扫雪拾玉只是相关线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
     assert_eq!(rejected, None);
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按所给在范围内证据，通灵宝玉“直接丢失/被盗”可确认有 1 次；另有若干相关线索，但不计入直接丢失次数。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_missing_embedded_evidence_anchor"));
 }
 
 #[test]

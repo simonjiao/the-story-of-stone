@@ -33,7 +33,8 @@ mod evidence_slot_rules;
 mod upstream_bundle;
 
 use answer_composer::{
-    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, source_layer_for_card,
+    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, representative_matches,
+    source_layer_for_card,
 };
 use evidence_slot_rules::{
     active_count_basis_for_question, evidence_slot_count_policy_value,
@@ -4477,7 +4478,7 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. The visible draft_answer must name the relevant evidence slot labels and embed a short source or phrase cue; do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -5280,6 +5281,9 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if draft_count_conflicts_with_evidence_slots(question, &draft_text, cards) {
         return Some("draft_count_conflicts_with_evidence_events");
     }
+    if draft_lacks_embedded_slot_evidence(question, &draft_text, cards) {
+        return Some("draft_missing_embedded_evidence_anchor");
+    }
     for term in [
         "出身",
         "亲戚",
@@ -5295,6 +5299,47 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         }
     }
     None
+}
+
+fn draft_lacks_embedded_slot_evidence(
+    question: &str,
+    draft_text: &str,
+    cards: &[EvidenceCard],
+) -> bool {
+    if !question_asks_for_count(question) {
+        return false;
+    }
+    if cards_include_later_forty(cards) {
+        return false;
+    }
+    let Some(active_basis) = active_count_basis_for_question(question, true)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
+    let direct = representative_matches(&slot_matches, |item| {
+        item.counts_as.iter().any(|basis| basis == &active_basis.id)
+    });
+    if direct.is_empty() {
+        return false;
+    }
+    if labels_missing_from_draft(draft_text, &direct) {
+        return true;
+    }
+    let related = representative_matches(&slot_matches, |item| {
+        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
+            && item.display_group != "unclassified"
+    });
+    !related.is_empty() && labels_missing_from_draft(draft_text, &related)
+}
+
+fn labels_missing_from_draft(draft_text: &str, matches: &[EvidenceSlotMatch]) -> bool {
+    matches.iter().any(|item| {
+        let label = normalize_text(&item.label);
+        !label.is_empty() && !draft_text.contains(&label)
+    })
 }
 
 fn draft_count_conflicts_with_evidence_slots(
