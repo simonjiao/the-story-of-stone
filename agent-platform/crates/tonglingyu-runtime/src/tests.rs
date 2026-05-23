@@ -1846,80 +1846,131 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
             "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
         }),
     );
-    for (block_id, source_title, chapter_no, block_index, kind, text) in [
+    conn.execute(
+        r#"
+        INSERT INTO sources (
+            source_id, source_category, format, title, work, edition, language,
+            source_url, api_url, fetched_at, license, license_url,
+            license_source_url, attribution, usage_boundary, notes,
+            snapshot_contract_json, source_hash
+        ) VALUES (
+            'quality-source-zhiyanzhai', 'commentary_material', 'mediawiki',
+            '质量测试脂批 source', '红楼梦', '测试脂批', 'zh',
+            'https://example.test/source/zhiyanzhai',
+            'https://example.test/api/zhiyanzhai',
+            '2026-05-15T00:00:00Z', 'CC-BY-SA-4.0',
+            'https://creativecommons.org/licenses/by-sa/4.0/',
+            'https://wikisource.org/wiki/Wikisource:Copyright_policy',
+            'Wikisource contributors',
+            '可作为默认回答证据；与前八十回正文同属 in-scope，证据来源层记录为脂批。',
+            '测试 commentary source snapshot', '{}', 'hash-quality-source-zhiyanzhai'
+        )
+        "#,
+        [],
+    )
+    .expect("insert commentary quality source");
+    let long_fengjie_commentary = format!(
+        "{}剛至穿堂門前，{{{{~|【庚辰雙行夾批：妙！這便是鳳姐掃雪拾玉之處，一絲不亂。】}}}}只見襲人倚門立在那裡。",
+        "前置脂批材料。".repeat(80)
+    );
+    for (block_id, source_id, source_title, chapter_no, block_index, kind, evidence_type, text) in [
         (
             "quality-block-lost-jade-heading",
+            "quality-source",
             "紅樓夢/第九十四回",
             94_i64,
             1_i64,
             "heading",
-            "第九十四回 宴海棠賈母賞花妖 失寶玉通靈知奇禍",
+            "base_text",
+            "第九十四回 宴海棠賈母賞花妖 失寶玉通靈知奇禍".to_string(),
         ),
         (
             "quality-block-lost-jade-body",
+            "quality-source",
             "紅樓夢/第九十四回",
             94_i64,
             2_i64,
             "paragraph",
-            "襲人見寶玉脖子上沒有挂著，便問：“那塊玉呢？”寶玉道：“才剛忙亂換衣，摘下來放在炕桌上，我沒有帶。”襲人回看桌上并沒有玉，便向各處找尋，蹤影全無。眾人又道：“你二哥哥的玉丟了，你瞧見了沒有？”",
+            "base_text",
+            "襲人見寶玉脖子上沒有挂著，便問：“那塊玉呢？”寶玉道：“才剛忙亂換衣，摘下來放在炕桌上，我沒有帶。”襲人回看桌上并沒有玉，便向各處找尋，蹤影全無。眾人又道：“你二哥哥的玉丟了，你瞧見了沒有？”".to_string(),
         ),
         (
             "quality-block-lianger-stole-jade",
+            "quality-source",
             "紅樓夢/第五十二回",
             52_i64,
             3_i64,
             "paragraph",
-            "平兒道：“我赶忙接了鐲子，想了一想：寳玉是偏在你們身上留心用意、争勝要强的，那一年有一個良兒偷玉，剛冷了這二年，閒時還常有人提起來趂愿。”",
+            "base_text",
+            "平兒道：“我赶忙接了鐲子，想了一想：寳玉是偏在你們身上留心用意、争勝要强的，那一年有一個良兒偷玉，剛冷了這二年，閒時還常有人提起來趂愿。”".to_string(),
         ),
         (
             "quality-block-monk-delivers-jade",
+            "quality-source",
             "紅樓夢/第一百十五回",
             115_i64,
             4_i64,
             "paragraph",
-            "只見那和尚道：“施主們，我是送玉来的。”說着，把那塊玉擎着道：“快把銀子拿出來，我好救他。”和尚哈哈大笑，手拿着玉在寳玉耳邊呌道：“寶玉，寳玉，你的寳玉囬來了。”",
+            "base_text",
+            "只見那和尚道：“施主們，我是送玉来的。”說着，把那塊玉擎着道：“快把銀子拿出來，我好救他。”和尚哈哈大笑，手拿着玉在寳玉耳邊呌道：“寶玉，寳玉，你的寳玉囬來了。”".to_string(),
         ),
         (
             "quality-block-snow-pickup-cover-story",
+            "quality-source",
             "紅樓夢/第五十二回",
             52_i64,
             5_i64,
             "paragraph",
-            "平兒道：“我徃大奶奶那裡去來着，誰知鐲子褪了口，丢在草根底下，雪深了，没看見。今兒雪化盡了，黃澄澄的映着日頭，還在那裡呢。我就揀了起來。”",
+            "base_text",
+            "平兒道：“我徃大奶奶那裡去來着，誰知鐲子褪了口，丢在草根底下，雪深了，没看見。今兒雪化盡了，黃澄澄的映着日頭，還在那裡呢。我就揀了起來。”".to_string(),
+        ),
+        (
+            "quality-block-fengjie-snow-pickup-commentary",
+            "quality-source-zhiyanzhai",
+            "脂硯齋重評石頭記/第二十三回",
+            23_i64,
+            6_i64,
+            "paragraph",
+            "commentary",
+            long_fengjie_commentary,
         ),
         (
             "quality-block-jade-inscription-distractor",
+            "quality-source",
             "紅樓夢/第八回",
             8_i64,
-            6_i64,
+            7_i64,
             "paragraph",
-            "通靈寶玉正面鐫著“莫失莫忘，仙壽恒昌”，反面又有“一除邪祟，二療冤疾，三知禍福”。",
+            "base_text",
+            "通靈寶玉正面鐫著“莫失莫忘，仙壽恒昌”，反面又有“一除邪祟，二療冤疾，三知禍福”。".to_string(),
         ),
     ] {
+        let normalized_text = normalize_text(&text);
         conn.execute(
             r#"
                 INSERT INTO blocks (
                     block_id, source_id, section_id, source_title, normalized_source_title,
                     source_url, revision_id, block_index, kind, tag, text, normalized_text,
                     evidence_type, chapter_no
-                ) VALUES (?1, 'quality-source', 'quality-section-lost-jade',
-                    ?2, ?3, 'https://example.test/source/lost-jade',
-                    1, ?4, ?5, NULL, ?6, ?7, 'base_text', ?8)
+                ) VALUES (?1, ?2, 'quality-section-lost-jade',
+                    ?3, ?4, 'https://example.test/source/lost-jade',
+                    1, ?5, ?6, NULL, ?8, ?9, ?7, ?10)
                 "#,
             params![
                 block_id,
+                source_id,
                 source_title,
                 normalize_title(source_title),
                 block_index,
                 kind,
-                text,
-                normalize_text(text),
+                evidence_type,
+                &text,
+                normalized_text,
                 chapter_no,
             ],
         )
         .expect("insert lost jade block");
     }
-
     let output = execute_tool(
         &conn,
         TonglingyuToolCall::TextSearch {
@@ -1962,6 +2013,12 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
             .any(|card| card.block_id == "quality-block-snow-pickup-cover-story"),
         "loss-count query should retrieve snow-pickup recall evidence"
     );
+    let fengjie_snow_pickup_card = cards
+        .iter()
+        .find(|card| card.block_id == "quality-block-fengjie-snow-pickup-commentary")
+        .expect("loss-count query should retrieve Fengjie snow-pickup commentary evidence");
+    assert_eq!(fengjie_snow_pickup_card.evidence_type, "commentary");
+    assert!(fengjie_snow_pickup_card.text.contains("鳳姐掃雪拾玉"));
     let later_forty_card = cards
         .iter()
         .find(|card| card.block_id == "quality-block-lost-jade-body")
@@ -2001,6 +2058,12 @@ fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
             .expanded_terms
             .iter()
             .any(|term| term == "掃雪拾玉")
+    );
+    assert!(
+        quality_report
+            .protected_terms
+            .iter()
+            .any(|term| term == "鳳姐掃雪拾玉")
     );
 }
 
@@ -2473,6 +2536,15 @@ fn required_exact_terms_protect_core_eval_targets() {
     assert_eq!(
         required_exact_terms("后四十回从哪里开始？").expect("exact terms"),
         vec!["第八十一".to_string()]
+    );
+    assert!(
+        !required_exact_terms("通灵宝玉丢了几次")
+            .expect("exact terms")
+            .contains(&"寳玉".to_string())
+    );
+    assert_eq!(
+        required_exact_terms("寳玉和通灵玉是什么关系？").expect("exact terms"),
+        vec!["寳玉".to_string()]
     );
 }
 

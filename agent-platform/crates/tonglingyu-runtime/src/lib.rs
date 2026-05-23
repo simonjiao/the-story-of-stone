@@ -13656,7 +13656,7 @@ fn search_evidence_result(
             }
             candidate_block_ids.insert(block.block_id.clone());
             record_match_channels(&mut match_channel_blocks, &block, exact_term);
-            let card = evidence_card_from_block(block);
+            let card = evidence_card_from_block_with_focus(block, exact_term);
             if seen.insert(card.block_id.clone()) {
                 cards.insert(0, card);
                 break;
@@ -15274,7 +15274,14 @@ fn query_matches_expansion_term(question: &str, normalized: &str, term: &str) ->
     if term.is_empty() {
         return false;
     }
+    if query_expansion_trigger_requires_raw_match(term) {
+        return question.contains(term);
+    }
     question.contains(term) || normalized.contains(&normalize_query(term))
+}
+
+fn query_expansion_trigger_requires_raw_match(term: &str) -> bool {
+    term.contains('寳')
 }
 
 fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQueryTerms> {
