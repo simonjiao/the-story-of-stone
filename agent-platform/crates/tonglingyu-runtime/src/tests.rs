@@ -2536,7 +2536,7 @@ fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
             .and_then(Value::as_str)
             .expect("brief item has text");
         assert!(
-            text.chars().count() <= 226,
+            text.chars().count() <= UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS + 6,
             "evidence brief text should be excerpted: {text}"
         );
     }
@@ -2564,6 +2564,24 @@ fn agent_runtime_step_message_compacts_context_projection_payload() {
         "used_context_refs": ["prior_subject", "current_question"],
         "agent_decision": {"raw": "z".repeat(20_000)}
     });
+    let mut cards = Vec::new();
+    for index in 0..12 {
+        let mut card = sample_card("base_text");
+        card.evidence_id = format!("ev-compact-context-{index}");
+        card.source_title = format!("紅樓夢/第{:03}回", index + 1);
+        card.text = format!(
+            "{}通靈玉正面鐫著“莫失莫忘，仙壽恒昌”，反面又有“一除邪祟，二療冤疾，三知禍福”。{}",
+            "前置正文。".repeat(80),
+            "後續正文。".repeat(80)
+        );
+        cards.push(card);
+    }
+    let evidence_brief = upstream_evidence_brief("通灵玉是什么？", &cards);
+    let evidence_ids = evidence_brief
+        .iter()
+        .filter_map(|item| item.get("evidence_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
     let step = RuntimeWorkflowStepReport {
         step_id: "step-03-draft-answer".to_string(),
         profile: "honglou-main".to_string(),
@@ -2580,8 +2598,8 @@ fn agent_runtime_step_message_compacts_context_projection_payload() {
         output: json!({
             "object": "tonglingyu.draft_answer",
             "package_id": "pkg-compact-context",
-            "evidence_ids": [],
-            "evidence_brief": [],
+            "evidence_ids": evidence_ids,
+            "evidence_brief": evidence_brief,
             "source_scope_policy": source_scope_policy_for_question("他是谁？"),
         }),
         agent_runtime: None,

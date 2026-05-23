@@ -108,6 +108,11 @@ pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
 
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
+const UPSTREAM_EVIDENCE_BRIEF_CARD_LIMIT: usize = 5;
+const UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS: usize = 120;
+const UPSTREAM_EVIDENCE_BRIEF_SOURCE_TITLE_CHARS: usize = 80;
+const UPSTREAM_EVIDENCE_BRIEF_SCOPE_CHARS: usize = 72;
+const UPSTREAM_EVIDENCE_BRIEF_LIMITS_CHARS: usize = 96;
 
 pub trait TextNormalizer {
     fn normalize_for_search(&self, input: &str) -> String;
@@ -4120,11 +4125,21 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         .get("package_id")
         .cloned()
         .unwrap_or(Value::Null);
-    let evidence_ids = step
+    let output_evidence_ids = step
         .output
         .get("evidence_ids")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let evidence_brief = step
+        .output
+        .get("evidence_brief")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let evidence_ids = if step.operation == "draft_answer" {
+        evidence_ids_from_evidence_brief(&evidence_brief).unwrap_or(output_evidence_ids)
+    } else {
+        output_evidence_ids
+    };
     let evidence_types = step
         .output
         .get("evidence_types")
@@ -4149,11 +4164,7 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         "claim_count": step.output.get("claim_count").cloned().unwrap_or(Value::Null),
         "evidence_ids": evidence_ids,
         "evidence_types": evidence_types,
-        "evidence_brief": step
-            .output
-            .get("evidence_brief")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
+        "evidence_brief": evidence_brief,
         "source_scope_policy": step
             .output
             .get("source_scope_policy")
@@ -4174,6 +4185,16 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         "draft_consumed": step.output.get("draft_consumed").cloned().unwrap_or(Value::Null),
         "revision_applied": step.output.get("revision_applied").cloned().unwrap_or(Value::Null),
     })
+}
+
+fn evidence_ids_from_evidence_brief(evidence_brief: &Value) -> Option<Value> {
+    let ids = evidence_brief
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("evidence_id").and_then(Value::as_str))
+        .map(|item| json!(item))
+        .collect::<Vec<_>>();
+    Some(Value::Array(ids))
 }
 
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
@@ -14375,22 +14396,30 @@ pub fn package_json(package: &EvidencePackage) -> Value {
 
 fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value> {
     let focus_terms = upstream_evidence_focus_terms(question);
-    cards
+    let mut indexed_cards = cards.iter().enumerate().collect::<Vec<_>>();
+    indexed_cards.sort_by_key(|(index, card)| {
+        (
+            std::cmp::Reverse(matched_evidence_focus_terms(card, &focus_terms).len()),
+            *index,
+        )
+    });
+    indexed_cards
         .iter()
+        .take(UPSTREAM_EVIDENCE_BRIEF_CARD_LIMIT)
         .map(|card| {
+            let card = card.1;
             let text_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
             let matched_terms = matched_evidence_focus_terms(card, &focus_terms);
             json!({
                 "evidence_id": &card.evidence_id,
                 "evidence_type": &card.evidence_type,
                 "source_layer": evidence_card_source_layer(card),
-                "source_title": &card.source_title,
-                "block_id": &card.block_id,
+                "source_title": trim_text(&card.source_title, UPSTREAM_EVIDENCE_BRIEF_SOURCE_TITLE_CHARS),
                 "text": text_excerpt,
                 "text_is_excerpt": true,
                 "matched_terms": matched_terms,
-                "support_scope": trim_text(&card.support_scope, 96),
-                "unsupported_scope": trim_text(&card.unsupported_scope, 120),
+                "support_scope": trim_text(&card.support_scope, UPSTREAM_EVIDENCE_BRIEF_SCOPE_CHARS),
+                "unsupported_scope": trim_text(&card.unsupported_scope, UPSTREAM_EVIDENCE_BRIEF_LIMITS_CHARS),
             })
         })
         .collect()
@@ -14418,13 +14447,12 @@ fn upstream_evidence_focus_terms(question: &str) -> Vec<String> {
 }
 
 fn upstream_evidence_text_excerpt(card: &EvidenceCard, focus_terms: &[String]) -> String {
-    const MAX_EXCERPT_CHARS: usize = 220;
     for term in focus_terms {
         if evidence_text_contains_focus(&card.text, term) {
-            return trim_text_around(&card.text, term, MAX_EXCERPT_CHARS);
+            return trim_text_around(&card.text, term, UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS);
         }
     }
-    trim_text(&card.text, MAX_EXCERPT_CHARS)
+    trim_text(&card.text, UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS)
 }
 
 fn evidence_text_contains_focus(text: &str, focus: &str) -> bool {
