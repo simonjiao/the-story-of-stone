@@ -6175,6 +6175,63 @@ fn hermes_mode_rejects_partial_coverage_count_draft() {
 }
 
 #[test]
+fn hermes_mode_rejects_partial_coverage_before_claim_ref_validation() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text"), sample_card("commentary")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    let package_id = workflow.package.package_id.clone();
+    let mut evidence_refs = evidence_ids(&workflow.package.cards);
+    evidence_refs.push("ev-outside-package".to_string());
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
+            "draft_candidate": {
+                "draft_answer": "通灵宝玉失落后，当前可用证据仍不足以回答完整经过。",
+                "package_id": package_id,
+                "claim_statements": [{
+                    "text": "上游报告 coverage=partial 时，claim refs 不再决定是否完成治理。",
+                    "evidence_refs": evidence_refs,
+                }],
+            },
+            "coverage_assessment": {
+                "status": "partial",
+                "missing_in_scope_slots": ["完整经过仍缺证。"],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {
+                "recommended": false,
+                "queries": [],
+            },
+            "out_of_scope_hints": [],
+        }))
+        .expect("partial coverage bundle serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("partial coverage rejected before refs");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("coverage_assessment_not_passed")
+    );
+    assert_eq!(
+        workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
+        "coverage_assessment_not_passed"
+    );
+}
+
+#[test]
 fn hermes_mode_allows_default_scope_pre80_chengjia_source_label() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],

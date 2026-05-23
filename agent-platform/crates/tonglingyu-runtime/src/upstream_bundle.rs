@@ -250,6 +250,22 @@ pub(crate) fn extract_upstream_bundle_draft(
         .get("claim_statements")
         .and_then(Value::as_array)
         .map(Vec::len);
+    if coverage_status.as_deref() != Some("passed") {
+        let rejected_reason = if coverage_status.is_some() {
+            "coverage_assessment_not_passed"
+        } else {
+            "coverage_assessment_status_missing"
+        };
+        return UpstreamBundleDraftExtraction {
+            package_id: candidate_package_id,
+            claim_statement_count,
+            coverage_status,
+            evidence_hint_count,
+            retrieval_repair_recommended,
+            out_of_scope_hint_count,
+            ..rejected_bundle("json", Some(rejected_reason))
+        };
+    }
     if claim_statement_count.is_none() {
         return UpstreamBundleDraftExtraction {
             package_id: candidate_package_id,
@@ -284,22 +300,6 @@ pub(crate) fn extract_upstream_bundle_draft(
             package_id: candidate_package_id,
             claim_statement_count,
             ..rejected_bundle("json", Some("draft_uses_unscoped_later_forty"))
-        };
-    }
-    if coverage_status.as_deref() != Some("passed") {
-        let rejected_reason = if coverage_status.is_some() {
-            "coverage_assessment_not_passed"
-        } else {
-            "coverage_assessment_status_missing"
-        };
-        return UpstreamBundleDraftExtraction {
-            package_id: candidate_package_id,
-            claim_statement_count,
-            coverage_status,
-            evidence_hint_count,
-            retrieval_repair_recommended,
-            out_of_scope_hint_count,
-            ..rejected_bundle("json", Some(rejected_reason))
         };
     }
     UpstreamBundleDraftExtraction {
