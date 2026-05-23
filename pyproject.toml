@@ -1,6 +1,6 @@
 [project]
 name = "the-story-of-stone"
-version = "0.3.23"
+version = "0.3.24"
 requires-python = ">=3.11"
 dependencies = [
   "faster-whisper",

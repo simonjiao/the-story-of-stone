@@ -45,9 +45,12 @@ pub(crate) struct EvidenceSlotRule {
     pub id: String,
     pub label: String,
     pub role: String,
+    pub public_role_label: String,
     #[serde(default)]
     pub counts_as: Vec<String>,
     pub display_group: String,
+    #[serde(default)]
+    pub count_note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,10 +185,21 @@ fn parse_evidence_slot_rule_catalog(source: &str) -> Result<EvidenceSlotRuleCata
         }
         if slot.label.trim().is_empty()
             || slot.role.trim().is_empty()
+            || slot.public_role_label.trim().is_empty()
             || slot.display_group.trim().is_empty()
         {
             return Err(anyhow!(
-                "evidence slot rule {} must define label, role, and display_group",
+                "evidence slot rule {} must define label, role, public_role_label, and display_group",
+                slot.id
+            ));
+        }
+        if slot
+            .count_note
+            .as_deref()
+            .is_some_and(|note| note.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "evidence slot rule {} count_note must be non-empty when provided",
                 slot.id
             ));
         }
@@ -257,8 +271,10 @@ pub(crate) fn evidence_slot_rule_values_for_ids(slot_ids: &[String]) -> Result<V
                 "id": rule.id,
                 "label": rule.label,
                 "role": rule.role,
+                "public_role_label": rule.public_role_label,
                 "counts_as": rule.counts_as,
                 "display_group": rule.display_group,
+                "count_note": rule.count_note,
             })
         })
         .collect())
@@ -269,8 +285,10 @@ fn unknown_slot_rule(slot_id: &str) -> EvidenceSlotRule {
         id: slot_id.to_string(),
         label: slot_id.to_string(),
         role: "unclassified".to_string(),
+        public_role_label: "相关线索".to_string(),
         counts_as: Vec::new(),
         display_group: "unclassified".to_string(),
+        count_note: None,
     }
 }
 

@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct EvidenceSlotMatch {
     pub slot_id: String,
     pub label: String,
-    pub role: String,
+    pub public_role_label: String,
     pub counts_as: Vec<String>,
     pub display_group: String,
+    pub count_note: Option<String>,
     pub matched_terms: Vec<String>,
     pub source_title: String,
     pub source_layer: String,
@@ -30,9 +31,10 @@ impl EvidenceSlotMatch {
         Self {
             slot_id: rule.id,
             label: rule.label,
-            role: rule.role,
+            public_role_label: rule.public_role_label,
             counts_as: rule.counts_as,
             display_group: rule.display_group,
+            count_note: rule.count_note,
             matched_terms,
             source_title: source_title.to_string(),
             source_layer: source_layer.to_string(),
@@ -52,25 +54,18 @@ pub(crate) fn compose_slot_count_answer(
     let direct = representative_matches(slot_matches, |item| {
         item.counts_as.iter().any(|basis| basis == &active_basis.id)
     });
-    let direct_recovery = direct
+    let direct_notes = direct
         .iter()
-        .filter(|item| is_recovery_clue(item))
-        .cloned()
+        .filter_map(|item| {
+            item.count_note
+                .as_deref()
+                .map(|note| format!("{}：{}", item.label, note.trim_end_matches('。')))
+        })
         .collect::<Vec<_>>();
     let related = representative_matches(slot_matches, |item| {
         !item.counts_as.iter().any(|basis| basis == &active_basis.id)
             && item.display_group != "unclassified"
     });
-    let recovery = related
-        .iter()
-        .filter(|item| is_recovery_clue(item))
-        .cloned()
-        .collect::<Vec<_>>();
-    let other_related = related
-        .iter()
-        .filter(|item| !is_recovery_clue(item))
-        .cloned()
-        .collect::<Vec<_>>();
     if direct.is_empty() && related.is_empty() {
         return None;
     }
@@ -103,27 +98,15 @@ pub(crate) fn compose_slot_count_answer(
         answer.push_str("后四十回未纳入，除非用户明确要求。");
     }
 
-    if !direct_recovery.is_empty() {
-        answer.push_str(&format!(
-            "\n\n其中{}按“拾玉/失而复得”计入明确失玉：{}；它能证明曾经失玉，但不补出丢失经过。",
-            chinese_number(direct_recovery.len()),
-            related_labels_with_roles(&direct_recovery)
-        ));
+    if !direct_notes.is_empty() {
+        answer.push_str(&format!("\n\n计数说明：{}。", direct_notes.join("；")));
     }
 
-    if !recovery.is_empty() {
-        answer.push_str(&format!(
-            "\n\n如果把“拾玉/失而复得”也纳入广义失玉线索，还应单列{}条：{}；但它证明的是拾玉或失而复得，不等于已经给出完整的直接丢失经过。",
-            chinese_number(recovery.len()),
-            related_labels_with_roles(&recovery)
-        ));
-    }
-
-    if !other_related.is_empty() {
+    if !related.is_empty() {
         answer.push_str(&format!(
             "\n\n另有{}条流转/疑似线索，不能直接计入次数：{}。",
-            chinese_number(other_related.len()),
-            related_labels_with_roles(&other_related)
+            chinese_number(related.len()),
+            related_labels_with_roles(&related)
         ));
     }
 
@@ -140,7 +123,7 @@ pub(crate) fn compose_slot_count_answer(
         ));
         index += 1;
     }
-    for item in recovery.iter().chain(other_related.iter()) {
+    for item in &related {
         answer.push_str(&format!(
             "\n{}. {}（{}，{}）：{}",
             index,
@@ -188,11 +171,6 @@ pub(crate) fn direct_count_for_basis(
     .len()
 }
 
-fn is_recovery_clue(item: &EvidenceSlotMatch) -> bool {
-    item.role == "recovery_or_lost_and_found_clue"
-        || item.counts_as.iter().any(|basis| basis == "recovery_clue")
-}
-
 fn evidence_rank(item: &EvidenceSlotMatch) -> usize {
     match item.source_layer.as_str() {
         "base_text_pre_80" => 0,
@@ -216,19 +194,9 @@ fn labels_join(items: &[EvidenceSlotMatch]) -> String {
 fn related_labels_with_roles(items: &[EvidenceSlotMatch]) -> String {
     items
         .iter()
-        .map(|item| format!("{}（{}）", item.label, public_role_label(&item.role)))
+        .map(|item| format!("{}（{}）", item.label, item.public_role_label))
         .collect::<Vec<_>>()
         .join("、")
-}
-
-fn public_role_label(role: &str) -> &'static str {
-    match role {
-        "suspected_transfer_related_to_loss" => "送玉/流转疑似线索",
-        "recovery_or_lost_and_found_clue" => "拾玉/失而复见线索",
-        "direct_loss_or_theft" => "直接丢失或被盗",
-        "later_forty_direct_loss" => "后四十回直接失玉",
-        _ => "相关线索",
-    }
 }
 
 fn source_layer_label(source_layer: &str) -> &'static str {

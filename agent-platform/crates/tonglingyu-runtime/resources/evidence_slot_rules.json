@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.evidence_slot_rules.v1",
-  "catalog_version": "2026-05-23.2",
+  "catalog_version": "2026-05-23.3",
   "count_bases": [
     {
       "id": "direct_loss",
@@ -15,6 +15,7 @@
       "id": "lianger_stole_jade",
       "label": "良儿偷玉",
       "role": "direct_loss_or_theft",
+      "public_role_label": "直接丢失或被盗",
       "counts_as": ["direct_loss"],
       "display_group": "direct_evidence"
     },
@@ -22,6 +23,7 @@
       "id": "zhen_baoyu_delivers_jade",
       "label": "甄宝玉送玉",
       "role": "suspected_transfer_related_to_loss",
+      "public_role_label": "送玉/流转疑似线索",
       "counts_as": ["related_loss_clue"],
       "display_group": "related_clue"
     },
@@ -29,13 +31,16 @@
       "id": "fengjie_snow_pickup_jade",
       "label": "凤姐扫雪拾玉",
       "role": "recovery_or_lost_and_found_clue",
+      "public_role_label": "拾玉/失而复见线索",
       "counts_as": ["direct_loss", "recovery_clue"],
-      "display_group": "direct_evidence"
+      "display_group": "direct_evidence",
+      "count_note": "按“拾玉/失而复得”计入明确失玉；它能证明曾经失玉，但不补出丢失经过"
     },
     {
       "id": "later_forty_lost_jade",
       "label": "后四十回失玉",
       "role": "later_forty_direct_loss",
+      "public_role_label": "后四十回直接失玉",
       "counts_as": ["direct_loss"],
       "display_group": "direct_evidence"
     }

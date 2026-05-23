@@ -10,11 +10,20 @@ fn default_catalog_marks_zhen_baoyu_as_related_not_direct_loss() {
     .expect("slot rules");
 
     assert!(rules[0].counts_as.contains(&"direct_loss".to_string()));
+    assert_eq!(rules[0].public_role_label, "直接丢失或被盗");
     assert_eq!(rules[1].role, "suspected_transfer_related_to_loss");
+    assert_eq!(rules[1].public_role_label, "送玉/流转疑似线索");
     assert!(!rules[1].counts_as.contains(&"direct_loss".to_string()));
     assert_eq!(rules[2].role, "recovery_or_lost_and_found_clue");
+    assert_eq!(rules[2].public_role_label, "拾玉/失而复见线索");
     assert!(rules[2].counts_as.contains(&"direct_loss".to_string()));
     assert!(rules[2].counts_as.contains(&"recovery_clue".to_string()));
+    assert!(
+        rules[2]
+            .count_note
+            .as_deref()
+            .is_some_and(|note| note.contains("失而复得"))
+    );
 }
 
 #[test]
@@ -49,6 +58,7 @@ fn catalog_cache_hot_reloads_external_file() {
                 "id": "slot:test",
                 "label": "初始槽位",
                 "role": "initial_role",
+                "public_role_label": "初始角色",
                 "counts_as": ["direct_loss"],
                 "display_group": "direct_evidence"
             }
@@ -71,8 +81,10 @@ fn catalog_cache_hot_reloads_external_file() {
                 "id": "slot:test",
                 "label": "更新槽位",
                 "role": "updated_role",
+                "public_role_label": "更新角色",
                 "counts_as": [],
-                "display_group": "related_clue"
+                "display_group": "related_clue",
+                "count_note": "更新计数说明"
             }
         ]
     }"#;
@@ -90,7 +102,9 @@ fn catalog_cache_hot_reloads_external_file() {
         .catalog(Some(catalog_path.clone()))
         .expect("reload updated catalog");
     assert_eq!(catalog.slots[0].label, "更新槽位");
+    assert_eq!(catalog.slots[0].public_role_label, "更新角色");
     assert_eq!(catalog.slots[0].display_group, "related_clue");
+    assert_eq!(catalog.slots[0].count_note.as_deref(), Some("更新计数说明"));
 
     std::fs::remove_file(catalog_path).expect("remove catalog");
 }
