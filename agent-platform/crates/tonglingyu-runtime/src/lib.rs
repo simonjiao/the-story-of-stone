@@ -4029,10 +4029,18 @@ fn openai_compatible_config_from_provider_profile(
     profile: &str,
     runtime_profiles: &[&str],
 ) -> Result<OpenAiCompatibleNetworkRuntimeConfig> {
-    let base_url = required_agent_provider_env(profile, "BASE_URL")?;
-    let model = required_agent_provider_env(profile, "MODEL")?;
-    let api_key_env = required_agent_provider_env(profile, "API_KEY_ENV")?;
-    let api_key = env_nonempty(&api_key_env)
+    openai_compatible_config_from_provider_profile_source(profile, runtime_profiles, &env_nonempty)
+}
+
+fn openai_compatible_config_from_provider_profile_source(
+    profile: &str,
+    runtime_profiles: &[&str],
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<OpenAiCompatibleNetworkRuntimeConfig> {
+    let base_url = required_agent_provider_env_from(profile, "BASE_URL", get_env)?;
+    let model = required_agent_provider_env_from(profile, "MODEL", get_env)?;
+    let api_key_env = required_agent_provider_env_from(profile, "API_KEY_ENV", get_env)?;
+    let api_key = get_env(&api_key_env)
         .ok_or_else(|| anyhow!("{api_key_env} must be configured for {profile}"))?;
     let mut config = OpenAiCompatibleNetworkRuntimeConfig::new(base_url, model.clone());
     config.api_key = Some(api_key);
@@ -4040,8 +4048,16 @@ fn openai_compatible_config_from_provider_profile(
         .iter()
         .map(|runtime_profile| ((*runtime_profile).to_string(), model.clone()))
         .collect();
-    config.reasoning_split = Some(true);
+    config.reasoning_split =
+        optional_true_env_from("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", get_env);
     Ok(config)
+}
+
+fn optional_true_env_from(name: &str, get_env: &dyn Fn(&str) -> Option<String>) -> Option<bool> {
+    match get_env(name)?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
 }
 
 fn agent_runtime_profile_step_message(

@@ -84,6 +84,104 @@ fn workflow_agent_runtime_mode_accepts_openai_compatible_provider_backend() {
 }
 
 #[test]
+fn openai_compatible_provider_profile_omits_reasoning_split_by_default() {
+    let env = test_env(&[
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
+            "openai-compatible-network",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
+            "http://provider.local/v1",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL",
+            "provider-model",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_KEY_ENV",
+            "OPENAI_COMPATIBLE_API_KEY",
+        ),
+        ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
+    ]);
+
+    let config = openai_compatible_config_from_provider_profile_source(
+        "openai_profile",
+        &["honglou-text", "honglou-main"],
+        &env,
+    )
+    .expect("provider profile config parses");
+
+    assert_eq!(config.reasoning_split, None);
+    assert_eq!(
+        config
+            .profile_models
+            .get("honglou-text")
+            .map(String::as_str),
+        Some("provider-model")
+    );
+}
+
+#[test]
+fn openai_compatible_provider_profile_only_sends_reasoning_split_when_enabled() {
+    let env = test_env(&[
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
+            "openai-compatible-network",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
+            "http://provider.local/v1",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL",
+            "provider-model",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_KEY_ENV",
+            "OPENAI_COMPATIBLE_API_KEY",
+        ),
+        ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
+        ("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", "true"),
+    ]);
+
+    let config = openai_compatible_config_from_provider_profile_source(
+        "openai_profile",
+        &["honglou-text"],
+        &env,
+    )
+    .expect("provider profile config parses");
+
+    assert_eq!(config.reasoning_split, Some(true));
+
+    let disabled_env = test_env(&[
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
+            "http://provider.local/v1",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL",
+            "provider-model",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_KEY_ENV",
+            "OPENAI_COMPATIBLE_API_KEY",
+        ),
+        ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
+        ("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", "false"),
+    ]);
+
+    let disabled_config = openai_compatible_config_from_provider_profile_source(
+        "openai_profile",
+        &["honglou-text"],
+        &disabled_env,
+    )
+    .expect("provider profile config parses");
+
+    assert_eq!(disabled_config.reasoning_split, None);
+}
+
+#[test]
 fn workflow_agent_runtime_mode_rejects_partial_role_provider_config() {
     let env = test_env(&[("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling")]);
 

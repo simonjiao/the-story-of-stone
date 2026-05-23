@@ -3831,14 +3831,16 @@ fn env_bool(name: &str, default: bool) -> bool {
 }
 
 fn env_optional_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().and_then(|value| {
-        let normalized = value.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(matches!(normalized.as_str(), "1" | "true" | "yes" | "on"))
-        }
-    })
+    std::env::var(name)
+        .ok()
+        .and_then(|value| optional_true_bool_value(&value))
+}
+
+fn optional_true_bool_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
 }
 
 fn openai_chat_url(base_url: &str) -> CoreResult<Url> {
@@ -4694,6 +4696,15 @@ mod tests {
         );
         assert_eq!(summarize_json(&json!(42)), "number");
         assert_eq!(summarize_json(&json!(true)), "bool");
+    }
+
+    #[test]
+    fn optional_true_bool_value_only_enables_truthy_values() {
+        assert_eq!(optional_true_bool_value("true"), Some(true));
+        assert_eq!(optional_true_bool_value("on"), Some(true));
+        assert_eq!(optional_true_bool_value("false"), None);
+        assert_eq!(optional_true_bool_value("0"), None);
+        assert_eq!(optional_true_bool_value(""), None);
     }
 
     #[derive(Debug, Default)]
