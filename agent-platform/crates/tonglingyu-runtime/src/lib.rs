@@ -3448,7 +3448,7 @@ pub fn execute_runtime_workflow(
             "object": "tonglingyu.draft_answer",
             "package_id": &package.package_id,
             "evidence_ids": evidence_ids(&package.cards),
-            "evidence_brief": upstream_evidence_brief(&package.cards),
+            "evidence_brief": upstream_evidence_brief(&input.question, &package.cards),
             "claim_statements": &package.claims,
             "answer_source": "runtime_local_profile",
             "source_scope_policy": &source_scope_report.policy,
@@ -4132,7 +4132,7 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{...copy step_output_json.source_scope_policy exactly...},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Use step_output_json.evidence_brief as the only factual basis for draft_answer and claim_statements. package_id values must match step_output_json.package_id; evidence_refs must come from step_output_json.evidence_ids. When source_scope_policy.later_forty_allowed is false, do not use out_of_scope_hints or later-forty source layers; commentary evidence in evidence_brief remains first-class in-scope even when the commentary text mentions future plot labels such as 扫雪拾玉 or 甄宝玉送玉. For count questions, count only distinct in-scope evidence events visible in evidence_brief and state the evidence boundary. local reviewer remains required. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{...copy step_output_json.source_scope_policy exactly...},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Use step_output_json.evidence_brief as the only factual basis for draft_answer and claim_statements; evidence_brief text fields are bounded excerpts, so do not infer omitted material. package_id values must match step_output_json.package_id; evidence_refs must come from step_output_json.evidence_ids. When source_scope_policy.later_forty_allowed is false, do not use out_of_scope_hints or later-forty source layers; commentary evidence in evidence_brief remains first-class in-scope even when the commentary text mentions future plot labels. For count questions, count only distinct in-scope evidence events visible in evidence_brief and state the evidence boundary. local reviewer remains required. Do not add another result_summary key."
         }
         "review_answer" => {
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -4933,7 +4933,7 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         return Some("draft_missing_later_forty_boundary");
     }
     if question_mentions_tonglingyu_loss(question)
-        && draft_loss_count_conflicts_with_evidence(&draft_text, cards)
+        && draft_loss_count_conflicts_with_evidence(question, &draft_text, cards)
     {
         return Some("draft_count_conflicts_with_evidence_events");
     }
@@ -4954,37 +4954,18 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     None
 }
 
-fn draft_loss_count_conflicts_with_evidence(draft_text: &str, cards: &[EvidenceCard]) -> bool {
-    let event_count = tonglingyu_loss_event_slots(cards).len();
+fn draft_loss_count_conflicts_with_evidence(
+    question: &str,
+    draft_text: &str,
+    cards: &[EvidenceCard],
+) -> bool {
+    let event_count = matched_query_expansion_evidence_slots(question, cards)
+        .map(|slots| slots.len())
+        .unwrap_or_default();
     if event_count < 2 {
         return false;
     }
     highest_explicit_loss_count(draft_text).is_some_and(|count| count < event_count)
-}
-
-fn tonglingyu_loss_event_slots(cards: &[EvidenceCard]) -> BTreeSet<&'static str> {
-    let mut slots = BTreeSet::new();
-    for card in cards {
-        let text = normalize_text(&card.text);
-        if text.contains("良儿偷玉") {
-            slots.insert("lianger_stole_jade");
-        }
-        if text.contains("甄宝玉送玉") {
-            slots.insert("zhen_baoyu_delivers_jade");
-        }
-        if text.contains("凤姐扫雪拾玉") {
-            slots.insert("fengjie_snow_pickup_jade");
-        }
-        if evidence_card_is_later_forty(card)
-            && (text.contains("那块玉呢")
-                || text.contains("踪影全无")
-                || text.contains("玉丢")
-                || text.contains("玉不见"))
-        {
-            slots.insert("later_forty_lost_jade");
-        }
-    }
-    slots
 }
 
 fn highest_explicit_loss_count(text: &str) -> Option<usize> {
@@ -14345,22 +14326,72 @@ pub fn package_json(package: &EvidencePackage) -> Value {
     })
 }
 
-fn upstream_evidence_brief(cards: &[EvidenceCard]) -> Vec<Value> {
+fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value> {
+    let focus_terms = upstream_evidence_focus_terms(question);
     cards
         .iter()
         .map(|card| {
+            let text_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
+            let matched_terms = matched_evidence_focus_terms(card, &focus_terms);
             json!({
                 "evidence_id": &card.evidence_id,
                 "evidence_type": &card.evidence_type,
                 "source_layer": evidence_card_source_layer(card),
                 "source_title": &card.source_title,
                 "block_id": &card.block_id,
-                "text": &card.text,
-                "support_scope": &card.support_scope,
-                "unsupported_scope": &card.unsupported_scope,
+                "text": text_excerpt,
+                "text_is_excerpt": true,
+                "matched_terms": matched_terms,
+                "support_scope": trim_text(&card.support_scope, 96),
+                "unsupported_scope": trim_text(&card.unsupported_scope, 120),
             })
         })
         .collect()
+}
+
+fn upstream_evidence_focus_terms(question: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let normalized = normalize_query(question);
+    if let Ok(catalog) = query_expansion_catalog() {
+        apply_query_expansion_exact_terms(&catalog, question, &normalized, &mut terms);
+        apply_query_expansion_evidence_slot_terms(&catalog, question, &normalized, &mut terms);
+    }
+    for token in cjk_tokens(question) {
+        if token.chars().count() >= 2 && token.chars().count() <= 10 {
+            push_term(&mut terms, &token);
+        }
+        for focus_term in cjk_focus_terms(&token) {
+            if focus_term.chars().count() >= 2 && focus_term.chars().count() <= 10 {
+                push_term(&mut terms, &focus_term);
+            }
+        }
+    }
+    terms.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    terms
+}
+
+fn upstream_evidence_text_excerpt(card: &EvidenceCard, focus_terms: &[String]) -> String {
+    const MAX_EXCERPT_CHARS: usize = 220;
+    for term in focus_terms {
+        if evidence_text_contains_focus(&card.text, term) {
+            return trim_text_around(&card.text, term, MAX_EXCERPT_CHARS);
+        }
+    }
+    trim_text(&card.text, MAX_EXCERPT_CHARS)
+}
+
+fn evidence_text_contains_focus(text: &str, focus: &str) -> bool {
+    text.contains(focus) || normalize_text(text).contains(&normalize_text(focus))
+}
+
+fn matched_evidence_focus_terms(card: &EvidenceCard, focus_terms: &[String]) -> Vec<String> {
+    let mut matched = Vec::new();
+    for term in focus_terms {
+        if evidence_text_contains_focus(&card.text, term) {
+            push_term(&mut matched, term);
+        }
+    }
+    matched
 }
 
 fn public_claim_evidence_map(claim_evidence_map: &[ClaimEvidenceMap]) -> Vec<Value> {
@@ -15164,6 +15195,15 @@ struct QueryExpansionEntry {
     terms: Vec<String>,
     #[serde(default)]
     exact_terms: Vec<String>,
+    #[serde(default)]
+    evidence_slots: Vec<QueryExpansionEvidenceSlot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryExpansionEvidenceSlot {
+    id: String,
+    terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -15312,6 +15352,21 @@ fn parse_query_expansion_catalog(source: &str) -> Result<QueryExpansionCatalog> 
                 ));
             }
         }
+        for slot in &entry.evidence_slots {
+            if slot.id.trim().is_empty() {
+                return Err(anyhow!(
+                    "query expansion entry {} has an evidence slot without id",
+                    entry.id
+                ));
+            }
+            if slot.terms.is_empty() || slot.terms.iter().all(|term| term.trim().is_empty()) {
+                return Err(anyhow!(
+                    "query expansion entry {} evidence slot {} must define non-empty terms",
+                    entry.id,
+                    slot.id
+                ));
+            }
+        }
     }
     Ok(catalog)
 }
@@ -15352,6 +15407,47 @@ fn apply_query_expansion_exact_terms(
             }
         }
     }
+}
+
+fn apply_query_expansion_evidence_slot_terms(
+    catalog: &QueryExpansionCatalog,
+    question: &str,
+    normalized: &str,
+    terms: &mut Vec<String>,
+) {
+    for entry in &catalog.entries {
+        if query_expansion_entry_matches(entry, question, normalized) {
+            for slot in &entry.evidence_slots {
+                for term in &slot.terms {
+                    push_term(terms, term);
+                }
+            }
+        }
+    }
+}
+
+fn matched_query_expansion_evidence_slots(
+    question: &str,
+    cards: &[EvidenceCard],
+) -> Result<BTreeSet<String>> {
+    let catalog = query_expansion_catalog()?;
+    let normalized = normalize_query(question);
+    let mut slots = BTreeSet::new();
+    for entry in &catalog.entries {
+        if !query_expansion_entry_matches(entry, question, &normalized) {
+            continue;
+        }
+        for slot in &entry.evidence_slots {
+            if slot.terms.iter().any(|term| {
+                cards
+                    .iter()
+                    .any(|card| evidence_text_contains_focus(&card.text, term))
+            }) {
+                slots.insert(slot.id.clone());
+            }
+        }
+    }
+    Ok(slots)
 }
 
 fn query_expansion_entry_matches(

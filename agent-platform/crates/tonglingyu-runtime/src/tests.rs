@@ -2513,6 +2513,36 @@ fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
 }
 
 #[test]
+fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
+    let mut cards = in_scope_lost_jade_event_cards();
+    cards[2].text = format!(
+        "{}剛至穿堂門前，{{{{~|【庚辰雙行夾批：妙！這便是鳳姐掃雪拾玉之處，一絲不亂。】}}}}只見襲人倚門立在那裡。",
+        "前置脂批材料。".repeat(100)
+    );
+
+    let brief = upstream_evidence_brief("通灵宝玉丢了几次", &cards);
+    let rendered = serde_json::to_string(&brief).expect("brief serializes");
+
+    assert!(
+        rendered.len() < 3200,
+        "brief should stay comfortably below profile message safety budget: {}",
+        rendered.len()
+    );
+    assert!(rendered.contains("鳳姐掃雪拾玉"));
+    assert!(rendered.contains("凤姐扫雪拾玉"));
+    for item in brief {
+        let text = item
+            .get("text")
+            .and_then(Value::as_str)
+            .expect("brief item has text");
+        assert!(
+            text.chars().count() <= 226,
+            "evidence brief text should be excerpted: {text}"
+        );
+    }
+}
+
+#[test]
 fn trim_text_around_locates_normalized_focus_without_mutating_raw_text() {
     let text = format!("{}史湘雲問道：“寶玉哥哥不在家么？”", "甲".repeat(300));
 

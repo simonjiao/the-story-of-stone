@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.query_expansions.v1",
-  "catalog_version": "2026-05-23.2",
+  "catalog_version": "2026-05-23.3",
   "entries": [
     {
       "id": "core:tonglingyu",
@@ -101,6 +101,29 @@
         "凤姐扫雪拾玉",
         "這便是鳳姐掃雪拾玉之處",
         "这便是凤姐扫雪拾玉之处"
+      ],
+      "evidence_slots": [
+        {
+          "id": "lianger_stole_jade",
+          "terms": ["良兒偷玉", "良儿偷玉"]
+        },
+        {
+          "id": "zhen_baoyu_delivers_jade",
+          "terms": ["甄寶玉送玉", "甄宝玉送玉", "伏甄寶玉送玉", "伏甄宝玉送玉"]
+        },
+        {
+          "id": "fengjie_snow_pickup_jade",
+          "terms": [
+            "鳳姐掃雪拾玉",
+            "凤姐扫雪拾玉",
+            "這便是鳳姐掃雪拾玉之處",
+            "这便是凤姐扫雪拾玉之处"
+          ]
+        },
+        {
+          "id": "later_forty_lost_jade",
+          "terms": ["那塊玉呢", "那块玉呢", "蹤影全無", "踪影全无", "玉丟", "玉丢", "玉不見", "玉不见"]
+        }
       ]
     },
     {
