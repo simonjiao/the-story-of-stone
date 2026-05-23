@@ -1127,11 +1127,11 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             model: model.into(),
             profile_models: BTreeMap::new(),
             connect_timeout: Duration::from_millis(1500),
-            read_timeout: Duration::from_millis(60000),
-            total_deadline: Duration::from_millis(90000),
+            read_timeout: Duration::from_millis(45000),
+            total_deadline: Duration::from_millis(120000),
             max_tokens: 768,
             temperature: 0.0,
-            max_attempts: 2,
+            max_attempts: 3,
             retry_base_delay: Duration::from_millis(120),
             unhealthy_window: Duration::from_secs(5),
             max_concurrency: 2,
@@ -1356,6 +1356,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
     ) -> CoreResult<(String, Value)> {
         let mut last_error_type = "provider_unavailable";
         let mut attempt_failures = Vec::new();
+        let mut retry_instruction = None;
         for attempt in 1..=self.config.max_attempts {
             if started.elapsed() >= self.config.total_deadline {
                 self.mark_provider_unhealthy().await;
@@ -1366,7 +1367,14 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 ));
             }
             match self
-                .send_chat_completion(input, model, requested_tools, attempt, started)
+                .send_chat_completion(
+                    input,
+                    model,
+                    requested_tools,
+                    attempt,
+                    started,
+                    retry_instruction,
+                )
                 .await
             {
                 Ok(mut output) => {
@@ -1390,6 +1398,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                     if error.mark_unhealthy {
                         self.mark_provider_unhealthy().await;
                     }
+                    retry_instruction = openai_retry_instruction_for_error(error.error_type);
                     if attempt >= self.config.max_attempts || !error.retryable {
                         return Err(openai_runtime_error_with_diagnostic(
                             error.error_type,
@@ -1436,17 +1445,25 @@ impl OpenAiCompatibleNetworkRuntimeClient {
         requested_tools: &[String],
         attempt: usize,
         started: Instant,
+        retry_instruction: Option<&'static str>,
     ) -> Result<(String, Value), OpenAiRuntimeAttemptError> {
+        let mut messages = input
+            .messages
+            .iter()
+            .map(|message| OpenAiCompatibleChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(instruction) = retry_instruction {
+            messages.push(OpenAiCompatibleChatMessage {
+                role: "user".to_string(),
+                content: instruction.to_string(),
+            });
+        }
         let request = OpenAiCompatibleChatCompletionRequest {
             model: model.to_string(),
-            messages: input
-                .messages
-                .iter()
-                .map(|message| OpenAiCompatibleChatMessage {
-                    role: message.role.clone(),
-                    content: message.content.clone(),
-                })
-                .collect(),
+            messages,
             stream: false,
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
@@ -1588,6 +1605,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "usage": provider_usage,
                 "latency_ms": latency_ms,
                 "attempt_count": attempt,
+                "retry_instruction_applied": retry_instruction.is_some(),
                 "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
                 "parsed_json_sha256": content_json_digest.map(|value| format!("sha256:{value}")),
                 "provider_output": provider_output.to_metadata(),
@@ -4166,6 +4184,18 @@ fn classify_openai_reqwest_error(error: reqwest::Error) -> OpenAiRuntimeAttemptE
     )
 }
 
+fn openai_retry_instruction_for_error(error_type: &'static str) -> Option<&'static str> {
+    match error_type {
+        "provider_empty_content" => Some(
+            "The previous provider response had no assistant content. Retry now and return exactly one non-empty JSON object matching the earlier result_summary_contract. Do not return an empty assistant message. Do not use markdown.",
+        ),
+        "deadline_exceeded" => Some(
+            "The previous provider attempt exceeded the time budget. Retry with a compact response: return exactly one non-empty JSON object matching the earlier result_summary_contract. Do not include prose outside JSON.",
+        ),
+        _ => None,
+    }
+}
+
 fn classify_openai_http_error(
     status: ReqwestStatusCode,
     body_text: &str,
@@ -5719,50 +5749,58 @@ mod tests {
     #[tokio::test]
     async fn openai_compatible_runtime_retries_empty_content_with_diagnostic() {
         let calls = Arc::new(Mutex::new(0usize));
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let app = Router::new()
             .route(
                 "/chat/completions",
-                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
-                    let call = {
-                        let mut calls = calls.lock().unwrap();
-                        *calls += 1;
-                        *calls
-                    };
-                    if call == 1 {
-                        Json(json!({
-                            "id": "empty-1",
-                            "model": "direct-test-model",
-                            "metadata_secret": "SECRET_PROVIDER_EMPTY_BODY",
-                            "choices": [
-                                {
-                                    "finish_reason": "stop",
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": ""
+                post(
+                    |State((calls, requests)): State<(
+                        Arc<Mutex<usize>>,
+                        Arc<Mutex<Vec<Value>>>,
+                    )>,
+                     Json(request): Json<Value>| async move {
+                        requests.lock().unwrap().push(request);
+                        let call = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        if call == 1 {
+                            Json(json!({
+                                "id": "empty-1",
+                                "model": "direct-test-model",
+                                "metadata_secret": "SECRET_PROVIDER_EMPTY_BODY",
+                                "choices": [
+                                    {
+                                        "finish_reason": "stop",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": ""
+                                        }
                                     }
-                                }
-                            ],
-                            "usage": {"prompt_tokens": 5, "completion_tokens": 4}
-                        }))
-                    } else {
-                        Json(json!({
-                            "id": "ok-2",
-                            "model": "direct-test-model",
-                            "choices": [
-                                {
-                                    "finish_reason": "stop",
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                ],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 4}
+                            }))
+                        } else {
+                            Json(json!({
+                                "id": "ok-2",
+                                "model": "direct-test-model",
+                                "choices": [
+                                    {
+                                        "finish_reason": "stop",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                        }
                                     }
-                                }
-                            ],
-                            "usage": {"prompt_tokens": 5, "completion_tokens": 31}
-                        }))
-                    }
-                }),
+                                ],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 31}
+                            }))
+                        }
+                    },
+                ),
             )
-            .with_state(calls.clone());
+            .with_state((calls.clone(), requests.clone()));
         let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
             spawn_server(app).await,
             2,
@@ -5779,6 +5817,19 @@ mod tests {
             "{\"schema_version\":\"v1\",\"retried\":true}"
         );
         assert_eq!(output.metadata["attempt_count"], json!(2));
+        assert_eq!(output.metadata["retry_instruction_applied"], json!(true));
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let first_messages = captured[0]["messages"].as_array().unwrap();
+        let retry_messages = captured[1]["messages"].as_array().unwrap();
+        assert_eq!(retry_messages.len(), first_messages.len() + 1);
+        assert!(
+            retry_messages
+                .last()
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|content| content.contains("no assistant content"))
+        );
+        drop(captured);
         let failure = &output.metadata["previous_attempt_failures"][0];
         assert_eq!(
             failure["schema_version"],

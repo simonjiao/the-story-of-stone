@@ -2778,6 +2778,7 @@ fn agent_runtime_evidence_search_message_does_not_expose_runtime_evidence_ids() 
 
     assert!(message.content.contains("do_not_echo_runtime_ids"));
     assert!(message.content.contains("evidence_set_ref"));
+    assert!(message.content.contains("non-empty JSON object"));
     assert!(message.content.contains("\"evidence_refs\":[]"));
     assert!(!message.content.contains("ev-transient-one"));
     assert!(!message.content.contains("ev-transient-two"));

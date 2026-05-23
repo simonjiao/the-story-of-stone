@@ -4071,6 +4071,7 @@ fn agent_runtime_profile_step_message(
         format!(
             concat!(
                 "Tonglingyu profile step execution context.\n",
+                "Output rule: return exactly one non-empty JSON object as assistant content. Do not return an empty assistant message. Do not use markdown.\n",
                 "trace_id: {trace_id}\n",
                 "profile: {profile}\n",
                 "operation: {operation}\n",
@@ -4278,19 +4279,19 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "The runtime envelope already has result_summary. Return one JSON object string: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count distinct in-scope evidence_slots visible in evidence_brief and state the boundary. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count distinct in-scope evidence_slots visible in evidence_brief and state the boundary. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
+            "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
         }
         "text_evidence_search" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. step_output_json does not expose runtime evidence ids; keep evidence_refs empty. Do not write a final answer. Do not add another result_summary key."
+            "Return exactly one non-empty JSON object with this shape: {\"evidence_observation\":{\"evidence_refs\":[],\"evidence_analysis\":\"short observation\",\"unsupported_scope\":\"none|short boundary\"}}. step_output_json does not expose runtime evidence ids; keep evidence_refs empty. Do not write a final answer. Do not add another result_summary key."
         }
         "commentary_evidence_search" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[],\"commentary_analysis\":\"...\",\"scope_notes\":\"...\"}}. step_output_json does not expose runtime evidence ids; keep commentary_refs empty. Commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
+            "Return exactly one non-empty JSON object with this shape: {\"evidence_observation\":{\"commentary_refs\":[],\"commentary_analysis\":\"short observation\",\"scope_notes\":\"short boundary\"}}. step_output_json does not expose runtime evidence ids; keep commentary_refs empty. Commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
         }
         "evidence_package_create" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"...\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
+            "Return exactly one non-empty JSON object with this shape: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"short observation\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
         }
         _ => {
             "Return result_summary as a concise step observation that preserves the step output boundary."
