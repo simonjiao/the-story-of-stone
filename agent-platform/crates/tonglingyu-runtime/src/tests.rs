@@ -6443,11 +6443,22 @@ fn runtime_accepts_lost_jade_fuzzy_multiple_count_draft_with_later_forty_boundar
 fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是良儿偷玉这一处；甄宝玉送玉、凤姐扫雪拾玉只是相关线索。",
+        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是第五十二回良儿偷玉这一处；脂批第十八回甄宝玉送玉、脂批第二十三回凤姐扫雪拾玉只是相关线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
     assert_eq!(rejected, None);
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按“直接丢失/被盗”口径，通灵宝玉明确算作丢失 1 次：证据槽位是「lianger_stole_jade（良儿偷玉）」；另有相关线索「zhen_baoyu_delivers_jade（伏甄宝玉送玉）」和「fengjie_snow_pickup_jade（凤姐扫雪拾玉）」可作旁证，但不计入直接次数。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_exposes_internal_evidence_slot_id"));
 }
 
 #[test]
@@ -6459,6 +6470,17 @@ fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
     );
 
     assert_eq!(rejected, Some("draft_missing_embedded_evidence_anchor"));
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_without_embedded_source_cues() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "通灵宝玉在前八十回正文与脂批范围内，能按直接丢失/被盗计入的是良儿偷玉这一处；甄宝玉送玉、凤姐扫雪拾玉只是相关线索。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_missing_embedded_evidence_source"));
 }
 
 #[test]
@@ -6476,7 +6498,7 @@ fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
 fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_forty_scope() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按当前证据包的默认范围，可以说至少有三处可追溯线索：良儿偷玉、脂批伏甄宝玉送玉、脂批称凤姐扫雪拾玉；其中后两处来自脂批伏笔，不等于使用续书正文。",
+        "按当前证据包的默认范围，可以说至少有三处可追溯线索：第五十二回良儿偷玉、脂批第十八回伏甄宝玉送玉、脂批第二十三回称凤姐扫雪拾玉；其中后两处来自脂批伏笔，不等于使用续书正文。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -6501,7 +6523,7 @@ fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowi
         upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "按当前证据包的默认范围，可以说至少有三处可追溯线索：良儿偷玉、脂批伏甄宝玉送玉、脂批称凤姐扫雪拾玉。",
+            "按当前证据包的默认范围，可以说至少有三处可追溯线索：第五十二回良儿偷玉、脂批第十八回伏甄宝玉送玉、脂批第二十三回称凤姐扫雪拾玉。",
             "默认范围内的正文和脂批证据支持至少三处失玉线索。",
             evidence_ids(&workflow.package.cards),
         )
@@ -6578,6 +6600,15 @@ fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections()
     )));
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "draft_count_conflicts_with_evidence_events"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "draft_exposes_internal_evidence_slot_id"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "draft_missing_embedded_evidence_anchor"
+    )));
+    assert!(agent_runtime_draft_rejection_completes_governance(Some(
+        "draft_missing_embedded_evidence_source"
     )));
     assert!(agent_runtime_draft_rejection_completes_governance(Some(
         "coverage_assessment_not_passed"

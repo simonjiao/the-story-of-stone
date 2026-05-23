@@ -4745,6 +4745,9 @@ fn agent_runtime_draft_rejection_completes_governance(reason: Option<&str>) -> b
                 | "draft_missing_later_forty_boundary"
                 | "draft_uses_unscoped_later_forty"
                 | "draft_count_conflicts_with_evidence_events"
+                | "draft_exposes_internal_evidence_slot_id"
+                | "draft_missing_embedded_evidence_anchor"
+                | "draft_missing_embedded_evidence_source"
                 | "coverage_assessment_not_passed"
                 | "coverage_assessment_status_missing"
                 | "claim_evidence_refs_unavailable"
@@ -5281,8 +5284,14 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if draft_count_conflicts_with_evidence_slots(question, &draft_text, cards) {
         return Some("draft_count_conflicts_with_evidence_events");
     }
+    if draft_exposes_internal_evidence_slot_ids(question, &draft_text, cards) {
+        return Some("draft_exposes_internal_evidence_slot_id");
+    }
     if draft_lacks_embedded_slot_evidence(question, &draft_text, cards) {
         return Some("draft_missing_embedded_evidence_anchor");
+    }
+    if draft_lacks_embedded_slot_source(question, &draft_text, cards) {
+        return Some("draft_missing_embedded_evidence_source");
     }
     for term in [
         "出身",
@@ -5301,38 +5310,26 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     None
 }
 
+fn draft_exposes_internal_evidence_slot_ids(
+    question: &str,
+    draft_text: &str,
+    cards: &[EvidenceCard],
+) -> bool {
+    count_slot_representatives_for_boundary(question, cards).is_some_and(|matches| {
+        matches.iter().any(|item| {
+            let slot_id = normalize_text(&item.slot_id);
+            !slot_id.is_empty() && draft_text.contains(&slot_id)
+        })
+    })
+}
+
 fn draft_lacks_embedded_slot_evidence(
     question: &str,
     draft_text: &str,
     cards: &[EvidenceCard],
 ) -> bool {
-    if !question_asks_for_count(question) {
-        return false;
-    }
-    if cards_include_later_forty(cards) {
-        return false;
-    }
-    let Some(active_basis) = active_count_basis_for_question(question, true)
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
-    let direct = representative_matches(&slot_matches, |item| {
-        item.counts_as.iter().any(|basis| basis == &active_basis.id)
-    });
-    if direct.is_empty() {
-        return false;
-    }
-    if labels_missing_from_draft(draft_text, &direct) {
-        return true;
-    }
-    let related = representative_matches(&slot_matches, |item| {
-        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
-            && item.display_group != "unclassified"
-    });
-    !related.is_empty() && labels_missing_from_draft(draft_text, &related)
+    count_slot_representatives_for_boundary(question, cards)
+        .is_some_and(|matches| labels_missing_from_draft(draft_text, &matches))
 }
 
 fn labels_missing_from_draft(draft_text: &str, matches: &[EvidenceSlotMatch]) -> bool {
@@ -5340,6 +5337,75 @@ fn labels_missing_from_draft(draft_text: &str, matches: &[EvidenceSlotMatch]) ->
         let label = normalize_text(&item.label);
         !label.is_empty() && !draft_text.contains(&label)
     })
+}
+
+fn draft_lacks_embedded_slot_source(
+    question: &str,
+    draft_text: &str,
+    cards: &[EvidenceCard],
+) -> bool {
+    count_slot_representatives_for_boundary(question, cards).is_some_and(|matches| {
+        matches
+            .iter()
+            .any(|item| !source_cue_present_for_slot_match(draft_text, item))
+    })
+}
+
+fn source_cue_present_for_slot_match(draft_text: &str, item: &EvidenceSlotMatch) -> bool {
+    public_source_cues(&item.source_title)
+        .iter()
+        .map(|cue| normalize_text(cue))
+        .filter(|cue| !cue.is_empty())
+        .any(|cue| draft_text.contains(&cue))
+}
+
+fn public_source_cues(source_title: &str) -> Vec<String> {
+    let mut cues = Vec::new();
+    let title = source_title.trim();
+    if !title.is_empty() {
+        cues.push(title.to_string());
+    }
+    if let Some(tail) = title
+        .rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        cues.push(tail.to_string());
+    }
+    if let Some(chapter_no) = extract_chapter_no(title) {
+        cues.push(format!("第{chapter_no}回"));
+        cues.push(format!("第{chapter_no:03}回"));
+    }
+    cues.sort();
+    cues.dedup();
+    cues
+}
+
+fn count_slot_representatives_for_boundary(
+    question: &str,
+    cards: &[EvidenceCard],
+) -> Option<Vec<EvidenceSlotMatch>> {
+    if !question_asks_for_count(question) || cards_include_later_forty(cards) {
+        return None;
+    }
+    let active_basis = active_count_basis_for_question(question, true)
+        .ok()
+        .flatten()?;
+    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
+    let direct = representative_matches(&slot_matches, |item| {
+        item.counts_as.iter().any(|basis| basis == &active_basis.id)
+    });
+    if direct.is_empty() {
+        return None;
+    }
+    let related = representative_matches(&slot_matches, |item| {
+        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
+            && item.display_group != "unclassified"
+    });
+    let mut matches = direct;
+    matches.extend(related);
+    Some(matches)
 }
 
 fn draft_count_conflicts_with_evidence_slots(
