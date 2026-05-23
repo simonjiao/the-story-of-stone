@@ -2376,11 +2376,16 @@ fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
     chengyi.block_id = "block-lianger-theft-chengyi-long".to_string();
     chengyi.text = "說著，果然從後門出去至窗下潛聽。麝月悄悄問道：「你怎麼就得了的？」平兒道：「那日彼時洗手時不見了，二奶奶就不許吵嚷，出了園子，即刻就傳給園裡各處的媽媽們，小心訪查。我們只疑惑邢姑娘的丫頭，本來又窮，只怕小孩子家沒見過，拿起來是有的，再不料定是你們這裡的。幸而二奶奶沒有在屋裡，你們這裡的宋媽去了，拿著這支鐲子，說是小丫頭墜兒偷起來的，被他看見，來回二奶奶的。我趕忙接了鐲子，想了一想。寶玉是偏在你們身上留心用意，爭勝要強的。那一年有個良兒偷玉，剛冷了這二年，閒時還常有人提起來趁願；這會子又跑出一個偷金子的來了，而且更偷到街坊家去了。偏是他這麼著，偏是他的人打嘴。所以我倒忙叮嚀宋媽，千萬別告訴寶玉，只當沒有這事，總別和一個人提起。第二件，老太太、太太聽了生氣。三則襲人和你們也不好看。所以我回二奶奶，只說：『我往大奶奶那裡去來著。誰知鐲子褪了口，丟在草根底下，雪深了，沒看見。今兒雪化盡了，黃澄澄的映著日頭，還在那裡呢，我就撿了起來。』二奶奶也就信了，所以我來告訴你們。"
         .to_string();
+    let mut index = sample_card("base_text");
+    index.source_title = "紅樓夢（程甲本）".to_string();
+    index.block_id = "block-chengjia-navigation-index".to_string();
+    index.text = "[[/八十七|第八十七回]] 感秋聲撫琴悲往事 坐禪寂走火入邪魔\n[[/八十八|第八十八回]] 博庭歡寶玉讚孤兒 正家法賈珍鞭悍僕\n[[/八十九|第八十九回]] 人亡物在公子填詞 蛇影盃弓顰卿絶粧\n{{***}}\n[[/九十|第九十回]] 失綿衣貧女耐嗷嘈 送菓品小郎驚叵測\n[[/九十一|第九十一回]] 縱淫心寶蟾工設計 布疑陣寶玉妄談禪\n[[/九十四|第九十四回]] 晏海棠賈母賞花妖 失寶玉通靈知奇禍"
+        .to_string();
     let package = EvidencePackage {
         package_id: "pkg-long-duplicate-card-answer-test".to_string(),
         trace_id: "trace-long-duplicate-card-answer-test".to_string(),
         question: "通灵宝玉丢失".to_string(),
-        cards: vec![chengjia, wikisource, commentary, chengyi],
+        cards: vec![chengjia, wikisource, commentary, chengyi, index],
         claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
         claim_evidence_map: Vec::new(),
         review: ReviewRecord {
@@ -2399,6 +2404,8 @@ fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
     assert!(!answer.contains("2. 紅樓夢/第052回"));
     assert!(answer.contains("2. 脂硯齋重評石頭記/第五十二回"));
     assert!(!answer.contains("紅樓夢（程乙本）/第五十一回 至第六十回"));
+    assert!(!answer.contains("第九十四回"));
+    assert!(!answer.contains("失寶玉通靈知奇禍"));
 }
 
 #[test]

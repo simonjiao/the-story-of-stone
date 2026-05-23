@@ -14522,7 +14522,7 @@ fn answer_display_cards(cards: &[EvidenceCard], limit: usize) -> Vec<&EvidenceCa
 }
 
 fn evidence_card_presentable_in_answer(card: &EvidenceCard) -> bool {
-    !evidence_text_is_broken_shell(&card.text)
+    !evidence_text_is_broken_shell(&card.text) && !evidence_text_is_navigation_index(&card.text)
 }
 
 #[derive(Debug)]
@@ -14626,6 +14626,21 @@ fn evidence_text_is_broken_shell(text: &str) -> bool {
     .iter()
     .any(|suffix| trimmed.ends_with(suffix));
     speech_lead_only && substantive_count <= 6
+}
+
+fn evidence_text_is_navigation_index(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let wiki_subpage_link_count = trimmed.matches("[[/").count();
+    let chapter_link_count = trimmed.matches("|第").count();
+    let chapter_title_count = trimmed.matches('回').count();
+    let section_separator_count = trimmed.matches("{{***}}").count();
+    (wiki_subpage_link_count >= 3 && chapter_link_count >= 3 && chapter_title_count >= 6)
+        || (section_separator_count >= 2
+            && wiki_subpage_link_count >= 2
+            && chapter_title_count >= 6)
 }
 
 fn question_mentions_tonglingyu_loss(question: &str) -> bool {
