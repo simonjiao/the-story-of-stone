@@ -2521,7 +2521,8 @@ fn local_answer_uses_slot_semantics_for_lost_jade_count() {
     assert!(answer.contains("良儿偷玉"));
     assert!(answer.contains("甄宝玉送玉"));
     assert!(answer.contains("凤姐扫雪拾玉"));
-    assert!(answer.contains("不能直接计为"));
+    assert!(answer.contains("广义失玉线索"));
+    assert!(answer.contains("不能直接计入次数"));
     assert!(!answer.contains("目前能支持回答的主要材料如下"));
     assert!(!answer.contains("直接支持三处"));
 }

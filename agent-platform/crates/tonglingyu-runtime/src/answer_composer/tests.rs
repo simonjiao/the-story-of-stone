@@ -61,6 +61,14 @@ fn composer_counts_direct_slots_and_separates_related_clues() {
                 "那一年有一个良儿偷玉。",
             ),
             slot_match(
+                "fengjie_snow_pickup_jade",
+                "凤姐扫雪拾玉",
+                "recovery_or_lost_and_found_clue",
+                &["related_loss_clue", "recovery_clue"],
+                "commentary",
+                "凤姐扫雪拾玉。",
+            ),
+            slot_match(
                 "zhen_baoyu_delivers_jade",
                 "甄宝玉送玉",
                 "suspected_transfer_related_to_loss",
@@ -72,8 +80,48 @@ fn composer_counts_direct_slots_and_separates_related_clues() {
     )
     .expect("composed answer");
 
+    assert!(answer.contains("严格按“直接丢失/被盗”口径"));
     assert!(answer.contains("直接支持一处"));
     assert!(answer.contains("良儿偷玉"));
-    assert!(answer.contains("不能直接计为"));
+    assert!(answer.contains("广义失玉线索"));
+    assert!(answer.contains("凤姐扫雪拾玉"));
+    assert!(answer.contains("不能直接计入次数"));
     assert!(answer.contains("甄宝玉送玉"));
+}
+
+#[test]
+fn composer_strips_internal_markup_from_public_quotes() {
+    let package = EvidencePackage {
+        package_id: "pkg-test".to_string(),
+        trace_id: "trace-test".to_string(),
+        question: "通灵宝玉丢了几次".to_string(),
+        cards: Vec::new(),
+        claims: Vec::new(),
+        claim_evidence_map: Vec::new(),
+        knowledge_state_summary: Default::default(),
+        review: crate::ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "passed".to_string(),
+        },
+    };
+    let answer = compose_slot_count_answer(
+        &package,
+        &count_basis(),
+        &[slot_match(
+            "fengjie_snow_pickup_jade",
+            "凤姐扫雪拾玉",
+            "recovery_or_lost_and_found_clue",
+            &["related_loss_clue", "recovery_clue"],
+            "commentary",
+            "剛至穿堂門前，{{~|【庚辰雙行夾批：妙！這便是凤姐扫雪拾玉之處，一絲不亂。】}}<br>只見襲人倚門立在那裡。",
+        )],
+    )
+    .expect("composed answer");
+
+    assert!(answer.contains("凤姐扫雪拾玉"));
+    assert!(!answer.contains("{{~|"));
+    assert!(!answer.contains("}}"));
+    assert!(!answer.contains("<br>"));
 }

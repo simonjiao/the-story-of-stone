@@ -56,20 +56,36 @@ pub(crate) fn compose_slot_count_answer(
         !item.counts_as.iter().any(|basis| basis == &active_basis.id)
             && item.display_group != "unclassified"
     });
+    let recovery = related
+        .iter()
+        .filter(|item| is_recovery_clue(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    let other_related = related
+        .iter()
+        .filter(|item| !is_recovery_clue(item))
+        .cloned()
+        .collect::<Vec<_>>();
     if direct.is_empty() && related.is_empty() {
         return None;
     }
 
     let mut answer = String::new();
     let policy = source_scope_policy_for_question(&package.question);
+    let scope_label = if policy.later_forty_allowed {
+        "本次明确纳入后四十回范围"
+    } else {
+        "默认范围（前八十回正文 + 脂批）"
+    };
     if direct.is_empty() {
         answer.push_str(&format!(
-            "严格按“{}”口径，当前证据不能直接支持具体次数。",
-            active_basis.label
+            "按{}看，严格按“{}”口径，当前证据不能直接支持具体次数。",
+            scope_label, active_basis.label
         ));
     } else {
         answer.push_str(&format!(
-            "严格按“{}”口径，当前证据能直接支持{}{}：{}。",
+            "按{}看，严格按“{}”口径，当前证据能直接支持{}{}：{}。",
+            scope_label,
             active_basis.label,
             chinese_number(direct.len()),
             active_basis.answer_unit,
@@ -77,17 +93,24 @@ pub(crate) fn compose_slot_count_answer(
         ));
     }
     if policy.later_forty_allowed {
-        answer.push_str("本次问题已显式打开后四十回范围；回答仍按证据来源层标注。");
+        answer.push_str("回答仍按证据来源层标注。");
     } else {
-        answer.push_str("默认范围是前八十回正文 + 脂批；后四十回未纳入，除非用户明确要求。");
+        answer.push_str("后四十回未纳入，除非用户明确要求。");
     }
 
-    if !related.is_empty() {
+    if !recovery.is_empty() {
         answer.push_str(&format!(
-            "\n\n另有{}条相关线索，不能直接计为“{}”：{}。",
-            chinese_number(related.len()),
-            active_basis.answer_noun,
-            related_labels_with_roles(&related)
+            "\n\n如果把“拾玉/失而复得”也纳入广义失玉线索，还应单列{}条：{}；但它证明的是拾玉或失而复得，不等于已经给出完整的直接丢失经过。",
+            chinese_number(recovery.len()),
+            related_labels_with_roles(&recovery)
+        ));
+    }
+
+    if !other_related.is_empty() {
+        answer.push_str(&format!(
+            "\n\n另有{}条流转/疑似线索，不能直接计入次数：{}。",
+            chinese_number(other_related.len()),
+            related_labels_with_roles(&other_related)
         ));
     }
 
@@ -104,7 +127,7 @@ pub(crate) fn compose_slot_count_answer(
         ));
         index += 1;
     }
-    for item in &related {
+    for item in recovery.iter().chain(other_related.iter()) {
         answer.push_str(&format!(
             "\n{}. {}（{}，{}）：{}",
             index,
@@ -150,6 +173,11 @@ pub(crate) fn direct_count_for_basis(
         item.counts_as.iter().any(|basis| basis == &active_basis.id)
     })
     .len()
+}
+
+fn is_recovery_clue(item: &EvidenceSlotMatch) -> bool {
+    item.role == "recovery_or_lost_and_found_clue"
+        || item.counts_as.iter().any(|basis| basis == "recovery_clue")
 }
 
 fn evidence_rank(item: &EvidenceSlotMatch) -> usize {
@@ -201,12 +229,27 @@ fn source_layer_label(source_layer: &str) -> &'static str {
 }
 
 fn concise_slot_quote(item: &EvidenceSlotMatch) -> String {
+    let text = public_quote_text(&item.text);
     for term in &item.matched_terms {
-        if let Some(quote) = quote_around(&item.text, term) {
+        if let Some(quote) = quote_around(&text, term) {
             return quote;
         }
     }
-    trim_chars(&item.text, 56)
+    trim_chars(&text, 56)
+}
+
+fn public_quote_text(text: &str) -> String {
+    let stripped = text
+        .replace("{{~|", "")
+        .replace("}}", "")
+        .replace("<br />", " ")
+        .replace("<br/>", " ")
+        .replace("<br>", " ");
+    collapse_whitespace(&stripped)
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn quote_around(text: &str, term: &str) -> Option<String> {
