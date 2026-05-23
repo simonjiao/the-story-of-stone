@@ -16,7 +16,7 @@ use ferrous_opencc::{OpenCC, config::BuiltinConfig};
 use futures_util::future::try_join_all;
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -28,8 +28,17 @@ use std::{
 };
 use time::OffsetDateTime;
 
+mod answer_composer;
+mod evidence_slot_rules;
 mod upstream_bundle;
 
+use answer_composer::{
+    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, source_layer_for_card,
+};
+use evidence_slot_rules::{
+    active_count_basis_for_question, evidence_slot_count_policy_value,
+    evidence_slot_rule_values_for_ids, evidence_slot_rules_for_ids,
+};
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, evidence_card_source_layer,
     extract_upstream_bundle_draft, filter_cards_for_source_scope, source_scope_policy_for_question,
@@ -105,6 +114,7 @@ pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report
 pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
 pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
+pub const EVIDENCE_SLOT_RULES_PATH_ENV: &str = "TONGLINGYU_EVIDENCE_SLOT_RULES_PATH";
 
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
@@ -3457,6 +3467,10 @@ pub fn execute_runtime_workflow(
             "package_id": &package.package_id,
             "evidence_ids": evidence_ids(&package.cards),
             "evidence_brief": upstream_evidence_brief(&input.question, &package.cards),
+            "evidence_slot_count_policy": evidence_slot_count_policy_value(
+                &input.question,
+                question_asks_for_count(&input.question),
+            )?,
             "claim_statements": &package.claims,
             "answer_source": "runtime_local_profile",
             "source_scope_policy": &source_scope_report.policy,
@@ -4066,39 +4080,64 @@ fn agent_runtime_profile_step_message(
     projection: &RuntimeContextProjection,
     result_summary_contract: &str,
 ) -> RuntimeProfileMessage {
-    RuntimeProfileMessage::new(
-        "user",
-        format!(
-            concat!(
-                "Tonglingyu profile step execution context.\n",
-                "Output rule: return exactly one non-empty JSON object as assistant content. Do not return an empty assistant message. Do not use markdown.\n",
-                "trace_id: {trace_id}\n",
-                "profile: {profile}\n",
-                "operation: {operation}\n",
-                "context_projection_ref: {context_projection_ref}\n",
-                "context_projection_digest: {context_projection_digest}\n",
-                "context_projection_payload_json: {context_projection_payload}\n",
-                "input_ref: {input_ref}\n",
-                "output_ref: {output_ref}\n",
-                "allowed_tools: {allowed_tools}\n",
-                "result_summary_contract: {result_summary_contract}\n",
-                "step_output_json: {step_output}\n"
-            ),
-            trace_id = trace_id,
-            profile = &step.profile,
-            operation = &step.operation,
-            context_projection_ref = &projection.context_projection_ref,
-            context_projection_digest = &projection.context_projection_digest,
-            context_projection_payload =
-                serde_json::to_string(&context_projection_message_payload(projection))
-                    .unwrap_or_else(|_| "{}".to_string()),
-            input_ref = step.input_ref.as_deref().unwrap_or("none"),
-            output_ref = &step.output_ref,
-            allowed_tools = step.allowed_tools.join(","),
-            result_summary_contract = result_summary_contract,
-            step_output = serde_json::to_string(&step_output_message_payload(step))
-                .unwrap_or_else(|_| "{}".to_string()),
+    let max_compaction_level = if step.operation == "draft_answer" {
+        3
+    } else {
+        0
+    };
+    let mut selected_content = String::new();
+    for compaction_level in 0..=max_compaction_level {
+        selected_content = agent_runtime_profile_step_message_content(
+            trace_id,
+            step,
+            projection,
+            result_summary_contract,
+            compaction_level,
+        );
+        if selected_content.len() <= AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES {
+            break;
+        }
+    }
+    RuntimeProfileMessage::new("user", selected_content)
+}
+
+fn agent_runtime_profile_step_message_content(
+    trace_id: &str,
+    step: &RuntimeWorkflowStepReport,
+    projection: &RuntimeContextProjection,
+    result_summary_contract: &str,
+    compaction_level: usize,
+) -> String {
+    let step_output = step_output_message_payload_with_compaction(step, compaction_level);
+    format!(
+        concat!(
+            "Tonglingyu profile step execution context.\n",
+            "Output rule: return exactly one non-empty JSON object as assistant content. Do not return an empty assistant message. Do not use markdown.\n",
+            "trace_id: {trace_id}\n",
+            "profile: {profile}\n",
+            "operation: {operation}\n",
+            "context_projection_ref: {context_projection_ref}\n",
+            "context_projection_digest: {context_projection_digest}\n",
+            "context_projection_payload_json: {context_projection_payload}\n",
+            "input_ref: {input_ref}\n",
+            "output_ref: {output_ref}\n",
+            "allowed_tools: {allowed_tools}\n",
+            "result_summary_contract: {result_summary_contract}\n",
+            "step_output_json: {step_output}\n"
         ),
+        trace_id = trace_id,
+        profile = &step.profile,
+        operation = &step.operation,
+        context_projection_ref = &projection.context_projection_ref,
+        context_projection_digest = &projection.context_projection_digest,
+        context_projection_payload =
+            serde_json::to_string(&context_projection_message_payload(projection))
+                .unwrap_or_else(|_| "{}".to_string()),
+        input_ref = step.input_ref.as_deref().unwrap_or("none"),
+        output_ref = &step.output_ref,
+        allowed_tools = step.allowed_tools.join(","),
+        result_summary_contract = result_summary_contract,
+        step_output = serde_json::to_string(&step_output).unwrap_or_else(|_| "{}".to_string()),
     )
 }
 
@@ -4147,7 +4186,150 @@ fn json_trimmed_string(value: &Value, key: &str, max_chars: usize) -> Option<Str
         .map(|item| trim_text(item, max_chars))
 }
 
-fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
+fn compact_draft_evidence_brief_for_message(
+    evidence_brief: Value,
+    compaction_level: usize,
+) -> Value {
+    if compaction_level == 0 {
+        return evidence_brief;
+    }
+    let (card_limit, text_chars, source_title_chars, scope_chars, term_limit, term_chars) =
+        match compaction_level {
+            1 => (5, 96, 64, 56, 3, 14),
+            2 => (4, 72, 48, 40, 2, 12),
+            _ => (3, 56, 40, 0, 0, 0),
+        };
+    let Some(items) = evidence_brief.as_array() else {
+        return json!([]);
+    };
+    Value::Array(
+        items
+            .iter()
+            .take(card_limit)
+            .filter_map(Value::as_object)
+            .map(|item| {
+                let mut compact = Map::new();
+                insert_existing_value(&mut compact, item, "evidence_id");
+                insert_existing_value(&mut compact, item, "evidence_type");
+                insert_existing_value(&mut compact, item, "source_layer");
+                insert_trimmed_string(&mut compact, item, "source_title", source_title_chars);
+                insert_trimmed_string(&mut compact, item, "text", text_chars);
+                insert_existing_value(&mut compact, item, "evidence_slots");
+                compact.insert(
+                    "evidence_slot_rules".to_string(),
+                    compact_evidence_slot_rules_for_message(
+                        item.get("evidence_slot_rules").unwrap_or(&Value::Null),
+                        compaction_level,
+                    ),
+                );
+                if term_limit > 0 {
+                    compact.insert(
+                        "matched_terms".to_string(),
+                        compact_string_array_for_message(
+                            item.get("matched_terms").unwrap_or(&Value::Null),
+                            term_limit,
+                            term_chars,
+                        ),
+                    );
+                }
+                if scope_chars > 0 {
+                    insert_trimmed_string(&mut compact, item, "support_scope", scope_chars);
+                    insert_trimmed_string(&mut compact, item, "unsupported_scope", scope_chars);
+                }
+                Value::Object(compact)
+            })
+            .collect(),
+    )
+}
+
+fn compact_evidence_slot_count_policy_for_message(
+    evidence_slot_count_policy: Value,
+    compaction_level: usize,
+) -> Value {
+    if compaction_level == 0 || !evidence_slot_count_policy.is_object() {
+        return evidence_slot_count_policy;
+    }
+    let active_basis = evidence_slot_count_policy
+        .get("active_count_basis")
+        .and_then(Value::as_object);
+    let mut compact_basis = Map::new();
+    if let Some(active_basis) = active_basis {
+        insert_existing_value(&mut compact_basis, active_basis, "id");
+        insert_existing_value(&mut compact_basis, active_basis, "label");
+    }
+    json!({
+        "active_count_basis": Value::Object(compact_basis),
+        "count_question": evidence_slot_count_policy
+            .get("count_question")
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
+        "rule": "direct_count = unique evidence_slots whose rule.counts_as includes active_count_basis.id; other slots are related_clues"
+    })
+}
+
+fn compact_evidence_slot_rules_for_message(rules: &Value, compaction_level: usize) -> Value {
+    let Some(items) = rules.as_array() else {
+        return json!([]);
+    };
+    Value::Array(
+        items
+            .iter()
+            .filter_map(Value::as_object)
+            .map(|rule| {
+                let mut compact = Map::new();
+                insert_existing_value(&mut compact, rule, "id");
+                if compaction_level == 1 {
+                    insert_existing_value(&mut compact, rule, "label");
+                }
+                insert_existing_value(&mut compact, rule, "role");
+                insert_existing_value(&mut compact, rule, "counts_as");
+                if compaction_level <= 2 {
+                    insert_existing_value(&mut compact, rule, "display_group");
+                }
+                Value::Object(compact)
+            })
+            .collect(),
+    )
+}
+
+fn compact_string_array_for_message(value: &Value, max_items: usize, max_chars: usize) -> Value {
+    let Some(items) = value.as_array() else {
+        return json!([]);
+    };
+    Value::Array(
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .take(max_items)
+            .map(|item| Value::String(trim_text(item, max_chars)))
+            .collect(),
+    )
+}
+
+fn insert_existing_value(map: &mut Map<String, Value>, source: &Map<String, Value>, key: &str) {
+    if let Some(value) = source.get(key) {
+        map.insert(key.to_string(), value.clone());
+    }
+}
+
+fn insert_trimmed_string(
+    map: &mut Map<String, Value>,
+    source: &Map<String, Value>,
+    key: &str,
+    max_chars: usize,
+) {
+    if max_chars == 0 {
+        return;
+    }
+    if let Some(value) = source.get(key).and_then(Value::as_str) {
+        map.insert(key.to_string(), Value::String(trim_text(value, max_chars)));
+    }
+}
+
+fn step_output_message_payload_with_compaction(
+    step: &RuntimeWorkflowStepReport,
+    compaction_level: usize,
+) -> Value {
     let object = step
         .output
         .get("object")
@@ -4168,6 +4350,11 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         .get("evidence_brief")
         .cloned()
         .unwrap_or_else(|| json!([]));
+    let evidence_brief = if step.operation == "draft_answer" {
+        compact_draft_evidence_brief_for_message(evidence_brief, compaction_level)
+    } else {
+        evidence_brief
+    };
     let evidence_ids = if step.operation == "draft_answer" {
         evidence_ids_from_evidence_brief(&evidence_brief).unwrap_or(output_evidence_ids)
     } else {
@@ -4194,6 +4381,16 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         .get("source_scope_policy")
         .cloned()
         .unwrap_or(Value::Null);
+    let evidence_slot_count_policy = step
+        .output
+        .get("evidence_slot_count_policy")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let evidence_slot_count_policy = if step.operation == "draft_answer" {
+        compact_evidence_slot_count_policy_for_message(evidence_slot_count_policy, compaction_level)
+    } else {
+        evidence_slot_count_policy
+    };
     let out_of_scope_hint_count = step
         .output
         .get("out_of_scope_hints")
@@ -4207,6 +4404,7 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
             "package_id": package_id,
             "evidence_ids": evidence_ids,
             "evidence_brief": evidence_brief,
+            "evidence_slot_count_policy": evidence_slot_count_policy,
             "source_scope_policy": source_scope_policy,
         }),
         "review_answer" => json!({
@@ -4279,7 +4477,7 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count distinct in-scope evidence_slots visible in evidence_brief and state the boundary. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -5107,13 +5305,18 @@ fn draft_count_conflicts_with_evidence_slots(
     if !question_asks_for_count(question) {
         return false;
     }
-    let event_count = matched_query_expansion_evidence_slots(question, cards)
-        .map(|slots| slots.len())
-        .unwrap_or_default();
-    if event_count < 2 {
+    let Some(active_basis) = active_count_basis_for_question(question, true)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
+    let direct_count = direct_count_for_basis(&active_basis, &slot_matches);
+    if direct_count == 0 {
         return false;
     }
-    highest_explicit_count(draft_text).is_some_and(|count| count < event_count)
+    explicit_total_count(draft_text).is_some_and(|count| count != direct_count)
 }
 
 fn question_asks_for_count(question: &str) -> bool {
@@ -5135,31 +5338,45 @@ fn question_asks_for_count(question: &str) -> bool {
     .any(|term| question.contains(term) || normalized.contains(term))
 }
 
-fn highest_explicit_count(text: &str) -> Option<usize> {
+fn explicit_total_count(text: &str) -> Option<usize> {
     let compact = text.split_whitespace().collect::<String>();
     (1..=9)
-        .filter(|count| count_marker_present(&compact, *count))
+        .filter(|count| total_count_marker_present(&compact, *count))
         .max()
 }
 
-fn count_marker_present(text: &str, count: usize) -> bool {
+fn total_count_marker_present(text: &str, count: usize) -> bool {
     let Some(chinese) = chinese_count_word(count) else {
         return false;
     };
-    [
-        format!("{count}次"),
-        format!("{count}处"),
-        format!("{count}處"),
-        format!("{count}条"),
-        format!("{count}條"),
-        format!("{chinese}次"),
-        format!("{chinese}处"),
-        format!("{chinese}處"),
-        format!("{chinese}条"),
-        format!("{chinese}條"),
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
+    let count_words = [count.to_string(), chinese.to_string()];
+    let units = ["次", "处", "處"];
+    let prefixes = [
+        "共",
+        "共有",
+        "明确",
+        "明確",
+        "直接",
+        "算作",
+        "可概括为",
+        "可概括為",
+        "丢了",
+        "丟了",
+        "丢失",
+        "失玉",
+        "被盗",
+        "被盜",
+    ];
+    for prefix in prefixes {
+        for count_word in &count_words {
+            for unit in units {
+                if text.contains(&format!("{prefix}{count_word}{unit}")) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn chinese_count_word(count: usize) -> Option<&'static str> {
@@ -14515,6 +14732,8 @@ fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value>
                 .collect::<Vec<_>>();
             let evidence_slots = matched_query_expansion_evidence_slot_ids_for_card(question, card)
                 .unwrap_or_default();
+            let evidence_slot_rules =
+                evidence_slot_rule_values_for_ids(&evidence_slots).unwrap_or_default();
             json!({
                 "evidence_id": &card.evidence_id,
                 "evidence_type": &card.evidence_type,
@@ -14524,6 +14743,7 @@ fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value>
                 "text_is_excerpt": true,
                 "matched_terms": matched_terms,
                 "evidence_slots": evidence_slots,
+                "evidence_slot_rules": evidence_slot_rules,
                 "support_scope": trim_text(&card.support_scope, UPSTREAM_EVIDENCE_BRIEF_SCOPE_CHARS),
                 "unsupported_scope": trim_text(&card.unsupported_scope, UPSTREAM_EVIDENCE_BRIEF_LIMITS_CHARS),
             })
@@ -14653,9 +14873,19 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
     if matched_query_expansion_evidence_slots(question, cards).is_ok_and(|slots| !slots.is_empty())
     {
         claims.push(
-            "涉及事件归纳或次数统计的问题必须按当前证据包命中的证据槽位说明范围，区分正文事实、追述、批语伏笔和版本边界。"
+            "涉及事件归纳或次数统计的问题必须按 evidence slot rules 的 role/counts_as 解释，不能按命中卡片数或槽位总数直接计数。"
                 .to_string(),
         );
+        if active_count_basis_for_question(question, question_asks_for_count(question))
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            claims.push(
+                "未计入当前 active count basis 的证据槽位只能作为相关线索展示，不能改变直接次数。"
+                    .to_string(),
+            );
+        }
     }
     if cards_include_later_forty(cards) {
         claims.push(
@@ -14782,9 +15012,12 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     }
 }
 
-pub fn local_answer(_question: &str, package: &EvidencePackage) -> String {
+pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
         return "我暂时找不到足够的原文依据，不能可靠回答这个问题。".to_string();
+    }
+    if let Some(answer) = local_slot_count_answer(question, package) {
+        return answer;
     }
     let mut answer = String::new();
     if package.knowledge_state_summary.human_marked_count > 0 {
@@ -14814,6 +15047,20 @@ pub fn local_answer(_question: &str, package: &EvidencePackage) -> String {
         ));
     }
     answer
+}
+
+fn local_slot_count_answer(question: &str, package: &EvidencePackage) -> Option<String> {
+    let source_scope_policy = source_scope_policy_for_question(question);
+    if cards_include_later_forty(&package.cards) && !source_scope_policy.later_forty_allowed {
+        return None;
+    }
+    let active_basis = active_count_basis_for_question(question, question_asks_for_count(question))
+        .ok()
+        .flatten()?;
+    let slot_matches = evidence_slot_matches_for_cards(question, &package.cards)
+        .ok()
+        .filter(|matches| !matches.is_empty())?;
+    compose_slot_count_answer(package, &active_basis, &slot_matches)
 }
 
 fn answer_display_cards(cards: &[EvidenceCard], limit: usize) -> Vec<&EvidenceCard> {
@@ -15610,10 +15857,46 @@ fn matched_query_expansion_evidence_slots(
     Ok(slots)
 }
 
+fn evidence_slot_matches_for_cards(
+    question: &str,
+    cards: &[EvidenceCard],
+) -> Result<Vec<EvidenceSlotMatch>> {
+    let mut matches = Vec::new();
+    for card in cards {
+        let slot_matches = matched_query_expansion_evidence_slot_matches_for_card(question, card)?;
+        for (slot_id, matched_terms) in slot_matches {
+            let rules = evidence_slot_rules_for_ids(std::slice::from_ref(&slot_id))?;
+            for rule in rules {
+                matches.push(EvidenceSlotMatch::from_rule(
+                    &card.evidence_id,
+                    &card.source_title,
+                    &source_layer_for_card(card),
+                    &card.text,
+                    matched_terms.clone(),
+                    rule,
+                ));
+            }
+        }
+    }
+    Ok(matches)
+}
+
 fn matched_query_expansion_evidence_slot_ids_for_card(
     question: &str,
     card: &EvidenceCard,
 ) -> Result<Vec<String>> {
+    Ok(
+        matched_query_expansion_evidence_slot_matches_for_card(question, card)?
+            .into_iter()
+            .map(|(slot_id, _)| slot_id)
+            .collect(),
+    )
+}
+
+fn matched_query_expansion_evidence_slot_matches_for_card(
+    question: &str,
+    card: &EvidenceCard,
+) -> Result<Vec<(String, Vec<String>)>> {
     let catalog = query_expansion_catalog()?;
     let normalized = normalize_query(question);
     let mut slots = Vec::new();
@@ -15622,12 +15905,14 @@ fn matched_query_expansion_evidence_slot_ids_for_card(
             continue;
         }
         for slot in &entry.evidence_slots {
-            if slot
+            let matched_terms = slot
                 .terms
                 .iter()
-                .any(|term| evidence_text_contains_focus(&card.text, term))
-            {
-                push_term(&mut slots, &slot.id);
+                .filter(|term| evidence_text_contains_focus(&card.text, term))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !matched_terms.is_empty() && !slots.iter().any(|(slot_id, _)| slot_id == &slot.id) {
+                slots.push((slot.id.clone(), matched_terms));
             }
         }
     }

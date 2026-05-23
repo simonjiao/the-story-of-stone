@@ -4,12 +4,16 @@
 
 查询扩展词用于提高召回率，只能影响候选证据检索。它不能直接生成答案，不能作为 draft/review 拒收或放行 oracle，也不能把未命中的情节当作事实。
 
+证据槽位的语义不属于查询扩展词。`query_expansions.json` 只声明“哪些词可以把材料找出来”；`evidence_slot_rules.json` 声明“命中的 slot 支持什么谓词、能否进入某个计数口径、公开回答中如何分组”。例如“甄宝玉送玉”可以作为脂批 first-class evidence 进入证据包，但它的 slot role 是送玉/流转疑似线索，不能直接计入“丢失次数”。
+
 ## 目录位置
 
 - 内置默认目录：`agent-platform/crates/tonglingyu-runtime/resources/query_expansions.json`
 - 可选外部目录：通过环境变量 `TONGLINGYU_QUERY_EXPANSIONS_PATH` 指向 JSON 文件
+- 证据槽位语义内置目录：`agent-platform/crates/tonglingyu-runtime/resources/evidence_slot_rules.json`
+- 证据槽位语义可选外部目录：通过环境变量 `TONGLINGYU_EVIDENCE_SLOT_RULES_PATH` 指向 JSON 文件
 
-未配置外部目录时，runtime 使用内置目录。配置外部目录后，runtime 每次检索前读取文件元信息；当路径或修改时间变化时，下一次请求会重新解析目录，不需要重启进程。
+未配置外部目录时，runtime 使用内置目录。配置外部目录后，runtime 每次使用对应目录前读取文件元信息；当路径或修改时间变化时，下一次请求会重新解析目录，不需要重启进程。
 
 外部目录解析失败、schema 不匹配或词条非法时，本次检索直接失败。不要静默回退到旧目录或内置目录，否则会掩盖配置错误并污染 trace。
 
@@ -47,9 +51,39 @@
 
 `schema_version` 表示 JSON 结构兼容性；`catalog_version` 表示内容版本。部署侧 catalog 必须与 story 内置 catalog 保持相同 `catalog_version` 和 entries digest，否则部署 gate 应失败。
 
+## Evidence Slot Rules Schema
+
+```json
+{
+  "schema_version": "tonglingyu.evidence_slot_rules.v1",
+  "catalog_version": "2026-05-23.1",
+  "count_bases": [
+    {
+      "id": "direct_loss",
+      "label": "直接丢失/被盗",
+      "question_terms": ["丢", "失", "不见"],
+      "answer_unit": "处",
+      "answer_noun": "直接丢失证据"
+    }
+  ],
+  "slots": [
+    {
+      "id": "zhen_baoyu_delivers_jade",
+      "label": "甄宝玉送玉",
+      "role": "suspected_transfer_related_to_loss",
+      "counts_as": ["related_loss_clue"],
+      "display_group": "related_clue"
+    }
+  ]
+}
+```
+
+这层规则只解释已命中的 slot，不负责扩大召回。`counts_as` 必须精确表达该 slot 能进入哪些计数口径；没有 `direct_loss` 的 slot 只能作为相关线索展示，不能改变“丢失几次”的直接次数。
+
 ## 管理规则
 
 1. 召回词可以覆盖别名、繁简、异体字、章节标题、事件线索和常见问法。
 2. 后四十回线索可以用于召回，但第八十一回及以后内容仍必须在证据和回答中显式标注为后四十回。
 3. 新增事件线索时，需要补一条最小检索测试，证明它只改善候选证据召回，不改变本地答案或 reviewer 结论。
 4. 线上调整外部目录后，用 trace 检查 `expanded_terms` 是否包含预期词，并检查最终证据包是否仍按证据边界表达。
+5. 新增或修改 `evidence_slots` 时，必须同步维护 `evidence_slot_rules.json`；slot 没有语义规则时不能参与直接计数。

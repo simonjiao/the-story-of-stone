@@ -2495,6 +2495,38 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
 }
 
 #[test]
+fn local_answer_uses_slot_semantics_for_lost_jade_count() {
+    let package = EvidencePackage {
+        package_id: "pkg-lost-jade-slot-answer-test".to_string(),
+        trace_id: "trace-lost-jade-slot-answer-test".to_string(),
+        question: "通灵宝玉丢了几次".to_string(),
+        cards: in_scope_lost_jade_event_cards(),
+        claims: vec![
+            "涉及事件归纳或次数统计的问题必须按 evidence slot rules 的 role/counts_as 解释。"
+                .to_string(),
+        ],
+        claim_evidence_map: Vec::new(),
+        review: ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "reviewer 通过。".to_string(),
+        },
+        knowledge_state_summary: KnowledgeStateSummary::default(),
+    };
+
+    let answer = local_answer("通灵宝玉丢了几次", &package);
+
+    assert!(answer.contains("直接支持一处"));
+    assert!(answer.contains("良儿偷玉"));
+    assert!(answer.contains("甄宝玉送玉"));
+    assert!(answer.contains("凤姐扫雪拾玉"));
+    assert!(answer.contains("不能直接计为"));
+    assert!(!answer.contains("目前能支持回答的主要材料如下"));
+    assert!(!answer.contains("直接支持三处"));
+}
+
+#[test]
 fn local_answer_skips_broken_shell_evidence_cards() {
     let mut broken = sample_card("base_text");
     broken.source_title = "紅樓夢/第050回".to_string();
@@ -2644,6 +2676,8 @@ fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
     assert!(rendered.contains("lianger_stole_jade"));
     assert!(rendered.contains("zhen_baoyu_delivers_jade"));
     assert!(rendered.contains("fengjie_snow_pickup_jade"));
+    assert!(rendered.contains("suspected_transfer_related_to_loss"));
+    assert!(rendered.contains("recovery_or_lost_and_found_clue"));
     for item in brief {
         let text = item
             .get("text")
@@ -2831,6 +2865,11 @@ fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
             "package_id": "pkg-loss-event-message-budget",
             "evidence_ids": evidence_ids,
             "evidence_brief": evidence_brief,
+            "evidence_slot_count_policy": evidence_slot_count_policy_value(
+                "通灵宝玉丢了几次",
+                true,
+            )
+            .expect("slot count policy"),
             "source_scope_policy": source_scope_policy_for_question("通灵宝玉丢了几次"),
         }),
         agent_runtime: None,
@@ -6400,10 +6439,21 @@ fn runtime_accepts_lost_jade_fuzzy_multiple_count_draft_with_later_forty_boundar
 }
 
 #[test]
-fn runtime_rejects_loss_count_draft_that_understates_in_scope_event_evidence() {
+fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
         "通灵宝玉在前八十回中，明确算作丢失的次数通常可概括为 1 次。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, None);
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按前八十回正文与脂批可见的证据，通灵宝玉明确涉及丢失相关情节共2次：良儿偷玉和凤姐扫雪拾玉。",
         &in_scope_lost_jade_event_cards(),
     );
 
