@@ -2280,6 +2280,81 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
 }
 
 #[test]
+fn local_answer_skips_broken_shell_evidence_cards() {
+    let mut broken = sample_card("base_text");
+    broken.source_title = "紅樓夢/第050回".to_string();
+    broken.block_id = "block-broken-speech-lead".to_string();
+    broken.text = "寶玉道：".to_string();
+    let mut usable = sample_card("base_text");
+    usable.source_title = "紅樓夢/第052回".to_string();
+    usable.block_id = "block-lianger-theft".to_string();
+    usable.text = "只聽麝月說道：“那一年有一個良兒偷玉，剛冷了一二年，間或有人提起來，還有人無事生非。”平兒道：“二奶奶就不許吵嚷，只叫小心查訪。”"
+        .to_string();
+    let package = EvidencePackage {
+        package_id: "pkg-broken-card-answer-test".to_string(),
+        trace_id: "trace-broken-card-answer-test".to_string(),
+        question: "通灵宝玉丢失".to_string(),
+        cards: vec![broken, usable],
+        claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+        claim_evidence_map: Vec::new(),
+        review: ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "reviewer 通过。".to_string(),
+        },
+        knowledge_state_summary: KnowledgeStateSummary::default(),
+    };
+
+    let answer = local_answer("通灵宝玉丢失", &package);
+
+    assert!(!answer.contains("紅樓夢/第050回：寶玉道："));
+    assert!(answer.contains("1. 紅樓夢/第052回"));
+    assert!(answer.contains("良兒偷玉"));
+}
+
+#[test]
+fn local_answer_deduplicates_repeated_base_text_evidence() {
+    let mut chengjia = sample_card("base_text");
+    chengjia.source_title = "紅樓夢（程甲本）/五十二".to_string();
+    chengjia.block_id = "block-lianger-theft-chengjia".to_string();
+    chengjia.text = "只聽麝月說道：“那一年有一個良兒偷玉，剛冷了一二年，間或有人提起來，還有人無事生非。”平兒道：“二奶奶就不許吵嚷，只叫小心查訪。”"
+        .to_string();
+    let mut wikisource = sample_card("base_text");
+    wikisource.source_title = "紅樓夢/第052回".to_string();
+    wikisource.block_id = "block-lianger-theft-wikisource".to_string();
+    wikisource.text = "只听麝月说道：“那一年有一个良儿偷玉，刚冷了一二年，间或有人提起来，还会有人无事生非。”平儿道：“二奶奶就不许吵嚷，只叫小心查访。”"
+        .to_string();
+    let mut commentary = sample_card("commentary");
+    commentary.source_title = "脂硯齋重評石頭記/第五十二回".to_string();
+    commentary.block_id = "block-lianger-theft-commentary".to_string();
+    commentary.text = "只聽麝月說道：“那一年有一個良兒偷玉，剛冷了一二年，間或有人提起來，還有人無事生非。”【庚辰雙行夾批：二次小竊皆出於寶玉房中。】"
+        .to_string();
+    let package = EvidencePackage {
+        package_id: "pkg-duplicate-card-answer-test".to_string(),
+        trace_id: "trace-duplicate-card-answer-test".to_string(),
+        question: "通灵宝玉丢失".to_string(),
+        cards: vec![chengjia, wikisource, commentary],
+        claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+        claim_evidence_map: Vec::new(),
+        review: ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "reviewer 通过。".to_string(),
+        },
+        knowledge_state_summary: KnowledgeStateSummary::default(),
+    };
+
+    let answer = local_answer("通灵宝玉丢失", &package);
+
+    assert!(answer.contains("1. 紅樓夢（程甲本）/五十二"));
+    assert!(!answer.contains("2. 紅樓夢/第052回"));
+    assert!(answer.contains("2. 脂硯齋重評石頭記/第五十二回"));
+    assert!(answer.contains("二次小竊皆出於寶玉房中"));
+}
+
+#[test]
 fn trim_text_around_locates_normalized_focus_without_mutating_raw_text() {
     let text = format!("{}史湘雲問道：“寶玉哥哥不在家么？”", "甲".repeat(300));
 

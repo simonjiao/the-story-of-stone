@@ -14476,7 +14476,12 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
             "注意：以下包含第八十一回及以后（后四十回）材料；这类材料必须显式标注为后四十回内容，未标注时不能作为证据或参考。\n\n",
         );
     }
-    for (index, card) in package.cards.iter().take(4).enumerate() {
+    let display_cards = answer_display_cards(&package.cards, 4);
+    if display_cards.is_empty() {
+        answer.push_str("当前命中的证据片段过短或不完整，不能可靠展示为回答依据。\n");
+        return answer;
+    }
+    for (index, card) in display_cards.iter().enumerate() {
         answer.push_str(&format!(
             "{}. {}：{}\n",
             index + 1,
@@ -14485,6 +14490,157 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         ));
     }
     answer
+}
+
+fn answer_display_cards(cards: &[EvidenceCard], limit: usize) -> Vec<&EvidenceCard> {
+    let mut display_cards = Vec::new();
+    let mut signatures = Vec::new();
+    for card in cards {
+        if !evidence_card_presentable_in_answer(card) {
+            continue;
+        }
+        let signature = AnswerEvidenceSignature::from_card(card);
+        if signatures
+            .iter()
+            .any(|existing| answer_evidence_duplicate(existing, &signature))
+        {
+            continue;
+        }
+        signatures.push(signature);
+        display_cards.push(card);
+        if display_cards.len() >= limit {
+            break;
+        }
+    }
+    display_cards
+}
+
+fn evidence_card_presentable_in_answer(card: &EvidenceCard) -> bool {
+    !evidence_text_is_broken_shell(&card.text)
+}
+
+#[derive(Debug)]
+struct AnswerEvidenceSignature {
+    namespace: String,
+    compact_text: String,
+    shingles: BTreeSet<String>,
+}
+
+impl AnswerEvidenceSignature {
+    fn from_card(card: &EvidenceCard) -> Self {
+        let namespace = normalize_text(card.evidence_type.trim());
+        let compact_text = compact_evidence_text(&card.text);
+        let shingles = text_shingles(&compact_text, 4);
+        Self {
+            namespace,
+            compact_text,
+            shingles,
+        }
+    }
+}
+
+fn answer_evidence_duplicate(
+    existing: &AnswerEvidenceSignature,
+    candidate: &AnswerEvidenceSignature,
+) -> bool {
+    if existing.namespace != candidate.namespace {
+        return false;
+    }
+    if existing.compact_text == candidate.compact_text {
+        return true;
+    }
+    let existing_len = existing.compact_text.chars().count();
+    let candidate_len = candidate.compact_text.chars().count();
+    let min_len = existing_len.min(candidate_len);
+    if min_len < 24 {
+        return false;
+    }
+    if existing.compact_text.contains(&candidate.compact_text)
+        || candidate.compact_text.contains(&existing.compact_text)
+    {
+        return true;
+    }
+    let smaller_shingle_count = existing.shingles.len().min(candidate.shingles.len());
+    if smaller_shingle_count < 12 {
+        return false;
+    }
+    let shared = existing.shingles.intersection(&candidate.shingles).count();
+    shared * 100 >= smaller_shingle_count * 82
+}
+
+fn compact_evidence_text(text: &str) -> String {
+    normalize_text(text)
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !text_punctuation(*ch))
+        .collect()
+}
+
+fn text_shingles(text: &str, width: usize) -> BTreeSet<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if width == 0 || chars.len() < width {
+        return BTreeSet::new();
+    }
+    chars
+        .windows(width)
+        .map(|window| window.iter().collect::<String>())
+        .collect()
+}
+
+fn evidence_text_is_broken_shell(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let substantive_count = trimmed
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !text_punctuation(*ch))
+        .count();
+    if substantive_count == 0 {
+        return true;
+    }
+    let speech_lead_only = [
+        "道：",
+        "道:",
+        "問道：",
+        "问道：",
+        "說道：",
+        "说道：",
+        "笑道：",
+        "笑道:",
+        "寶玉道：",
+        "宝玉道：",
+    ]
+    .iter()
+    .any(|suffix| trimmed.ends_with(suffix));
+    speech_lead_only && substantive_count <= 6
+}
+
+fn text_punctuation(ch: char) -> bool {
+    ch.is_ascii_punctuation()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '：'
+                | '；'
+                | '、'
+                | '？'
+                | '！'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '《'
+                | '》'
+                | '【'
+                | '】'
+                | '…'
+        )
 }
 
 fn cards_include_later_forty(cards: &[EvidenceCard]) -> bool {
