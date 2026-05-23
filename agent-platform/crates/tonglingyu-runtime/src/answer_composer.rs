@@ -1,6 +1,7 @@
 use crate::{
     EvidencePackage,
     evidence_slot_rules::{EvidenceSlotCountBasis, EvidenceSlotRule},
+    retrieval_rules::{source_layer_answer_rank, source_layer_label},
     upstream_bundle::{evidence_card_source_layer, source_scope_policy_for_question},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,7 +118,7 @@ pub(crate) fn compose_slot_count_answer(
             "\n{}. {}（{}，{}）：{}",
             index,
             item.label,
-            source_layer_label(&item.source_layer),
+            source_layer_label(&item.source_layer).unwrap_or_else(|_| item.source_layer.clone()),
             item.source_title,
             concise_slot_quote(item)
         ));
@@ -128,7 +129,7 @@ pub(crate) fn compose_slot_count_answer(
             "\n{}. {}（{}，{}）：{}",
             index,
             item.label,
-            source_layer_label(&item.source_layer),
+            source_layer_label(&item.source_layer).unwrap_or_else(|_| item.source_layer.clone()),
             item.source_title,
             concise_slot_quote(item)
         ));
@@ -172,13 +173,7 @@ pub(crate) fn direct_count_for_basis(
 }
 
 fn evidence_rank(item: &EvidenceSlotMatch) -> usize {
-    match item.source_layer.as_str() {
-        "base_text_pre_80" => 0,
-        "commentary" => 1,
-        "version_note" => 2,
-        "base_text_later_40" => 3,
-        _ => 4,
-    }
+    source_layer_answer_rank(&item.source_layer).unwrap_or(usize::MAX)
 }
 
 fn labels_join(items: &[EvidenceSlotMatch]) -> String {
@@ -197,16 +192,6 @@ fn related_labels_with_roles(items: &[EvidenceSlotMatch]) -> String {
         .map(|item| format!("{}（{}）", item.label, item.public_role_label))
         .collect::<Vec<_>>()
         .join("、")
-}
-
-fn source_layer_label(source_layer: &str) -> &'static str {
-    match source_layer {
-        "base_text_pre_80" => "正文",
-        "base_text_later_40" => "后四十回正文",
-        "commentary" => "脂批",
-        "version_note" => "版本说明",
-        _ => "证据",
-    }
 }
 
 fn concise_slot_quote(item: &EvidenceSlotMatch) -> String {

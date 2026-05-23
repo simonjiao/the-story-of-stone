@@ -35,6 +35,12 @@ pub(crate) struct EvidenceSlotCountBasis {
     pub label: String,
     #[serde(default)]
     pub question_terms: Vec<String>,
+    #[serde(default)]
+    pub count_question_terms: Vec<String>,
+    #[serde(default)]
+    pub total_count_units: Vec<String>,
+    #[serde(default)]
+    pub total_count_prefixes: Vec<String>,
     pub answer_unit: String,
     pub answer_noun: String,
 }
@@ -174,6 +180,19 @@ fn parse_evidence_slot_rule_catalog(source: &str) -> Result<EvidenceSlotRuleCata
                 basis.id
             ));
         }
+        for (field, values) in [
+            ("count_question_terms", &basis.count_question_terms),
+            ("total_count_units", &basis.total_count_units),
+            ("total_count_prefixes", &basis.total_count_prefixes),
+        ] {
+            if values.is_empty() || values.iter().all(|term| term.trim().is_empty()) {
+                return Err(anyhow!(
+                    "evidence slot count basis {} must define non-empty {}",
+                    basis.id,
+                    field
+                ));
+            }
+        }
     }
     let mut slot_ids = BTreeSet::new();
     for slot in &catalog.slots {
@@ -230,6 +249,61 @@ pub(crate) fn active_count_basis_for_question(
             .iter()
             .any(|term| question_matches_term(question, &normalized, term))
     }))
+}
+
+pub(crate) fn question_asks_for_count(question: &str) -> Result<bool> {
+    let catalog = evidence_slot_rule_catalog()?;
+    let normalized = normalize_text(question);
+    Ok(catalog.count_bases.iter().any(|basis| {
+        basis
+            .count_question_terms
+            .iter()
+            .any(|term| question_matches_term(question, &normalized, term))
+    }))
+}
+
+pub(crate) fn explicit_total_count_for_basis(
+    text: &str,
+    basis: &EvidenceSlotCountBasis,
+) -> Option<usize> {
+    let compact = text.split_whitespace().collect::<String>();
+    (1..=9)
+        .filter(|count| total_count_marker_present(&compact, *count, basis))
+        .max()
+}
+
+fn total_count_marker_present(text: &str, count: usize, basis: &EvidenceSlotCountBasis) -> bool {
+    let mut count_words = vec![count.to_string()];
+    count_words.extend(
+        chinese_count_words(count)
+            .into_iter()
+            .map(ToOwned::to_owned),
+    );
+    for prefix in &basis.total_count_prefixes {
+        for count_word in &count_words {
+            for unit in &basis.total_count_units {
+                if text.contains(&format!("{}{}{}", prefix.trim(), count_word, unit.trim())) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn chinese_count_words(count: usize) -> Vec<&'static str> {
+    match count {
+        1 => vec!["一"],
+        2 => vec!["二", "两", "兩"],
+        3 => vec!["三"],
+        4 => vec!["四"],
+        5 => vec!["五"],
+        6 => vec!["六"],
+        7 => vec!["七"],
+        8 => vec!["八"],
+        9 => vec!["九"],
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn evidence_slot_count_policy_value(

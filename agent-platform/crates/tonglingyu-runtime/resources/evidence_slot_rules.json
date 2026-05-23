@@ -1,11 +1,41 @@
 {
   "schema_version": "tonglingyu.evidence_slot_rules.v1",
-  "catalog_version": "2026-05-23.3",
+  "catalog_version": "2026-05-23.4",
   "count_bases": [
     {
       "id": "direct_loss",
       "label": "明确失玉/被盗",
       "question_terms": ["丢", "丟", "失", "不见", "不見", "遗失", "遺失"],
+      "count_question_terms": [
+        "几次",
+        "幾次",
+        "多少次",
+        "几处",
+        "幾處",
+        "多少处",
+        "多少處",
+        "几条",
+        "幾條",
+        "多少条",
+        "多少條"
+      ],
+      "total_count_units": ["次", "处", "處"],
+      "total_count_prefixes": [
+        "共",
+        "共有",
+        "明确",
+        "明確",
+        "直接",
+        "算作",
+        "可概括为",
+        "可概括為",
+        "丢了",
+        "丟了",
+        "丢失",
+        "失玉",
+        "被盗",
+        "被盜"
+      ],
       "answer_unit": "处",
       "answer_noun": "明确失玉证据"
     }

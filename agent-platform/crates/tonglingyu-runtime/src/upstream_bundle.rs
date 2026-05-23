@@ -1,4 +1,9 @@
-use crate::{EvidenceCard, extract_chapter_no, normalize_text};
+use crate::{
+    EvidenceCard, extract_chapter_no,
+    governance_rules::{
+        draft_mentions_unscoped_later_forty_material, source_scope_question_allows_later_forty,
+    },
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -306,6 +311,7 @@ pub(crate) fn extract_upstream_bundle_draft(
     }
     if !expected_policy.later_forty_allowed
         && draft_mentions_unscoped_later_forty_material(draft_answer.as_deref().unwrap_or(""))
+            .unwrap_or(true)
     {
         return UpstreamBundleDraftExtraction {
             package_id: candidate_package_id,
@@ -344,29 +350,7 @@ fn rejected_bundle(
 }
 
 fn question_explicitly_allows_later_forty(question: &str) -> bool {
-    [
-        "后四十",
-        "後四十",
-        "第八十一",
-        "八十一回",
-        "第九十",
-        "九十回",
-        "第094",
-        "第94",
-        "第九十四",
-        "九十四回",
-        "一百二十回",
-        "百二十回",
-        "120回",
-        "120 回",
-        "程高",
-        "程甲",
-        "程乙",
-        "高鹗",
-        "高鶚",
-    ]
-    .iter()
-    .any(|term| question.contains(term))
+    source_scope_question_allows_later_forty(question).unwrap_or(false)
 }
 
 fn source_scope_policy_matches(value: &Value, expected: &SourceScopePolicy) -> bool {
@@ -463,33 +447,4 @@ fn invalid_claim_statements(
         }
     }
     None
-}
-
-fn draft_mentions_unscoped_later_forty_material(draft: &str) -> bool {
-    let draft = normalize_text(draft);
-    let compact_draft = draft.split_whitespace().collect::<String>();
-    [
-        "后四十",
-        "後四十",
-        "后四十回",
-        "後四十回",
-        "后40",
-        "後40",
-        "后40回",
-        "後40回",
-        "一百二十回",
-        "第八十一回",
-        "第九十回",
-        "第九十四回",
-        "第94回",
-        "第094回",
-        "一百二十回本",
-        "120回",
-        "120回本",
-        "程高本",
-        "高鹗",
-        "高鶚",
-    ]
-    .iter()
-    .any(|term| draft.contains(term) || compact_draft.contains(term))
 }

@@ -1,0 +1,114 @@
+{
+  "schema_version": "tonglingyu.ontology_aliases.v1",
+  "catalog_version": "2026-05-23.1",
+  "people": [
+    {
+      "person_id": "person:baoyu",
+      "canonical_name": "贾宝玉",
+      "description": "核心人物，通灵玉持有者。",
+      "aliases": ["宝玉", "寶玉", "宝二爷", "寳玉"]
+    },
+    {
+      "person_id": "person:daiyu",
+      "canonical_name": "林黛玉",
+      "description": "核心人物，金陵十二钗之一。",
+      "aliases": ["黛玉", "林姑娘", "颦儿", "顰兒"]
+    },
+    {
+      "person_id": "person:baochai",
+      "canonical_name": "薛宝钗",
+      "description": "核心人物，金陵十二钗之一。",
+      "aliases": ["宝钗", "寶釵", "宝姐姐", "薛姑娘"]
+    },
+    {
+      "person_id": "person:wangxifeng",
+      "canonical_name": "王熙凤",
+      "description": "贾府管家人物。",
+      "aliases": ["凤姐", "鳳姐", "凤姐儿", "璉二奶奶"]
+    },
+    {
+      "person_id": "person:jiazheng",
+      "canonical_name": "贾政",
+      "description": "贾宝玉之父。",
+      "aliases": ["贾政", "賈政"]
+    },
+    {
+      "person_id": "person:jiamu",
+      "canonical_name": "贾母",
+      "description": "贾府长辈。",
+      "aliases": ["贾母", "賈母", "老太太"]
+    },
+    {
+      "person_id": "person:wangfuren",
+      "canonical_name": "王夫人",
+      "description": "贾宝玉之母。",
+      "aliases": ["王夫人", "太太"]
+    },
+    {
+      "person_id": "person:xiren",
+      "canonical_name": "袭人",
+      "description": "贾宝玉身边丫鬟。",
+      "aliases": ["袭人", "襲人"]
+    },
+    {
+      "person_id": "person:qingwen",
+      "canonical_name": "晴雯",
+      "description": "贾宝玉身边丫鬟。",
+      "aliases": ["晴雯"]
+    },
+    {
+      "person_id": "person:xiangyun",
+      "canonical_name": "史湘云",
+      "description": "金陵十二钗之一。",
+      "aliases": ["湘云", "湘雲", "云妹妹"]
+    },
+    {
+      "person_id": "person:tanchun",
+      "canonical_name": "贾探春",
+      "description": "金陵十二钗之一。",
+      "aliases": ["探春", "三姑娘"]
+    },
+    {
+      "person_id": "person:yuanchun",
+      "canonical_name": "贾元春",
+      "description": "金陵十二钗之一。",
+      "aliases": ["元春", "元妃"]
+    },
+    {
+      "person_id": "person:yingchun",
+      "canonical_name": "贾迎春",
+      "description": "金陵十二钗之一。",
+      "aliases": ["迎春", "二姑娘"]
+    },
+    {
+      "person_id": "person:xichun",
+      "canonical_name": "贾惜春",
+      "description": "金陵十二钗之一。",
+      "aliases": ["惜春", "四姑娘"]
+    },
+    {
+      "person_id": "person:qiaojie",
+      "canonical_name": "巧姐",
+      "description": "金陵十二钗之一。",
+      "aliases": ["巧姐", "巧姐儿"]
+    },
+    {
+      "person_id": "person:liwan",
+      "canonical_name": "李纨",
+      "description": "金陵十二钗之一。",
+      "aliases": ["李纨", "李紈", "宫裁", "宮裁"]
+    },
+    {
+      "person_id": "person:miaoyu",
+      "canonical_name": "妙玉",
+      "description": "金陵十二钗之一。",
+      "aliases": ["妙玉"]
+    },
+    {
+      "person_id": "person:keqing",
+      "canonical_name": "秦可卿",
+      "description": "金陵十二钗之一。",
+      "aliases": ["秦可卿", "可卿"]
+    }
+  ]
+}

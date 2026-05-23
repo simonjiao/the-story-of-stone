@@ -5,6 +5,9 @@ fn count_basis() -> EvidenceSlotCountBasis {
         id: "direct_loss".to_string(),
         label: "明确失玉/被盗".to_string(),
         question_terms: vec!["丢".to_string()],
+        count_question_terms: vec!["几次".to_string()],
+        total_count_units: vec!["处".to_string()],
+        total_count_prefixes: vec!["明确".to_string()],
         answer_unit: "处".to_string(),
         answer_noun: "明确失玉证据".to_string(),
     }

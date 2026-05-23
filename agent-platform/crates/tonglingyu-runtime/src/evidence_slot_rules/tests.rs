@@ -49,6 +49,9 @@ fn catalog_cache_hot_reloads_external_file() {
                 "id": "direct_loss",
                 "label": "直接丢失",
                 "question_terms": ["丢"],
+                "count_question_terms": ["几次"],
+                "total_count_units": ["次"],
+                "total_count_prefixes": ["共"],
                 "answer_unit": "处",
                 "answer_noun": "直接丢失证据"
             }
@@ -72,6 +75,9 @@ fn catalog_cache_hot_reloads_external_file() {
                 "id": "direct_loss",
                 "label": "直接丢失",
                 "question_terms": ["丢"],
+                "count_question_terms": ["几次"],
+                "total_count_units": ["次"],
+                "total_count_prefixes": ["共"],
                 "answer_unit": "处",
                 "answer_noun": "直接丢失证据"
             }
@@ -107,4 +113,20 @@ fn catalog_cache_hot_reloads_external_file() {
     assert_eq!(catalog.slots[0].count_note.as_deref(), Some("更新计数说明"));
 
     std::fs::remove_file(catalog_path).expect("remove catalog");
+}
+
+#[test]
+fn count_parser_uses_catalog_terms_and_markers() {
+    assert!(question_asks_for_count("通灵宝玉丢了几次").expect("count question terms"));
+    let basis = active_count_basis_for_question("通灵宝玉丢了几次", true)
+        .expect("count basis")
+        .expect("active count basis");
+    assert_eq!(
+        explicit_total_count_for_basis("明确两处。", &basis),
+        Some(2)
+    );
+    assert_eq!(
+        explicit_total_count_for_basis("明确三处。", &basis),
+        Some(3)
+    );
 }

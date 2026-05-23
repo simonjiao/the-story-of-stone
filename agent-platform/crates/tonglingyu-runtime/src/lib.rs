@@ -30,6 +30,9 @@ use time::OffsetDateTime;
 
 mod answer_composer;
 mod evidence_slot_rules;
+mod governance_rules;
+mod ontology_aliases;
+mod retrieval_rules;
 mod upstream_bundle;
 
 use answer_composer::{
@@ -38,8 +41,16 @@ use answer_composer::{
 };
 use evidence_slot_rules::{
     active_count_basis_for_question, evidence_slot_count_policy_value,
-    evidence_slot_rule_values_for_ids, evidence_slot_rules_for_ids,
+    evidence_slot_rule_values_for_ids, evidence_slot_rules_for_ids, explicit_total_count_for_basis,
+    question_asks_for_count,
 };
+use governance_rules::{
+    blocked_prompt_control_issues, claim_evidence_types_for_claim, claim_rules,
+    draft_has_unsupported_term_without_evidence, draft_stops_for_user_opt_in,
+    empty_evidence_review_issue, later_forty_boundary_missing_from_claims,
+    later_forty_boundary_review_issue, triggered_review_rule_issues,
+};
+use ontology_aliases::seed_aliases;
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, evidence_card_source_layer,
     extract_upstream_bundle_draft, filter_cards_for_source_scope, source_scope_policy_for_question,
@@ -116,6 +127,9 @@ pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
 pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
 pub const EVIDENCE_SLOT_RULES_PATH_ENV: &str = "TONGLINGYU_EVIDENCE_SLOT_RULES_PATH";
+pub const GOVERNANCE_RULES_PATH_ENV: &str = "TONGLINGYU_GOVERNANCE_RULES_PATH";
+pub const RETRIEVAL_RULES_PATH_ENV: &str = "TONGLINGYU_RETRIEVAL_RULES_PATH";
+pub const ONTOLOGY_ALIASES_PATH_ENV: &str = "TONGLINGYU_ONTOLOGY_ALIASES_PATH";
 
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
@@ -3449,6 +3463,7 @@ pub fn execute_runtime_workflow(
     )?);
     let draft_started = Instant::now();
     let draft_answer = local_answer(&input.question, &package);
+    let count_question = question_asks_for_count(&input.question)?;
     let draft_plan_step = workflow_plan_step(&workflow_plan, "draft_answer")?;
     let draft_step_id = draft_plan_step.step_id.clone();
     steps.push(workflow_step_report(
@@ -3470,7 +3485,7 @@ pub fn execute_runtime_workflow(
             "evidence_brief": upstream_evidence_brief(&input.question, &package.cards),
             "evidence_slot_count_policy": evidence_slot_count_policy_value(
                 &input.question,
-                question_asks_for_count(&input.question),
+                count_question,
             )?,
             "claim_statements": &package.claims,
             "answer_source": "runtime_local_profile",
@@ -5275,7 +5290,7 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         .collect::<Vec<_>>()
         .join("\n");
     let draft_text = normalize_text(draft);
-    if draft_stops_for_user_opt_in(&draft_text) {
+    if draft_stops_for_user_opt_in(&draft_text).unwrap_or(true) {
         return Some("draft_stops_for_user_opt_in");
     }
     if cards_include_later_forty(cards) && !text_mentions_later_forty_boundary(&draft_text) {
@@ -5293,19 +5308,8 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if draft_lacks_embedded_slot_source(question, &draft_text, cards) {
         return Some("draft_missing_embedded_evidence_source");
     }
-    for term in [
-        "出身",
-        "亲戚",
-        "礼教",
-        "封建",
-        "市井",
-        "反抗",
-        "曹雪芹",
-        "误会",
-    ] {
-        if draft_text.contains(term) && !evidence_text.contains(term) {
-            return Some("draft_claim_exceeds_evidence_boundary");
-        }
+    if draft_has_unsupported_term_without_evidence(&draft_text, &evidence_text).unwrap_or(true) {
+        return Some("draft_claim_exceeds_evidence_boundary");
     }
     None
 }
@@ -5386,7 +5390,7 @@ fn count_slot_representatives_for_boundary(
     question: &str,
     cards: &[EvidenceCard],
 ) -> Option<Vec<EvidenceSlotMatch>> {
-    if !question_asks_for_count(question) || cards_include_later_forty(cards) {
+    if !question_asks_for_count(question).unwrap_or(false) || cards_include_later_forty(cards) {
         return None;
     }
     let active_basis = active_count_basis_for_question(question, true)
@@ -5413,7 +5417,7 @@ fn draft_count_conflicts_with_evidence_slots(
     draft_text: &str,
     cards: &[EvidenceCard],
 ) -> bool {
-    if !question_asks_for_count(question) {
+    if !question_asks_for_count(question).unwrap_or(false) {
         return false;
     }
     let Some(active_basis) = active_count_basis_for_question(question, true)
@@ -5427,104 +5431,8 @@ fn draft_count_conflicts_with_evidence_slots(
     if direct_count == 0 {
         return false;
     }
-    explicit_total_count(draft_text).is_some_and(|count| count != direct_count)
-}
-
-fn question_asks_for_count(question: &str) -> bool {
-    let normalized = normalize_text(question);
-    [
-        "几次",
-        "幾次",
-        "多少次",
-        "几处",
-        "幾處",
-        "多少处",
-        "多少處",
-        "几条",
-        "幾條",
-        "多少条",
-        "多少條",
-    ]
-    .iter()
-    .any(|term| question.contains(term) || normalized.contains(term))
-}
-
-fn explicit_total_count(text: &str) -> Option<usize> {
-    let compact = text.split_whitespace().collect::<String>();
-    (1..=9)
-        .filter(|count| total_count_marker_present(&compact, *count))
-        .max()
-}
-
-fn total_count_marker_present(text: &str, count: usize) -> bool {
-    let Some(chinese) = chinese_count_word(count) else {
-        return false;
-    };
-    let count_words = [count.to_string(), chinese.to_string()];
-    let units = ["次", "处", "處"];
-    let prefixes = [
-        "共",
-        "共有",
-        "明确",
-        "明確",
-        "直接",
-        "算作",
-        "可概括为",
-        "可概括為",
-        "丢了",
-        "丟了",
-        "丢失",
-        "失玉",
-        "被盗",
-        "被盜",
-    ];
-    for prefix in prefixes {
-        for count_word in &count_words {
-            for unit in units {
-                if text.contains(&format!("{prefix}{count_word}{unit}")) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn chinese_count_word(count: usize) -> Option<&'static str> {
-    match count {
-        1 => Some("一"),
-        2 => Some("二"),
-        3 => Some("三"),
-        4 => Some("四"),
-        5 => Some("五"),
-        6 => Some("六"),
-        7 => Some("七"),
-        8 => Some("八"),
-        9 => Some("九"),
-        _ => None,
-    }
-}
-
-fn draft_stops_for_user_opt_in(draft_text: &str) -> bool {
-    [
-        "如果你愿意",
-        "若你愿意",
-        "如果您愿意",
-        "若您愿意",
-        "我可以继续",
-        "我可以接着",
-        "可以继续按",
-        "需要我继续",
-        "要不要我",
-        "是否需要我",
-        "你可以继续",
-        "如果需要我可以",
-        "如需我可以",
-        "如需继续",
-        "如果需要继续",
-    ]
-    .iter()
-    .any(|term| draft_text.contains(term))
+    explicit_total_count_for_basis(draft_text, &active_basis)
+        .is_some_and(|count| count != direct_count)
 }
 
 fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
@@ -12315,7 +12223,10 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| usage_limit(&source.source_category).to_string());
+        .unwrap_or_else(|| {
+            retrieval_rules::usage_limit(&source.source_category)
+                .expect("retrieval usage limit rules must load")
+        });
     conn.execute(
         r#"
         INSERT INTO sources (
@@ -12353,7 +12264,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
             format!("edition:{}", source.source_id),
             source.source_id,
             source.edition.unwrap_or_else(|| "未标注版本".to_string()),
-            version_system(&source.source_id),
+            retrieval_rules::version_system(&source.source_id)?,
             source_usage_boundary,
         ],
     )?;
@@ -12408,7 +12319,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
         block_count += 1;
         let normalized_text = normalize_text(&block.text);
         let normalized_source_title = normalize_title(&block.source_title);
-        let evidence_type = evidence_type(&source.source_category, &source.source_id, &block);
+        let evidence_type = evidence_type(&source.source_category, &source.source_id, &block)?;
         let chapter_no = extract_chapter_no(&block.source_title);
         if let Some(no) = chapter_no {
             let chapter_id = format!("{}:chapter:{no:03}", source.source_id);
@@ -12458,7 +12369,7 @@ fn load_source_snapshot(conn: &Connection, source_dir: &Path) -> Result<()> {
                     block.source_id,
                     block.text,
                     commentary_type(&block.text),
-                    version_system(&source.source_id),
+                    retrieval_rules::version_system(&source.source_id)?,
                 ],
             )?;
         }
@@ -13750,122 +13661,6 @@ fn load_rows_json(conn: &Connection, sql: &str, trace_id: &str) -> Result<Vec<Va
         .map_err(Into::into)
 }
 
-fn seed_aliases(conn: &Connection) -> Result<()> {
-    let people = [
-        (
-            "person:baoyu",
-            "贾宝玉",
-            "核心人物，通灵玉持有者。",
-            &["宝玉", "寶玉", "宝二爷", "寳玉"][..],
-        ),
-        (
-            "person:daiyu",
-            "林黛玉",
-            "核心人物，金陵十二钗之一。",
-            &["黛玉", "林姑娘", "颦儿", "顰兒"][..],
-        ),
-        (
-            "person:baochai",
-            "薛宝钗",
-            "核心人物，金陵十二钗之一。",
-            &["宝钗", "寶釵", "宝姐姐", "薛姑娘"][..],
-        ),
-        (
-            "person:wangxifeng",
-            "王熙凤",
-            "贾府管家人物。",
-            &["凤姐", "鳳姐", "凤姐儿", "璉二奶奶"][..],
-        ),
-        (
-            "person:jiazheng",
-            "贾政",
-            "贾宝玉之父。",
-            &["贾政", "賈政"][..],
-        ),
-        (
-            "person:jiamu",
-            "贾母",
-            "贾府长辈。",
-            &["贾母", "賈母", "老太太"][..],
-        ),
-        (
-            "person:wangfuren",
-            "王夫人",
-            "贾宝玉之母。",
-            &["王夫人", "太太"][..],
-        ),
-        (
-            "person:xiren",
-            "袭人",
-            "贾宝玉身边丫鬟。",
-            &["袭人", "襲人"][..],
-        ),
-        ("person:qingwen", "晴雯", "贾宝玉身边丫鬟。", &["晴雯"][..]),
-        (
-            "person:xiangyun",
-            "史湘云",
-            "金陵十二钗之一。",
-            &["湘云", "湘雲", "云妹妹"][..],
-        ),
-        (
-            "person:tanchun",
-            "贾探春",
-            "金陵十二钗之一。",
-            &["探春", "三姑娘"][..],
-        ),
-        (
-            "person:yuanchun",
-            "贾元春",
-            "金陵十二钗之一。",
-            &["元春", "元妃"][..],
-        ),
-        (
-            "person:yingchun",
-            "贾迎春",
-            "金陵十二钗之一。",
-            &["迎春", "二姑娘"][..],
-        ),
-        (
-            "person:xichun",
-            "贾惜春",
-            "金陵十二钗之一。",
-            &["惜春", "四姑娘"][..],
-        ),
-        (
-            "person:qiaojie",
-            "巧姐",
-            "金陵十二钗之一。",
-            &["巧姐", "巧姐儿"][..],
-        ),
-        (
-            "person:liwan",
-            "李纨",
-            "金陵十二钗之一。",
-            &["李纨", "李紈", "宫裁", "宮裁"][..],
-        ),
-        ("person:miaoyu", "妙玉", "金陵十二钗之一。", &["妙玉"][..]),
-        (
-            "person:keqing",
-            "秦可卿",
-            "金陵十二钗之一。",
-            &["秦可卿", "可卿"][..],
-        ),
-    ];
-    for (person_id, name, description, aliases) in people {
-        conn.execute(
-            "INSERT INTO people (person_id, canonical_name, description) VALUES (?1, ?2, ?3)",
-            params![person_id, name, description],
-        )?;
-        for alias in aliases {
-            conn.execute(
-                "INSERT INTO aliases (alias, normalized_alias, person_id, scope) VALUES (?1, ?2, ?3, ?4)",
-                params![alias, normalize_alias(alias), person_id, "v1_seed_alias"],
-            )?;
-        }
-    }
-    Ok(())
-}
-
 pub fn create_evidence_package(
     conn: &Connection,
     trace_id: &str,
@@ -14626,9 +14421,10 @@ fn retrieval_source_usage_ref(
         license_url,
         license_source_url,
         attribution,
-        usage_boundary: metadata_usage_boundary
-            .or(usage_limit)
-            .unwrap_or_else(|| usage_limit_for_unknown_source(source_id)),
+        usage_boundary: metadata_usage_boundary.or(usage_limit).unwrap_or_else(|| {
+            retrieval_rules::usage_limit_for_source_id(source_id)
+                .expect("retrieval usage limit rules must load")
+        }),
         metadata_status,
     })
 }
@@ -14749,14 +14545,6 @@ fn retrieval_recommended_follow_up(issues: &[String]) -> Vec<String> {
         }
     }
     follow_up.into_iter().collect()
-}
-
-fn usage_limit_for_unknown_source(source_id: &str) -> String {
-    if source_id.contains("zhiyanzhai") || source_id.contains("jiaxu") {
-        "可作为默认回答证据；与前八十回正文同属 in-scope，后四十回材料仍需显式授权。".to_string()
-    } else {
-        "可作为正文或版本对照证据候选；不声明完成学术校勘。".to_string()
-    }
 }
 
 fn redacted_query_term(term: &str) -> String {
@@ -14977,126 +14765,63 @@ pub fn replay_answer(package: &EvidencePackage) -> String {
 }
 
 pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> {
+    let Ok(rules) = claim_rules() else {
+        return vec!["治理规则目录不可用，不能给出确定结论。".to_string()];
+    };
     if cards.is_empty() {
-        return vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()];
+        return vec![rules.empty_evidence];
     }
     let mut claims = Vec::new();
     if matched_query_expansion_evidence_slots(question, cards).is_ok_and(|slots| !slots.is_empty())
     {
-        claims.push(
-            "涉及事件归纳或次数统计的问题必须按 evidence slot rules 的 role/counts_as 解释，不能按命中卡片数或槽位总数直接计数。"
-                .to_string(),
-        );
-        if active_count_basis_for_question(question, question_asks_for_count(question))
-            .ok()
-            .flatten()
-            .is_some()
+        claims.push(rules.slot_count_rule.clone());
+        if active_count_basis_for_question(
+            question,
+            question_asks_for_count(question).unwrap_or(false),
+        )
+        .ok()
+        .flatten()
+        .is_some()
         {
-            claims.push(
-                "未计入当前 active count basis 的证据槽位只能作为相关线索展示，不能改变直接次数。"
-                    .to_string(),
-            );
+            claims.push(rules.inactive_count_basis.clone());
         }
     }
     if cards_include_later_forty(cards) {
-        claims.push(
-            "命中的第八十一回及以后材料必须显式标注为后四十回内容；未标注时不能作为证据或参考。"
-                .to_string(),
-        );
+        claims.push(rules.later_forty_boundary.clone());
     }
     if cards.iter().any(|card| card.evidence_type == "commentary") {
-        claims.push("命中的脂批材料可作为默认回答证据，证据来源层记录为脂批。".to_string());
+        claims.push(rules.commentary_scope.clone());
     }
     if cards.iter().any(|card| card.evidence_type == "base_text") {
-        claims.push("命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string());
+        claims.push(rules.base_text_scope.clone());
     }
     if claims.is_empty() {
-        claims.push("回答只能在已命中证据的支持范围内表述。".to_string());
+        claims.push(rules.default_scope.clone());
     }
     claims
 }
 
 pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> ReviewRecord {
     let mut issues = Vec::new();
-    for control in blocked_prompt_controls(question) {
-        issues.push(format!("用户请求包含受控内部流程绕过企图：{control}。"));
+    match blocked_prompt_control_issues(question) {
+        Ok(control_issues) => issues.extend(control_issues),
+        Err(error) => issues.push(format!("governance_rules_unavailable:{error}")),
     }
     if cards.is_empty() {
-        issues.push("未命中可追溯证据，必须返回证据不足。".to_string());
-    }
-    let asks_commentary_material =
-        question.contains("脂批") || question.contains("脂評") || question.contains("甲戌");
-    if cards_include_later_forty(cards)
-        && !claims
-            .iter()
-            .any(|claim| text_mentions_later_forty_boundary(claim))
-    {
         issues.push(
-            "命中第八十一回及以后（后四十回）材料时必须显式标注为后四十回内容；未标注时不能作为证据或参考。"
-                .to_string(),
+            empty_evidence_review_issue()
+                .unwrap_or_else(|error| format!("governance_rules_unavailable:{error}")),
         );
     }
-    if (question.contains("结局") || question.contains("命运"))
-        && !cards.iter().any(|card| card.evidence_type == "base_text")
-    {
-        issues.push("人物命运问题缺少正文证据，必须标注限制。".to_string());
-    }
-    if (question.contains("嫁给")
-        || question.contains("北静王")
-        || question.contains("北靜王")
-        || question.contains("断定")
-        || question.contains("必然")
-        || question.contains("一定"))
-        && cards.iter().all(|card| {
-            !card.text.contains("北静王")
-                && !card.text.contains("北靜王")
-                && !card.text.contains("嫁")
-                && !card.text.contains("断定")
-        })
-    {
-        issues.push("问题含高风险结论或过度断言，当前证据不能支持确定表述。".to_string());
-    }
-    if question.contains("量子")
-        || question.contains("现代程序员")
-        || question.contains("程序员")
-        || question.to_lowercase().contains("modern programmer")
-    {
-        issues.push("问题含现代外部概念，当前资料不能作为可追溯证据支持。".to_string());
-    }
-    if question.contains("内部配置")
-        || question.contains("系统提示词")
-        || question.to_lowercase().contains("system prompt")
-    {
-        issues.push("请求涉及内部配置或系统提示词，必须拒绝泄露。".to_string());
-    }
-    if asks_commentary_material && !cards.iter().any(|card| card.evidence_type == "commentary") {
-        issues.push("脂批或甲戌相关问题缺少脂批证据，必须标注限制。".to_string());
-    }
-    if (question.contains("程甲")
-        || question.contains("程乙")
-        || question.contains("版本")
-        || question.contains("前八十")
-        || question.contains("后四十")
-        || question.contains("後四十"))
-        && !cards.iter().any(|card| {
-            card.evidence_type == "version_note"
-                || card.source_id.contains("chengjia")
-                || card.source_id.contains("chengyi")
-        })
-    {
-        issues.push("版本边界问题缺少版本证据，必须标注限制。".to_string());
-    }
-    if question.contains("影印")
-        || question.contains("校注")
-        || question.contains("校勘")
-        || question.contains("专家")
-        || question.contains("權威")
-        || question.contains("权威")
-    {
+    if later_forty_boundary_missing_from_claims(cards, claims) {
         issues.push(
-            "source coverage boundary 缺少影印件、权威校注本或专家校勘复核，必须降级为资料不足。"
-                .to_string(),
+            later_forty_boundary_review_issue()
+                .unwrap_or_else(|error| format!("governance_rules_unavailable:{error}")),
         );
+    }
+    match triggered_review_rule_issues(question, cards, claims) {
+        Ok(rule_issues) => issues.extend(rule_issues),
+        Err(error) => issues.push(format!("governance_rules_unavailable:{error}")),
     }
     let status = if issues.is_empty() {
         "passed"
@@ -15165,9 +14890,10 @@ fn local_slot_count_answer(question: &str, package: &EvidencePackage) -> Option<
     if cards_include_later_forty(&package.cards) && !source_scope_policy.later_forty_allowed {
         return None;
     }
-    let active_basis = active_count_basis_for_question(question, question_asks_for_count(question))
-        .ok()
-        .flatten()?;
+    let active_basis =
+        active_count_basis_for_question(question, question_asks_for_count(question).ok()?)
+            .ok()
+            .flatten()?;
     let slot_matches = evidence_slot_matches_for_cards(question, &package.cards)
         .ok()
         .filter(|matches| !matches.is_empty())?;
@@ -15287,21 +15013,7 @@ fn evidence_text_is_broken_shell(text: &str) -> bool {
     if substantive_count == 0 {
         return true;
     }
-    let speech_lead_only = [
-        "道：",
-        "道:",
-        "問道：",
-        "问道：",
-        "說道：",
-        "说道：",
-        "笑道：",
-        "笑道:",
-        "寶玉道：",
-        "宝玉道：",
-    ]
-    .iter()
-    .any(|suffix| trimmed.ends_with(suffix));
-    speech_lead_only && substantive_count <= 6
+    retrieval_rules::evidence_text_is_broken_shell(trimmed, substantive_count).unwrap_or(true)
 }
 
 fn evidence_text_is_navigation_index(text: &str) -> bool {
@@ -15384,22 +15096,7 @@ fn normalized_primary_focus(question: &str) -> Option<String> {
 }
 
 fn generic_question_term(term: &str) -> bool {
-    matches!(
-        term,
-        "介绍"
-            | "介紹"
-            | "介绍一下"
-            | "介紹一下"
-            | "是谁"
-            | "是誰"
-            | "是什么"
-            | "是什麼"
-            | "人物"
-            | "说说"
-            | "說說"
-            | "讲讲"
-            | "講講"
-    )
+    retrieval_rules::generic_question_term(term).unwrap_or(false)
 }
 
 pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
@@ -15623,13 +15320,10 @@ fn claim_evidence_map_with_knowledge(
             let evidence_ids = cards
                 .iter()
                 .filter(|card| {
-                    if claim.contains("脂批") {
-                        card.evidence_type == "commentary"
-                    } else if claim.contains("正文") || claim.contains("通灵玉") {
-                        card.evidence_type == "base_text" || card.evidence_type == "version_note"
-                    } else {
-                        true
-                    }
+                    claim_evidence_types_for_claim(claim)
+                        .ok()
+                        .flatten()
+                        .is_none_or(|evidence_types| evidence_types.contains(&card.evidence_type))
                 })
                 .map(|card| card.evidence_id.clone())
                 .collect::<Vec<_>>();
@@ -16253,14 +15947,7 @@ fn query_blocks_exact_text(
         FROM blocks
         WHERE text LIKE ?1 ESCAPE '\'
            OR normalized_text LIKE ?2 ESCAPE '\'
-        ORDER BY
-          CASE
-            WHEN source_id = 'hongloumeng-wikisource-120' THEN 1
-            WHEN source_id LIKE '%chengjia%' THEN 2
-            WHEN source_id LIKE '%chengyi%' THEN 3
-            ELSE 4
-          END,
-          LENGTH(text) ASC
+        ORDER BY LENGTH(text) ASC
         LIMIT ?3
         "#,
     )?;
@@ -16281,8 +15968,14 @@ fn query_blocks_exact_text(
             normalized_text: row.get(8)?,
         })
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|block| {
+        (
+            retrieval_rules::exact_source_priority_rank(&block.source_id).unwrap_or(usize::MAX),
+            block.text.chars().count(),
+        )
+    });
+    Ok(rows)
 }
 
 fn evidence_card_from_block(block: SearchBlockRecord) -> EvidenceCard {
@@ -16295,38 +15988,16 @@ fn evidence_card_from_block_with_focus(block: SearchBlockRecord, focus: &str) ->
 
 fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) -> EvidenceCard {
     let is_later_forty = source_title_in_later_forty(&block.source_title);
-    let evidence_type =
-        if block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu") {
-            "commentary"
-        } else if block.text.contains("程甲")
-            || block.text.contains("程乙")
-            || block.text.contains("脂評本")
-        {
-            "version_note"
-        } else {
-            "base_text"
-        };
-    let (mut support_scope, mut unsupported_scope, evidence_level, confidence) = match evidence_type
-    {
-        "commentary" => (
-            "可作为默认回答证据；与前八十回正文同属 in-scope，证据来源层记录为脂批。".to_string(),
-            "不能扩展为后四十回材料或所有版本共同结论。".to_string(),
-            "脂批证据".to_string(),
-            "high".to_string(),
-        ),
-        "version_note" => (
-            "可支持版本边界、整理来源或版本系统说明。".to_string(),
-            "不能单独证明情节事实，不能替代影印或权威校注本校勘。".to_string(),
-            "版本边界".to_string(),
-            "medium".to_string(),
-        ),
-        _ => (
-            "可支持该版本该 block 中直接出现的原文事实或文本定位。".to_string(),
-            "不能证明未出现的情节、人物命运定论或其他版本必然相同。".to_string(),
-            "正文直接".to_string(),
-            "high".to_string(),
-        ),
-    };
+    let evidence_type = retrieval_rules::classify_evidence_type("", &block.source_id, &block.text)
+        .expect("retrieval source classification rules must load");
+    let scope = retrieval_rules::evidence_type_scope(&evidence_type)
+        .expect("retrieval evidence type scope rules must load");
+    let (mut support_scope, mut unsupported_scope, evidence_level, confidence) = (
+        scope.support_scope,
+        scope.unsupported_scope,
+        scope.evidence_level,
+        scope.confidence,
+    );
     if is_later_forty {
         support_scope = format!("第八十一回及以后（后四十回）边界：{support_scope}");
         unsupported_scope = format!(
@@ -16335,7 +16006,7 @@ fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) 
     }
     EvidenceCard {
         evidence_id: format!("ev-{}", uuid::Uuid::now_v7().simple()),
-        evidence_type: evidence_type.to_string(),
+        evidence_type,
         source_id: block.source_id,
         source_title: block.source_title,
         source_url: block.source_url,
@@ -16354,13 +16025,11 @@ fn evidence_card_from_block_text(block: SearchBlockRecord, focus: Option<&str>) 
 }
 
 fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
+    let ranking = retrieval_rules::ranking_rules().expect("retrieval ranking rules must load");
     let mut score = 1;
     let normalized_term = normalize_text(term);
-    let intro_question = question.contains("介绍")
-        || question.contains("介紹")
-        || question.contains("人物")
-        || question.contains("是谁")
-        || question.contains("是誰");
+    let intro_question =
+        retrieval_rules::contains_any_term(question, &ranking.intro_question_terms);
     let normalized_focus = if intro_question {
         normalized_primary_focus(question)
     } else {
@@ -16395,16 +16064,17 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
             score -= 10;
         }
     }
-    if question.contains("脂批")
-        && (block.source_id.contains("zhiyanzhai") || block.source_id.contains("jiaxu"))
+    if retrieval_rules::contains_any_term(question, &ranking.commentary_question_terms)
+        && retrieval_rules::contains_any_raw(&block.source_id, &ranking.commentary_source_id_terms)
     {
         score += 8;
     }
-    if question.contains("程甲") && block.source_id.contains("chengjia") {
-        score += 40;
-    }
-    if question.contains("程乙") && block.source_id.contains("chengyi") {
-        score += 40;
+    for boost in &ranking.version_source_boosts {
+        if retrieval_rules::contains_any_term(question, &boost.question_terms)
+            && retrieval_rules::contains_any_raw(&block.source_id, &boost.source_id_terms)
+        {
+            score += boost.score;
+        }
     }
     if block.kind == "heading" {
         score -= 12;
@@ -16420,42 +16090,22 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
     if intro_question && block.kind != "heading" && text_len >= 40 {
         score += 12;
     }
-    let asks_inscription = question.contains('字')
-        || question.contains("铭")
-        || question.contains("銘")
-        || question.contains("写")
-        || question.contains("寫");
-    let looks_like_inscription = block.text.contains("莫失莫忘")
-        || block.text.contains("仙壽")
-        || block.text.contains("仙寿")
-        || block.text.contains("一除邪祟")
-        || block.text.contains("二療冤疾")
-        || block.text.contains("二疗冤疾")
-        || block.text.contains("三知禍福")
-        || block.text.contains("三知祸福");
+    let asks_inscription =
+        retrieval_rules::contains_any_term(question, &ranking.inscription_question_terms);
+    let looks_like_inscription =
+        retrieval_rules::contains_any_term(&block.text, &ranking.inscription_text_terms);
     if asks_inscription && looks_like_inscription {
         score += 50;
-    } else if (term.contains("通灵") || term.contains("通靈")) && looks_like_inscription {
+    } else if retrieval_rules::contains_any_term(term, &ranking.tonglingyu_terms)
+        && looks_like_inscription
+    {
         score += 20;
     }
     score
 }
 
-fn evidence_type(source_category: &str, source_id: &str, block: &BlockRecord) -> &'static str {
-    if source_category == "commentary_material"
-        || source_id.contains("zhiyanzhai")
-        || source_id.contains("jiaxu")
-    {
-        "commentary"
-    } else if block.text.contains("程甲")
-        || block.text.contains("程乙")
-        || block.text.contains("脂評")
-        || block.text.contains("版本")
-    {
-        "version_note"
-    } else {
-        "base_text"
-    }
+fn evidence_type(source_category: &str, source_id: &str, block: &BlockRecord) -> Result<String> {
+    retrieval_rules::classify_evidence_type(source_category, source_id, &block.text)
 }
 
 pub fn normalize_for_search(input: &str) -> String {
@@ -16500,28 +16150,6 @@ fn apply_project_normalization_overrides(input: &str) -> String {
 fn useful_text(text: &str) -> bool {
     let trimmed = text.trim();
     !trimmed.is_empty() && trimmed != "----" && !trimmed.starts_with("[[../")
-}
-
-fn version_system(source_id: &str) -> &'static str {
-    if source_id.contains("chengjia") {
-        "程甲本"
-    } else if source_id.contains("chengyi") {
-        "程乙本"
-    } else if source_id.contains("jiaxu") {
-        "甲戌本脂评"
-    } else if source_id.contains("zhiyanzhai") {
-        "脂砚斋重评整理资料"
-    } else {
-        "Wikisource 120回汇校本"
-    }
-}
-
-fn usage_limit(source_category: &str) -> &'static str {
-    if source_category == "commentary_material" {
-        "可作为默认回答证据；与前八十回正文同属 in-scope，后四十回材料仍需显式授权。"
-    } else {
-        "可作为正文或版本对照证据候选；不声明完成学术校勘。"
-    }
 }
 
 fn version_range(chapter_no: i64) -> &'static str {
@@ -16825,41 +16453,6 @@ fn normalized_focus_char_index(text: &str, focus: &str) -> Option<usize> {
     let normalized_text = normalize_text(text);
     let byte_index = normalized_text.find(&normalized_focus)?;
     Some(normalized_text[..byte_index].chars().count())
-}
-
-fn blocked_prompt_controls(question: &str) -> Vec<String> {
-    let controls = [
-        ("跳过reviewer", "attempted_reviewer_bypass"),
-        ("跳过 reviewer", "attempted_reviewer_bypass"),
-        ("关闭审校", "attempted_reviewer_bypass"),
-        ("不要审校", "attempted_reviewer_bypass"),
-        ("skip reviewer", "attempted_reviewer_bypass"),
-        ("disable_reviewer", "attempted_reviewer_bypass"),
-        ("disable reviewer", "attempted_reviewer_bypass"),
-        ("只凭模型记忆", "attempted_memory_only_answer"),
-        ("不要证据", "attempted_evidence_bypass"),
-        ("忽略证据", "attempted_evidence_bypass"),
-        ("绕过证据", "attempted_evidence_bypass"),
-        ("honglou-", "attempted_internal_agent_control"),
-        ("内部 agent", "attempted_internal_agent_control"),
-        ("内部Agent", "attempted_internal_agent_control"),
-        ("内部配置", "attempted_internal_config_leak"),
-        ("系统提示词", "attempted_internal_prompt_leak"),
-        ("system prompt", "attempted_internal_prompt_leak"),
-    ];
-    let lowered = question.to_lowercase();
-    controls
-        .iter()
-        .filter_map(|(needle, code)| {
-            if lowered.contains(&needle.to_lowercase()) {
-                Some((*code).to_string())
-            } else {
-                None
-            }
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 pub fn append_runtime_audit_event(

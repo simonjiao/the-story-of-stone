@@ -1,0 +1,117 @@
+{
+  "schema_version": "tonglingyu.retrieval_rules.v1",
+  "catalog_version": "2026-05-23.1",
+  "source_layer_labels": [
+    { "id": "base_text_pre_80", "label": "正文", "answer_rank": 0 },
+    { "id": "commentary", "label": "脂批", "answer_rank": 1 },
+    { "id": "version_note", "label": "版本说明", "answer_rank": 2 },
+    { "id": "base_text_later_40", "label": "后四十回正文", "answer_rank": 3 },
+    { "id": "default", "label": "证据", "answer_rank": 4 }
+  ],
+  "evidence_text_hygiene": {
+    "broken_shell_suffixes": [
+      "道：",
+      "道:",
+      "問道：",
+      "问道：",
+      "說道：",
+      "说道：",
+      "笑道：",
+      "笑道:",
+      "寶玉道：",
+      "宝玉道："
+    ],
+    "broken_shell_max_substantive_chars": 6
+  },
+  "generic_question_terms": [
+    "介绍",
+    "介紹",
+    "介绍一下",
+    "介紹一下",
+    "是谁",
+    "是誰",
+    "是什么",
+    "是什麼",
+    "人物",
+    "说说",
+    "說說",
+    "讲讲",
+    "講講"
+  ],
+  "ranking": {
+    "intro_question_terms": ["介绍", "介紹", "人物", "是谁", "是誰"],
+    "commentary_question_terms": ["脂批"],
+    "commentary_source_id_terms": ["zhiyanzhai", "jiaxu"],
+    "version_source_boosts": [
+      {
+        "question_terms": ["程甲"],
+        "source_id_terms": ["chengjia"],
+        "score": 40
+      },
+      {
+        "question_terms": ["程乙"],
+        "source_id_terms": ["chengyi"],
+        "score": 40
+      }
+    ],
+    "inscription_question_terms": ["字", "铭", "銘", "写", "寫"],
+    "inscription_text_terms": [
+      "莫失莫忘",
+      "仙壽",
+      "仙寿",
+      "一除邪祟",
+      "二療冤疾",
+      "二疗冤疾",
+      "三知禍福",
+      "三知祸福"
+    ],
+    "tonglingyu_terms": ["通灵", "通靈"]
+  },
+  "source_classification": {
+    "commentary_source_categories": ["commentary_material"],
+    "commentary_source_id_terms": ["zhiyanzhai", "jiaxu"],
+    "version_note_text_terms": ["程甲", "程乙", "脂評本", "脂評", "版本"],
+    "evidence_type_scopes": [
+      {
+        "id": "commentary",
+        "support_scope": "可作为默认回答证据；与前八十回正文同属 in-scope，证据来源层记录为脂批。",
+        "unsupported_scope": "不能扩展为后四十回材料或所有版本共同结论。",
+        "evidence_level": "脂批证据",
+        "confidence": "high"
+      },
+      {
+        "id": "version_note",
+        "support_scope": "可支持版本边界、整理来源或版本系统说明。",
+        "unsupported_scope": "不能单独证明情节事实，不能替代影印或权威校注本校勘。",
+        "evidence_level": "版本边界",
+        "confidence": "medium"
+      },
+      {
+        "id": "base_text",
+        "support_scope": "可支持该版本该 block 中直接出现的原文事实或文本定位。",
+        "unsupported_scope": "不能证明未出现的情节、人物命运定论或其他版本必然相同。",
+        "evidence_level": "正文直接",
+        "confidence": "high"
+      }
+    ],
+    "source_systems": [
+      { "source_id_terms": ["chengjia"], "label": "程甲本" },
+      { "source_id_terms": ["chengyi"], "label": "程乙本" },
+      { "source_id_terms": ["jiaxu"], "label": "甲戌本脂评" },
+      { "source_id_terms": ["zhiyanzhai"], "label": "脂砚斋重评整理资料" }
+    ],
+    "exact_source_priority": [
+      { "source_id_terms": ["hongloumeng-wikisource-120"], "rank": 1 },
+      { "source_id_terms": ["chengjia"], "rank": 2 },
+      { "source_id_terms": ["chengyi"], "rank": 3 }
+    ],
+    "default_source_system": "Wikisource 120回汇校本",
+    "usage_limits": [
+      {
+        "source_categories": ["commentary_material"],
+        "usage_limit": "可作为默认回答证据；与前八十回正文同属 in-scope，后四十回材料仍需显式授权。"
+      }
+    ],
+    "default_usage_limit": "可作为正文或版本对照证据候选；不声明完成学术校勘。"
+  }
+}
