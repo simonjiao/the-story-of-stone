@@ -14465,7 +14465,13 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     } else {
         answer.push_str("根据目前可检索到的文本，可以这样回答：\n\n");
     }
-    if question.contains("通灵玉") || question.contains("通靈玉") || question.contains("莫失莫忘")
+    if question_mentions_tonglingyu_loss(question) {
+        answer.push_str("通灵宝玉丢失相关问题需要按具体版本和情节范围说明；当前证据只能支持下面这些命中的文本事实。\n\n");
+    } else if question.contains("通灵玉")
+        || question.contains("通靈玉")
+        || question.contains("通灵宝玉")
+        || question.contains("通靈寶玉")
+        || question.contains("莫失莫忘")
     {
         answer.push_str("通灵玉相关文本需要回到具体原文来读。若问铭文，当前命中的文本显示“莫失莫忘，仙寿恒昌”等字样；不同版本的字形和图式细节可能有差异，不能把这当作完整校勘结论。\n\n");
     } else {
@@ -14565,7 +14571,14 @@ fn answer_evidence_duplicate(
         return false;
     }
     let shared = existing.shingles.intersection(&candidate.shingles).count();
-    shared * 100 >= smaller_shingle_count * 82
+    let required_overlap_percent = if min_len >= 160 {
+        55
+    } else if min_len >= 80 {
+        70
+    } else {
+        82
+    };
+    shared * 100 >= smaller_shingle_count * required_overlap_percent
 }
 
 fn compact_evidence_text(text: &str) -> String {
@@ -14613,6 +14626,14 @@ fn evidence_text_is_broken_shell(text: &str) -> bool {
     .iter()
     .any(|suffix| trimmed.ends_with(suffix));
     speech_lead_only && substantive_count <= 6
+}
+
+fn question_mentions_tonglingyu_loss(question: &str) -> bool {
+    let normalized = normalize_text(question);
+    (normalized.contains("通灵玉") || normalized.contains("通灵宝玉"))
+        && ["丢", "失", "偷", "窃", "遗"]
+            .iter()
+            .any(|term| normalized.contains(term))
 }
 
 fn text_punctuation(ch: char) -> bool {

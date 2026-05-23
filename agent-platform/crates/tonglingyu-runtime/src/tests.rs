@@ -2269,7 +2269,7 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
 
     let answer = local_answer("通灵宝玉丢了几次", &package);
 
-    assert!(answer.contains("目前能支持回答的主要材料如下"));
+    assert!(answer.contains("通灵宝玉丢失相关问题需要按具体版本和情节范围说明"));
     assert!(answer.contains("以下包含第八十一回及以后（后四十回）材料"));
     assert!(answer.contains("第094回（后四十回）"));
     assert!(answer.contains("第094回"));
@@ -2352,6 +2352,53 @@ fn local_answer_deduplicates_repeated_base_text_evidence() {
     assert!(!answer.contains("2. 紅樓夢/第052回"));
     assert!(answer.contains("2. 脂硯齋重評石頭記/第五十二回"));
     assert!(answer.contains("二次小竊皆出於寶玉房中"));
+}
+
+#[test]
+fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
+    let mut chengjia = sample_card("base_text");
+    chengjia.source_title = "紅樓夢（程甲本）/五十二".to_string();
+    chengjia.block_id = "block-lianger-theft-chengjia-long".to_string();
+    chengjia.text = "月悄問道：「你怎麽就得了的？」平兒道：「那日彼時洗手時不見了，二奶奶就不許吵嚷。出了園子，卽刻就傳給園裡各處的媽媽們，小心訪查。我們只疑惑邢姑娘的丫頭，本來又窮，只怕小孩子家没見過，拿了起来是有的，再不料定是你們這裡的。幸而二奶奶没有在屋裡，你們這裡的宋媽去了，拿着這支鐲子，說是小丫頭墜兒偷起來的，被他看見，來囬二奶奶的。我赶忙接了鐲子，想了一想：寳玉是偏在你們身上留心用意、争勝要强的，那一年有一個良兒偷玉，剛冷了這二年，閒時還常有人提起來趂愿。這㑹子又跑出一個偷金子的来了，而且更偷到街坊家去了。偏是他這様，偏是他的人打嘴。所以我倒忙叮嚀宋媽千萬别告訴寶玉，只當没有這事，總别和一個人提起。第二件，老太太、太太𦗟了生氣。三則襲人和你們也不好看。所以我囬二奶奶，只說：『我徃大奶奶那裡去來着，誰知鐲子褪了口，丢在草根底下，雪深了，没看見。今兒雪化盡了，黃澄澄的映着日頭，還在那裡呢。我就揀了起來。』二奶奶也就信了，所以我來告訴你們。你們以後防着他些，别使喚他到别處去。等襲人囘來，你們商議着，變個法子打發出去就完了。」"
+        .to_string();
+    let mut wikisource = sample_card("base_text");
+    wikisource.source_title = "紅樓夢/第052回".to_string();
+    wikisource.block_id = "block-lianger-theft-wikisource-long".to_string();
+    wikisource.text = "只聞麝月悄問道：“你怎麼就得了的？”平兒道：“那日洗手時不見了，二奶奶就不許吵嚷，出了園子，即刻就傳給園里各處的媽媽們小心查訪。我們只疑惑邢姑娘的丫頭，本來又窮，只怕小孩子家沒見過，拿了起來也是有的。再不料定是你們這里的。幸而二奶奶沒有在屋里，你們這里的宋媽媽去了，拿著這支鐲子，說是小丫頭子墜兒偷起來的，被他看見，來回二奶奶的。我赶著忙接了鐲子，想了一想：寶玉是偏在你們身上留心用意，爭胜要強的，那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願，這會子又跑出一個偷金子的來了。而且更偷到街坊家去了。偏是他這樣，偏是他的人打嘴。所以我倒忙叮嚀宋媽，千萬別告訴寶玉，只當沒有這事，別和一個人提起。第二件，老太太，太太聽了也生氣。三則襲人和你們也不好看。所以我回二奶奶，只說：‘我往大奶奶那里去的，誰知鐲子褪了口，丟在草根底下，雪深了沒看見。今兒雪化盡了，黃澄澄的映著日頭，還在那里呢，我就揀了起來。’二奶奶也就信了，所以我來告訴你們。你們以後防著他些，別使喚他到別處去。等襲人回來，你們商議著，變個法子打發出去就完了。”"
+        .to_string();
+    let mut commentary = sample_card("commentary");
+    commentary.source_title = "脂硯齋重評石頭記/第五十二回".to_string();
+    commentary.block_id = "block-lianger-theft-commentary-long".to_string();
+    commentary.text = "幸而二奶奶沒有在屋裡，你們這裡的宋媽媽去了，拿著這支鐲子，說是小丫頭子墜兒偷起來的，被他看見，來回二奶奶的。{{~|【庚辰雙行夾批：二次小竊皆出於寶玉房中，亦大有深意在焉。】}}我趕著忙接了鐲子，想了一想：寶玉是偏在你們身上留心用意、爭勝要強的，那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。"
+        .to_string();
+    let mut chengyi = sample_card("base_text");
+    chengyi.source_title = "紅樓夢（程乙本）/第五十一回 至第六十回".to_string();
+    chengyi.block_id = "block-lianger-theft-chengyi-long".to_string();
+    chengyi.text = "說著，果然從後門出去至窗下潛聽。麝月悄悄問道：「你怎麼就得了的？」平兒道：「那日彼時洗手時不見了，二奶奶就不許吵嚷，出了園子，即刻就傳給園裡各處的媽媽們，小心訪查。我們只疑惑邢姑娘的丫頭，本來又窮，只怕小孩子家沒見過，拿起來是有的，再不料定是你們這裡的。幸而二奶奶沒有在屋裡，你們這裡的宋媽去了，拿著這支鐲子，說是小丫頭墜兒偷起來的，被他看見，來回二奶奶的。我趕忙接了鐲子，想了一想。寶玉是偏在你們身上留心用意，爭勝要強的。那一年有個良兒偷玉，剛冷了這二年，閒時還常有人提起來趁願；這會子又跑出一個偷金子的來了，而且更偷到街坊家去了。偏是他這麼著，偏是他的人打嘴。所以我倒忙叮嚀宋媽，千萬別告訴寶玉，只當沒有這事，總別和一個人提起。第二件，老太太、太太聽了生氣。三則襲人和你們也不好看。所以我回二奶奶，只說：『我往大奶奶那裡去來著。誰知鐲子褪了口，丟在草根底下，雪深了，沒看見。今兒雪化盡了，黃澄澄的映著日頭，還在那裡呢，我就撿了起來。』二奶奶也就信了，所以我來告訴你們。"
+        .to_string();
+    let package = EvidencePackage {
+        package_id: "pkg-long-duplicate-card-answer-test".to_string(),
+        trace_id: "trace-long-duplicate-card-answer-test".to_string(),
+        question: "通灵宝玉丢失".to_string(),
+        cards: vec![chengjia, wikisource, commentary, chengyi],
+        claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
+        claim_evidence_map: Vec::new(),
+        review: ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "reviewer 通过。".to_string(),
+        },
+        knowledge_state_summary: KnowledgeStateSummary::default(),
+    };
+
+    let answer = local_answer("通灵宝玉丢失", &package);
+
+    assert!(answer.contains("通灵宝玉丢失相关问题需要按具体版本和情节范围说明"));
+    assert!(answer.contains("1. 紅樓夢（程甲本）/五十二"));
+    assert!(!answer.contains("2. 紅樓夢/第052回"));
+    assert!(answer.contains("2. 脂硯齋重評石頭記/第五十二回"));
+    assert!(!answer.contains("紅樓夢（程乙本）/第五十一回 至第六十回"));
 }
 
 #[test]
