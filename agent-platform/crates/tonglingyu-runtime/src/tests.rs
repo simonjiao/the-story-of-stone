@@ -2360,7 +2360,9 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
         trace_id: "trace-lost-jade-answer-test".to_string(),
         question: "通灵宝玉丢了几次".to_string(),
         cards: lost_jade_test_cards(),
-        claims: vec!["通灵宝玉失玉次数必须按当前证据包命中的事件线索说明范围。".to_string()],
+        claims: vec![
+            "涉及事件归纳或次数统计的问题必须按当前证据包命中的证据槽位说明范围。".to_string(),
+        ],
         claim_evidence_map: Vec::new(),
         review: ReviewRecord {
             status: "passed".to_string(),
@@ -2373,7 +2375,7 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
 
     let answer = local_answer("通灵宝玉丢了几次", &package);
 
-    assert!(answer.contains("通灵宝玉丢失相关问题需要按具体版本和情节范围说明"));
+    assert!(answer.contains("目前能支持回答的主要材料如下"));
     assert!(answer.contains("以下包含第八十一回及以后（后四十回）材料"));
     assert!(answer.contains("第094回（后四十回）"));
     assert!(answer.contains("第094回"));
@@ -2503,7 +2505,7 @@ fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
 
     let answer = local_answer("通灵宝玉丢失", &package);
 
-    assert!(answer.contains("通灵宝玉丢失相关问题需要按具体版本和情节范围说明"));
+    assert!(answer.contains("目前能支持回答的主要材料如下"));
     assert!(answer.contains("1. 紅樓夢（程甲本）/五十二"));
     assert!(!answer.contains("2. 紅樓夢/第052回"));
     assert!(answer.contains("2. 脂硯齋重評石頭記/第五十二回"));
@@ -2530,6 +2532,9 @@ fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
     );
     assert!(rendered.contains("鳳姐掃雪拾玉"));
     assert!(rendered.contains("凤姐扫雪拾玉"));
+    assert!(rendered.contains("lianger_stole_jade"));
+    assert!(rendered.contains("zhen_baoyu_delivers_jade"));
+    assert!(rendered.contains("fengjie_snow_pickup_jade"));
     for item in brief {
         let text = item
             .get("text")
@@ -2621,6 +2626,77 @@ fn agent_runtime_step_message_compacts_context_projection_payload() {
     assert!(message.content.contains("projection_payload_sha256"));
     assert!(!message.content.contains(&"x".repeat(128)));
     assert!(!message.content.contains(&"z".repeat(128)));
+}
+
+#[test]
+fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
+    let projection = test_runtime_projection(
+        "trace-loss-event-message-budget",
+        "context-pack://test/loss-event-message-budget",
+        "honglou-main",
+        "通灵宝玉丢了几次",
+        Some("最近用户在追问通灵宝玉失玉次数。".to_string()),
+        vec!["tonglingyu.evidence.package.read".to_string()],
+    );
+    let mut cards = in_scope_lost_jade_event_cards();
+    cards[0].text = format!(
+        "{}{}{}",
+        "前置正文。".repeat(120),
+        cards[0].text,
+        "后续正文。".repeat(120)
+    );
+    cards[2].text = format!(
+        "{}{}{}",
+        "前置脂批材料。".repeat(120),
+        cards[2].text,
+        "后续脂批材料。".repeat(120)
+    );
+    let evidence_brief = upstream_evidence_brief("通灵宝玉丢了几次", &cards);
+    let evidence_ids = evidence_brief
+        .iter()
+        .filter_map(|item| item.get("evidence_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let step = RuntimeWorkflowStepReport {
+        step_id: "step-03-draft-answer".to_string(),
+        profile: "honglou-main".to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "draft_answer".to_string(),
+        status: "completed".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+        tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+        input_ref: Some("runtime://test/package".to_string()),
+        output_ref: "runtime://test/step-03-draft-answer".to_string(),
+        duration_ms: 1,
+        trace_id: "trace-loss-event-message-budget".to_string(),
+        output: json!({
+            "object": "tonglingyu.draft_answer",
+            "package_id": "pkg-loss-event-message-budget",
+            "evidence_ids": evidence_ids,
+            "evidence_brief": evidence_brief,
+            "source_scope_policy": source_scope_policy_for_question("通灵宝玉丢了几次"),
+        }),
+        agent_runtime: None,
+    };
+
+    let message = agent_runtime_profile_step_message(
+        "trace-loss-event-message-budget",
+        &step,
+        &projection,
+        agent_runtime_result_summary_contract(&step),
+    );
+
+    assert!(
+        message.content.len() < AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES,
+        "loss event profile message should stay inside safety budget: {}",
+        message.content.len()
+    );
+    assert!(message.content.contains("evidence_slots"));
+    assert!(message.content.contains("lianger_stole_jade"));
+    assert!(message.content.contains("zhen_baoyu_delivers_jade"));
+    assert!(message.content.contains("fengjie_snow_pickup_jade"));
+    assert!(!message.content.contains(&"前置脂批材料。".repeat(20)));
 }
 
 #[test]

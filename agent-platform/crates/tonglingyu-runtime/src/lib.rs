@@ -108,11 +108,14 @@ pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
 
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
+const AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES: usize = 8192;
 const UPSTREAM_EVIDENCE_BRIEF_CARD_LIMIT: usize = 5;
 const UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS: usize = 120;
 const UPSTREAM_EVIDENCE_BRIEF_SOURCE_TITLE_CHARS: usize = 80;
 const UPSTREAM_EVIDENCE_BRIEF_SCOPE_CHARS: usize = 72;
 const UPSTREAM_EVIDENCE_BRIEF_LIMITS_CHARS: usize = 96;
+const UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_LIMIT: usize = 4;
+const UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_CHARS: usize = 16;
 
 pub trait TextNormalizer {
     fn normalize_for_search(&self, input: &str) -> String;
@@ -2947,7 +2950,7 @@ pub fn agent_runtime_profile_contracts(
             contract.max_runtime_seconds = Some(max_runtime_seconds);
             contract.safety_policy = json!({
                 "deny_message_roles": ["tool"],
-                "max_message_bytes": 8192
+                "max_message_bytes": AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES
             });
             contract
         })
@@ -3571,15 +3574,22 @@ async fn execute_agent_runtime_profile_step(
         .get("visible_question")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let message =
+        agent_runtime_profile_step_message(&trace_id, &step, &projection, &result_summary_contract);
+    let message_bytes = message.content.len();
+    if message_bytes > AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES {
+        return Err(anyhow!(
+            "runtime profile message exceeded safety budget: step_id={} operation={} bytes={} limit={}",
+            step.step_id,
+            step.operation,
+            message_bytes,
+            AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES
+        ));
+    }
     let output = runtime
         .execute_profile_step(RuntimeProfileInput {
             profile_id: step.profile.clone(),
-            messages: vec![agent_runtime_profile_step_message(
-                &trace_id,
-                &step,
-                &projection,
-                &result_summary_contract,
-            )],
+            messages: vec![message],
             metadata: json!({
                 "runtime": "tonglingyu",
                 "workflow_step_id": &step.step_id,
@@ -3594,6 +3604,8 @@ async fn execute_agent_runtime_profile_step(
                 "result_summary_contract": &result_summary_contract,
                 "question_chars": visible_question.chars().count(),
                 "question_sha256": hash_text(visible_question),
+                "message_bytes": message_bytes,
+                "message_max_bytes": AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES,
                 "content_source": "tonglingyu-deterministic-workflow",
             }),
             profile_contract: Some(contract),
@@ -4107,8 +4119,7 @@ fn context_projection_message_payload(projection: &RuntimeContextProjection) -> 
                 .cloned()
                 .unwrap_or_else(|| json!([])),
         }),
-        "allowed_tools": &projection.allowed_tools,
-        "forbidden_tools": &projection.forbidden_tools,
+        "tool_policy_digest": &projection.tool_policy_digest,
     })
 }
 
@@ -4120,6 +4131,11 @@ fn json_trimmed_string(value: &Value, key: &str, max_chars: usize) -> Option<Str
 }
 
 fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
+    let object = step
+        .output
+        .get("object")
+        .cloned()
+        .unwrap_or_else(|| json!("tonglingyu.runtime_step_output"));
     let package_id = step
         .output
         .get("package_id")
@@ -4150,41 +4166,75 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
         .get("review")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    json!({
-        "object": step
-            .output
-            .get("object")
-            .cloned()
-            .unwrap_or_else(|| json!("tonglingyu.runtime_step_output")),
-        "operation": &step.operation,
-        "profile": &step.profile,
-        "output_ref": &step.output_ref,
-        "package_id": package_id,
-        "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
-        "claim_count": step.output.get("claim_count").cloned().unwrap_or(Value::Null),
-        "evidence_ids": evidence_ids,
-        "evidence_types": evidence_types,
-        "evidence_brief": evidence_brief,
-        "source_scope_policy": step
-            .output
-            .get("source_scope_policy")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "out_of_scope_hints": step
-            .output
-            .get("out_of_scope_hints")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
-        "review_status": step
-            .output
-            .get("review_status")
-            .cloned()
-            .or_else(|| review.get("status").cloned())
-            .unwrap_or(Value::Null),
-        "review_severity": review.get("severity").cloned().unwrap_or(Value::Null),
-        "draft_consumed": step.output.get("draft_consumed").cloned().unwrap_or(Value::Null),
-        "revision_applied": step.output.get("revision_applied").cloned().unwrap_or(Value::Null),
-    })
+    let review_status = step
+        .output
+        .get("review_status")
+        .cloned()
+        .or_else(|| review.get("status").cloned())
+        .unwrap_or(Value::Null);
+    let source_scope_policy = step
+        .output
+        .get("source_scope_policy")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let out_of_scope_hint_count = step
+        .output
+        .get("out_of_scope_hints")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    match step.operation.as_str() {
+        "draft_answer" => json!({
+            "object": object,
+            "operation": &step.operation,
+            "output_ref": &step.output_ref,
+            "package_id": package_id,
+            "evidence_ids": evidence_ids,
+            "evidence_brief": evidence_brief,
+            "source_scope_policy": source_scope_policy,
+        }),
+        "review_answer" => json!({
+            "object": object,
+            "operation": &step.operation,
+            "output_ref": &step.output_ref,
+            "package_id": package_id,
+            "review_status": review_status,
+            "review_severity": review.get("severity").cloned().unwrap_or(Value::Null),
+            "review_issue_count": review
+                .get("issues")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            "draft_consumed": step.output.get("draft_consumed").cloned().unwrap_or(Value::Null),
+            "revision_applied": step.output.get("revision_applied").cloned().unwrap_or(Value::Null),
+        }),
+        "evidence_package_create" => json!({
+            "object": object,
+            "operation": &step.operation,
+            "output_ref": &step.output_ref,
+            "package_id": package_id,
+            "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
+            "claim_count": step.output.get("claim_count").cloned().unwrap_or(Value::Null),
+            "review_status": review_status,
+            "source_scope_policy": source_scope_policy,
+            "out_of_scope_hint_count": out_of_scope_hint_count,
+        }),
+        "text_evidence_search" | "commentary_evidence_search" => json!({
+            "object": object,
+            "operation": &step.operation,
+            "output_ref": &step.output_ref,
+            "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
+            "evidence_ids": evidence_ids,
+            "evidence_types": evidence_types,
+        }),
+        _ => json!({
+            "object": object,
+            "operation": &step.operation,
+            "output_ref": &step.output_ref,
+            "package_id": package_id,
+            "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
+            "evidence_ids": evidence_ids,
+            "evidence_types": evidence_types,
+        }),
+    }
 }
 
 fn evidence_ids_from_evidence_brief(evidence_brief: &Value) -> Option<Value> {
@@ -4200,7 +4250,7 @@ fn evidence_ids_from_evidence_brief(evidence_brief: &Value) -> Option<Value> {
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{...copy step_output_json.source_scope_policy exactly...},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Use step_output_json.evidence_brief as the only factual basis for draft_answer and claim_statements; evidence_brief text fields are bounded excerpts, so do not infer omitted material. package_id values must match step_output_json.package_id; evidence_refs must come from step_output_json.evidence_ids. When source_scope_policy.later_forty_allowed is false, do not use out_of_scope_hints or later-forty source layers; commentary evidence in evidence_brief remains first-class in-scope even when the commentary text mentions future plot labels. For count questions, count only distinct in-scope evidence events visible in evidence_brief and state the evidence boundary. local reviewer remains required. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Return one JSON object string: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count distinct in-scope evidence_slots visible in evidence_brief and state the boundary. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -5000,9 +5050,7 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if cards_include_later_forty(cards) && !text_mentions_later_forty_boundary(&draft_text) {
         return Some("draft_missing_later_forty_boundary");
     }
-    if question_mentions_tonglingyu_loss(question)
-        && draft_loss_count_conflicts_with_evidence(question, &draft_text, cards)
-    {
+    if draft_count_conflicts_with_evidence_slots(question, &draft_text, cards) {
         return Some("draft_count_conflicts_with_evidence_events");
     }
     for term in [
@@ -5022,28 +5070,50 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     None
 }
 
-fn draft_loss_count_conflicts_with_evidence(
+fn draft_count_conflicts_with_evidence_slots(
     question: &str,
     draft_text: &str,
     cards: &[EvidenceCard],
 ) -> bool {
+    if !question_asks_for_count(question) {
+        return false;
+    }
     let event_count = matched_query_expansion_evidence_slots(question, cards)
         .map(|slots| slots.len())
         .unwrap_or_default();
     if event_count < 2 {
         return false;
     }
-    highest_explicit_loss_count(draft_text).is_some_and(|count| count < event_count)
+    highest_explicit_count(draft_text).is_some_and(|count| count < event_count)
 }
 
-fn highest_explicit_loss_count(text: &str) -> Option<usize> {
+fn question_asks_for_count(question: &str) -> bool {
+    let normalized = normalize_text(question);
+    [
+        "几次",
+        "幾次",
+        "多少次",
+        "几处",
+        "幾處",
+        "多少处",
+        "多少處",
+        "几条",
+        "幾條",
+        "多少条",
+        "多少條",
+    ]
+    .iter()
+    .any(|term| question.contains(term) || normalized.contains(term))
+}
+
+fn highest_explicit_count(text: &str) -> Option<usize> {
     let compact = text.split_whitespace().collect::<String>();
     (1..=9)
-        .filter(|count| loss_count_marker_present(&compact, *count))
+        .filter(|count| count_marker_present(&compact, *count))
         .max()
 }
 
-fn loss_count_marker_present(text: &str, count: usize) -> bool {
+fn count_marker_present(text: &str, count: usize) -> bool {
     let Some(chinese) = chinese_count_word(count) else {
         return false;
     };
@@ -14409,7 +14479,13 @@ fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value>
         .map(|card| {
             let card = card.1;
             let text_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
-            let matched_terms = matched_evidence_focus_terms(card, &focus_terms);
+            let matched_terms = matched_evidence_focus_terms(card, &focus_terms)
+                .into_iter()
+                .map(|term| trim_text(&term, UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_CHARS))
+                .take(UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_LIMIT)
+                .collect::<Vec<_>>();
+            let evidence_slots = matched_query_expansion_evidence_slot_ids_for_card(question, card)
+                .unwrap_or_default();
             json!({
                 "evidence_id": &card.evidence_id,
                 "evidence_type": &card.evidence_type,
@@ -14418,6 +14494,7 @@ fn upstream_evidence_brief(question: &str, cards: &[EvidenceCard]) -> Vec<Value>
                 "text": text_excerpt,
                 "text_is_excerpt": true,
                 "matched_terms": matched_terms,
+                "evidence_slots": evidence_slots,
                 "support_scope": trim_text(&card.support_scope, UPSTREAM_EVIDENCE_BRIEF_SCOPE_CHARS),
                 "unsupported_scope": trim_text(&card.unsupported_scope, UPSTREAM_EVIDENCE_BRIEF_LIMITS_CHARS),
             })
@@ -14544,14 +14621,12 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
         return vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()];
     }
     let mut claims = Vec::new();
-    if question.contains("通灵玉") || question.contains("通靈玉") {
+    if matched_query_expansion_evidence_slots(question, cards).is_ok_and(|slots| !slots.is_empty())
+    {
         claims.push(
-            "通灵玉相关回答必须回到可追溯证据；前八十回正文与脂批同属默认可用证据范围。"
+            "涉及事件归纳或次数统计的问题必须按当前证据包命中的证据槽位说明范围，区分正文事实、追述、批语伏笔和版本边界。"
                 .to_string(),
         );
-    }
-    if asks_tonglingyu_loss_event(question, &normalize_query(question)) {
-        claims.push("通灵宝玉失玉次数必须按当前证据包命中的事件线索说明范围，区分失玉、偷玉、送回、拾得、追述等事件类型。".to_string());
     }
     if cards_include_later_forty(cards) {
         claims.push(
@@ -14678,7 +14753,7 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
     }
 }
 
-pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
+pub fn local_answer(_question: &str, package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
         return "我暂时找不到足够的原文依据，不能可靠回答这个问题。".to_string();
     }
@@ -14690,18 +14765,7 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     } else {
         answer.push_str("根据目前可检索到的文本，可以这样回答：\n\n");
     }
-    if question_mentions_tonglingyu_loss(question) {
-        answer.push_str("通灵宝玉丢失相关问题需要按具体版本和情节范围说明；当前证据只能支持下面这些命中的文本事实。\n\n");
-    } else if question.contains("通灵玉")
-        || question.contains("通靈玉")
-        || question.contains("通灵宝玉")
-        || question.contains("通靈寶玉")
-        || question.contains("莫失莫忘")
-    {
-        answer.push_str("通灵玉相关文本需要回到具体原文来读。若问铭文，当前命中的文本显示“莫失莫忘，仙寿恒昌”等字样；不同版本的字形和图式细节可能有差异，不能把这当作完整校勘结论。\n\n");
-    } else {
-        answer.push_str("目前能支持回答的主要材料如下，结论只限于这些文本直接能说明的范围。\n\n");
-    }
+    answer.push_str("目前能支持回答的主要材料如下，结论只限于这些文本直接能说明的范围。\n\n");
     if cards_include_later_forty(&package.cards) {
         answer.push_str(
             "注意：以下包含第八十一回及以后（后四十回）材料；这类材料必须显式标注为后四十回内容，未标注时不能作为证据或参考。\n\n",
@@ -14866,14 +14930,6 @@ fn evidence_text_is_navigation_index(text: &str) -> bool {
         || (section_separator_count >= 2
             && wiki_subpage_link_count >= 2
             && chapter_title_count >= 6)
-}
-
-fn question_mentions_tonglingyu_loss(question: &str) -> bool {
-    let normalized = normalize_text(question);
-    (normalized.contains("通灵玉") || normalized.contains("通灵宝玉"))
-        && ["丢", "失", "偷", "窃", "遗"]
-            .iter()
-            .any(|term| normalized.contains(term))
 }
 
 fn text_punctuation(ch: char) -> bool {
@@ -15525,6 +15581,30 @@ fn matched_query_expansion_evidence_slots(
     Ok(slots)
 }
 
+fn matched_query_expansion_evidence_slot_ids_for_card(
+    question: &str,
+    card: &EvidenceCard,
+) -> Result<Vec<String>> {
+    let catalog = query_expansion_catalog()?;
+    let normalized = normalize_query(question);
+    let mut slots = Vec::new();
+    for entry in &catalog.entries {
+        if !query_expansion_entry_matches(entry, question, &normalized) {
+            continue;
+        }
+        for slot in &entry.evidence_slots {
+            if slot
+                .terms
+                .iter()
+                .any(|term| evidence_text_contains_focus(&card.text, term))
+            {
+                push_term(&mut slots, &slot.id);
+            }
+        }
+    }
+    Ok(slots)
+}
+
 fn query_expansion_entry_matches(
     entry: &QueryExpansionEntry,
     question: &str,
@@ -15631,34 +15711,6 @@ fn extract_query_terms(conn: &Connection, question: &str) -> Result<ExtractedQue
         push_term(&mut terms, question);
     }
     Ok(ExtractedQueryTerms { terms, aliases })
-}
-
-fn asks_tonglingyu_loss_event(question: &str, normalized: &str) -> bool {
-    let mentions_tonglingyu = question.contains("通灵宝玉")
-        || question.contains("通靈寶玉")
-        || question.contains("通灵玉")
-        || question.contains("通靈玉")
-        || normalized.contains("通灵宝玉")
-        || normalized.contains("通灵玉");
-    if !mentions_tonglingyu {
-        return false;
-    }
-    let asks_loss = question.contains('丢')
-        || question.contains('丟')
-        || question.contains('失')
-        || question.contains("不见")
-        || question.contains("不見")
-        || question.contains("遗失")
-        || question.contains("遺失")
-        || normalized.contains('丢')
-        || normalized.contains('失')
-        || normalized.contains("不见");
-    let asks_count = question.contains("几次")
-        || question.contains("幾次")
-        || question.contains("多少次")
-        || normalized.contains("几次")
-        || normalized.contains("多少次");
-    asks_loss || asks_count
 }
 
 fn expand_canonical_person_terms(
