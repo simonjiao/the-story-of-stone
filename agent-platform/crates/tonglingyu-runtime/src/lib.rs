@@ -4222,8 +4222,9 @@ fn step_output_message_payload(step: &RuntimeWorkflowStepReport) -> Value {
             "operation": &step.operation,
             "output_ref": &step.output_ref,
             "card_count": step.output.get("card_count").cloned().unwrap_or(Value::Null),
-            "evidence_ids": evidence_ids,
             "evidence_types": evidence_types,
+            "evidence_set_ref": evidence_set_ref_from_output(&step.trace_id, &step.output),
+            "evidence_ref_policy": "do_not_echo_runtime_ids",
         }),
         _ => json!({
             "object": object,
@@ -4247,6 +4248,17 @@ fn evidence_ids_from_evidence_brief(evidence_brief: &Value) -> Option<Value> {
     Some(Value::Array(ids))
 }
 
+fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String> {
+    let evidence_ids = output
+        .get("evidence_ids")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    Some(evidence_set_output_ref(trace_id, &evidence_ids))
+}
+
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
@@ -4256,10 +4268,10 @@ fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
         }
         "text_evidence_search" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[...],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. evidence_refs must come from step_output_json.evidence_ids; do not write a final answer. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"evidence_refs\":[],\"evidence_analysis\":\"...\",\"unsupported_scope\":\"...\"}}. step_output_json does not expose runtime evidence ids; keep evidence_refs empty. Do not write a final answer. Do not add another result_summary key."
         }
         "commentary_evidence_search" => {
-            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[...],\"commentary_analysis\":\"...\",\"scope_notes\":\"...\"}}. commentary_refs must come from step_output_json.evidence_ids; commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
+            "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"evidence_observation\":{\"commentary_refs\":[],\"commentary_analysis\":\"...\",\"scope_notes\":\"...\"}}. step_output_json does not expose runtime evidence ids; keep commentary_refs empty. Commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
         }
         "evidence_package_create" => {
             "The runtime envelope already has result_summary. Put this JSON object string inside it: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"...\"}}. package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."

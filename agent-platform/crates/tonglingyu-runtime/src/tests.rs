@@ -424,10 +424,12 @@ impl RuntimeClient for DraftRuntimeClient {
                             tool_name.as_str(),
                             "tonglingyu.text.search" | "tonglingyu.commentary.search"
                         ) {
-                            evidence_set_output_ref(
-                                &input.trace_id,
-                                &evidence_ids_from_step_message(&message),
-                            )
+                            evidence_set_ref_from_step_message(&message).unwrap_or_else(|| {
+                                evidence_set_output_ref(
+                                    &input.trace_id,
+                                    &evidence_ids_from_step_message(&message),
+                                )
+                            })
                         } else {
                             format!(
                                 "runtime://tonglingyu/{}/tools/{operation}/{index}",
@@ -702,10 +704,12 @@ impl RuntimeClient for IncompleteHermesContentRuntimeClient {
                         tool_name.as_str(),
                         "tonglingyu.text.search" | "tonglingyu.commentary.search"
                     ) {
-                        evidence_set_output_ref(
-                            &input.trace_id,
-                            &evidence_ids_from_step_message(&message),
-                        )
+                        evidence_set_ref_from_step_message(&message).unwrap_or_else(|| {
+                            evidence_set_output_ref(
+                                &input.trace_id,
+                                &evidence_ids_from_step_message(&message),
+                            )
+                        })
                     } else if matches!(
                         tool_name.as_str(),
                         "tonglingyu.evidence.package.create"
@@ -969,6 +973,13 @@ fn source_scope_policy_from_step_message(message: &str) -> Value {
     step_output_from_message(message)
         .and_then(|value| value.get("source_scope_policy").cloned())
         .unwrap_or_else(|| json!(source_scope_policy_for_question("")))
+}
+
+fn evidence_set_ref_from_step_message(message: &str) -> Option<String> {
+    step_output_from_message(message)?
+        .get("evidence_set_ref")?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn evidence_ids_from_step_message(message: &str) -> Vec<String> {
@@ -2626,6 +2637,52 @@ fn agent_runtime_step_message_compacts_context_projection_payload() {
     assert!(message.content.contains("projection_payload_sha256"));
     assert!(!message.content.contains(&"x".repeat(128)));
     assert!(!message.content.contains(&"z".repeat(128)));
+}
+
+#[test]
+fn agent_runtime_evidence_search_message_does_not_expose_runtime_evidence_ids() {
+    let projection = test_runtime_projection(
+        "trace-evidence-search-message-boundary",
+        "context-pack://test/evidence-search-message-boundary",
+        "honglou-text",
+        "介绍贾宝玉",
+        None,
+        vec!["tonglingyu.text.search".to_string()],
+    );
+    let step = RuntimeWorkflowStepReport {
+        step_id: "step-01-text-search".to_string(),
+        profile: "honglou-text".to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "text_evidence_search".to_string(),
+        status: "completed".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.text.search".to_string()],
+        tool_calls: vec!["tonglingyu.text.search".to_string()],
+        input_ref: None,
+        output_ref: "runtime://test/step-01-text-search".to_string(),
+        duration_ms: 1,
+        trace_id: "trace-evidence-search-message-boundary".to_string(),
+        output: json!({
+            "object": "tonglingyu.text.evidence_search",
+            "card_count": 2,
+            "evidence_ids": ["ev-transient-one", "ev-transient-two"],
+            "evidence_types": ["base_text"],
+        }),
+        agent_runtime: None,
+    };
+
+    let message = agent_runtime_profile_step_message(
+        "trace-evidence-search-message-boundary",
+        &step,
+        &projection,
+        agent_runtime_result_summary_contract(&step),
+    );
+
+    assert!(message.content.contains("do_not_echo_runtime_ids"));
+    assert!(message.content.contains("evidence_set_ref"));
+    assert!(message.content.contains("\"evidence_refs\":[]"));
+    assert!(!message.content.contains("ev-transient-one"));
+    assert!(!message.content.contains("ev-transient-two"));
 }
 
 #[test]
