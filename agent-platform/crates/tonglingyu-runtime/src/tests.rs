@@ -1136,6 +1136,16 @@ impl RuntimeClient for DraftRepairRuntimeClient {
                 "draft-repair runtime requires repair context",
             ));
         }
+        if !message.contains("\"direct_count\":2")
+            || !message.contains("良儿偷玉")
+            || !message.contains("凤姐扫雪拾玉")
+            || !message.contains("甄宝玉送玉")
+        {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "draft-repair runtime requires structured slot count context",
+            ));
+        }
         let package_id =
             package_id_from_step_message(&message).unwrap_or_else(|| "pkg-missing".to_string());
         Ok(RuntimeOutput {
@@ -6800,6 +6810,28 @@ fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
 }
 
 #[test]
+fn runtime_count_policy_exposes_public_slot_context_for_upstream() {
+    let value = evidence_slot_count_context_value(
+        "通灵宝玉丢了几次",
+        &in_scope_lost_jade_event_cards(),
+        true,
+    )
+    .expect("count context");
+
+    assert_eq!(value["direct_count"], json!(2));
+    assert_eq!(
+        value["direct_slots"]
+            .as_array()
+            .expect("direct slots")
+            .iter()
+            .filter_map(|item| item.get("label").and_then(Value::as_str))
+            .collect::<Vec<_>>(),
+        vec!["凤姐扫雪拾玉", "良儿偷玉"]
+    );
+    assert_eq!(value["related_slots"][0]["label"], json!("甄宝玉送玉"));
+}
+
+#[test]
 fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
@@ -6989,8 +7021,9 @@ async fn runtime_repairs_rejected_profile_draft_with_same_package_boundary() {
         "package_id": &package_id,
         "evidence_ids": evidence_ids(&workflow.package.cards),
         "evidence_brief": upstream_evidence_brief(&workflow.question, &workflow.package.cards),
-        "evidence_slot_count_policy": evidence_slot_count_policy_value(
+        "evidence_slot_count_policy": evidence_slot_count_context_value(
             &workflow.question,
+            &workflow.package.cards,
             count_question,
         )
         .expect("count policy"),

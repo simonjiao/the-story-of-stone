@@ -3510,8 +3510,9 @@ pub fn execute_runtime_workflow(
             "package_id": &package.package_id,
             "evidence_ids": evidence_ids(&package.cards),
             "evidence_brief": upstream_evidence_brief(&input.question, &package.cards),
-            "evidence_slot_count_policy": evidence_slot_count_policy_value(
+            "evidence_slot_count_policy": evidence_slot_count_context_value(
                 &input.question,
+                &package.cards,
                 count_question,
             )?,
             "claim_statements": &package.claims,
@@ -4418,6 +4419,8 @@ fn compact_evidence_slot_count_policy_for_message(
     if let Some(active_basis) = active_basis {
         insert_existing_value(&mut compact_basis, active_basis, "id");
         insert_existing_value(&mut compact_basis, active_basis, "label");
+        insert_existing_value(&mut compact_basis, active_basis, "answer_unit");
+        insert_existing_value(&mut compact_basis, active_basis, "answer_noun");
     }
     json!({
         "active_count_basis": Value::Object(compact_basis),
@@ -4425,8 +4428,55 @@ fn compact_evidence_slot_count_policy_for_message(
             .get("count_question")
             .cloned()
             .unwrap_or(Value::Bool(false)),
-        "rule": "direct_count = unique evidence_slots whose rule.counts_as includes active_count_basis.id; other slots are related_clues"
+        "direct_count": evidence_slot_count_policy
+            .get("direct_count")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "direct_slots": compact_count_context_slots_for_message(
+            evidence_slot_count_policy
+                .get("direct_slots")
+                .unwrap_or(&Value::Null),
+            compaction_level,
+        ),
+        "related_slots": compact_count_context_slots_for_message(
+            evidence_slot_count_policy
+                .get("related_slots")
+                .unwrap_or(&Value::Null),
+            compaction_level,
+        ),
+        "rule": "For count questions, use direct_count exactly; direct_slots are counted, related_slots are mentioned separately and do not change direct_count"
     })
+}
+
+fn compact_count_context_slots_for_message(slots: &Value, compaction_level: usize) -> Value {
+    let Some(items) = slots.as_array() else {
+        return json!([]);
+    };
+    let (limit, source_title_chars) = match compaction_level {
+        1 => (5, 64),
+        2 => (4, 48),
+        _ => (3, 40),
+    };
+    Value::Array(
+        items
+            .iter()
+            .take(limit)
+            .filter_map(Value::as_object)
+            .map(|slot| {
+                let mut compact = Map::new();
+                insert_existing_value(&mut compact, slot, "id");
+                insert_existing_value(&mut compact, slot, "label");
+                insert_existing_value(&mut compact, slot, "public_role_label");
+                insert_existing_value(&mut compact, slot, "counts_as");
+                insert_existing_value(&mut compact, slot, "display_group");
+                insert_existing_value(&mut compact, slot, "count_note");
+                insert_existing_value(&mut compact, slot, "evidence_id");
+                insert_existing_value(&mut compact, slot, "source_layer");
+                insert_trimmed_string(&mut compact, slot, "source_title", source_title_chars);
+                Value::Object(compact)
+            })
+            .collect(),
+    )
 }
 
 fn compact_evidence_slot_rules_for_message(rules: &Value, compaction_level: usize) -> Value {
@@ -4440,14 +4490,14 @@ fn compact_evidence_slot_rules_for_message(rules: &Value, compaction_level: usiz
             .map(|rule| {
                 let mut compact = Map::new();
                 insert_existing_value(&mut compact, rule, "id");
-                if compaction_level == 1 {
-                    insert_existing_value(&mut compact, rule, "label");
+                insert_existing_value(&mut compact, rule, "label");
+                insert_existing_value(&mut compact, rule, "public_role_label");
+                if compaction_level <= 1 {
+                    insert_existing_value(&mut compact, rule, "role");
                 }
-                insert_existing_value(&mut compact, rule, "role");
                 insert_existing_value(&mut compact, rule, "counts_as");
-                if compaction_level <= 2 {
-                    insert_existing_value(&mut compact, rule, "display_group");
-                }
+                insert_existing_value(&mut compact, rule, "display_group");
+                insert_existing_value(&mut compact, rule, "count_note");
                 Value::Object(compact)
             })
             .collect(),
@@ -4639,7 +4689,7 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. The visible draft_answer must name public event/source labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, if evidence_slot_count_policy.direct_count is present, use that number exactly; direct_slots are counted evidence, related_slots are separate clues that must not change direct_count. The visible draft_answer must name public event/source labels from evidence_slot_rules.label or count policy slot labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -4937,8 +4987,8 @@ fn agent_runtime_profile_step_repair_message_content(
         "rejected_reason": rejected_reason,
         "required_action": "return a full replacement upstream bundle that satisfies the same result_summary_contract",
         "package_binding": "package_id, source_scope_policy, and evidence_refs must come only from step_output_json",
-        "count_rule": "for count questions, direct_count is the unique evidence_slots whose rule.counts_as contains active_count_basis.id; related clues must not be counted as direct evidence",
-        "public_answer_rule": "the visible draft_answer must use public event/source labels, embed short evidence cues, and avoid internal runtime terms",
+        "count_rule": "for count questions, use evidence_slot_count_policy.direct_count exactly when present; direct_slots are counted evidence and related_slots are separate clues",
+        "public_answer_rule": "the visible draft_answer must use public labels from evidence_slot_rules.label or evidence_slot_count_policy slot labels, embed short evidence/source cues, and avoid internal runtime terms",
         "failure_boundary": "if the repaired bundle cannot satisfy these constraints, return coverage_assessment.status=insufficient with concrete missing_in_scope_slots",
     });
     format!(
@@ -5712,6 +5762,64 @@ fn public_source_cues(source_title: &str) -> Vec<String> {
     cues.sort();
     cues.dedup();
     cues
+}
+
+fn evidence_slot_count_context_value(
+    question: &str,
+    cards: &[EvidenceCard],
+    count_question: bool,
+) -> Result<Value> {
+    let mut policy = evidence_slot_count_policy_value(question, count_question)?;
+    if !count_question {
+        return Ok(policy);
+    }
+    let Some(active_basis) = active_count_basis_for_question(question, true)? else {
+        return Ok(policy);
+    };
+    let slot_matches = evidence_slot_matches_for_cards(question, cards)?;
+    let direct = representative_matches(&slot_matches, |item| {
+        item.counts_as.iter().any(|basis| basis == &active_basis.id)
+    });
+    let related = representative_matches(&slot_matches, |item| {
+        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
+            && item.display_group != "unclassified"
+    });
+    if let Some(object) = policy.as_object_mut() {
+        object.insert("direct_count".to_string(), json!(direct.len()));
+        object.insert(
+            "direct_slots".to_string(),
+            Value::Array(
+                direct
+                    .iter()
+                    .map(evidence_slot_match_count_context_value)
+                    .collect(),
+            ),
+        );
+        object.insert(
+            "related_slots".to_string(),
+            Value::Array(
+                related
+                    .iter()
+                    .map(evidence_slot_match_count_context_value)
+                    .collect(),
+            ),
+        );
+    }
+    Ok(policy)
+}
+
+fn evidence_slot_match_count_context_value(item: &EvidenceSlotMatch) -> Value {
+    json!({
+        "id": &item.slot_id,
+        "label": &item.label,
+        "public_role_label": &item.public_role_label,
+        "counts_as": &item.counts_as,
+        "display_group": &item.display_group,
+        "count_note": &item.count_note,
+        "evidence_id": &item.evidence_id,
+        "source_layer": &item.source_layer,
+        "source_title": &item.source_title,
+    })
 }
 
 fn count_slot_representatives_for_boundary(

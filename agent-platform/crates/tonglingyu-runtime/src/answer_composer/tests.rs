@@ -24,6 +24,7 @@ fn slot_match(
     text: &str,
 ) -> EvidenceSlotMatch {
     EvidenceSlotMatch {
+        evidence_id: format!("ev-{slot_id}"),
         slot_id: slot_id.to_string(),
         label: label.to_string(),
         public_role_label: public_role_label.to_string(),

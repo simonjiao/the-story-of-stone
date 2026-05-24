@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub(crate) struct EvidenceSlotMatch {
+    pub evidence_id: String,
     pub slot_id: String,
     pub label: String,
     pub public_role_label: String,
@@ -22,7 +23,7 @@ pub(crate) struct EvidenceSlotMatch {
 
 impl EvidenceSlotMatch {
     pub(crate) fn from_rule(
-        _evidence_id: &str,
+        evidence_id: &str,
         source_title: &str,
         source_layer: &str,
         text: &str,
@@ -30,6 +31,7 @@ impl EvidenceSlotMatch {
         rule: EvidenceSlotRule,
     ) -> Self {
         Self {
+            evidence_id: evidence_id.to_string(),
             slot_id: rule.id,
             label: rule.label,
             public_role_label: rule.public_role_label,
