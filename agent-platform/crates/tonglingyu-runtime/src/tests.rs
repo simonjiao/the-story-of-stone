@@ -6834,6 +6834,13 @@ fn runtime_count_policy_exposes_public_slot_context_for_upstream() {
     assert_eq!(compact["direct_count"], json!(2));
     assert_eq!(compact["direct_slots"][0]["label"], json!("凤姐扫雪拾玉"));
     assert_eq!(compact["related_slots"][0]["label"], json!("甄宝玉送玉"));
+    assert!(
+        compact["related_slots"][0]["source_cues"]
+            .as_array()
+            .expect("source cues")
+            .iter()
+            .any(|value| value == "第18回" || value == "第十八回")
+    );
     assert!(compact["direct_slots"][0].get("counts_as").is_none());
 }
 
