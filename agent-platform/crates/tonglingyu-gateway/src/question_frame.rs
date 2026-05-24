@@ -68,9 +68,7 @@ pub(crate) fn build_question_frame(question: &str) -> Result<QuestionFrame> {
             None
         } else {
             subjects
-                .iter()
-                .skip(1)
-                .next()
+                .get(1)
                 .map(|canonical| frame_entity(canonical, "current_question"))
                 .transpose()?
         };
