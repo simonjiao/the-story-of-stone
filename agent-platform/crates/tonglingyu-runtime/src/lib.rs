@@ -4982,13 +4982,8 @@ fn agent_runtime_profile_step_repair_message_content(
     rejected_reason: &str,
     compaction_level: usize,
 ) -> String {
-    let base = agent_runtime_profile_step_message_content(
-        trace_id,
-        step,
-        projection,
-        result_summary_contract,
-        compaction_level,
-    );
+    let projection_payload = compact_repair_context_projection_payload_for_message(projection);
+    let step_output = step_output_message_payload_with_compaction(step, compaction_level);
     let repair_context = json!({
         "object": "tonglingyu.draft_repair_context",
         "rejected_reason": rejected_reason,
@@ -5000,9 +4995,33 @@ fn agent_runtime_profile_step_repair_message_content(
         "failure_boundary": "if the repaired bundle cannot satisfy these constraints, return coverage_assessment.status=insufficient with concrete missing_in_scope_slots",
     });
     format!(
-        "{base}draft_repair_context_json: {}\nrepair_instruction: Fix the rejected draft without changing the evidence package boundary. Return only the replacement JSON object.\n",
+        "Tonglingyu profile draft repair context.\nOutput rule: return exactly one non-empty JSON object as assistant content. Do not return an empty assistant message. Do not use markdown.\ntrace_id: {trace_id}\nprofile: {}\noperation: {}\ncontext_projection_payload_json: {}\nresult_summary_contract: {result_summary_contract}\nstep_output_json: {}\ndraft_repair_context_json: {}\nrepair_instruction: Fix the rejected draft without changing the evidence package boundary. Return only the replacement JSON object.\n",
+        step.profile,
+        step.operation,
+        serde_json::to_string(&projection_payload).unwrap_or_else(|_| "{}".to_string()),
+        serde_json::to_string(&step_output).unwrap_or_else(|_| "{}".to_string()),
         serde_json::to_string(&repair_context).unwrap_or_else(|_| "{}".to_string())
     )
+}
+
+fn compact_repair_context_projection_payload_for_message(
+    projection: &RuntimeContextProjection,
+) -> Value {
+    let mut compact = Map::new();
+    if let Some(source) = projection.projection_payload.as_object() {
+        insert_trimmed_string(&mut compact, source, "visible_question", 160);
+        insert_trimmed_string(&mut compact, source, "resolved_question", 160);
+        insert_trimmed_string(&mut compact, source, "session_summary", 220);
+    }
+    compact.insert(
+        "context_projection_digest".to_string(),
+        Value::String(projection.context_projection_digest.clone()),
+    );
+    compact.insert(
+        "projection_payload_sha256".to_string(),
+        Value::String(hash_json(&projection.projection_payload)),
+    );
+    Value::Object(compact)
 }
 
 fn agent_runtime_execution_summary(

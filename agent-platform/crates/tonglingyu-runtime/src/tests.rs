@@ -3194,8 +3194,9 @@ fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
             "package_id": "pkg-loss-event-message-budget",
             "evidence_ids": evidence_ids,
             "evidence_brief": evidence_brief,
-            "evidence_slot_count_policy": evidence_slot_count_policy_value(
+            "evidence_slot_count_policy": evidence_slot_count_context_value(
                 "通灵宝玉丢了几次",
+                &cards,
                 true,
             )
             .expect("slot count policy"),
@@ -3221,6 +3222,71 @@ fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
     assert!(message.content.contains("zhen_baoyu_delivers_jade"));
     assert!(message.content.contains("fengjie_snow_pickup_jade"));
     assert!(!message.content.contains(&"前置脂批材料。".repeat(20)));
+}
+
+#[test]
+fn agent_runtime_draft_repair_message_uses_minimal_payload_under_budget() {
+    let projection = test_runtime_projection(
+        "trace-repair-message-budget",
+        "context-pack://test/repair-message-budget",
+        "honglou-main",
+        "通灵宝玉丢了几次",
+        Some("最近用户在追问通灵宝玉失玉次数。".to_string()),
+        vec!["tonglingyu.evidence.package.read".to_string()],
+    );
+    let cards = in_scope_lost_jade_event_cards();
+    let evidence_brief = upstream_evidence_brief("通灵宝玉丢了几次", &cards);
+    let evidence_ids = evidence_brief
+        .iter()
+        .filter_map(|item| item.get("evidence_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let step = RuntimeWorkflowStepReport {
+        step_id: "step-03-draft-answer".to_string(),
+        profile: "honglou-main".to_string(),
+        profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
+        operation: "draft_answer".to_string(),
+        status: "completed".to_string(),
+        required: true,
+        allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
+        tool_calls: vec!["tonglingyu.evidence.package.read".to_string()],
+        input_ref: Some("runtime://test/package".to_string()),
+        output_ref: "runtime://test/step-03-draft-answer".to_string(),
+        duration_ms: 1,
+        trace_id: "trace-repair-message-budget".to_string(),
+        output: json!({
+            "object": "tonglingyu.draft_answer",
+            "package_id": "pkg-repair-message-budget",
+            "evidence_ids": evidence_ids,
+            "evidence_brief": evidence_brief,
+            "evidence_slot_count_policy": evidence_slot_count_context_value(
+                "通灵宝玉丢了几次",
+                &cards,
+                true,
+            )
+            .expect("slot count context"),
+            "source_scope_policy": source_scope_policy_for_question("通灵宝玉丢了几次"),
+        }),
+        agent_runtime: None,
+    };
+
+    let message = agent_runtime_profile_step_repair_message(
+        "trace-repair-message-budget",
+        &step,
+        &projection,
+        agent_runtime_result_summary_contract(&step),
+        "draft_missing_embedded_evidence_source",
+    );
+
+    assert!(
+        message.content.len() < AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES,
+        "repair message should stay inside safety budget: {}",
+        message.content.len()
+    );
+    assert!(message.content.contains("draft_repair_context_json"));
+    assert!(message.content.contains("source_cues"));
+    assert!(message.content.contains("第18回"));
+    assert!(!message.content.contains("context_projection_ref"));
 }
 
 #[test]
