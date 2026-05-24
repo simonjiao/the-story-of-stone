@@ -46,10 +46,10 @@ use evidence_slot_rules::{
 };
 use governance_rules::{
     blocked_prompt_control_issues, claim_evidence_types_for_claim, claim_rules,
-    draft_has_unsupported_term_without_evidence, draft_stops_for_user_opt_in,
-    empty_evidence_review_issue, later_forty_boundary_missing_from_claims,
-    later_forty_boundary_review_issue, preferred_answer_evidence_types,
-    triggered_review_rule_issues,
+    draft_has_public_forbidden_term, draft_has_unsupported_term_without_evidence,
+    draft_stops_for_user_opt_in, empty_evidence_review_issue,
+    later_forty_boundary_missing_from_claims, later_forty_boundary_review_issue,
+    preferred_answer_evidence_types, triggered_review_rule_issues,
 };
 use ontology_aliases::seed_aliases;
 use upstream_bundle::{
@@ -4509,7 +4509,7 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. The visible draft_answer must name the relevant evidence slot labels and embed a short source or phrase cue; do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, count only slots whose evidence_slot_rules counts_as contains active_count_basis.id; slots without that basis are related clues, not direct count evidence. The visible draft_answer must name public event/source labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -5317,6 +5317,9 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     }
     if draft_exposes_internal_evidence_slot_ids(question, &draft_text, cards) {
         return Some("draft_exposes_internal_evidence_slot_id");
+    }
+    if draft_has_public_forbidden_term(&draft_text).unwrap_or(true) {
+        return Some("draft_exposes_internal_public_term");
     }
     if draft_negates_direct_evidence_slot(question, &draft_text, cards) {
         return Some("draft_negates_direct_evidence_slot_count");

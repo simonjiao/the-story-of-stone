@@ -13,6 +13,10 @@ fn default_catalog_drives_draft_boundary_terms() {
         !draft_has_unsupported_term_without_evidence("这是礼教问题", "礼教一词已在证据中出现")
             .expect("unsupported terms load")
     );
+    assert!(
+        draft_has_public_forbidden_term("证据槽可标为人物结局提示")
+            .expect("public forbidden terms load")
+    );
 }
 
 #[test]

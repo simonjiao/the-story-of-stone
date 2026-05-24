@@ -35,6 +35,7 @@ struct GovernanceRuleCatalog {
 pub(crate) struct DraftBoundaryRules {
     pub user_opt_in_stop_terms: Vec<String>,
     pub unsupported_terms_without_evidence: Vec<String>,
+    pub public_forbidden_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,6 +219,10 @@ fn parse_governance_rule_catalog(source: &str) -> Result<GovernanceRuleCatalog> 
         &catalog.draft_boundary.unsupported_terms_without_evidence,
     )?;
     require_non_empty_terms(
+        "draft_boundary.public_forbidden_terms",
+        &catalog.draft_boundary.public_forbidden_terms,
+    )?;
+    require_non_empty_terms(
         "source_scope.later_forty_question_terms",
         &catalog.source_scope.later_forty_question_terms,
     )?;
@@ -323,6 +328,15 @@ pub(crate) fn draft_has_unsupported_term_without_evidence(
             term_matches(draft_text, &normalize_text(draft_text), term)
                 && !term_matches(evidence_text, &normalize_text(evidence_text), term)
         }))
+}
+
+pub(crate) fn draft_has_public_forbidden_term(draft_text: &str) -> Result<bool> {
+    let catalog = governance_rule_catalog()?;
+    Ok(contains_any_term(
+        draft_text,
+        &normalize_text(draft_text),
+        &catalog.draft_boundary.public_forbidden_terms,
+    ))
 }
 
 pub(crate) fn source_scope_question_allows_later_forty(question: &str) -> Result<bool> {

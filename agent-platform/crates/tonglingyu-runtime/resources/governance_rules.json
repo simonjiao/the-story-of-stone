@@ -28,6 +28,18 @@
       "反抗",
       "曹雪芹",
       "误会"
+    ],
+    "public_forbidden_terms": [
+      "证据槽",
+      "證據槽",
+      "槽位",
+      "evidence slot",
+      "slot id",
+      "package_id",
+      "trace_id",
+      "context_pack",
+      "claim_statements",
+      "result_summary"
     ]
   },
   "source_scope": {

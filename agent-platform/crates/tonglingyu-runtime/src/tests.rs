@@ -588,7 +588,9 @@ impl RuntimeClient for DraftRuntimeClient {
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
                         &package_id_from_step_message(&message)
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        &format!("Hermes full workflow draft from {operation}. context={message}"),
+                        &format!(
+                            "Hermes full workflow draft from {operation} with a public source cue."
+                        ),
                         "Hermes full workflow draft claim",
                         evidence_ids_from_step_message(&message),
                     ),
@@ -680,7 +682,9 @@ impl RuntimeClient for NoToolRuntimeClient {
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
                         &package_id_from_step_message(&message)
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        &format!("Hermes full workflow draft from {operation}. context={message}"),
+                        &format!(
+                            "Hermes full workflow draft from {operation} with a public source cue."
+                        ),
                         "Hermes full workflow draft claim",
                         evidence_ids_from_step_message(&message),
                     ),
@@ -6669,6 +6673,20 @@ fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
 }
 
 #[test]
+fn runtime_rejects_public_draft_with_internal_answer_terms() {
+    let mut commentary = sample_card("commentary");
+    commentary.text = "第六支，樂中悲：襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。".to_string();
+
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "关于史湘云的结局，脂批中的证据呢",
+        "当前可直接用的证据槽主要是《第五回》“乐中悲”：终久是云散高唐，水涸湘江。",
+        &[commentary],
+    );
+
+    assert_eq!(rejected, Some("draft_exposes_internal_public_term"));
+}
+
+#[test]
 fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
@@ -7972,7 +7990,6 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
 
     assert_eq!(workflow.package.review.status, "passed");
     assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
-    assert!(workflow.draft_answer.contains(&workflow.package.package_id));
     assert!(workflow.final_answer.contains("Hermes full workflow draft"));
     assert_eq!(
         workflow.answer_source,
