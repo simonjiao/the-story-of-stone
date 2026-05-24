@@ -87,6 +87,7 @@ run uv run --no-sync python -m unittest discover \
 run uv run --no-sync python -m unittest discover \
   -s "${REPO_DIR}/open-webui/functions" \
   -p 'test_*.py'
+run bash "${REPO_DIR}/scripts/check-tonglingyu-no-question-hardcode.sh" --base HEAD
 
 while IFS= read -r -d '' script_path; do
   run bash -n "${script_path}"
