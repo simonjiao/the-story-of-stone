@@ -45,6 +45,9 @@ struct FlakyProfileRuntimeClient {
 }
 
 #[derive(Debug, Default)]
+struct DraftRepairRuntimeClient;
+
+#[derive(Debug, Default)]
 struct CalibrationJudgeRuntimeClient;
 
 #[test]
@@ -497,6 +500,7 @@ impl RuntimeClient for DraftRuntimeClient {
             1
         };
         let package_id = package_id_from_step_message(&message);
+        let public_draft = public_draft_from_step_message(&message);
         let tool_results = if input.requested_tools.is_empty() {
             json!([])
         } else {
@@ -593,10 +597,8 @@ impl RuntimeClient for DraftRuntimeClient {
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
                         &package_id_from_step_message(&message)
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        &format!(
-                            "Hermes full workflow draft from {operation} with a public source cue."
-                        ),
-                        "Hermes full workflow draft claim",
+                        &public_draft,
+                        &public_draft,
                         evidence_ids_from_step_message(&message),
                     ),
                     "evidence_package_create" => serde_json::to_string(&json!({
@@ -663,6 +665,7 @@ impl RuntimeClient for NoToolRuntimeClient {
             .first()
             .map(|message| message.content.clone())
             .unwrap_or_default();
+        let public_draft = public_draft_from_step_message(&message);
         Ok(RuntimeOutput {
                 result_summary: match operation {
                     "text_evidence_search" => serde_json::to_string(&json!({
@@ -687,10 +690,8 @@ impl RuntimeClient for NoToolRuntimeClient {
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
                         &package_id_from_step_message(&message)
                             .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                        &format!(
-                            "Hermes full workflow draft from {operation} with a public source cue."
-                        ),
-                        "Hermes full workflow draft claim",
+                        &public_draft,
+                        &public_draft,
                         evidence_ids_from_step_message(&message),
                     ),
                     "evidence_package_create" => serde_json::to_string(&json!({
@@ -1108,6 +1109,62 @@ impl RuntimeClient for FlakyProfileRuntimeClient {
 }
 
 #[async_trait]
+impl RuntimeClient for DraftRepairRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "draft-repair runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "draft-repair runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let message = input
+            .messages
+            .first()
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        if !message.contains("draft_repair_context_json") {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "draft-repair runtime requires repair context",
+            ));
+        }
+        let package_id =
+            package_id_from_step_message(&message).unwrap_or_else(|| "pkg-missing".to_string());
+        Ok(RuntimeOutput {
+            result_summary: upstream_bundle_summary_with_policy(
+                source_scope_policy_from_step_message(&message),
+                &package_id,
+                &package_id,
+                "按当前材料的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
+                "默认范围内的正文和脂批证据支持两处明确失玉证据，并保留一条疑似流转线索。",
+                evidence_ids_from_step_message(&message),
+            ),
+            result_ref: Some(format!(
+                "result://draft-repair-runtime/{}",
+                input.profile_id
+            )),
+            messages: Vec::new(),
+            metadata: json!({
+                "runtime_profile": input.profile_id,
+                "trace_id": input.trace_id,
+                "operation": "draft_answer",
+                "tool_rounds": 0,
+                "tool_results": [],
+                "tool_audit_events": [],
+            }),
+        })
+    }
+}
+
+#[async_trait]
 impl RuntimeClient for SlowDraftRuntimeClient {
     async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
         DraftRuntimeClient.execute_run(input).await
@@ -1175,6 +1232,29 @@ fn evidence_ids_from_step_message(message: &str) -> Vec<String> {
                 })
         })
         .unwrap_or_default()
+}
+
+fn public_draft_from_step_message(message: &str) -> String {
+    let source_and_text = step_output_from_message(message)
+        .and_then(|value| {
+            let first = value.get("evidence_brief")?.as_array()?.first()?;
+            let source_title = first
+                .get("source_title")
+                .and_then(Value::as_str)
+                .map(|value| trim_text(value, 32))
+                .unwrap_or_else(|| "当前材料".to_string());
+            let text = first
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|value| trim_text(value, 48))
+                .unwrap_or_else(|| "原文片段".to_string());
+            Some((source_title, text))
+        })
+        .unwrap_or_else(|| ("当前材料".to_string(), "原文片段".to_string()));
+    format!(
+        "根据{}“{}”，可以在当前材料范围内作答；结论不外推到未给出的版本。",
+        source_and_text.0, source_and_text.1
+    )
 }
 
 fn upstream_bundle_summary(
@@ -1378,6 +1458,30 @@ fn seed_lost_jade_runtime_blocks(conn: &Connection) {
         )
         .expect("insert lost jade runtime block");
     }
+}
+
+fn seed_basic_tonglingyu_runtime_block(conn: &Connection) {
+    let source_title = "紅樓夢/第008回";
+    let text = "寶玉項上所佩之玉，通稱通靈寶玉；此處材料只支持說明通靈玉與寶玉隨身之玉相關。";
+    conn.execute(
+        r#"
+        INSERT INTO blocks (
+            block_id, source_id, section_id, source_title, normalized_source_title,
+            source_url, revision_id, block_index, kind, tag, text, normalized_text,
+            evidence_type, chapter_no
+        ) VALUES (?1, 'quality-source', 'quality-section-basic-tonglingyu',
+            ?2, ?3, 'https://example.test/source/basic-tonglingyu',
+            1, 1, 'paragraph', NULL, ?4, ?5, 'base_text', 8)
+        "#,
+        params![
+            "quality-block-basic-tonglingyu",
+            source_title,
+            normalize_title(source_title),
+            text,
+            normalize_text(text),
+        ],
+    )
+    .expect("insert basic tonglingyu runtime block");
 }
 
 fn yousanjie_test_package() -> EvidencePackage {
@@ -6865,44 +6969,83 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
     );
 }
 
-#[test]
-fn runtime_draft_rejection_completion_policy_accepts_local_boundary_rejections() {
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_claim_exceeds_evidence_boundary"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_stops_for_user_opt_in"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_missing_later_forty_boundary"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_uses_unscoped_later_forty"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_count_conflicts_with_evidence_events"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_exposes_internal_evidence_slot_id"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_missing_embedded_evidence_anchor"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "draft_missing_embedded_evidence_source"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "coverage_assessment_not_passed"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "coverage_assessment_status_missing"
-    )));
-    assert!(agent_runtime_draft_rejection_completes_governance(Some(
-        "claim_evidence_refs_unavailable"
-    )));
-    assert!(!agent_runtime_draft_rejection_completes_governance(Some(
-        "package_id_mismatch"
-    )));
+#[tokio::test]
+async fn runtime_repairs_rejected_profile_draft_with_same_package_boundary() {
+    let mut workflow = runtime_draft_workflow(
+        in_scope_lost_jade_event_cards(),
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "通灵宝玉丢了几次".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    let count_question = question_asks_for_count(&workflow.question).expect("count intent");
+    workflow.steps[0].output = json!({
+        "object": "tonglingyu.draft_answer",
+        "package_id": &package_id,
+        "evidence_ids": evidence_ids(&workflow.package.cards),
+        "evidence_brief": upstream_evidence_brief(&workflow.question, &workflow.package.cards),
+        "evidence_slot_count_policy": evidence_slot_count_policy_value(
+            &workflow.question,
+            count_question,
+        )
+        .expect("count policy"),
+        "claim_statements": &workflow.package.claims,
+        "answer_source": "runtime_local_profile",
+        "source_scope_policy": source_scope_policy_for_question(&workflow.question),
+        "out_of_scope_hints": [],
+    });
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "第52回良儿偷玉、第23回脂批凤姐扫雪拾玉、第18回脂批甄宝玉送玉均有材料；但第23回脂批凤姐扫雪拾玉不计入失玉次数，甄宝玉送玉只是疑似流转线索。",
+            "通灵宝玉只有一处明确失玉证据。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let rejected = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("initial draft is rejected");
+    assert!(!rejected.draft_consumed);
+    assert_eq!(
+        rejected.rejected_reason,
+        Some("draft_negates_direct_evidence_slot_count")
+    );
+
+    let profiles = RuntimeWorkflowProfiles::default();
+    let context = test_runtime_context(&workflow.trace_id, &workflow.question, &profiles);
+    repair_agent_runtime_draft(
+        &mut workflow,
+        &profiles,
+        &context,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+        Arc::new(DraftRepairRuntimeClient),
+        &rejected,
+    )
+    .await
+    .expect("draft repair executes");
+    let repaired = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("repaired draft is consumed");
+
+    assert!(repaired.draft_consumed);
+    assert_eq!(repaired.rejected_reason, None);
+    assert!(workflow.final_answer.contains("两处"));
+    assert!(workflow.final_answer.contains("凤姐扫雪拾玉"));
+    assert_eq!(
+        workflow.steps[0].agent_runtime.as_ref().unwrap()["draft_repair"]["initial_rejection"]["rejected_reason"],
+        json!("draft_negates_direct_evidence_slot_count")
+    );
 }
 
 #[test]
@@ -8007,6 +8150,7 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
                 "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
@@ -8023,8 +8167,8 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
         .expect("workflow executes");
 
     assert_eq!(workflow.package.review.status, "passed");
-    assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
-    assert!(workflow.final_answer.contains("Hermes full workflow draft"));
+    assert!(workflow.draft_answer.contains("当前材料"));
+    assert!(workflow.final_answer.contains("当前材料"));
     assert_eq!(
         workflow.answer_source,
         "agent_runtime_hermes_profile_with_local_review"
@@ -8119,7 +8263,7 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
             && event
                 .content_delta
                 .as_deref()
-                .is_some_and(|chunk| chunk.contains("Hermes full workflow draft"))
+                .is_some_and(|chunk| chunk.contains("当前材料"))
     }));
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
@@ -8201,6 +8345,7 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
                 "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
@@ -8217,8 +8362,8 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
         .expect("openai-compatible profile workflow executes");
 
     assert_eq!(workflow.package.review.status, "passed");
-    assert!(workflow.draft_answer.contains("Hermes full workflow draft"));
-    assert!(workflow.final_answer.contains("Hermes full workflow draft"));
+    assert!(workflow.draft_answer.contains("当前材料"));
+    assert!(workflow.final_answer.contains("当前材料"));
     assert_eq!(
         workflow.answer_source,
         "agent_runtime_openai_compatible_profile_with_local_review"
@@ -8325,6 +8470,7 @@ async fn runtime_profile_step_retries_transient_failure_without_local_fallback()
                 "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let trace_id = "trace-openai-compatible-profile-retry-test";
     let workflow = store
@@ -8378,11 +8524,12 @@ async fn runtime_store_audits_openai_compatible_provider_request_payload() {
                 "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
             }),
         );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let trace_id = "trace-provider-request-audit-test";
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
-            test_workflow_input(trace_id, "史湘云的结局", 2, vec!["base_text".to_string()]),
+            test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
             TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
             Arc::new(ProviderRequestRuntimeClient),
         )
@@ -8440,6 +8587,17 @@ async fn hermes_workflow_host_enforces_missing_runtime_tool_results() {
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
@@ -8494,6 +8652,17 @@ async fn hermes_workflow_rejects_unbound_runtime_tool_output_refs() {
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let error = store
         .execute_workflow_with_agent_runtime_client(
@@ -8528,6 +8697,17 @@ async fn hermes_workflow_rejects_mismatched_evidence_tool_output_refs() {
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let error = store
         .execute_workflow_with_agent_runtime_client(
@@ -8770,6 +8950,17 @@ async fn hermes_workflow_rejects_missing_tool_audit_events() {
     {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        seed_basic_tonglingyu_runtime_block(&conn);
     }
     let trace_id = "trace-hermes-missing-tool-audit-test";
     let error = store

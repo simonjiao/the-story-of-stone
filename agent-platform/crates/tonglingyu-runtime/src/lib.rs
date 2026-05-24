@@ -1278,7 +1278,7 @@ impl TonglingyuRuntimeStore {
             &input.profiles,
             &input.context,
             mode,
-            runtime,
+            runtime.clone(),
         )
         .await
         {
@@ -1294,8 +1294,32 @@ impl TonglingyuRuntimeStore {
             apply_agent_runtime_evidence_outputs(&mut workflow, mode);
         let agent_runtime_package_observation =
             apply_agent_runtime_package_output(&mut workflow, mode);
-        let agent_runtime_content_application =
+        let mut agent_runtime_content_application =
             apply_agent_runtime_content_outputs(&mut workflow, mode);
+        let repair_application = agent_runtime_content_application
+            .filter(|application| should_repair_agent_runtime_draft(mode, Some(application)));
+        if let Some(rejected_application) = repair_application {
+            if let Err(error) = repair_agent_runtime_draft(
+                &mut workflow,
+                &input.profiles,
+                &input.context,
+                mode,
+                runtime,
+                &rejected_application,
+            )
+            .await
+            {
+                self.record_agent_runtime_rejection(
+                    &workflow,
+                    mode,
+                    "agent_runtime_draft_repair",
+                    &error,
+                );
+                return Err(error);
+            }
+            agent_runtime_content_application =
+                apply_agent_runtime_content_outputs(&mut workflow, mode);
+        }
         let agent_runtime_review_observation =
             apply_agent_runtime_reviewer_output(&mut workflow, mode);
         workflow.agent_runtime_summary = agent_runtime_execution_summary(
@@ -1443,7 +1467,8 @@ impl TonglingyuRuntimeStore {
                 .filter(|step| step.agent_runtime.is_some())
                 .count();
             let provider_diagnostic = error
-                .downcast_ref::<AgentCoreError>()
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<AgentCoreError>())
                 .and_then(|error| error.diagnostic().cloned())
                 .unwrap_or(Value::Null);
             let _ = append_runtime_audit_event(
@@ -3638,6 +3663,16 @@ async fn execute_agent_runtime_profile_step(
         runtime,
     )
     .await?;
+    agent_runtime_step_execution_from_run(index, mode, &step, result_summary_contract, execution)
+}
+
+fn agent_runtime_step_execution_from_run(
+    index: usize,
+    mode: TonglingyuAgentRuntimeMode,
+    step: &RuntimeWorkflowStepReport,
+    result_summary_contract: String,
+    execution: AgentRuntimeProfileStepRun,
+) -> Result<AgentRuntimeStepExecution> {
     let output = execution.output;
     let mut tool_results = output
         .metadata
@@ -3651,11 +3686,11 @@ async fn execute_agent_runtime_profile_step(
         .unwrap_or_else(|| json!([]));
     host_enforce_missing_required_tool_results(
         mode,
-        &step,
+        step,
         &mut tool_results,
         &mut tool_audit_events,
     )?;
-    validate_agent_runtime_required_tools(mode, &step, &tool_results)?;
+    validate_agent_runtime_required_tools(mode, step, &tool_results)?;
     let tool_result_count = tool_results.as_array().map_or(0, Vec::len);
     let tool_audit_event_count = tool_audit_events.as_array().map_or(0, Vec::len);
     Ok(AgentRuntimeStepExecution {
@@ -4715,6 +4750,203 @@ fn agent_runtime_profile_draft_source(mode: TonglingyuAgentRuntimeMode) -> Strin
     format!("agent_runtime_{source}_profile")
 }
 
+fn should_repair_agent_runtime_draft(
+    mode: TonglingyuAgentRuntimeMode,
+    application: Option<&AgentRuntimeContentApplication>,
+) -> bool {
+    agent_runtime_profile_observation_mode(mode)
+        && application.is_some_and(|value| !value.draft_consumed && value.rejected_reason.is_some())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn repair_agent_runtime_draft(
+    workflow: &mut RuntimeWorkflowOutput,
+    profiles: &RuntimeWorkflowProfiles,
+    context: &RuntimeContextContract,
+    mode: TonglingyuAgentRuntimeMode,
+    runtime: Arc<dyn RuntimeClient>,
+    rejected_application: &AgentRuntimeContentApplication,
+) -> Result<()> {
+    let profile_contracts = agent_runtime_profile_contracts(profiles);
+    let contracts = profile_contracts
+        .into_iter()
+        .map(|contract| (contract.profile_id.clone(), contract))
+        .collect::<BTreeMap<_, _>>();
+    let Some((draft_step_index, draft_step)) = workflow
+        .steps
+        .iter()
+        .cloned()
+        .enumerate()
+        .find(|(_, step)| step.operation == "draft_answer")
+    else {
+        return Err(anyhow!("runtime profile draft repair missing draft step"));
+    };
+    let rejected_reason = rejected_application
+        .rejected_reason
+        .ok_or_else(|| anyhow!("runtime profile draft repair missing rejected reason"))?;
+    let contract = contracts.get(&draft_step.profile).cloned().ok_or_else(|| {
+        anyhow!(
+            "runtime profile contract missing for draft repair {}",
+            draft_step.profile
+        )
+    })?;
+    let projection = context
+        .projection_for_consumer(&draft_step.profile)?
+        .clone();
+    let result_summary_contract = agent_runtime_result_summary_contract(&draft_step).to_owned();
+    let runtime_step = agent_runtime_step_from_workflow_step(&draft_step);
+    let visible_question = projection
+        .projection_payload
+        .get("visible_question")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let initial_rejection =
+        agent_runtime_draft_repair_initial_state(&draft_step, rejected_application);
+    let message = agent_runtime_profile_step_repair_message(
+        &workflow.trace_id,
+        &draft_step,
+        &projection,
+        &result_summary_contract,
+        rejected_reason,
+    );
+    let message_bytes = message.content.len();
+    if message_bytes > AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES {
+        return Err(anyhow!(
+            "runtime profile draft repair message exceeded safety budget: step_id={} operation={} bytes={} limit={}",
+            draft_step.step_id,
+            draft_step.operation,
+            message_bytes,
+            AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES
+        ));
+    }
+    let execution = execute_agent_runtime_profile_step_with_retry(
+        &draft_step,
+        &workflow.trace_id,
+        &message,
+        &result_summary_contract,
+        &contract,
+        &runtime_step,
+        &projection,
+        context,
+        visible_question,
+        message_bytes,
+        runtime,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "runtime profile draft repair failed: step_id={} rejected_reason={rejected_reason}",
+            draft_step.step_id
+        )
+    })?;
+    let mut repaired = agent_runtime_step_execution_from_run(
+        draft_step_index,
+        mode,
+        &draft_step,
+        result_summary_contract,
+        execution,
+    )?;
+    if let Some(agent_runtime) = repaired.agent_runtime.as_object_mut() {
+        agent_runtime.insert(
+            "draft_repair".to_string(),
+            json!({
+                "phase": "draft_governance_repair",
+                "attempted": true,
+                "repair_attempt_count": 1,
+                "initial_rejection": initial_rejection,
+            }),
+        );
+    }
+    let step = &mut workflow.steps[draft_step_index];
+    step.agent_runtime = Some(repaired.agent_runtime);
+    step.output["agent_runtime_draft_repair_attempted"] = json!(true);
+    step.output["agent_runtime_initial_draft_rejected_reason"] = json!(rejected_reason);
+    Ok(())
+}
+
+fn agent_runtime_draft_repair_initial_state(
+    step: &RuntimeWorkflowStepReport,
+    application: &AgentRuntimeContentApplication,
+) -> Value {
+    let agent_runtime = step.agent_runtime.as_ref();
+    json!({
+        "rejected_reason": application.rejected_reason,
+        "result_format": application.result_format,
+        "content_used_for_final_answer": application.content_used_for_final_answer,
+        "result_ref": agent_runtime
+            .and_then(|value| value.get("result_ref"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "provider_request_sha256": agent_runtime
+            .and_then(|value| value.get("provider_request_sha256"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "content_source": agent_runtime
+            .and_then(|value| value.get("content_source"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    })
+}
+
+fn agent_runtime_profile_step_repair_message(
+    trace_id: &str,
+    step: &RuntimeWorkflowStepReport,
+    projection: &RuntimeContextProjection,
+    result_summary_contract: &str,
+    rejected_reason: &str,
+) -> RuntimeProfileMessage {
+    let max_compaction_level = if step.operation == "draft_answer" {
+        3
+    } else {
+        0
+    };
+    let mut selected_content = String::new();
+    for compaction_level in 0..=max_compaction_level {
+        selected_content = agent_runtime_profile_step_repair_message_content(
+            trace_id,
+            step,
+            projection,
+            result_summary_contract,
+            rejected_reason,
+            compaction_level,
+        );
+        if selected_content.len() <= AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES {
+            break;
+        }
+    }
+    RuntimeProfileMessage::new("user", selected_content)
+}
+
+fn agent_runtime_profile_step_repair_message_content(
+    trace_id: &str,
+    step: &RuntimeWorkflowStepReport,
+    projection: &RuntimeContextProjection,
+    result_summary_contract: &str,
+    rejected_reason: &str,
+    compaction_level: usize,
+) -> String {
+    let base = agent_runtime_profile_step_message_content(
+        trace_id,
+        step,
+        projection,
+        result_summary_contract,
+        compaction_level,
+    );
+    let repair_context = json!({
+        "object": "tonglingyu.draft_repair_context",
+        "rejected_reason": rejected_reason,
+        "required_action": "return a full replacement upstream bundle that satisfies the same result_summary_contract",
+        "package_binding": "package_id, source_scope_policy, and evidence_refs must come only from step_output_json",
+        "count_rule": "for count questions, direct_count is the unique evidence_slots whose rule.counts_as contains active_count_basis.id; related clues must not be counted as direct evidence",
+        "public_answer_rule": "the visible draft_answer must use public event/source labels, embed short evidence cues, and avoid internal runtime terms",
+        "failure_boundary": "if the repaired bundle cannot satisfy these constraints, return coverage_assessment.status=insufficient with concrete missing_in_scope_slots",
+    });
+    format!(
+        "{base}draft_repair_context_json: {}\nrepair_instruction: Fix the rejected draft without changing the evidence package boundary. Return only the replacement JSON object.\n",
+        serde_json::to_string(&repair_context).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
 fn agent_runtime_execution_summary(
     mode: TonglingyuAgentRuntimeMode,
     workflow: &RuntimeWorkflowOutput,
@@ -4808,10 +5040,7 @@ fn agent_runtime_execution_summary(
     let local_answer_used_for_final_answer = agent_runtime_profile_observation_mode(mode)
         && !content_used_for_final_answer
         && workflow.answer_source == "runtime_local_profile";
-    let draft_governance_completed = application.is_some_and(|value| {
-        value.draft_consumed
-            || agent_runtime_draft_rejection_completes_governance(value.rejected_reason)
-    });
+    let draft_governance_completed = application.is_some_and(|value| value.draft_consumed);
     let evidence_governance_completed =
         evidence_matches_local || local_answer_used_for_final_answer;
     let profile_observation_complete = agent_runtime_profile_observation_mode(mode)
@@ -4860,25 +5089,6 @@ fn agent_runtime_execution_summary(
         "local_governance_enforced": true,
         "answer_source": &workflow.answer_source,
     })
-}
-
-fn agent_runtime_draft_rejection_completes_governance(reason: Option<&str>) -> bool {
-    matches!(
-        reason,
-        Some(
-            "draft_claim_exceeds_evidence_boundary"
-                | "draft_stops_for_user_opt_in"
-                | "draft_missing_later_forty_boundary"
-                | "draft_uses_unscoped_later_forty"
-                | "draft_count_conflicts_with_evidence_events"
-                | "draft_exposes_internal_evidence_slot_id"
-                | "draft_missing_embedded_evidence_anchor"
-                | "draft_missing_embedded_evidence_source"
-                | "coverage_assessment_not_passed"
-                | "coverage_assessment_status_missing"
-                | "claim_evidence_refs_unavailable"
-        )
-    )
 }
 
 fn validate_agent_runtime_execution_summary(
@@ -5332,6 +5542,7 @@ fn apply_agent_runtime_content_outputs(
         step.output["agent_runtime_draft_consumed"] = json!(true);
         step.output["agent_runtime_content_used_for_final_answer"] =
             json!(content_used_for_final_answer);
+        step.output["agent_runtime_draft_rejected_reason"] = Value::Null;
         step.output["agent_runtime_result_format"] = json!(extraction.result_format);
         step.output["agent_runtime_package_id"] = json!(extraction.package_id);
         step.output["agent_runtime_claim_statement_count"] =
