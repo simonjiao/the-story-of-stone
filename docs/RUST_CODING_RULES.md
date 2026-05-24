@@ -62,8 +62,25 @@ are implementation constraints, not general style preferences.
   The degraded outcome must be explicit: clarification, insufficient coverage,
   review rejection, or auditable fail-closed status.
 
-## Reuse and Templates
+## Duplicate Code and Reuse Boundaries
 
+- Evaluate duplication by shared semantics, not by visual similarity. The same
+  domain behavior should have one implementation; similar syntax with different
+  lifecycle, ownership, error, async, or policy semantics may remain separate.
+- Repeated production logic inside one module is not acceptable by default.
+  Extract private functions, private types, local builders, or focused helpers
+  when repeated branches perform the same validation, mapping, state transition,
+  audit append, config parsing, or text matching.
+- Repeated logic across modules in the same crate should move to a `pub(crate)`
+  helper, private submodule, typed builder, repository/model mapper, or
+  crate-owned domain service. Do not copy code to bypass module visibility,
+  error types, async runtime boundaries, ownership, or lifetimes.
+- Repeated logic across crates must not automatically become a shared crate.
+  Extract a shared crate only when the semantics are stable, dependency direction
+  is correct, and at least two crates have durable need for the same contract.
+- If similar code intentionally stays separate because the business semantics
+  differ, make the distinction visible through names, types, tests, or a short
+  boundary comment.
 - Do not copy-paste the same handler, repository, DTO mapping, config loading,
   audit append, or test fixture shape more than twice. On the third occurrence,
   introduce a local helper, typed builder, trait, or macro-backed template.
@@ -80,9 +97,9 @@ are implementation constraints, not general style preferences.
 - SQL row mapping, status transitions, and enum parsing should be centralized in
   repository or model helpers. New SQL paths must reuse existing mappers when the
   returned shape is the same.
-- Test setup should use fixture builders or factory helpers for agents, sessions,
-  runs, approvals, leases, locks, and external actions instead of repeating large
-  JSON or model literals.
+- Test setup can keep small local repetition for readability. When fixture,
+  mock, or assertion logic affects multiple test modules, move it into a
+  crate-local test helper instead of repeating large JSON or model literals.
 
 ## Traits and Generics
 
