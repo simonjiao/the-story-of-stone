@@ -2602,11 +2602,18 @@ fn local_answer_prefers_requested_commentary_and_cleans_markup() {
     commentary.source_title = "脂硯齋重評石頭記/第五回".to_string();
     commentary.text = "<center>'''第六支，樂中悲：'''</center> 襁褓中，父母嘆雙亡。{{~~|【甲側：意真辭切。】}}終久是雲散高唐，水涸湘江。".to_string();
 
+    let mut weak_commentary = sample_card("commentary");
+    weak_commentary.source_id = "shitouji-wikisource-jiaxu".to_string();
+    weak_commentary.source_title = "脂硯齋重評石頭記甲戌本/第五回".to_string();
+    weak_commentary.text =
+        "寶玉看了，便知{{~|[「便知」二字是字法。]}}只見那邊厨上封條上大書七字云：「金陵十二釵正冊」。"
+            .to_string();
+
     let package = EvidencePackage {
         package_id: "pkg-commentary-answer-test".to_string(),
         trace_id: "trace-commentary-answer-test".to_string(),
         question: "关于史湘云的结局，脂批中的证据呢".to_string(),
-        cards: vec![base, commentary],
+        cards: vec![base, weak_commentary, commentary],
         claims: vec!["命中的脂批材料可作为默认回答证据。".to_string()],
         claim_evidence_map: Vec::new(),
         review: ReviewRecord {
@@ -2620,8 +2627,11 @@ fn local_answer_prefers_requested_commentary_and_cleans_markup() {
 
     let answer = local_answer("关于史湘云的结局，脂批中的证据呢", &package);
 
+    assert!(answer.starts_with("有。脂批里最直接可用的是"));
     assert!(answer.contains("脂硯齋重評石頭記/第五回"));
     assert!(!answer.contains("紅樓夢/第005回"));
+    assert!(!answer.contains("金陵十二釵正冊"));
+    assert!(!answer.contains("目前能支持回答的主要材料如下"));
     assert!(answer.contains("第六支，樂中悲"));
     assert!(answer.contains("甲側：意真辭切"));
     assert!(!answer.contains("{{"));

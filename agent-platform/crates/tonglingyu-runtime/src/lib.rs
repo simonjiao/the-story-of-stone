@@ -14920,6 +14920,9 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if let Some(answer) = local_slot_count_answer(question, package) {
         return answer;
     }
+    if let Some(answer) = preferred_evidence_answer(question, package) {
+        return answer;
+    }
     let mut answer = String::new();
     if package.knowledge_state_summary.human_marked_count > 0 {
         answer.push_str("人工标记资料显示，可以这样回答：\n\n");
@@ -14948,6 +14951,50 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         ));
     }
     answer
+}
+
+fn preferred_evidence_answer(question: &str, package: &EvidencePackage) -> Option<String> {
+    let preferred_types = preferred_answer_evidence_types(question).ok()?;
+    if preferred_types.is_empty() {
+        return None;
+    }
+    let display_cards = answer_display_cards(&package.question, &package.cards, 2);
+    let primary = display_cards.first()?;
+    if !preferred_types
+        .iter()
+        .any(|item| item == &primary.evidence_type)
+    {
+        return None;
+    }
+    let evidence_label = evidence_card_layer_label(primary);
+    let source_label = evidence_card_source_label(primary);
+    let excerpt = answer_evidence_excerpt(&package.question, primary);
+    if excerpt.trim().is_empty() {
+        return None;
+    }
+
+    let mut answer = String::new();
+    if cards_include_later_forty(&package.cards) {
+        answer.push_str(
+            "注意：以下包含第八十一回及以后（后四十回）材料；这类材料必须显式标注为后四十回内容，未标注时不能作为证据或参考。\n\n",
+        );
+    }
+    answer.push_str(&format!(
+        "有。{}里最直接可用的是 {}：{}。\n\n",
+        evidence_label,
+        source_label,
+        quoted_excerpt(&excerpt)
+    ));
+    answer.push_str("用法上，");
+    answer.push_str(&sentence_without_terminal_punctuation(
+        &primary.support_scope,
+    ));
+    answer.push_str("；边界是：");
+    answer.push_str(&sentence_without_terminal_punctuation(
+        &primary.unsupported_scope,
+    ));
+    answer.push('。');
+    Some(answer)
 }
 
 fn local_slot_count_answer(question: &str, package: &EvidencePackage) -> Option<String> {
@@ -14989,10 +15036,21 @@ fn answer_display_cards<'a>(
                     .any(|item| item == &card.evidence_type)
         })
         .collect::<Vec<_>>();
+    let mut ranked_candidates = candidates
+        .drain(..)
+        .map(|card| (answer_card_rank(question, card, &focus_terms), card))
+        .collect::<Vec<_>>();
     if preferred_available {
-        candidates.sort_by_key(|card| std::cmp::Reverse(answer_card_rank(card, &focus_terms)));
+        ranked_candidates.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
     }
-    for card in candidates {
+    let best_rank = ranked_candidates
+        .first()
+        .map(|(rank, _)| *rank)
+        .unwrap_or_default();
+    for (rank, card) in ranked_candidates {
+        if preferred_available && best_rank >= 20 && rank * 100 < best_rank * 50 {
+            continue;
+        }
         if !evidence_card_presentable_in_answer(card) {
             continue;
         }
@@ -15012,7 +15070,7 @@ fn answer_display_cards<'a>(
     display_cards
 }
 
-fn answer_card_rank(card: &EvidenceCard, focus_terms: &[String]) -> i64 {
+fn answer_card_rank(question: &str, card: &EvidenceCard, focus_terms: &[String]) -> i64 {
     let mut score = 0;
     let normalized = normalize_text(&card.text);
     for term in focus_terms {
@@ -15025,7 +15083,38 @@ fn answer_card_rank(card: &EvidenceCard, focus_terms: &[String]) -> i64 {
     if card.evidence_type == "commentary" {
         score += 5;
     }
+    if let Ok(ranking) = retrieval_rules::ranking_rules() {
+        if retrieval_rules::contains_any_term(question, &ranking.commentary_question_terms)
+            && retrieval_rules::contains_any_raw(
+                &card.source_id,
+                &ranking.commentary_source_id_terms,
+            )
+        {
+            score += 15;
+        }
+        if retrieval_rules::contains_any_term(question, &ranking.fate_question_terms) {
+            score += 12 * matching_rule_term_count(&card.text, &ranking.fate_text_terms) as i64;
+        }
+        for boost in ranking.version_source_boosts {
+            if retrieval_rules::contains_any_term(question, &boost.question_terms)
+                && retrieval_rules::contains_any_raw(&card.source_id, &boost.source_id_terms)
+            {
+                score += boost.score;
+            }
+        }
+    }
     score
+}
+
+fn matching_rule_term_count(text: &str, terms: &[String]) -> usize {
+    let normalized = normalize_text(text);
+    terms
+        .iter()
+        .filter(|term| {
+            let term = term.trim();
+            !term.is_empty() && (text.contains(term) || normalized.contains(&normalize_text(term)))
+        })
+        .count()
 }
 
 fn answer_evidence_excerpt(question: &str, card: &EvidenceCard) -> String {
@@ -15182,6 +15271,21 @@ fn evidence_card_source_label(card: &EvidenceCard) -> String {
     } else {
         card.source_title.clone()
     }
+}
+
+fn evidence_card_layer_label(card: &EvidenceCard) -> String {
+    retrieval_rules::source_layer_label(&evidence_card_source_layer(card))
+        .unwrap_or_else(|_| card.evidence_level.clone())
+}
+
+fn quoted_excerpt(text: &str) -> String {
+    format!("「{}」", sentence_without_terminal_punctuation(text))
+}
+
+fn sentence_without_terminal_punctuation(text: &str) -> String {
+    text.trim()
+        .trim_end_matches(['。', '；', ';', '.', '！', '!', '？', '?'])
+        .to_string()
 }
 
 fn normalized_primary_focus(question: &str) -> Option<String> {
