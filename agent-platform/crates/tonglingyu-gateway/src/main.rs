@@ -40,6 +40,7 @@ use tonglingyu_runtime::{
     KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
     KnowledgeItemHumanReviewDecision, KnowledgeItemHumanReviewInput, KnowledgeItemKind,
     KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
+    OnlineEvidenceCardUpdateRequestInput, OnlineEvidenceCardWorkerRunInput,
     RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
     RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
     RUNTIME_CONTEXT_CONSUMER_TYPE, RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
@@ -565,6 +566,30 @@ struct ServeArgs {
         default_value_t = 100
     )]
     memory_collector_batch_size: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_ONLINE_EVIDENCE_CARD_WORKER_ENABLED",
+        default_value_t = true
+    )]
+    online_evidence_card_worker_enabled: bool,
+    #[arg(
+        long,
+        env = "TONGLINGYU_ONLINE_EVIDENCE_CARD_WORKER_INTERVAL_SECS",
+        default_value_t = 30
+    )]
+    online_evidence_card_worker_interval_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_ONLINE_EVIDENCE_CARD_WORKER_BATCH_SIZE",
+        default_value_t = 20
+    )]
+    online_evidence_card_worker_batch_size: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_ONLINE_EVIDENCE_CARD_WORKER_RETRIEVAL_LIMIT",
+        default_value_t = 12
+    )]
+    online_evidence_card_worker_retrieval_limit: usize,
     #[arg(long, env = "TONGLINGYU_PROFILE_MAIN", default_value = "honglou-main")]
     profile_main: String,
     #[arg(long, env = "TONGLINGYU_PROFILE_TEXT", default_value = "honglou-text")]
@@ -604,6 +629,10 @@ struct AppState {
     rate_limiter: Arc<GatewayRateLimiter>,
     admin_rate_limiter: Arc<GatewayRateLimiter>,
     retention_days: u32,
+    online_evidence_card_worker_enabled: bool,
+    online_evidence_card_worker_interval_secs: u64,
+    online_evidence_card_worker_batch_size: usize,
+    online_evidence_card_worker_retrieval_limit: usize,
     profiles: InternalProfiles,
     agent_runtime: Arc<dyn RuntimeClient>,
     agent_runtime_mode: TonglingyuAgentRuntimeMode,
@@ -1437,6 +1466,14 @@ struct MemoryCollectorRunRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct OnlineEvidenceCardWorkerRunRequest {
+    actor: Option<String>,
+    limit: Option<usize>,
+    retrieval_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MemoryCandidateTransitionRequest {
     action: String,
     reason: Option<String>,
@@ -2186,6 +2223,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
         rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         admin_rate_limiter: Arc::new(GatewayRateLimiter::per_minute(args.rate_limit_per_minute)),
         retention_days: args.retention_days,
+        online_evidence_card_worker_enabled: args.online_evidence_card_worker_enabled,
+        online_evidence_card_worker_interval_secs: args.online_evidence_card_worker_interval_secs,
+        online_evidence_card_worker_batch_size: args.online_evidence_card_worker_batch_size,
+        online_evidence_card_worker_retrieval_limit: args
+            .online_evidence_card_worker_retrieval_limit,
         profiles,
         agent_runtime,
         agent_runtime_mode,
@@ -2200,6 +2242,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
             args.db.clone(),
             args.memory_collector_interval_secs,
             args.memory_collector_batch_size,
+        );
+    }
+    if args.online_evidence_card_worker_enabled {
+        spawn_online_evidence_card_background_worker(
+            args.db.clone(),
+            args.online_evidence_card_worker_interval_secs,
+            args.online_evidence_card_worker_batch_size,
+            args.online_evidence_card_worker_retrieval_limit,
         );
     }
     let app = Router::new()
@@ -2231,6 +2281,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/admin/memory/collector/run",
             post(memory_collector_run_endpoint),
+        )
+        .route(
+            "/v1/admin/evidence-card-ingest/run",
+            post(online_evidence_card_worker_run_endpoint),
         )
         .route(
             "/v1/admin/memory/candidates",
@@ -2363,6 +2417,62 @@ fn spawn_memory_collector_background_worker(db: PathBuf, interval_secs: u64, bat
                 }
                 Err(error) => {
                     tracing::error!(error = %error, "memory collector background worker panicked");
+                }
+            }
+        }
+    });
+}
+
+fn spawn_online_evidence_card_background_worker(
+    db: PathBuf,
+    interval_secs: u64,
+    batch_size: usize,
+    retrieval_limit: usize,
+) {
+    let interval_secs = interval_secs.max(5);
+    let limit = batch_size.clamp(1, 100);
+    let retrieval_limit = retrieval_limit.clamp(1, 64);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let db = db.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                TonglingyuRuntimeStore::new(db).run_online_evidence_card_worker_once(
+                    OnlineEvidenceCardWorkerRunInput {
+                        actor: "gateway-online-evidence-card-worker".to_string(),
+                        limit,
+                        retrieval_limit,
+                    },
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(report)) => {
+                    if report.processed_count > 0 {
+                        tracing::info!(
+                            processed_count = report.processed_count,
+                            raw_candidate_count = report.raw_candidate_count,
+                            staged_count = report.staged_count,
+                            promoted_count = report.promoted_count,
+                            conflicted_count = report.conflicted_count,
+                            failed_count = report.failed_count,
+                            "online evidence card background worker completed"
+                        );
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        error = %error,
+                        "online evidence card background worker failed"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "online evidence card background worker panicked"
+                    );
                 }
             }
         }
@@ -6104,8 +6214,11 @@ fn builtin_eval_cases() -> Vec<EvalCase> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
-    match state.runtime_store.store_stats() {
-        Ok(stats) => Json(json!({
+    match (
+        state.runtime_store.store_stats(),
+        state.runtime_store.online_evidence_card_ingest_stats(),
+    ) {
+        (Ok(stats), Ok(online_evidence_card_ingest)) => Json(json!({
             "status": "ok",
             "model": state.model_id,
             "agent_runtime": {
@@ -6128,11 +6241,18 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "max_question_chars": state.max_question_chars,
                 "max_body_bytes": state.max_body_bytes,
             },
+            "online_evidence_card_ingest": {
+                "worker_enabled": state.online_evidence_card_worker_enabled,
+                "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
+                "worker_batch_size": state.online_evidence_card_worker_batch_size,
+                "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
+                "stats": online_evidence_card_ingest,
+            },
             "sources": stats.sources,
             "blocks": stats.blocks
         }))
         .into_response(),
-        Err(error) => (
+        (Err(error), _) | (_, Err(error)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "degraded",
@@ -6548,6 +6668,72 @@ async fn memory_collector_run_endpoint(
             error_response(
                 StatusCode::BAD_REQUEST,
                 "memory_collector_run_failed",
+                safe_error_detail(&error),
+                None,
+            )
+        }
+    }
+}
+
+async fn online_evidence_card_worker_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<OnlineEvidenceCardWorkerRunRequest>,
+) -> Response {
+    let actor = match admin_auth_and_rate_limit(&state, &headers, "online_evidence_card_worker_run")
+    {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    let requested_actor = payload
+        .actor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&actor);
+    let input = OnlineEvidenceCardWorkerRunInput {
+        actor: requested_actor.to_string(),
+        limit: payload
+            .limit
+            .unwrap_or(state.online_evidence_card_worker_batch_size),
+        retrieval_limit: payload
+            .retrieval_limit
+            .unwrap_or(state.online_evidence_card_worker_retrieval_limit),
+    };
+    match state
+        .runtime_store
+        .run_online_evidence_card_worker_once(input)
+    {
+        Ok(report) => {
+            if let Err(error) = append_admin_audit_event(
+                &state.db,
+                "online_evidence_card_worker_admin_run",
+                &actor,
+                json!({
+                    "processed_count": report.processed_count,
+                    "raw_candidate_count": report.raw_candidate_count,
+                    "staged_count": report.staged_count,
+                    "promoted_count": report.promoted_count,
+                    "conflicted_count": report.conflicted_count,
+                    "failed_count": report.failed_count,
+                    "actor_overridden": requested_actor != actor,
+                }),
+            ) {
+                tracing::warn!(error = %error, "online evidence card worker admin audit failed");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "admin_audit_failed",
+                    "admin audit failed",
+                    None,
+                );
+            }
+            Json(json!(report)).into_response()
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "online evidence card worker run failed");
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "online_evidence_card_worker_run_failed",
                 safe_error_detail(&error),
                 None,
             )
@@ -10165,6 +10351,14 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         100,
     )?;
     let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
+    let online_evidence_card_update_requests =
+        runtime_store.online_evidence_card_update_requests_for_trace(trace_id, 100)?;
+    let online_evidence_card_raw_candidates =
+        runtime_store.online_evidence_card_raw_candidates_for_trace(trace_id, 100)?;
+    let online_evidence_card_staged =
+        runtime_store.online_evidence_card_staged_for_trace(trace_id, 100)?;
+    let online_evidence_card_events =
+        runtime_store.online_evidence_card_events_for_trace(trace_id, 200)?;
     let retrieval_quality_summary = retrieval_quality_summary(&retrieval_failures);
     let scoped_context = context_governance::load_trace_context(&conn, trace_id)?;
     let scoped_context_has_rows = scoped_context
@@ -10178,6 +10372,10 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     if package_ids.is_empty()
         && workflow_states.is_empty()
         && audit_events.is_empty()
+        && online_evidence_card_update_requests.is_empty()
+        && online_evidence_card_raw_candidates.is_empty()
+        && online_evidence_card_staged.is_empty()
+        && online_evidence_card_events.is_empty()
         && !scoped_context_has_rows
     {
         return Ok(None);
@@ -10199,6 +10397,12 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "retrieval_failures": retrieval_failures,
         "governance_task_ids": governance_task_ids(&governance_tasks),
         "governance_tasks": governance_tasks,
+        "online_evidence_card_ingest": {
+            "update_requests": online_evidence_card_update_requests,
+            "raw_candidates": online_evidence_card_raw_candidates,
+            "staged_cards": online_evidence_card_staged,
+            "events": online_evidence_card_events,
+        },
         "scoped_context": scoped_context,
         "packages": packages,
     });
@@ -10315,6 +10519,7 @@ fn load_session(db: &Path, session_id: &str) -> Result<Option<Value>> {
 fn load_metrics(state: &AppState) -> Result<Value> {
     let conn = open_db(&state.db)?;
     let runtime_stats = state.runtime_store.store_stats()?;
+    let online_evidence_card_ingest = state.runtime_store.online_evidence_card_ingest_stats()?;
     let scoped_context_counts = context_table_counts(&conn)?;
     let workflow_status_counts = grouped_counts(
         &conn,
@@ -10357,6 +10562,13 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         "retention": {
             "retention_days": state.retention_days,
             "auto_prune_enabled": state.retention_days > 0,
+        },
+        "online_evidence_card_ingest": {
+            "worker_enabled": state.online_evidence_card_worker_enabled,
+            "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
+            "worker_batch_size": state.online_evidence_card_worker_batch_size,
+            "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
+            "stats": online_evidence_card_ingest,
         },
         "counts": {
             "sources": runtime_stats.sources,
@@ -11325,6 +11537,10 @@ mod tests {
             rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
             admin_rate_limiter: Arc::new(GatewayRateLimiter::new(120, Duration::from_secs(60))),
             retention_days: 30,
+            online_evidence_card_worker_enabled: true,
+            online_evidence_card_worker_interval_secs: 30,
+            online_evidence_card_worker_batch_size: 20,
+            online_evidence_card_worker_retrieval_limit: 12,
             profiles: InternalProfiles {
                 main: "honglou-main".to_string(),
                 text: "honglou-text".to_string(),
@@ -12019,6 +12235,102 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn admin_trace_includes_online_evidence_card_ingest_state() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-trace-online-card");
+        let runtime_store = TonglingyuRuntimeStore::new(db_path.clone());
+        let conn = runtime_store.open_connection().expect("runtime db opens");
+        let trace_id = "trace-admin-online-card-test";
+        let request = tonglingyu_runtime::create_online_evidence_card_update_request(
+            &conn,
+            OnlineEvidenceCardUpdateRequestInput {
+                trace_id: trace_id.to_string(),
+                session_id: Some("session-online-card-test".to_string()),
+                resolved_question: "A 与 B 的关系".to_string(),
+                question_frame: Some(json!({
+                    "intent": "relation_query",
+                    "canonical_question": "A 与 B 的关系",
+                    "subject": {"canonical": "A", "aliases": []},
+                    "predicate": {
+                        "id": "relation",
+                        "label": "关系",
+                        "aliases": ["关系"],
+                        "evidence_terms": ["关系"]
+                    },
+                    "object": {"canonical": "B", "aliases": []},
+                    "required_evidence_types": ["base_text"]
+                })),
+                coverage_gap_reason: "package_coverage_partial".to_string(),
+                source_scope_policy: json!({"scope": "test"}),
+                recall_advice_ref: None,
+            },
+        )
+        .expect("online evidence card update request created");
+
+        let trace = load_trace(&db_path, trace_id)
+            .expect("trace loads")
+            .expect("trace exists");
+        assert_eq!(
+            trace["online_evidence_card_ingest"]["update_requests"][0]["update_request_id"],
+            json!(request.update_request_id)
+        );
+        assert_eq!(
+            trace["online_evidence_card_ingest"]["update_requests"][0]["status"],
+            json!("queued")
+        );
+        assert!(trace["audit_events"].as_array().is_some_and(|events| {
+            events
+                .iter()
+                .any(|event| event["event_type"] == "online_evidence_card_update_requested")
+        }));
+        remove_sqlite_file_set(&db_path);
+    }
+
+    #[tokio::test]
+    async fn admin_can_run_online_evidence_card_worker_once() {
+        let db_path = temp_gateway_db_path("tonglingyu-admin-online-card-worker");
+        seed_runtime_chat_source(&db_path);
+        let state = Arc::new(test_app_state(db_path.clone()));
+        let conn = state
+            .runtime_store
+            .open_connection()
+            .expect("runtime db opens");
+        tonglingyu_runtime::create_online_evidence_card_update_request(
+            &conn,
+            OnlineEvidenceCardUpdateRequestInput {
+                trace_id: "trace-admin-online-card-worker-test".to_string(),
+                session_id: None,
+                resolved_question: "尤三姐最后".to_string(),
+                question_frame: None,
+                coverage_gap_reason: "package_coverage_partial".to_string(),
+                source_scope_policy: json!({"scope": "test"}),
+                recall_advice_ref: None,
+            },
+        )
+        .expect("online evidence card update request created");
+
+        let response = online_evidence_card_worker_run_endpoint(
+            State(state),
+            admin_headers(),
+            Json(OnlineEvidenceCardWorkerRunRequest {
+                actor: None,
+                limit: Some(5),
+                retrieval_limit: Some(5),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_str(&response_text(response).await).expect("worker response json");
+        assert_eq!(body["processed_count"], json!(1));
+        assert_eq!(body["failed_count"], json!(0));
+        let stats = TonglingyuRuntimeStore::new(db_path.clone())
+            .online_evidence_card_ingest_stats()
+            .expect("ingest stats");
+        assert_eq!(stats["update_requests"]["by_status"]["completed"], json!(1));
+        remove_sqlite_file_set(&db_path);
     }
 
     #[test]

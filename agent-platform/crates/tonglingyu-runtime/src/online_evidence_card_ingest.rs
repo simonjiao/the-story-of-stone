@@ -372,6 +372,64 @@ pub fn list_online_evidence_card_raw_candidates_for_trace(
     query_raw_candidate_rows(&mut stmt, params![trace_id, limit])
 }
 
+pub fn list_online_evidence_card_update_requests_for_trace(
+    conn: &Connection,
+    trace_id: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    init_schema(conn)?;
+    let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT update_request_id, trace_id, session_id, resolved_question,
+               question_frame_json, coverage_gap_reason, source_scope_policy_json,
+               recall_advice_ref, status, created_at, updated_at
+        FROM online_evidence_card_update_requests
+        WHERE trace_id = ?1
+        ORDER BY created_at, update_request_id
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![trace_id, limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+        ))
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|row| {
+            let question_frame = row
+                .4
+                .as_deref()
+                .map(serde_json::from_str::<Value>)
+                .transpose()?;
+            Ok(json!({
+                "update_request_id": row.0,
+                "trace_id": row.1,
+                "session_id": row.2,
+                "resolved_question": row.3,
+                "question_frame": question_frame,
+                "coverage_gap_reason": row.5,
+                "source_scope_policy": serde_json::from_str::<Value>(&row.6)?,
+                "recall_advice_ref": row.7,
+                "status": row.8,
+                "created_at": row.9,
+                "updated_at": row.10,
+            }))
+        })
+        .collect()
+}
+
 pub fn list_online_evidence_card_staged_for_trace(
     conn: &Connection,
     trace_id: &str,
@@ -1312,6 +1370,18 @@ fn staged_card_from_sql_row(
     })
 }
 
+pub fn online_evidence_card_ingest_stats(conn: &Connection) -> Result<Value> {
+    init_schema(conn)?;
+    Ok(json!({
+        "object": "tonglingyu.online_evidence_card_ingest_stats",
+        "schema_version": ONLINE_INGEST_SCHEMA_VERSION,
+        "update_requests": grouped_count_json(conn, "online_evidence_card_update_requests", "status")?,
+        "staged_cards": grouped_count_json(conn, "canonical_staged_cards", "status")?,
+        "raw_candidate_count": table_count(conn, "raw_evidence_candidates")?,
+        "event_count": table_count(conn, "staged_card_events")?,
+    }))
+}
+
 fn load_raw_candidate(
     conn: &Connection,
     candidate_id: &str,
@@ -1550,6 +1620,31 @@ fn append_unique_json(values: &mut Vec<Value>, value: Value) {
     if !values.iter().any(|item| item == &value) {
         values.push(value);
     }
+}
+
+fn grouped_count_json(conn: &Connection, table: &str, column: &str) -> Result<Value> {
+    let sql = format!("SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut object = serde_json::Map::new();
+    let mut total = 0_i64;
+    for row in rows {
+        let (status, count) = row?;
+        total += count;
+        object.insert(status, json!(count));
+    }
+    Ok(json!({
+        "total": total,
+        "by_status": Value::Object(object),
+    }))
+}
+
+fn table_count(conn: &Connection, table: &str) -> Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table}");
+    conn.query_row(&sql, [], |row| row.get(0))
+        .map_err(Into::into)
 }
 
 fn escape_like(value: &str) -> String {

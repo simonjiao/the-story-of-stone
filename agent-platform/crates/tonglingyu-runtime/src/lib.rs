@@ -68,9 +68,12 @@ use upstream_bundle::{
 };
 
 pub use online_evidence_card_ingest::{
-    OnlineEvidenceCardUpdateRequestInput, OnlineEvidenceCardWorkerRunInput,
+    CanonicalStagedCardRecord, OnlineEvidenceCardUpdateRequestInput,
+    OnlineEvidenceCardUpdateRequestRecord, OnlineEvidenceCardWorkerRunInput,
+    OnlineEvidenceCardWorkerRunReport, RawEvidenceCandidateRecord,
     create_online_evidence_card_update_request, list_online_evidence_card_events_for_trace,
     list_online_evidence_card_raw_candidates_for_trace, list_online_evidence_card_staged_for_trace,
+    list_online_evidence_card_update_requests_for_trace, online_evidence_card_ingest_stats,
     run_online_evidence_card_worker_once,
 };
 
@@ -1587,6 +1590,63 @@ impl TonglingyuRuntimeStore {
     pub fn audit_events_for_trace(&self, trace_id: &str) -> Result<Vec<Value>> {
         let conn = self.open_connection()?;
         runtime_audit_events_for_trace(&conn, trace_id)
+    }
+
+    pub fn run_online_evidence_card_worker_once(
+        &self,
+        input: OnlineEvidenceCardWorkerRunInput,
+    ) -> Result<OnlineEvidenceCardWorkerRunReport> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::run_online_evidence_card_worker_once(&conn, input)
+    }
+
+    pub fn online_evidence_card_ingest_stats(&self) -> Result<Value> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::online_evidence_card_ingest_stats(&conn)
+    }
+
+    pub fn online_evidence_card_update_requests_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::list_online_evidence_card_update_requests_for_trace(
+            &conn, trace_id, limit,
+        )
+    }
+
+    pub fn online_evidence_card_raw_candidates_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RawEvidenceCandidateRecord>> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::list_online_evidence_card_raw_candidates_for_trace(
+            &conn, trace_id, limit,
+        )
+    }
+
+    pub fn online_evidence_card_staged_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CanonicalStagedCardRecord>> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::list_online_evidence_card_staged_for_trace(
+            &conn, trace_id, limit,
+        )
+    }
+
+    pub fn online_evidence_card_events_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::list_online_evidence_card_events_for_trace(
+            &conn, trace_id, limit,
+        )
     }
 
     pub fn create_retrieval_failure(

@@ -65,6 +65,25 @@ fn creates_update_request_idempotently() {
 }
 
 #[test]
+fn update_requests_and_stats_are_queryable() {
+    let conn = test_conn();
+    let request = relation_request(&conn);
+
+    let requests =
+        list_online_evidence_card_update_requests_for_trace(&conn, &request.trace_id, 10)
+            .expect("requests list");
+    let stats = online_evidence_card_ingest_stats(&conn).expect("ingest stats");
+
+    assert_eq!(
+        requests[0]["update_request_id"],
+        json!(request.update_request_id)
+    );
+    assert_eq!(requests[0]["status"], json!("queued"));
+    assert_eq!(stats["update_requests"]["by_status"]["queued"], json!(1));
+    assert_eq!(stats["raw_candidate_count"], json!(0));
+}
+
+#[test]
 fn stages_validates_and_promotes_supported_relation_card() {
     let conn = test_conn();
     let request = relation_request(&conn);
