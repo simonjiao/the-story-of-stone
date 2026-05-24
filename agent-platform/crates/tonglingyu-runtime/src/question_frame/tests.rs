@@ -190,3 +190,30 @@ fn relation_direct_answer_uses_same_block_relation_support() {
     assert!(answer.contains("可以确认"));
     assert!(answer.contains("紫鹃服侍过史湘云"));
 }
+
+#[test]
+fn relation_direct_answer_rejects_unlinked_block_cooccurrence() {
+    let frame = relation_frame();
+    let cards = vec![EvidenceCard {
+        evidence_id: "ev-1".to_string(),
+        evidence_type: "base_text".to_string(),
+        source_id: "source".to_string(),
+        source_title: "紅樓夢/第二十一回".to_string(),
+        source_url: String::new(),
+        revision_id: None,
+        block_id: "block-1".to_string(),
+        text: "黛玉起來叫醒湘雲。只見紫鵑、雪雁進來伏侍梳洗。湘雲洗了面，翠縷便拿殘水要潑。"
+            .to_string(),
+        support_scope: String::new(),
+        unsupported_scope: String::new(),
+        evidence_level: String::new(),
+        confidence: String::new(),
+        verification_status: String::new(),
+    }];
+
+    assert!(relation_direct_answer(Some(&frame), &cards).is_none());
+    assert_eq!(
+        relation_review_issues(Some(&frame), &cards),
+        vec!["relation_predicate_evidence_missing"]
+    );
+}

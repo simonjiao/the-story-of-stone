@@ -230,18 +230,24 @@ pub(crate) fn relation_direct_support_cards<'a>(
     let Some(groups) = relation_support_terms(frame) else {
         return Vec::new();
     };
+    cards
+        .iter()
+        .filter(|card| relation_text_matches_support_terms(&card.text, &groups))
+        .collect()
+}
+
+pub(crate) fn relation_text_matches_support_terms(
+    text: &str,
+    groups: &RelationSupportTerms,
+) -> bool {
     let subject_terms = normalized_terms(&groups.subject);
     let predicate_terms = normalized_terms(&groups.predicate);
     let object_terms = normalized_terms(&groups.object);
-    cards
-        .iter()
-        .filter(|card| {
-            let normalized = normalize_text(&card.text);
-            contains_any_normalized(&normalized, &subject_terms)
-                && contains_any_normalized(&normalized, &predicate_terms)
-                && contains_any_normalized(&normalized, &object_terms)
-        })
-        .collect()
+    let normalized = normalize_text(text);
+    contains_any_normalized(&normalized, &subject_terms)
+        && contains_any_normalized(&normalized, &predicate_terms)
+        && contains_any_normalized(&normalized, &object_terms)
+        && relation_text_links_predicate_and_object(&normalized, &predicate_terms, &object_terms)
 }
 
 fn entity_intro_answer(
@@ -288,9 +294,8 @@ pub(crate) fn parse_runtime_question_frame(value: &Value) -> Option<RuntimeQuest
 }
 
 fn predicate_terms(predicate: &RuntimeQuestionFramePredicate) -> Vec<String> {
-    let mut terms = vec![predicate.label.clone(), predicate.id.clone()];
+    let mut terms = vec![predicate.label.clone()];
     terms.extend(predicate.aliases.clone());
-    terms.extend(predicate.evidence_terms.clone());
     terms
 }
 
@@ -319,6 +324,41 @@ fn normalized_terms(terms: &[String]) -> Vec<String> {
 
 fn contains_any_normalized(text: &str, terms: &[String]) -> bool {
     terms.iter().any(|term| text.contains(term))
+}
+
+fn relation_text_links_predicate_and_object(
+    text: &str,
+    predicate_terms: &[String],
+    object_terms: &[String],
+) -> bool {
+    const MAX_CHARS_BETWEEN: usize = 18;
+    predicate_terms.iter().any(|predicate| {
+        object_terms.iter().any(|object| {
+            terms_are_near(text, predicate, object, MAX_CHARS_BETWEEN)
+                || terms_are_near(text, object, predicate, MAX_CHARS_BETWEEN)
+        })
+    })
+}
+
+fn terms_are_near(text: &str, left: &str, right: &str, max_chars_between: usize) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    text.match_indices(left).any(|(left_index, _)| {
+        let after_left = left_index + left.len();
+        text[after_left..].find(right).is_some_and(|offset| {
+            let between = &text[after_left..after_left + offset];
+            between.chars().count() <= max_chars_between
+                && !between.chars().any(is_relation_clause_boundary)
+        })
+    })
+}
+
+fn is_relation_clause_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '；' | ';' | '？' | '?' | '！' | '!' | '\n' | '\r'
+    )
 }
 
 fn short_quote(text: &str) -> String {

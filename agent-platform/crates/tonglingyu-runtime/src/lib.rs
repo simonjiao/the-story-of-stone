@@ -57,6 +57,7 @@ use question_frame::{
     RelationSupportTerms, frame_focus_terms, frame_search_query, question_frame_answer,
     question_frame_from_context, relation_answer, relation_boundary_answer,
     relation_required_evidence_types, relation_review_issues, relation_support_terms,
+    relation_text_matches_support_terms,
 };
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, UpstreamBundleDraftExtraction, evidence_card_is_later_forty,
@@ -14830,18 +14831,7 @@ fn relation_block_matches_support_terms(
     block: &SearchBlockRecord,
     groups: &RelationSupportTerms,
 ) -> bool {
-    let normalized = normalize_text(&block.text);
-    relation_text_contains_group(&normalized, &groups.subject)
-        && relation_text_contains_group(&normalized, &groups.predicate)
-        && relation_text_contains_group(&normalized, &groups.object)
-}
-
-fn relation_text_contains_group(text: &str, terms: &[String]) -> bool {
-    terms
-        .iter()
-        .map(|term| normalize_text(term))
-        .filter(|term| !term.trim().is_empty())
-        .any(|term| text.contains(&term))
+    relation_text_matches_support_terms(&block.text, groups)
 }
 
 fn relation_support_source_rank(block: &SearchBlockRecord) -> (usize, usize) {
