@@ -54,8 +54,9 @@ use governance_rules::{
 };
 use ontology_aliases::seed_aliases;
 use question_frame::{
-    question_frame_from_context, relation_boundary_answer, relation_required_evidence_types,
-    relation_review_issues, relation_search_query,
+    RelationSupportTerms, frame_search_query, question_frame_from_context,
+    relation_boundary_answer, relation_direct_answer, relation_required_evidence_types,
+    relation_review_issues, relation_support_terms,
 };
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, evidence_card_source_layer,
@@ -3338,7 +3339,7 @@ pub fn execute_runtime_workflow(
         return Err(anyhow!("runtime workflow limit must be greater than 0"));
     }
     let question_frame = question_frame_from_context(&input.context);
-    let search_question = relation_search_query(&input.question, question_frame.as_ref());
+    let search_question = frame_search_query(&input.question, question_frame.as_ref());
     let required_evidence_types =
         relation_required_evidence_types(&input.required_evidence_types, question_frame.as_ref());
     let workflow_plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
@@ -3357,7 +3358,7 @@ pub fn execute_runtime_workflow(
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
     let text_required_types = text_search_required_evidence_types(&required_evidence_types);
     let text_started = Instant::now();
-    let (text_cards, text_quality_report) = match execute_tool(
+    let (mut text_cards, text_quality_report) = match execute_tool(
         conn,
         TonglingyuToolCall::TextSearch {
             question: search_question.clone(),
@@ -3372,6 +3373,10 @@ pub fn execute_runtime_workflow(
         } => (cards, *quality_report),
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
+    let relation_direct_cards =
+        relation_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
+    let relation_direct_evidence_ids = evidence_ids(&relation_direct_cards);
+    text_cards = merge_cards(text_cards, relation_direct_cards);
     retrieval_failure_candidates.push((text_quality_report.clone(), evidence_ids(&text_cards)));
     cards = merge_cards(cards, text_cards.clone());
     let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
@@ -3393,6 +3398,7 @@ pub fn execute_runtime_workflow(
             "evidence_ids": evidence_ids(&text_cards),
                 "evidence_types": evidence_types(&text_cards),
                 "query_frame_bound": question_frame.is_some(),
+                "question_frame_direct_support_evidence_ids": relation_direct_evidence_ids,
                 "query_sha256": hash_text(&search_question),
                 "quality_report": &text_quality_report,
             }),
@@ -4832,6 +4838,25 @@ fn should_repair_agent_runtime_draft(
         && application.is_some_and(|value| !value.draft_consumed && value.rejected_reason.is_some())
 }
 
+fn agent_runtime_draft_governance_decision_is_complete(
+    application: &AgentRuntimeContentApplication,
+) -> bool {
+    application.draft_consumed
+        || application.rejected_reason.is_some_and(|reason| {
+            matches!(
+                reason,
+                "coverage_assessment_not_passed"
+                    | "draft_count_conflicts_with_evidence_events"
+                    | "draft_exposes_internal_evidence_slot_id"
+                    | "draft_exposes_internal_public_term"
+                    | "draft_missing_later_forty_boundary"
+                    | "draft_negates_direct_evidence_slot_count"
+                    | "draft_stops_for_user_opt_in"
+                    | "draft_uses_unscoped_later_forty"
+            )
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn repair_agent_runtime_draft(
     workflow: &mut RuntimeWorkflowOutput,
@@ -5129,12 +5154,14 @@ fn agent_runtime_execution_summary(
                 })
     });
     let draft_consumed = application.is_some_and(|value| value.draft_consumed);
+    let draft_governance_decided =
+        application.is_some_and(agent_runtime_draft_governance_decision_is_complete);
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
     let local_answer_used_for_final_answer = agent_runtime_profile_observation_mode(mode)
         && !content_used_for_final_answer
         && workflow.answer_source == "runtime_local_profile";
-    let draft_governance_completed = application.is_some_and(|value| value.draft_consumed);
+    let draft_governance_completed = draft_governance_decided;
     let evidence_governance_completed =
         evidence_matches_local || local_answer_used_for_final_answer;
     let profile_observation_complete = agent_runtime_profile_observation_mode(mode)
@@ -5176,6 +5203,7 @@ fn agent_runtime_execution_summary(
         "package_matches_local": package_matches_local,
         "draft_consumed": draft_consumed,
         "draft_governance_completed": draft_governance_completed,
+        "draft_rejected_by_local_governance": draft_governance_decided && !draft_consumed,
         "content_used_for_final_answer": content_used_for_final_answer,
         "review_local_enforced": review_local_enforced,
         "profile_observation_complete": profile_observation_complete,
@@ -6487,6 +6515,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             question TEXT NOT NULL,
             claim_statements_json TEXT NOT NULL,
             evidence_ids_json TEXT NOT NULL,
+            question_frame_json TEXT,
             review_status TEXT NOT NULL,
             review_json TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -6568,6 +6597,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
             ON retrieval_failures(trace_id, IFNULL(package_id, ''), failure_type);
         "#,
     )?;
+    migrate_evidence_package_question_frame_schema(conn)?;
     migrate_retrieval_failure_privacy_schema(conn)?;
     conn.execute_batch(knowledge_governance_task_create_table_sql())?;
     migrate_knowledge_governance_task_source_entity_schema(conn)?;
@@ -6820,6 +6850,20 @@ fn migrate_knowledge_item_calibration_columns(conn: &Connection) -> Result<()> {
                 [],
             )?;
         }
+    }
+    Ok(())
+}
+
+fn migrate_evidence_package_question_frame_schema(conn: &Connection) -> Result<()> {
+    if !sqlite_table_exists(conn, "evidence_packages")? {
+        return Ok(());
+    }
+    let columns = sqlite_table_columns(conn, "evidence_packages")?;
+    if !columns.contains("question_frame_json") {
+        conn.execute(
+            "ALTER TABLE evidence_packages ADD COLUMN question_frame_json TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -14235,14 +14279,19 @@ fn create_evidence_package_with_question_frame(
     let package_id = format!("pkg-{}", uuid::Uuid::now_v7().simple());
     let now = now_rfc3339();
     let evidence_ids: Vec<_> = cards.iter().map(|card| card.evidence_id.clone()).collect();
+    let question_frame_json = question_frame
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     conn.execute(
-        "INSERT INTO evidence_packages (package_id, trace_id, question, claim_statements_json, evidence_ids_json, review_status, review_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO evidence_packages (package_id, trace_id, question, claim_statements_json, evidence_ids_json, question_frame_json, review_status, review_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             package_id,
             trace_id,
             question,
             serde_json::to_string(&claims)?,
             serde_json::to_string(&evidence_ids)?,
+            question_frame_json,
             review.status,
             serde_json::to_string(&review)?,
             now,
@@ -14358,18 +14407,29 @@ pub fn load_evidence_package_from_conn(
     conn: &Connection,
     package_id: &str,
 ) -> Result<Option<EvidencePackage>> {
-    let package: Option<(String, String, String, String, String, String)> = conn
+    let package: Option<(String, String, String, String, String, Option<String>, String)> = conn
         .query_row(
-            "SELECT package_id, trace_id, question, claim_statements_json, evidence_ids_json, review_json FROM evidence_packages WHERE package_id = ?1",
+            "SELECT package_id, trace_id, question, claim_statements_json, evidence_ids_json, question_frame_json, review_json FROM evidence_packages WHERE package_id = ?1",
             params![package_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         )
         .optional()?;
-    let Some((package_id, trace_id, question, claims_json, evidence_ids_json, review_json)) =
-        package
+    let Some((
+        package_id,
+        trace_id,
+        question,
+        claims_json,
+        evidence_ids_json,
+        question_frame_json,
+        review_json,
+    )) = package
     else {
         return Ok(None);
     };
+    let question_frame = question_frame_json
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()?;
     let evidence_ids: Vec<String> = serde_json::from_str(&evidence_ids_json)?;
     let mut stmt = conn
         .prepare("SELECT evidence_id, evidence_json FROM evidence_cards WHERE package_id = ?1")?;
@@ -14493,7 +14553,7 @@ pub fn load_evidence_package_from_conn(
         claims,
         claim_evidence_map,
         knowledge_state_summary,
-        question_frame: None,
+        question_frame,
         review: serde_json::from_str(&review_json)?,
     }))
 }
@@ -14669,6 +14729,88 @@ fn text_search_required_evidence_types(required_evidence_types: &[String]) -> Ve
         .filter(|item| item.as_str() != "commentary")
         .cloned()
         .collect()
+}
+
+fn relation_direct_support_search(
+    conn: &Connection,
+    frame: Option<&question_frame::RuntimeQuestionFrame>,
+    limit: usize,
+) -> Result<Vec<EvidenceCard>> {
+    let Some(groups) = frame.and_then(relation_support_terms) else {
+        return Ok(Vec::new());
+    };
+    let mut candidate_blocks = BTreeMap::<String, SearchBlockRecord>::new();
+    let per_term_limit = limit.saturating_mul(32).max(32);
+    for term in relation_support_candidate_terms(&groups) {
+        for block in query_blocks_like(conn, &term, per_term_limit)? {
+            candidate_blocks
+                .entry(block.block_id.clone())
+                .or_insert(block);
+        }
+    }
+    let mut blocks = candidate_blocks
+        .into_values()
+        .filter(|block| relation_block_matches_support_terms(block, &groups))
+        .collect::<Vec<_>>();
+    blocks.sort_by_key(|block| {
+        (
+            relation_support_source_rank(block),
+            block.text.chars().count(),
+            block.block_id.clone(),
+        )
+    });
+    blocks.truncate(limit);
+    let focus = groups
+        .subject
+        .first()
+        .or_else(|| groups.object.first())
+        .map(String::as_str)
+        .unwrap_or("");
+    Ok(blocks
+        .into_iter()
+        .map(|block| evidence_card_from_block_with_focus(block, focus))
+        .collect())
+}
+
+fn relation_support_candidate_terms(groups: &RelationSupportTerms) -> Vec<String> {
+    let mut terms = Vec::new();
+    for group in [&groups.predicate, &groups.subject, &groups.object] {
+        for term in group {
+            if term.chars().count() >= 2 {
+                push_term(&mut terms, term);
+            }
+        }
+    }
+    terms
+}
+
+fn relation_block_matches_support_terms(
+    block: &SearchBlockRecord,
+    groups: &RelationSupportTerms,
+) -> bool {
+    let normalized = normalize_text(&block.text);
+    relation_text_contains_group(&normalized, &groups.subject)
+        && relation_text_contains_group(&normalized, &groups.predicate)
+        && relation_text_contains_group(&normalized, &groups.object)
+}
+
+fn relation_text_contains_group(text: &str, terms: &[String]) -> bool {
+    terms
+        .iter()
+        .map(|term| normalize_text(term))
+        .filter(|term| !term.trim().is_empty())
+        .any(|term| text.contains(&term))
+}
+
+fn relation_support_source_rank(block: &SearchBlockRecord) -> (usize, usize) {
+    let source_rank =
+        retrieval_rules::exact_source_priority_rank(&block.source_id).unwrap_or(usize::MAX);
+    let type_rank = match block.kind.as_str() {
+        "heading" => 2,
+        "poem" => 1,
+        _ => 0,
+    };
+    (source_rank, type_rank)
 }
 
 fn retrieval_quality_report(
@@ -15418,6 +15560,9 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         .question_frame
         .as_ref()
         .and_then(question_frame::parse_runtime_question_frame);
+    if let Some(answer) = relation_direct_answer(parsed_question_frame.as_ref(), &package.cards) {
+        return answer;
+    }
     if let Some(answer) = relation_boundary_answer(parsed_question_frame.as_ref(), &package.cards) {
         return answer;
     }

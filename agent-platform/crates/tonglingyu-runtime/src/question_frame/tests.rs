@@ -30,6 +30,26 @@ fn relation_search_query_binds_subject_predicate_and_object_terms() {
 }
 
 #[test]
+fn frame_search_query_expands_entity_aliases() {
+    let frame: RuntimeQuestionFrame = serde_json::from_value(json!({
+        "intent": "entity_query",
+        "canonical_question": "紫鹃在《红楼梦》里是什么样的人？",
+        "subject": {"canonical": "紫鹃", "aliases": ["紫鹃", "紫鵑", "鹦哥", "鸚哥"]},
+        "predicate": null,
+        "object": null,
+        "required_evidence_types": []
+    }))
+    .expect("entity frame");
+
+    let query = frame_search_query("紫鹃在《红楼梦》里是什么样的人？", Some(&frame));
+
+    assert!(query.contains("紫鹃"));
+    assert!(query.contains("紫鵑"));
+    assert!(query.contains("鹦哥"));
+    assert!(query.contains("鸚哥"));
+}
+
+#[test]
 fn relation_review_requires_direct_relation_support_for_yes_no_relation() {
     let frame = relation_frame();
     let cards = vec![EvidenceCard {
@@ -53,6 +73,32 @@ fn relation_review_requires_direct_relation_support_for_yes_no_relation() {
         vec!["relation_predicate_evidence_missing"]
     );
     let answer = relation_boundary_answer(Some(&frame), &cards).expect("boundary answer");
-    assert!(answer.contains("未见直接证据"));
+    assert!(answer.contains("没有直接证据"));
+    assert!(answer.contains("不能确认"));
+    assert!(answer.contains("紫鹃服侍过史湘云"));
+}
+
+#[test]
+fn relation_direct_answer_uses_same_block_relation_support() {
+    let frame = relation_frame();
+    let cards = vec![EvidenceCard {
+        evidence_id: "ev-1".to_string(),
+        evidence_type: "base_text".to_string(),
+        source_id: "source".to_string(),
+        source_title: "紅樓夢/第三回".to_string(),
+        source_url: String::new(),
+        revision_id: None,
+        block_id: "block-1".to_string(),
+        text: "紫鵑伏侍史湘雲，日夜不離。".to_string(),
+        support_scope: String::new(),
+        unsupported_scope: String::new(),
+        evidence_level: String::new(),
+        confidence: String::new(),
+        verification_status: String::new(),
+    }];
+
+    assert!(relation_review_issues(Some(&frame), &cards).is_empty());
+    let answer = relation_direct_answer(Some(&frame), &cards).expect("direct answer");
+    assert!(answer.contains("可以确认"));
     assert!(answer.contains("紫鹃服侍过史湘云"));
 }

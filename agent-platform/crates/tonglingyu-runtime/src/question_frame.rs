@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelationSupportTerms {
+    pub(crate) subject: Vec<String>,
+    pub(crate) predicate: Vec<String>,
+    pub(crate) object: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RuntimeQuestionFrame {
     pub(crate) intent: String,
@@ -92,6 +99,30 @@ pub(crate) fn relation_search_query(
     terms.into_iter().take(24).collect::<Vec<_>>().join(" ")
 }
 
+pub(crate) fn frame_search_query(question: &str, frame: Option<&RuntimeQuestionFrame>) -> String {
+    let Some(frame) = frame else {
+        return question.to_string();
+    };
+    if frame.is_relation() {
+        return relation_search_query(question, Some(frame));
+    }
+    let mut terms = Vec::new();
+    if let Some(subject) = &frame.subject {
+        extend_terms(&mut terms, &subject.identity_terms());
+    }
+    if let Some(object) = &frame.object {
+        extend_terms(&mut terms, &object.identity_terms());
+    }
+    if terms.is_empty() {
+        return question.to_string();
+    }
+    extend_terms(
+        &mut terms,
+        &[question.to_string(), frame.canonical_question.clone()],
+    );
+    terms.into_iter().take(24).collect::<Vec<_>>().join(" ")
+}
+
 pub(crate) fn relation_required_evidence_types(
     fallback: &[String],
     frame: Option<&RuntimeQuestionFrame>,
@@ -120,6 +151,23 @@ pub(crate) fn relation_review_issues(
     Vec::new()
 }
 
+pub(crate) fn relation_direct_answer(
+    frame: Option<&RuntimeQuestionFrame>,
+    cards: &[EvidenceCard],
+) -> Option<String> {
+    let frame = frame.filter(|frame| frame.has_relation_object())?;
+    let direct_cards = relation_direct_support_cards(frame, cards);
+    let card = direct_cards.first()?;
+    let subject = frame.subject.as_ref()?;
+    let predicate = frame.predicate.as_ref()?;
+    let object = frame.object.as_ref()?;
+    let quote = short_quote(&card.text);
+    Some(format!(
+        "可以确认。{}有直接证据：{}。因此，在当前证据范围内，{}{}过{}。",
+        card.source_title, quote, subject.canonical, predicate.label, object.canonical
+    ))
+}
+
 pub(crate) fn relation_boundary_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -132,7 +180,7 @@ pub(crate) fn relation_boundary_answer(
     let predicate = frame.predicate.as_ref()?;
     let object = frame.object.as_ref()?;
     let mut answer = format!(
-        "就当前证据包看，未见直接证据能确认{}{}过{}；因此不能把它说成已被文本支持的关系。",
+        "就当前证据包看，没有直接证据能确认{}{}过{}；因此不能确认这是一条已被文本支持的关系。",
         subject.canonical, predicate.label, object.canonical
     );
     if !cards.is_empty() {
@@ -145,18 +193,12 @@ pub(crate) fn relation_direct_support_cards<'a>(
     frame: &RuntimeQuestionFrame,
     cards: &'a [EvidenceCard],
 ) -> Vec<&'a EvidenceCard> {
-    let Some(subject) = &frame.subject else {
+    let Some(groups) = relation_support_terms(frame) else {
         return Vec::new();
     };
-    let Some(predicate) = &frame.predicate else {
-        return Vec::new();
-    };
-    let Some(object) = &frame.object else {
-        return Vec::new();
-    };
-    let subject_terms = normalized_terms(&subject.identity_terms());
-    let predicate_terms = normalized_terms(&predicate_terms(predicate));
-    let object_terms = normalized_terms(&object.identity_terms());
+    let subject_terms = normalized_terms(&groups.subject);
+    let predicate_terms = normalized_terms(&groups.predicate);
+    let object_terms = normalized_terms(&groups.object);
     cards
         .iter()
         .filter(|card| {
@@ -166,6 +208,20 @@ pub(crate) fn relation_direct_support_cards<'a>(
                 && contains_any_normalized(&normalized, &object_terms)
         })
         .collect()
+}
+
+pub(crate) fn relation_support_terms(frame: &RuntimeQuestionFrame) -> Option<RelationSupportTerms> {
+    if !frame.has_relation_object() {
+        return None;
+    }
+    let subject = frame.subject.as_ref()?;
+    let predicate = frame.predicate.as_ref()?;
+    let object = frame.object.as_ref()?;
+    Some(RelationSupportTerms {
+        subject: subject.identity_terms(),
+        predicate: predicate_terms(predicate),
+        object: object.identity_terms(),
+    })
 }
 
 pub(crate) fn parse_runtime_question_frame(value: &Value) -> Option<RuntimeQuestionFrame> {
@@ -204,6 +260,19 @@ fn normalized_terms(terms: &[String]) -> Vec<String> {
 
 fn contains_any_normalized(text: &str, terms: &[String]) -> bool {
     terms.iter().any(|term| text.contains(term))
+}
+
+fn short_quote(text: &str) -> String {
+    let cleaned = text.split_whitespace().collect::<Vec<_>>().join("");
+    let mut output = String::new();
+    for (index, ch) in cleaned.chars().enumerate() {
+        if index >= 72 {
+            output.push_str("...");
+            break;
+        }
+        output.push(ch);
+    }
+    format!("“{}”", output)
 }
 
 #[cfg(test)]

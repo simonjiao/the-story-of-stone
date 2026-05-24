@@ -16,6 +16,9 @@ struct DraftRuntimeClient;
 struct NoToolRuntimeClient;
 
 #[derive(Debug, Default)]
+struct PartialCoverageDraftRuntimeClient;
+
+#[derive(Debug, Default)]
 struct ProviderRequestRuntimeClient;
 
 #[derive(Debug, Default)]
@@ -444,6 +447,33 @@ fn relation_question_frame_value() -> Value {
     })
 }
 
+fn xiren_jiamu_relation_question_frame_value() -> Value {
+    json!({
+        "schema_version": "tonglingyu.question_frame.v1",
+        "intent": "relation_query",
+        "canonical_question": "袭人服侍过贾母吗？",
+        "subject": {
+            "canonical": "袭人",
+            "aliases": ["袭人", "襲人", "珍珠"]
+        },
+        "predicate": {
+            "id": "serve",
+            "label": "服侍",
+            "aliases": ["服侍", "伏侍", "侍候"],
+            "evidence_terms": ["丫鬟", "丫头", "跟着"]
+        },
+        "object": {
+            "canonical": "贾母",
+            "aliases": ["贾母", "賈母", "老太太"]
+        },
+        "source_scope": "pre_80_base_text_and_commentary",
+        "required_evidence_types": ["base_text", "commentary"],
+        "confidence": 0.91,
+        "needs_clarification": false,
+        "clarification_question": null
+    })
+}
+
 #[async_trait]
 impl RuntimeClient for CalibrationJudgeRuntimeClient {
     async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -530,7 +560,8 @@ impl RuntimeClient for DraftRuntimeClient {
             .as_ref()
             .and_then(|step| step.metadata.get("operation"))
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_string();
         let message = input
             .messages
             .first()
@@ -616,7 +647,7 @@ impl RuntimeClient for DraftRuntimeClient {
             )
         };
         Ok(RuntimeOutput {
-                result_summary: match operation {
+                result_summary: match operation.as_str() {
                     "text_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "evidence_refs": evidence_ids_from_step_message(&message),
@@ -701,7 +732,8 @@ impl RuntimeClient for NoToolRuntimeClient {
             .as_ref()
             .and_then(|step| step.metadata.get("operation"))
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_string();
         let message = input
             .messages
             .first()
@@ -709,7 +741,7 @@ impl RuntimeClient for NoToolRuntimeClient {
             .unwrap_or_default();
         let public_draft = public_draft_from_step_message(&message);
         Ok(RuntimeOutput {
-                result_summary: match operation {
+                result_summary: match operation.as_str() {
                     "text_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "evidence_refs": evidence_ids_from_step_message(&message),
@@ -765,6 +797,69 @@ impl RuntimeClient for NoToolRuntimeClient {
                     "tool_audit_events": [],
                 }),
             })
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for PartialCoverageDraftRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "partial-coverage runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "partial-coverage runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let operation = input
+            .runtime_step
+            .as_ref()
+            .and_then(|step| step.metadata.get("operation"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let message = input
+            .messages
+            .first()
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        let mut output = NoToolRuntimeClient.execute_profile_step(input).await?;
+        if operation == "draft_answer" {
+            let package_id = package_id_from_step_message(&message)
+                .unwrap_or_else(|| "pkg-missing-from-step-output".to_string());
+            output.result_summary = serde_json::to_string(&json!({
+                "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+                "package_id": package_id,
+                "source_scope_policy": source_scope_policy_from_step_message(&message),
+                "draft_candidate": {
+                    "draft_answer": "上游认为当前包不足，交由本地治理边界处理。",
+                    "package_id": package_id,
+                    "claim_statements": [{
+                        "text": "上游 coverage 未通过时，本地治理仍保留包边界。",
+                        "evidence_refs": evidence_ids_from_step_message(&message),
+                    }],
+                },
+                "coverage_assessment": {
+                    "status": "insufficient",
+                    "missing_in_scope_slots": ["上游未能完成覆盖判断。"],
+                    "out_of_scope_slots": [],
+                },
+                "evidence_hints": [],
+                "retrieval_repair": {
+                    "recommended": false,
+                    "queries": [],
+                },
+                "out_of_scope_hints": [],
+            }))
+            .expect("partial coverage output serializes");
+        }
+        Ok(output)
     }
 }
 
@@ -1568,6 +1663,40 @@ fn seed_relation_object_only_runtime_block(conn: &Connection) {
         ],
     )
     .expect("insert relation object-only runtime block");
+}
+
+fn seed_relation_direct_support_runtime_block(conn: &Connection) {
+    seed_retrieval_quality_source(
+        conn,
+        json!({
+            "license": "CC-BY-SA-4.0",
+            "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+            "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+            "attribution": "Wikisource contributors",
+            "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+        }),
+    );
+    let source_title = "脂硯齋重評石頭記甲戌本/第三回";
+    let text = "原來這襲人亦是賈母之婢，伏侍賈母時，心中眼中只有一個賈母。";
+    conn.execute(
+        r#"
+        INSERT INTO blocks (
+            block_id, source_id, section_id, source_title, normalized_source_title,
+            source_url, revision_id, block_index, kind, tag, text, normalized_text,
+            evidence_type, chapter_no
+        ) VALUES (?1, 'quality-source', 'quality-section-relation-direct',
+            ?2, ?3, 'https://example.test/source/relation-direct',
+            1, 1, 'paragraph', NULL, ?4, ?5, 'commentary', 3)
+        "#,
+        params![
+            "quality-block-relation-direct",
+            source_title,
+            normalize_title(source_title),
+            text,
+            normalize_text(text),
+        ],
+    )
+    .expect("insert relation direct runtime block");
 }
 
 fn yousanjie_test_package() -> EvidencePackage {
@@ -6886,8 +7015,63 @@ fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
             .iter()
             .any(|issue| issue == "relation_predicate_evidence_missing")
     );
-    assert!(workflow.final_answer.contains("未见直接证据"));
+    assert!(workflow.final_answer.contains("没有直接证据"));
+    assert!(workflow.final_answer.contains("不能确认"));
     assert!(workflow.final_answer.contains("紫鹃服侍过史湘云"));
+}
+
+#[test]
+fn runtime_workflow_promotes_relation_direct_support_cards() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+    seed_relation_direct_support_runtime_block(&conn);
+
+    let workflow = execute_runtime_workflow(
+        &conn,
+        test_workflow_input_with_question_frame(
+            "trace-relation-direct-workflow",
+            "袭人服侍过贾母吗？",
+            4,
+            vec!["base_text".to_string()],
+            xiren_jiamu_relation_question_frame_value(),
+        ),
+    )
+    .expect("workflow executes");
+
+    assert!(workflow.package.question_frame.is_some());
+    assert!(
+        workflow
+            .package
+            .cards
+            .iter()
+            .any(|card| card.block_id == "quality-block-relation-direct")
+    );
+    assert!(
+        !workflow
+            .package
+            .review
+            .issues
+            .iter()
+            .any(|issue| issue == "relation_predicate_evidence_missing")
+    );
+    assert!(workflow.final_answer.contains("可以确认"));
+    assert!(workflow.final_answer.contains("袭人服侍过贾母"));
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .filter(|step| step.operation == "text_evidence_search")
+            .any(|step| {
+                step.output["question_frame_direct_support_evidence_ids"]
+                    .as_array()
+                    .is_some_and(|ids| !ids.is_empty())
+            })
+    );
+    let stored = load_evidence_package_from_conn(&conn, &workflow.package.package_id)
+        .expect("stored package loads")
+        .expect("stored package exists");
+    assert!(stored.question_frame.is_some());
 }
 
 #[test]
@@ -8769,6 +8953,71 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
                 == json!("openai_compatible_profile_observed_with_local_governance")
             && event["payload"]["profile_observation_complete"] == json!(true)
             && event["payload"]["profile_content_execution_complete"] == json!(true)
+    }));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+}
+
+#[tokio::test]
+async fn openai_compatible_workflow_keeps_controlled_local_answer_when_draft_coverage_fails() {
+    let db_path = std::env::temp_dir().join(format!(
+        "tonglingyu-runtime-openai-compatible-draft-coverage-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let store = TonglingyuRuntimeStore::new(db_path.clone());
+    {
+        let conn = store.open_connection().expect("runtime conn");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+        seed_basic_tonglingyu_runtime_block(&conn);
+    }
+    let trace_id = "trace-openai-compatible-draft-coverage-test";
+    let workflow = store
+        .execute_workflow_with_agent_runtime_client(
+            test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+            Arc::new(PartialCoverageDraftRuntimeClient),
+        )
+        .await
+        .expect("draft coverage rejection should produce controlled local-governed response");
+
+    assert_eq!(workflow.answer_source, "runtime_local_profile");
+    assert_eq!(
+        workflow.agent_runtime_summary["profile_execution_status"],
+        "openai_compatible_profile_observed_with_local_governance"
+    );
+    assert_eq!(
+        workflow.agent_runtime_summary["profile_observation_complete"],
+        json!(true)
+    );
+    assert_eq!(
+        workflow.agent_runtime_summary["draft_consumed"],
+        json!(false)
+    );
+    assert_eq!(
+        workflow.agent_runtime_summary["draft_rejected_by_local_governance"],
+        json!(true)
+    );
+    let events = store
+        .audit_events_for_trace(trace_id)
+        .expect("audit events");
+    assert!(events.iter().any(|event| {
+        event["event_type"] == "agent_runtime_profile_draft_rejected"
+            && event["payload"]["rejected_reason"] == json!("coverage_assessment_not_passed")
+    }));
+    assert!(events.iter().any(|event| {
+        event["event_type"] == "agent_runtime_profile_execution_summarized"
+            && event["payload"]["profile_observation_complete"] == json!(true)
     }));
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
