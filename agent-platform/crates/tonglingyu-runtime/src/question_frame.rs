@@ -71,6 +71,20 @@ impl RuntimeQuestionFrameEntity {
     }
 }
 
+pub(crate) fn frame_focus_terms(frame: Option<&RuntimeQuestionFrame>) -> Vec<String> {
+    let Some(frame) = frame else {
+        return Vec::new();
+    };
+    let mut terms = Vec::new();
+    if let Some(subject) = &frame.subject {
+        extend_terms(&mut terms, &subject.identity_terms());
+    }
+    if let Some(object) = &frame.object {
+        extend_terms(&mut terms, &object.identity_terms());
+    }
+    terms
+}
+
 pub(crate) fn question_frame_from_context(
     context: &RuntimeContextContract,
 ) -> Option<RuntimeQuestionFrame> {
@@ -168,6 +182,26 @@ pub(crate) fn relation_direct_answer(
     ))
 }
 
+pub(crate) fn question_frame_answer(
+    frame: Option<&RuntimeQuestionFrame>,
+    cards: &[EvidenceCard],
+) -> Option<String> {
+    if let Some(answer) = relation_direct_answer(frame, cards) {
+        return Some(answer);
+    }
+    if let Some(answer) = relation_boundary_answer(frame, cards) {
+        return Some(answer);
+    }
+    entity_intro_answer(frame, cards)
+}
+
+pub(crate) fn relation_answer(
+    frame: Option<&RuntimeQuestionFrame>,
+    cards: &[EvidenceCard],
+) -> Option<String> {
+    relation_direct_answer(frame, cards).or_else(|| relation_boundary_answer(frame, cards))
+}
+
 pub(crate) fn relation_boundary_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -208,6 +242,31 @@ pub(crate) fn relation_direct_support_cards<'a>(
                 && contains_any_normalized(&normalized, &object_terms)
         })
         .collect()
+}
+
+fn entity_intro_answer(
+    frame: Option<&RuntimeQuestionFrame>,
+    cards: &[EvidenceCard],
+) -> Option<String> {
+    let frame = frame.filter(|frame| frame.intent == "entity_query")?;
+    let subject = frame.subject.as_ref().or(frame.object.as_ref())?;
+    let terms = normalized_terms(&subject.identity_terms());
+    let direct_card = cards.iter().find(|card| {
+        let normalized = normalize_text(&card.text);
+        contains_any_normalized(&normalized, &terms)
+    });
+    let Some(card) = direct_card else {
+        return Some(format!(
+            "就当前证据包看，没有命中关于{}的直接材料，不能可靠概括这个人物。",
+            subject.canonical
+        ));
+    };
+    Some(format!(
+        "就当前证据包看，{}的直接材料是{}：{}。这能支持其在该处的文本定位和相关人物关系；更完整的性格或结局概括，需要继续命中对应情节。",
+        subject.canonical,
+        card.source_title,
+        short_quote(&card.text)
+    ))
 }
 
 pub(crate) fn relation_support_terms(frame: &RuntimeQuestionFrame) -> Option<RelationSupportTerms> {

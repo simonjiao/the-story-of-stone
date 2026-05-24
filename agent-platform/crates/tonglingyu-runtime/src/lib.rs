@@ -54,14 +54,15 @@ use governance_rules::{
 };
 use ontology_aliases::seed_aliases;
 use question_frame::{
-    RelationSupportTerms, frame_search_query, question_frame_from_context,
-    relation_boundary_answer, relation_direct_answer, relation_required_evidence_types,
-    relation_review_issues, relation_support_terms,
+    RelationSupportTerms, frame_focus_terms, frame_search_query, question_frame_answer,
+    question_frame_from_context, relation_answer, relation_boundary_answer,
+    relation_required_evidence_types, relation_review_issues, relation_support_terms,
 };
 use upstream_bundle::{
-    UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, evidence_card_source_layer,
-    extract_upstream_bundle_draft, filter_cards_for_source_scope, source_scope_policy_for_question,
-    source_title_in_later_forty, text_mentions_later_forty_boundary,
+    UPSTREAM_BUNDLE_SCHEMA_VERSION, UpstreamBundleDraftExtraction, evidence_card_is_later_forty,
+    evidence_card_source_layer, extract_upstream_bundle_draft, filter_cards_for_source_scope,
+    source_scope_policy_for_question, source_title_in_later_forty,
+    text_mentions_later_forty_boundary,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3373,10 +3374,14 @@ pub fn execute_runtime_workflow(
         } => (cards, *quality_report),
         other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
     };
+    let question_frame_focus_cards =
+        question_frame_focus_search(conn, question_frame.as_ref(), input.limit)?;
+    let question_frame_focus_evidence_ids = evidence_ids(&question_frame_focus_cards);
     let relation_direct_cards =
         relation_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
     let relation_direct_evidence_ids = evidence_ids(&relation_direct_cards);
-    text_cards = merge_cards(text_cards, relation_direct_cards);
+    let protected_focus_cards = merge_cards(relation_direct_cards, question_frame_focus_cards);
+    text_cards = merge_cards(protected_focus_cards, text_cards);
     retrieval_failure_candidates.push((text_quality_report.clone(), evidence_ids(&text_cards)));
     cards = merge_cards(cards, text_cards.clone());
     let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
@@ -3398,6 +3403,7 @@ pub fn execute_runtime_workflow(
             "evidence_ids": evidence_ids(&text_cards),
                 "evidence_types": evidence_types(&text_cards),
                 "query_frame_bound": question_frame.is_some(),
+                "question_frame_focus_evidence_ids": question_frame_focus_evidence_ids,
                 "question_frame_direct_support_evidence_ids": relation_direct_evidence_ids,
                 "query_sha256": hash_text(&search_question),
                 "quality_report": &text_quality_report,
@@ -4747,6 +4753,54 @@ struct AgentRuntimeContentApplication {
     rejected_reason: Option<&'static str>,
 }
 
+fn reject_agent_runtime_draft_application(
+    workflow: &mut RuntimeWorkflowOutput,
+    draft_step_index: usize,
+    mode: TonglingyuAgentRuntimeMode,
+    extraction: &UpstreamBundleDraftExtraction,
+    reason: &'static str,
+    content_source_suffix: &'static str,
+) -> AgentRuntimeContentApplication {
+    if let Some(step) = workflow.steps.get_mut(draft_step_index) {
+        step.output["agent_runtime_draft_consumed"] = json!(false);
+        step.output["agent_runtime_result_format"] = json!(extraction.result_format);
+        step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
+        step.output["agent_runtime_package_id"] = json!(extraction.package_id);
+        step.output["agent_runtime_coverage_status"] = json!(extraction.coverage_status);
+        step.output["agent_runtime_evidence_hint_count"] = json!(extraction.evidence_hint_count);
+        step.output["agent_runtime_out_of_scope_hint_count"] =
+            json!(extraction.out_of_scope_hint_count);
+        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
+            agent_runtime.insert(
+                "content_source".to_string(),
+                json!(agent_runtime_profile_content_source(
+                    mode,
+                    content_source_suffix
+                )),
+            );
+            agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
+            agent_runtime.insert(
+                "content_application".to_string(),
+                json!({
+                    "answer_source": &workflow.answer_source,
+                    "local_reviewer_enforced": true,
+                    "review_status": &workflow.package.review.status,
+                    "result_format": extraction.result_format,
+                    "draft_consumed": false,
+                    "rejected_reason": reason,
+                    "content_used_for_final_answer": false,
+                }),
+            );
+        }
+    }
+    AgentRuntimeContentApplication {
+        draft_consumed: false,
+        content_used_for_final_answer: false,
+        result_format: extraction.result_format,
+        rejected_reason: Some(reason),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AgentRuntimeEvidenceObservation {
     operation: String,
@@ -4836,6 +4890,9 @@ fn should_repair_agent_runtime_draft(
 ) -> bool {
     agent_runtime_profile_observation_mode(mode)
         && application.is_some_and(|value| !value.draft_consumed && value.rejected_reason.is_some())
+        && !application.is_some_and(|value| {
+            value.rejected_reason == Some("question_frame_relation_answer_enforced")
+        })
 }
 
 fn agent_runtime_draft_governance_decision_is_complete(
@@ -4853,6 +4910,7 @@ fn agent_runtime_draft_governance_decision_is_complete(
                     | "draft_negates_direct_evidence_slot_count"
                     | "draft_stops_for_user_opt_in"
                     | "draft_uses_unscoped_later_forty"
+                    | "question_frame_relation_answer_enforced"
             )
         })
 }
@@ -5565,89 +5623,40 @@ fn apply_agent_runtime_content_outputs(
             })?;
 
     if let Some(reason) = extraction.rejected_reason {
-        if let Some(step) = workflow.steps.get_mut(draft_step_index) {
-            step.output["agent_runtime_draft_consumed"] = json!(false);
-            step.output["agent_runtime_result_format"] = json!(extraction.result_format);
-            step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
-            step.output["agent_runtime_package_id"] = json!(extraction.package_id);
-            step.output["agent_runtime_coverage_status"] = json!(extraction.coverage_status);
-            step.output["agent_runtime_evidence_hint_count"] =
-                json!(extraction.evidence_hint_count);
-            step.output["agent_runtime_out_of_scope_hint_count"] =
-                json!(extraction.out_of_scope_hint_count);
-            if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
-            {
-                agent_runtime.insert(
-                    "content_source".to_string(),
-                    json!(agent_runtime_profile_content_source(
-                        mode,
-                        "profile-rejected"
-                    )),
-                );
-                agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
-                agent_runtime.insert(
-                    "content_application".to_string(),
-                    json!({
-                        "answer_source": &workflow.answer_source,
-                        "local_reviewer_enforced": true,
-                        "review_status": &workflow.package.review.status,
-                        "result_format": extraction.result_format,
-                        "draft_consumed": false,
-                        "rejected_reason": reason,
-                        "content_used_for_final_answer": false,
-                    }),
-                );
-            }
-        }
-        return Some(AgentRuntimeContentApplication {
-            draft_consumed: false,
-            content_used_for_final_answer: false,
-            result_format: extraction.result_format,
-            rejected_reason: Some(reason),
-        });
+        return Some(reject_agent_runtime_draft_application(
+            workflow,
+            draft_step_index,
+            mode,
+            &extraction,
+            reason,
+            "profile-rejected",
+        ));
     }
 
-    let draft = extraction.draft_answer?;
+    let draft = extraction.draft_answer.clone()?;
     if let Some(reason) = agent_runtime_draft_evidence_boundary_rejection(
         &workflow.package.question,
         &draft,
         &workflow.package.cards,
     ) {
-        if let Some(step) = workflow.steps.get_mut(draft_step_index) {
-            step.output["agent_runtime_draft_consumed"] = json!(false);
-            step.output["agent_runtime_result_format"] = json!(extraction.result_format);
-            step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
-            step.output["agent_runtime_package_id"] = json!(extraction.package_id);
-            if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut)
-            {
-                agent_runtime.insert(
-                    "content_source".to_string(),
-                    json!(agent_runtime_profile_content_source(
-                        mode,
-                        "profile-evidence-boundary-rejected"
-                    )),
-                );
-                agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
-                agent_runtime.insert(
-                    "content_application".to_string(),
-                    json!({
-                        "answer_source": &workflow.answer_source,
-                        "local_reviewer_enforced": true,
-                        "review_status": &workflow.package.review.status,
-                        "result_format": extraction.result_format,
-                        "draft_consumed": false,
-                        "rejected_reason": reason,
-                        "content_used_for_final_answer": false,
-                    }),
-                );
-            }
-        }
-        return Some(AgentRuntimeContentApplication {
-            draft_consumed: false,
-            content_used_for_final_answer: false,
-            result_format: extraction.result_format,
-            rejected_reason: Some(reason),
-        });
+        return Some(reject_agent_runtime_draft_application(
+            workflow,
+            draft_step_index,
+            mode,
+            &extraction,
+            reason,
+            "profile-evidence-boundary-rejected",
+        ));
+    }
+    if package_relation_answer(&workflow.package).is_some() {
+        return Some(reject_agent_runtime_draft_application(
+            workflow,
+            draft_step_index,
+            mode,
+            &extraction,
+            "question_frame_relation_answer_enforced",
+            "profile-question-frame-rejected",
+        ));
     }
 
     workflow.draft_answer = draft.clone();
@@ -14731,6 +14740,39 @@ fn text_search_required_evidence_types(required_evidence_types: &[String]) -> Ve
         .collect()
 }
 
+fn question_frame_focus_search(
+    conn: &Connection,
+    frame: Option<&question_frame::RuntimeQuestionFrame>,
+    limit: usize,
+) -> Result<Vec<EvidenceCard>> {
+    let focus_terms = frame_focus_terms(frame);
+    if focus_terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut candidate_blocks = BTreeMap::<String, SearchBlockRecord>::new();
+    let per_term_limit = limit.saturating_mul(16).max(16);
+    for term in focus_terms {
+        for block in query_blocks_exact_text(conn, &term, per_term_limit)? {
+            candidate_blocks
+                .entry(block.block_id.clone())
+                .or_insert(block);
+        }
+    }
+    let mut blocks = candidate_blocks.into_values().collect::<Vec<_>>();
+    blocks.sort_by_key(|block| {
+        (
+            relation_support_source_rank(block),
+            block.text.chars().count(),
+            block.block_id.clone(),
+        )
+    });
+    blocks.truncate(limit);
+    Ok(blocks
+        .into_iter()
+        .map(|block| evidence_card_from_block(block))
+        .collect())
+}
+
 fn relation_direct_support_search(
     conn: &Connection,
     frame: Option<&question_frame::RuntimeQuestionFrame>,
@@ -15560,10 +15602,7 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         .question_frame
         .as_ref()
         .and_then(question_frame::parse_runtime_question_frame);
-    if let Some(answer) = relation_direct_answer(parsed_question_frame.as_ref(), &package.cards) {
-        return answer;
-    }
-    if let Some(answer) = relation_boundary_answer(parsed_question_frame.as_ref(), &package.cards) {
+    if let Some(answer) = question_frame_answer(parsed_question_frame.as_ref(), &package.cards) {
         return answer;
     }
     if let Some(answer) = local_slot_count_answer(question, package) {
@@ -15600,6 +15639,14 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
         ));
     }
     answer
+}
+
+fn package_relation_answer(package: &EvidencePackage) -> Option<String> {
+    let parsed_question_frame = package
+        .question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame);
+    relation_answer(parsed_question_frame.as_ref(), &package.cards)
 }
 
 fn preferred_evidence_answer(question: &str, package: &EvidencePackage) -> Option<String> {

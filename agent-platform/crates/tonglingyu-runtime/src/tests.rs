@@ -474,6 +474,25 @@ fn xiren_jiamu_relation_question_frame_value() -> Value {
     })
 }
 
+fn zijuan_entity_question_frame_value() -> Value {
+    json!({
+        "schema_version": "tonglingyu.question_frame.v1",
+        "intent": "entity_query",
+        "canonical_question": "紫鹃在《红楼梦》里是什么样的人？",
+        "subject": {
+            "canonical": "紫鹃",
+            "aliases": ["紫鹃", "紫鵑", "鹦哥", "鸚哥"]
+        },
+        "predicate": null,
+        "object": null,
+        "source_scope": "pre_80_base_text_and_commentary",
+        "required_evidence_types": ["base_text"],
+        "confidence": 0.91,
+        "needs_clarification": false,
+        "clarification_question": null
+    })
+}
+
 #[async_trait]
 impl RuntimeClient for CalibrationJudgeRuntimeClient {
     async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -1697,6 +1716,54 @@ fn seed_relation_direct_support_runtime_block(conn: &Connection) {
         ],
     )
     .expect("insert relation direct runtime block");
+}
+
+fn seed_entity_focus_runtime_blocks(conn: &Connection) {
+    seed_retrieval_quality_source(
+        conn,
+        json!({
+            "license": "CC-BY-SA-4.0",
+            "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+            "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+            "attribution": "Wikisource contributors",
+            "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+        }),
+    );
+    for (block_id, source_title, block_index, text) in [
+        (
+            "quality-block-generic-title",
+            "紅樓夢/第001回",
+            1_i64,
+            "從此空空道人因空見色，由色生情，改《石頭記》為《情僧錄》，又題曰《紅樓夢》。",
+        ),
+        (
+            "quality-block-zijuan-focus",
+            "紅樓夢/第003回",
+            2_i64,
+            "賈母見雪雁甚小，便將自己身邊的一個二等丫頭，名喚鸚哥者與了黛玉。王嬤嬤與鸚哥陪侍黛玉在碧紗櫥內。",
+        ),
+    ] {
+        conn.execute(
+            r#"
+        INSERT INTO blocks (
+            block_id, source_id, section_id, source_title, normalized_source_title,
+            source_url, revision_id, block_index, kind, tag, text, normalized_text,
+            evidence_type, chapter_no
+        ) VALUES (?1, 'quality-source', 'quality-section-entity-focus',
+            ?2, ?3, 'https://example.test/source/entity-focus',
+            1, ?4, 'paragraph', NULL, ?5, ?6, 'base_text', 3)
+        "#,
+            params![
+                block_id,
+                source_title,
+                normalize_title(source_title),
+                block_index,
+                text,
+                normalize_text(text),
+            ],
+        )
+        .expect("insert entity focus runtime block");
+    }
 }
 
 fn yousanjie_test_package() -> EvidencePackage {
@@ -7075,6 +7142,52 @@ fn runtime_workflow_promotes_relation_direct_support_cards() {
 }
 
 #[test]
+fn runtime_workflow_promotes_entity_question_frame_focus_cards() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+    seed_entity_focus_runtime_blocks(&conn);
+
+    let workflow = execute_runtime_workflow(
+        &conn,
+        test_workflow_input_with_question_frame(
+            "trace-entity-focus-workflow",
+            "紫鹃在《红楼梦》里是什么样的人？",
+            4,
+            vec!["base_text".to_string()],
+            zijuan_entity_question_frame_value(),
+        ),
+    )
+    .expect("workflow executes");
+
+    assert!(
+        workflow
+            .package
+            .cards
+            .iter()
+            .any(|card| card.block_id == "quality-block-zijuan-focus")
+    );
+    assert!(workflow.final_answer.contains("紫鹃"));
+    assert!(workflow.final_answer.contains("紅樓夢/第003回"));
+    assert!(
+        !workflow
+            .final_answer
+            .contains("目前能支持回答的主要材料如下")
+    );
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .filter(|step| step.operation == "text_evidence_search")
+            .any(|step| {
+                step.output["question_frame_focus_evidence_ids"]
+                    .as_array()
+                    .is_some_and(|ids| !ids.is_empty())
+            })
+    );
+}
+
+#[test]
 fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
@@ -7105,6 +7218,51 @@ fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
         workflow.steps[1].output["draft_source"],
         "agent_runtime_hermes_profile"
     );
+}
+
+#[test]
+fn openai_compatible_relation_question_keeps_local_relation_answer() {
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-relation-direct".to_string();
+    card.source_title = "紅樓夢/第003回".to_string();
+    card.text = "原來這襲人亦是賈母之婢，伏侍賈母時，心中眼中只有一個賈母。".to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![card],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "袭人服侍过贾母吗？".to_string();
+    workflow.package.question = workflow.question.clone();
+    workflow.package.question_frame = Some(xiren_jiamu_relation_question_frame_value());
+    workflow.draft_answer = local_answer(&workflow.question, &workflow.package);
+    workflow.final_answer = workflow.draft_answer.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &workflow.package.package_id,
+            "未见有可靠证据表明袭人曾服侍过贾母。",
+            "未见袭人服侍贾母的证据。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("runtime draft observed");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("question_frame_relation_answer_enforced")
+    );
+    assert!(workflow.final_answer.contains("可以确认"));
+    assert!(workflow.final_answer.contains("袭人服侍过贾母"));
+    assert!(!workflow.final_answer.contains("未见有可靠证据"));
 }
 
 #[test]
