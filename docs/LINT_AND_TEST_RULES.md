@@ -96,6 +96,23 @@ cargo test --manifest-path agent-platform/Cargo.toml --workspace
 State or concurrency changes must cover lease ownership, heartbeat expiry,
 idempotency, lock behavior, and error propagation.
 
+## Fallback and Release Claims
+
+Fallbacks are valid only as explicit degraded behavior, not as a substitute for
+the primary path.
+
+- Primary-path tests must assert that the intended Runtime, Gateway, policy,
+  store, live dependency, or release gate actually executed.
+- Fallback, mock, replay, fixture, local no-upstream, and default-empty paths
+  must be covered by dedicated degraded-path tests or smoke checks.
+- Degraded-path tests must assert observable status: typed status, audit/event,
+  metric, report field, or equivalent structured evidence.
+- A fallback-triggered run must not be counted as `primary_path_passed`,
+  `production_ready`, `production_release_ready`, or `release_ready`.
+- Saved reports and release artifacts must distinguish primary success from
+  degraded success; missing dependencies should produce `BLOCKED`, non-production
+  status, or a release blocker rather than a green release claim.
+
 ## Minimum Gates
 
 - Markdown only: `git diff --check`.

@@ -13,7 +13,7 @@ are implementation constraints, not general style preferences.
 - Keep production behavior explicit: trace ids, audit records, idempotency keys,
   lease ownership, policy decisions, and degraded states must remain visible.
 - Do not let a fallback, mock, default empty value, old code path, or replay path
-  make a primary-path test or release gate look successful.
+  silently replace the intended code path.
 - When a local rule conflicts with existing code, migrate the touched area
   deliberately and keep verification proportional to the behavior being changed.
 
@@ -131,11 +131,9 @@ are implementation constraints, not general style preferences.
   input, missing rows, expired leases, malformed config, or downstream failure.
 - Fallbacks are allowed only as explicit degraded behavior. They must produce a
   typed degraded status, audit/event record, metric, or report field.
-- A fallback must not be counted as `primary_path_passed`, `production_ready`, or
-  `release_ready`. Primary-path tests must assert the intended Runtime, Gateway,
-  policy, store, or release gate actually executed.
-- Test-only mocks, fixtures, replay, or local no-upstream paths must be named as
-  such and must not leak into production-ready claims.
+- Code paths that intentionally use fallback, replay, mock, local no-upstream, or
+  default-empty behavior must make that source explicit in the returned type,
+  report payload, audit event, or test fixture name.
 
 ## Unsafe
 
@@ -210,4 +208,4 @@ are implementation constraints, not general style preferences.
   propagation.
 - Fallback and degraded-path changes must include both sides of the assertion:
   the primary path still runs when dependencies are healthy, and the degraded
-  path is observable without being marked as production success.
+  path is observable through typed status, audit, metrics, or reports.
