@@ -52,6 +52,7 @@ fn catalog_cache_hot_reloads_external_file() {
                 "count_question_terms": ["几次"],
                 "total_count_units": ["次"],
                 "total_count_prefixes": ["共"],
+                "direct_slot_negation_terms": ["不计入"],
                 "answer_unit": "处",
                 "answer_noun": "直接丢失证据"
             }
@@ -78,6 +79,7 @@ fn catalog_cache_hot_reloads_external_file() {
                 "count_question_terms": ["几次"],
                 "total_count_units": ["次"],
                 "total_count_prefixes": ["共"],
+                "direct_slot_negation_terms": ["不计入"],
                 "answer_unit": "处",
                 "answer_noun": "直接丢失证据"
             }
@@ -128,5 +130,11 @@ fn count_parser_uses_catalog_terms_and_markers() {
     assert_eq!(
         explicit_total_count_for_basis("明确三处。", &basis),
         Some(3)
+    );
+    assert_eq!(explicit_total_count_for_basis("可计1次。", &basis), Some(1));
+    assert!(
+        basis
+            .direct_slot_negation_terms
+            .contains(&"不计入".to_string())
     );
 }

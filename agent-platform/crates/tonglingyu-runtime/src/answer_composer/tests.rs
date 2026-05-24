@@ -8,6 +8,7 @@ fn count_basis() -> EvidenceSlotCountBasis {
         count_question_terms: vec!["几次".to_string()],
         total_count_units: vec!["处".to_string()],
         total_count_prefixes: vec!["明确".to_string()],
+        direct_slot_negation_terms: vec!["不计入".to_string()],
         answer_unit: "处".to_string(),
         answer_noun: "明确失玉证据".to_string(),
     }
@@ -135,4 +136,16 @@ fn composer_strips_internal_markup_from_public_quotes() {
     assert!(!answer.contains("{{~|"));
     assert!(!answer.contains("}}"));
     assert!(!answer.contains("<br>"));
+}
+
+#[test]
+fn public_quote_text_removes_wiki_and_html_markup() {
+    let text = "{{block center/s|width=80%}}<center>'''第六支，樂中悲：'''</center> 襁褓中，父母嘆雙亡。{{~~|【甲側：意真辭切。】}}<br>終久是雲散高唐。";
+    let quote = public_quote_text(text);
+
+    assert!(!quote.contains("{{"));
+    assert!(!quote.contains("<center>"));
+    assert!(!quote.contains("block center"));
+    assert!(quote.contains("第六支，樂中悲"));
+    assert!(quote.contains("甲側：意真辭切"));
 }

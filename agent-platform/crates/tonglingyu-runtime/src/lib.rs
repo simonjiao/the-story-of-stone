@@ -36,11 +36,11 @@ mod retrieval_rules;
 mod upstream_bundle;
 
 use answer_composer::{
-    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, representative_matches,
-    source_layer_for_card,
+    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, public_quote_text,
+    representative_matches, source_layer_for_card,
 };
 use evidence_slot_rules::{
-    active_count_basis_for_question, evidence_slot_count_policy_value,
+    EvidenceSlotCountBasis, active_count_basis_for_question, evidence_slot_count_policy_value,
     evidence_slot_rule_values_for_ids, evidence_slot_rules_for_ids, explicit_total_count_for_basis,
     question_asks_for_count,
 };
@@ -48,7 +48,8 @@ use governance_rules::{
     blocked_prompt_control_issues, claim_evidence_types_for_claim, claim_rules,
     draft_has_unsupported_term_without_evidence, draft_stops_for_user_opt_in,
     empty_evidence_review_issue, later_forty_boundary_missing_from_claims,
-    later_forty_boundary_review_issue, triggered_review_rule_issues,
+    later_forty_boundary_review_issue, preferred_answer_evidence_types,
+    triggered_review_rule_issues,
 };
 use ontology_aliases::seed_aliases;
 use upstream_bundle::{
@@ -5317,6 +5318,9 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if draft_exposes_internal_evidence_slot_ids(question, &draft_text, cards) {
         return Some("draft_exposes_internal_evidence_slot_id");
     }
+    if draft_negates_direct_evidence_slot(question, &draft_text, cards) {
+        return Some("draft_negates_direct_evidence_slot_count");
+    }
     if draft_lacks_embedded_slot_evidence(question, &draft_text, cards) {
         return Some("draft_missing_embedded_evidence_anchor");
     }
@@ -5448,6 +5452,52 @@ fn draft_count_conflicts_with_evidence_slots(
     }
     explicit_total_count_for_basis(draft_text, &active_basis)
         .is_some_and(|count| count != direct_count)
+}
+
+fn draft_negates_direct_evidence_slot(
+    question: &str,
+    draft_text: &str,
+    cards: &[EvidenceCard],
+) -> bool {
+    if !question_asks_for_count(question).unwrap_or(false) {
+        return false;
+    }
+    let Some(active_basis) = active_count_basis_for_question(question, true)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
+    representative_matches(&slot_matches, |item| {
+        item.counts_as.iter().any(|basis| basis == &active_basis.id)
+    })
+    .iter()
+    .any(|item| direct_slot_is_negated_after_label(draft_text, item, &active_basis))
+}
+
+fn direct_slot_is_negated_after_label(
+    draft_text: &str,
+    item: &EvidenceSlotMatch,
+    active_basis: &EvidenceSlotCountBasis,
+) -> bool {
+    let label = normalize_text(&item.label);
+    if label.is_empty() {
+        return false;
+    }
+    let negation_terms = active_basis
+        .direct_slot_negation_terms
+        .iter()
+        .map(|term| normalize_text(term))
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if negation_terms.is_empty() {
+        return false;
+    }
+    draft_text.match_indices(&label).any(|(index, _)| {
+        let window = draft_text[index..].chars().take(80).collect::<String>();
+        negation_terms.iter().any(|term| window.contains(term))
+    })
 }
 
 fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
@@ -14884,7 +14934,7 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
             "注意：以下包含第八十一回及以后（后四十回）材料；这类材料必须显式标注为后四十回内容，未标注时不能作为证据或参考。\n\n",
         );
     }
-    let display_cards = answer_display_cards(&package.cards, 4);
+    let display_cards = answer_display_cards(&package.question, &package.cards, 4);
     if display_cards.is_empty() {
         answer.push_str("当前命中的证据片段过短或不完整，不能可靠展示为回答依据。\n");
         return answer;
@@ -14894,7 +14944,7 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
             "{}. {}：{}\n",
             index + 1,
             evidence_card_source_label(card),
-            card.text
+            answer_evidence_excerpt(&package.question, card)
         ));
     }
     answer
@@ -14915,10 +14965,34 @@ fn local_slot_count_answer(question: &str, package: &EvidencePackage) -> Option<
     compose_slot_count_answer(package, &active_basis, &slot_matches)
 }
 
-fn answer_display_cards(cards: &[EvidenceCard], limit: usize) -> Vec<&EvidenceCard> {
+fn answer_display_cards<'a>(
+    question: &str,
+    cards: &'a [EvidenceCard],
+    limit: usize,
+) -> Vec<&'a EvidenceCard> {
     let mut display_cards = Vec::new();
     let mut signatures = Vec::new();
-    for card in cards {
+    let preferred_types = preferred_answer_evidence_types(question).unwrap_or_default();
+    let preferred_available = !preferred_types.is_empty()
+        && cards.iter().any(|card| {
+            preferred_types
+                .iter()
+                .any(|item| item == &card.evidence_type)
+        });
+    let focus_terms = upstream_evidence_focus_terms(question);
+    let mut candidates = cards
+        .iter()
+        .filter(|card| {
+            !preferred_available
+                || preferred_types
+                    .iter()
+                    .any(|item| item == &card.evidence_type)
+        })
+        .collect::<Vec<_>>();
+    if preferred_available {
+        candidates.sort_by_key(|card| std::cmp::Reverse(answer_card_rank(card, &focus_terms)));
+    }
+    for card in candidates {
         if !evidence_card_presentable_in_answer(card) {
             continue;
         }
@@ -14936,6 +15010,29 @@ fn answer_display_cards(cards: &[EvidenceCard], limit: usize) -> Vec<&EvidenceCa
         }
     }
     display_cards
+}
+
+fn answer_card_rank(card: &EvidenceCard, focus_terms: &[String]) -> i64 {
+    let mut score = 0;
+    let normalized = normalize_text(&card.text);
+    for term in focus_terms {
+        if !term.trim().is_empty() && evidence_text_contains_focus(&card.text, term) {
+            score += 20 + term.chars().count() as i64;
+        } else if !term.trim().is_empty() && normalized.contains(&normalize_text(term)) {
+            score += 10;
+        }
+    }
+    if card.evidence_type == "commentary" {
+        score += 5;
+    }
+    score
+}
+
+fn answer_evidence_excerpt(question: &str, card: &EvidenceCard) -> String {
+    let focus_terms = upstream_evidence_focus_terms(question);
+    let raw_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
+    let cleaned = public_quote_text(&raw_excerpt);
+    trim_text(&cleaned, 180)
 }
 
 fn evidence_card_presentable_in_answer(card: &EvidenceCard) -> bool {

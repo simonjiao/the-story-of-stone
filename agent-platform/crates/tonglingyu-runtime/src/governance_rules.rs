@@ -401,6 +401,25 @@ pub(crate) fn triggered_review_rule_issues(
         .collect())
 }
 
+pub(crate) fn preferred_answer_evidence_types(question: &str) -> Result<Vec<String>> {
+    let catalog = governance_rule_catalog()?;
+    let normalized_question = normalize_text(question);
+    let mut evidence_types = Vec::new();
+    for rule in &catalog.review.rules {
+        if !review_trigger_matches(&rule.trigger, question, &normalized_question) {
+            continue;
+        }
+        for evidence_type in &rule.require.evidence_type_any {
+            let evidence_type = evidence_type.trim();
+            if !evidence_type.is_empty() && !evidence_types.iter().any(|item| item == evidence_type)
+            {
+                evidence_types.push(evidence_type.to_string());
+            }
+        }
+    }
+    Ok(evidence_types)
+}
+
 pub(crate) fn later_forty_boundary_missing_from_claims(
     cards: &[EvidenceCard],
     claims: &[String],

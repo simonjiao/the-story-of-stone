@@ -41,6 +41,8 @@ pub(crate) struct EvidenceSlotCountBasis {
     pub total_count_units: Vec<String>,
     #[serde(default)]
     pub total_count_prefixes: Vec<String>,
+    #[serde(default)]
+    pub direct_slot_negation_terms: Vec<String>,
     pub answer_unit: String,
     pub answer_noun: String,
 }
@@ -184,6 +186,10 @@ fn parse_evidence_slot_rule_catalog(source: &str) -> Result<EvidenceSlotRuleCata
             ("count_question_terms", &basis.count_question_terms),
             ("total_count_units", &basis.total_count_units),
             ("total_count_prefixes", &basis.total_count_prefixes),
+            (
+                "direct_slot_negation_terms",
+                &basis.direct_slot_negation_terms,
+            ),
         ] {
             if values.is_empty() || values.iter().all(|term| term.trim().is_empty()) {
                 return Err(anyhow!(
@@ -315,7 +321,7 @@ pub(crate) fn evidence_slot_count_policy_value(
         "schema_version": EVIDENCE_SLOT_RULES_SCHEMA_VERSION,
         "active_count_basis": active_basis,
         "count_question": count_question,
-        "rule": "Count only evidence slots whose semantic rule counts_as contains active_count_basis.id; other slots may be displayed as related clues but must not change the direct count."
+        "rule": "Count only evidence slots whose semantic rule counts_as contains active_count_basis.id; other slots may be displayed as related clues but must not change the direct count. A draft must not negate a direct slot with active_count_basis.direct_slot_negation_terms."
     }))
 }
 

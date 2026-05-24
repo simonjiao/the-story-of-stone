@@ -2593,6 +2593,42 @@ fn local_answer_keeps_raw_quotes_without_intro_synthesis() {
 }
 
 #[test]
+fn local_answer_prefers_requested_commentary_and_cleans_markup() {
+    let mut base = sample_card("base_text");
+    base.source_title = "紅樓夢/第005回".to_string();
+    base.text = "（樂中悲）襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。".to_string();
+
+    let mut commentary = sample_card("commentary");
+    commentary.source_title = "脂硯齋重評石頭記/第五回".to_string();
+    commentary.text = "<center>'''第六支，樂中悲：'''</center> 襁褓中，父母嘆雙亡。{{~~|【甲側：意真辭切。】}}終久是雲散高唐，水涸湘江。".to_string();
+
+    let package = EvidencePackage {
+        package_id: "pkg-commentary-answer-test".to_string(),
+        trace_id: "trace-commentary-answer-test".to_string(),
+        question: "关于史湘云的结局，脂批中的证据呢".to_string(),
+        cards: vec![base, commentary],
+        claims: vec!["命中的脂批材料可作为默认回答证据。".to_string()],
+        claim_evidence_map: Vec::new(),
+        review: ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: Vec::new(),
+            summary: "reviewer 通过。".to_string(),
+        },
+        knowledge_state_summary: KnowledgeStateSummary::default(),
+    };
+
+    let answer = local_answer("关于史湘云的结局，脂批中的证据呢", &package);
+
+    assert!(answer.contains("脂硯齋重評石頭記/第五回"));
+    assert!(!answer.contains("紅樓夢/第005回"));
+    assert!(answer.contains("第六支，樂中悲"));
+    assert!(answer.contains("甲側：意真辭切"));
+    assert!(!answer.contains("{{"));
+    assert!(!answer.contains("<center>"));
+}
+
+#[test]
 fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
     let package = EvidencePackage {
         package_id: "pkg-lost-jade-answer-test".to_string(),
@@ -6653,6 +6689,28 @@ fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
     );
 
     assert_eq!(rejected, Some("draft_count_conflicts_with_evidence_events"));
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_with_numeric_count_conflict() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按现有证据，通灵宝玉明确“失玉/被盗”可计1次：第52回良儿偷玉；另有第23回脂批凤姐扫雪拾玉属于找回/拾回线索，不计入失玉次数；第18回脂批伏甄宝玉送玉也只是相关伏笔。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_count_conflicts_with_evidence_events"));
+}
+
+#[test]
+fn runtime_rejects_loss_count_draft_that_negates_direct_slot() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "第52回良儿偷玉、第23回脂批凤姐扫雪拾玉、第18回脂批甄宝玉送玉均有材料；但第23回脂批凤姐扫雪拾玉不计入失玉次数，甄宝玉送玉只是疑似流转线索。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, Some("draft_negates_direct_evidence_slot_count"));
 }
 
 #[test]

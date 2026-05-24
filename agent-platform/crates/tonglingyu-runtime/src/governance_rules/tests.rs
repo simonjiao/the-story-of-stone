@@ -42,4 +42,8 @@ fn default_catalog_drives_review_rules() {
             .iter()
             .any(|issue| issue.contains("attempted_evidence_bypass"))
     );
+    assert_eq!(
+        preferred_answer_evidence_types("脂批中的证据呢").expect("preferred types"),
+        vec!["commentary".to_string()]
+    );
 }
