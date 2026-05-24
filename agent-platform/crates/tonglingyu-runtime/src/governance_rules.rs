@@ -231,6 +231,10 @@ fn parse_governance_rule_catalog(source: &str) -> Result<GovernanceRuleCatalog> 
         "source_scope.later_forty_draft_terms",
         &catalog.source_scope.later_forty_draft_terms,
     )?;
+    require_non_empty_terms(
+        "source_scope.later_forty_boundary_context_terms",
+        &catalog.source_scope.later_forty_boundary_context_terms,
+    )?;
     for (name, value) in [
         ("claims.empty_evidence", &catalog.claims.empty_evidence),
         ("claims.slot_count_rule", &catalog.claims.slot_count_rule),
@@ -361,9 +365,9 @@ pub(crate) fn draft_mentions_unscoped_later_forty_material(draft: &str) -> Resul
         let mut matched_with_position = false;
         for (index, _) in normalized.match_indices(&term) {
             matched_with_position = true;
-            let window = later_forty_context_window(&normalized, index);
+            let clause = later_forty_context_clause(&normalized, index);
             if !contains_later_forty_boundary_context(
-                &window,
+                &clause,
                 &catalog.source_scope.later_forty_boundary_context_terms,
             ) {
                 return Ok(true);
@@ -377,20 +381,36 @@ pub(crate) fn draft_mentions_unscoped_later_forty_material(draft: &str) -> Resul
     Ok(false)
 }
 
-fn later_forty_context_window(normalized: &str, term_index: usize) -> String {
-    let before = normalized[..term_index]
-        .chars()
+fn later_forty_context_clause(normalized: &str, term_index: usize) -> String {
+    let start = normalized[..term_index]
+        .char_indices()
         .rev()
-        .take(18)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    let after = normalized[term_index..]
-        .chars()
-        .take(28)
-        .collect::<String>();
-    format!("{before}{after}")
+        .find_map(|(index, ch)| {
+            if is_later_forty_clause_boundary(ch) {
+                Some(index + ch.len_utf8())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let end = normalized[term_index..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            if is_later_forty_clause_boundary(ch) {
+                Some(term_index + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(normalized.len());
+    normalized[start..end].trim().to_string()
+}
+
+fn is_later_forty_clause_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '；' | ';' | '！' | '!' | '？' | '?' | '\n' | '\r'
+    )
 }
 
 fn contains_later_forty_boundary_context(window: &str, terms: &[String]) -> bool {

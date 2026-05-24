@@ -29,6 +29,18 @@ fn default_catalog_drives_later_forty_scope_terms() {
         draft_mentions_unscoped_later_forty_material("第九十四回里另有失玉情节")
             .expect("source scope rules load")
     );
+    assert!(
+        !draft_mentions_unscoped_later_forty_material(
+            "这些证据只能说明悲意，不能据此断成后四十回式的定论。"
+        )
+        .expect("source scope rules load")
+    );
+    assert!(
+        draft_mentions_unscoped_later_forty_material(
+            "不能引入后四十回材料；第九十四回另有具体情节。"
+        )
+        .expect("source scope rules load")
+    );
 }
 
 #[test]

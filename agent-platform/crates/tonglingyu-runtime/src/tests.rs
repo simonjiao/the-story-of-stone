@@ -7471,6 +7471,43 @@ fn hermes_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary(
 }
 
 #[test]
+fn hermes_mode_allows_later_forty_style_boundary_without_using_later_forty_evidence() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text"), sample_card("commentary")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "关于史湘云的结局，脂批中的证据呢".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "就现有前八十回正文与脂批来看，史湘云的结局只能作“有悲意的归结”来答，不能据此断成后四十回式的定论。第五回曲文已写她“襁褓中，父母叹双亡”，同回脂批又以“乐中悲”点出这一支的底色；至于更具体的终局细节，现有证据并不能证明。",
+            "默认范围内只使用前八十回正文和脂批；若要谈史湘云更具体的终局，只能另行引入后四十回材料，本次包内不允许。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("later-forty boundary phrasing is not source use");
+
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
+    assert!(
+        workflow
+            .final_answer
+            .contains("不能据此断成后四十回式的定论")
+    );
+}
+
+#[test]
 fn hermes_mode_rejects_partial_coverage_count_draft() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text"), sample_card("commentary")],
