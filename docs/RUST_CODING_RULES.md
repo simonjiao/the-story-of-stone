@@ -1,22 +1,58 @@
 # Rust Coding Rules
 
-These rules apply to Rust code under `agent-platform/`, which now contains the
-Tonglingyu gateway/runtime crates and the minimal runtime support crates they
-depend on. Prefer the existing crate and module boundaries before adding new
-abstraction.
+These rules apply to Rust code under `agent-platform/`, which contains the
+Tonglingyu gateway/runtime crates and their minimal runtime support crates. They
+are implementation constraints, not general style preferences.
 
-## Template Requirements
+## Rule Priority
+
+- Preserve the existing crate, module, schema, and contract boundaries before
+  adding new abstraction.
+- Prefer typed domain contracts over ad hoc JSON, stringly typed state, or
+  broad "common" helpers.
+- Keep production behavior explicit: trace ids, audit records, idempotency keys,
+  lease ownership, policy decisions, and degraded states must remain visible.
+- Do not let a fallback, mock, default empty value, old code path, or replay path
+  make a primary-path test or release gate look successful.
+- When a local rule conflicts with existing code, migrate the touched area
+  deliberately and keep verification proportional to the behavior being changed.
+
+## Crate Boundaries
+
+- `agent-core` owns shared models, typed IDs, policy, errors, and public API
+  contracts.
+- `agent-runtime` owns reusable Runtime client behavior and minimal/Hermes
+  Runtime adapters used by Tonglingyu.
+- `tonglingyu-runtime` owns source snapshot ingestion, SQLite/FTS, evidence,
+  reviewer, RQA, and Tonglingyu Runtime workflow behavior.
+- `tonglingyu-gateway` owns OpenAI-compatible HTTP, auth, model hiding, rate
+  limits, admin surfaces, and request/stream response wrapping.
+- Web frameworks, databases, queues, telemetry, and deployment concerns must not
+  define core model semantics.
+
+## Module Organization
+
+- Large, relatively independent features must live in a dedicated module or
+  module directory instead of expanding a crate root or unrelated module.
+- Prefer a small public module facade plus private submodules for substantial
+  behavior.
+- Move coherent groups of types, helpers, tests, and private functions together
+  when the feature can be reasoned about independently.
+- Keep cross-module APIs typed and domain-shaped. Do not expose broad catch-all
+  helpers just to share implementation details.
+
+## Reuse and Templates
 
 - Do not copy-paste the same handler, repository, DTO mapping, config loading,
   audit append, or test fixture shape more than twice. On the third occurrence,
   introduce a local helper, typed builder, trait, or macro-backed template.
-- Prefer ordinary Rust templates first: constructors, builder structs, generic
-  helpers, trait methods, and shared test fixtures. Use `macro_rules!` only when
-  repeated declarations have identical semantics and the macro expansion stays
-  easy to inspect.
+- Prefer ordinary Rust reuse first: constructors, builder structs, generic
+  helpers, trait methods, and shared test fixtures.
+- Use `macro_rules!` only when repeated declarations have identical semantics and
+  the macro expansion stays easy to inspect.
 - Templates must preserve domain boundaries. Do not hide request lifecycle, run
   lifecycle, approval state, lease ownership, idempotency key, trace id, or audit
-  decision behind a vague "common" function.
+  decision behind a vague shared function.
 - API responses and error bodies must come from shared response and error types.
   Avoid ad hoc `serde_json::json!` response shapes in production handlers unless
   the endpoint is intentionally dynamic.
@@ -37,66 +73,95 @@ abstraction.
 - Keep trait methods domain-shaped. Prefer `create_run`, `claim_next_run`, or
   `append_audit` over generic verbs such as `handle`, `process`, or `execute`
   when the contract has specific state semantics.
-- Avoid over-generic APIs that hide ownership, lifetimes, error semantics, or
-  async boundaries. If the caller must understand the concrete type to use the
-  trait safely, the abstraction is too broad.
+- Avoid over-generic APIs that hide ownership, lifetimes, error semantics, async
+  boundaries, retry behavior, or ordering requirements.
 - Prefer associated types for implementation-owned types and generic parameters
   for caller-supplied data. Keep bounds narrow and local to the function or impl
   that actually needs them.
 - Public traits must return typed `Result` values and document idempotency,
   ordering, ownership, and retry expectations when they cross crate or process
   boundaries.
+- Library-style crates should avoid unnecessary runtime-specific trait
+  requirements. Bind to Tokio only when the contract genuinely owns Tokio I/O,
+  timers, processes, synchronization, or task spawning.
 
-## Crate Boundaries
+## Async Runtime and Concurrency
 
-- `agent-core` owns shared models, typed IDs, policy, errors, and public API
-  contracts.
-- `agent-runtime` owns reusable Runtime client behavior and minimal/Hermes Runtime
-  adapters used by Tonglingyu.
-- `tonglingyu-runtime` owns source snapshot ingestion, SQLite/FTS, evidence,
-  reviewer, RQA, and Tonglingyu Runtime workflow behavior.
-- `tonglingyu-gateway` owns OpenAI-compatible HTTP, auth, model hiding, rate
-  limits, admin surfaces, and request/stream response wrapping.
-- Do not let web framework, database, queue, telemetry, or deployment concerns
-  define core model semantics.
+- Rust standard library does not provide an official async runtime. In this
+  workspace, service and network-facing Rust code should default to Tokio unless
+  there is an explicit target-environment constraint or a crate boundary requires
+  a runtime-agnostic API.
+- Do not introduce a second async runtime such as `async-std` or `smol` into an
+  existing Tokio service.
+- New async dependencies should run cleanly on the workspace Tokio runtime and
+  use the workspace `tokio` dependency when Tokio APIs are needed.
+- Application crates may use Tokio-specific entrypoints and primitives such as
+  `#[tokio::main]`, `#[tokio::test]`, `tokio::spawn`, `tokio::time`, and
+  `tokio::sync`.
+- Do not create nested Tokio runtimes or call `Runtime::new().block_on(...)`
+  inside async request, worker, or Runtime paths.
+- If synchronous CPU-heavy work or blocking I/O is unavoidable, isolate it with
+  `tokio::task::spawn_blocking` or a dedicated bounded worker path, and keep
+  timeout/cancellation behavior explicit.
+- Do not hold locks, transactions, or mutable shared state across external I/O
+  unless the ownership model is explicit and tested.
+- Queue claiming must remain lease-based and worker-owned. Changes touching run
+  execution must cover claim, heartbeat, expiry sweep, retry backoff, dead-letter,
+  and finish behavior.
+- Concurrent workers must use database-level ownership primitives such as
+  `FOR UPDATE SKIP LOCKED`, compare-and-update predicates, leases, or unique
+  constraints instead of process-local assumptions.
+- Idempotency checks belong at request, session, and run creation boundaries.
+  Retries must be safe to repeat under network timeout or worker restart.
 
-## Module Organization
-
-- Large, relatively independent Rust features must live in a dedicated module or
-  module directory instead of expanding a crate root or unrelated module. Move
-  coherent groups of types, helpers, tests, and private functions together when
-  the feature can be reasoned about independently.
-- Prefer a small public module facade plus private submodules for substantial
-  behavior. Keep cross-module APIs typed and domain-shaped; do not expose broad
-  catch-all helpers just to share implementation details.
-
-## Error and Result Style
+## Errors, Panics, and Fallbacks
 
 - Use `CoreResult<T>` and `AgentCoreError` for domain and contract failures.
   Convert infrastructure errors at the boundary with safe, traceable messages.
-- Prefer `Result` for all recoverable failures. Do not use `unwrap`, `expect`,
-  or `panic!` in production paths except for impossible invariant violations
-  that are documented at the call site.
+- Prefer `Result` for all recoverable failures. Do not use `unwrap`, `expect`, or
+  `panic!` in production paths except for impossible invariant violations that
+  are documented at the call site.
 - Convert `Option` to typed errors with context at the boundary where absence
   becomes invalid. Do not let `None` propagate until it causes a panic.
 - User-visible errors must expose stable error codes and `trace_id`, not raw
   database, token, network, or secret-bearing strings.
 - State-transition failures should use typed conflict errors and keep the
   rejected entity, source state, and target state debuggable.
+- Background workers, queue consumers, and HTTP handlers must not panic on bad
+  input, missing rows, expired leases, malformed config, or downstream failure.
+- Fallbacks are allowed only as explicit degraded behavior. They must produce a
+  typed degraded status, audit/event record, metric, or report field.
+- A fallback must not be counted as `primary_path_passed`, `production_ready`, or
+  `release_ready`. Primary-path tests must assert the intended Runtime, Gateway,
+  policy, store, or release gate actually executed.
+- Test-only mocks, fixtures, replay, or local no-upstream paths must be named as
+  such and must not leak into production-ready claims.
 
-## Unsafe and Panics
+## Unsafe
 
-- Avoid `unsafe`. If a dependency or FFI boundary makes `unsafe` unavoidable,
-  keep it in the smallest possible module, document the safety invariant, and
-  cover it with targeted tests.
+- Avoid `unsafe`.
+- If a dependency or FFI boundary makes `unsafe` unavoidable, keep it in the
+  smallest possible module, document the safety invariant, and cover it with
+  targeted tests.
 - Do not use `unsafe` to work around borrow-checker or lifetime design issues.
   Refactor ownership, clone small typed IDs, or move state into explicit structs
   instead.
-- Panics are acceptable in tests and compile-time validation, but production
-  service code should return typed errors that preserve `trace_id` and audit
-  context.
-- Background workers, queue consumers, and HTTP handlers must not panic on bad
-  input, missing rows, expired leases, malformed config, or downstream failure.
+- If `unsafe` is genuinely required for FFI or a low-level boundary, do not
+  weaken the whole crate. Put that code in a small module, remove
+  `forbid(unsafe_code)` only at the crate where necessary, add local safety
+  documentation, and keep the rest of the crate linted.
+
+## Config, Audit, and Secrets
+
+- Parse environment and config into typed structs at process boundaries. Do not
+  scatter `std::env::var` reads through business logic.
+- Secrets must stay in `.env`, deployment config, or secret-provider paths.
+- Do not log token values, API keys, passwords, private keys, credential leases,
+  system prompts, raw user-private memory, or secret-bearing payloads.
+- Control-plane decisions, approvals, external actions, credential leases,
+  compensations, context projection decisions, memory policy decisions, and
+  fallback/degraded states must append auditable records with stable action names
+  and trace ids.
 
 ## Code-Level Lints for New Files
 
@@ -116,54 +181,33 @@ abstraction.
 ```
 
 - New non-root module files may use the same module-level lint block when the
-  crate root does not cover them yet. Prefer moving repeated lint policy up to
-  the crate root instead of duplicating it in many files.
+  crate root does not cover them yet.
+- Prefer moving repeated lint policy up to the crate root instead of duplicating
+  it in many files.
 - Do not add broad `#![allow(...)]` or `#[allow(...)]` attributes to make new
   code pass. Any lint exception must be narrow, placed on the smallest item, and
   include a short reason.
-- If `unsafe` is genuinely required for FFI or a low-level boundary, do not
-  weaken the whole crate. Put that code in a small module, remove
-  `forbid(unsafe_code)` only at the crate where necessary, add local safety
-  documentation, and keep the rest of the crate linted.
 - Test modules may allow `unwrap` or `expect` for fixture setup, but production
   modules should convert failures into typed `Result` values.
-
-## Async and Concurrency
-
-- Do not hold locks, transactions, or mutable shared state across external I/O
-  unless the ownership model is explicit and tested.
-- Queue claiming must remain lease-based and worker-owned. Changes touching run
-  execution must cover claim, heartbeat, expiry sweep, retry backoff, dead-letter,
-  and finish behavior.
-- Concurrent workers must use database-level ownership primitives such as
-  `FOR UPDATE SKIP LOCKED`, compare-and-update predicates, leases, or unique
-  constraints instead of process-local assumptions.
-- Idempotency checks belong at request, session, and run creation boundaries.
-  Retries must be safe to repeat under network timeout or worker restart.
-
-## Config, Audit, and Secrets
-
-- Parse environment and config into typed structs at process boundaries. Do not
-  scatter `std::env::var` reads through business logic.
-- Secrets must stay in `.env`, deployment config, or secret-provider paths. Do
-  not log token values, API keys, passwords, private keys, or credential leases.
-- Control-plane decisions, approvals, external actions, credential leases, and
-  compensations must append auditable records with stable action names and trace
-  ids.
 
 ## Tests and Verification
 
 - Rust module tests must live in a separate test module file instead of growing
-  inline `#[cfg(test)] mod tests { ... }` blocks inside production modules. Wire
-  them from the module with `#[cfg(test)] mod tests;`, using `tests.rs` or
-  `tests/mod.rs` in the corresponding module directory.
+  inline `#[cfg(test)] mod tests { ... }` blocks inside production modules.
+- Wire separate test modules from the production module with `#[cfg(test)] mod
+  tests;`, using `tests.rs` or `tests/mod.rs` in the corresponding module
+  directory.
 - When changing an existing Rust module that already has inline tests, do not add
   more inline test bodies there. Move the touched tests into the separate test
   module file as part of the change.
 - For Rust-only changes, start with the smallest crate-level `cargo fmt`,
   `cargo clippy`, and `cargo test` command that covers the touched crate.
 - Broaden to the full `agent-platform` workspace when shared models, traits,
-  runtime behavior, lifecycle behavior, or public API contracts change.
+  runtime behavior, lifecycle behavior, concurrency behavior, public API
+  contracts, or release gates change.
 - State and concurrency changes must include tests or smoke evidence for lease
   ownership, heartbeat expiry, idempotency, lock behavior, retry timing, and error
   propagation.
+- Fallback and degraded-path changes must include both sides of the assertion:
+  the primary path still runs when dependencies are healthy, and the degraded
+  path is observable without being marked as production success.
