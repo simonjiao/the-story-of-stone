@@ -4360,7 +4360,7 @@ fn compact_draft_evidence_brief_for_message(
         match compaction_level {
             1 => (5, 96, 64, 56, 3, 14),
             2 => (4, 72, 48, 40, 2, 12),
-            _ => (3, 56, 40, 0, 0, 0),
+            _ => (3, 40, 32, 0, 0, 0),
         };
     let Some(items) = evidence_brief.as_array() else {
         return json!([]);
@@ -4455,7 +4455,7 @@ fn compact_count_context_slots_for_message(slots: &Value, compaction_level: usiz
     let (limit, source_title_chars) = match compaction_level {
         1 => (5, 64),
         2 => (4, 48),
-        _ => (3, 40),
+        _ => (3, 32),
     };
     Value::Array(
         items
@@ -4464,14 +4464,18 @@ fn compact_count_context_slots_for_message(slots: &Value, compaction_level: usiz
             .filter_map(Value::as_object)
             .map(|slot| {
                 let mut compact = Map::new();
-                insert_existing_value(&mut compact, slot, "id");
+                if compaction_level <= 2 {
+                    insert_existing_value(&mut compact, slot, "id");
+                }
                 insert_existing_value(&mut compact, slot, "label");
                 insert_existing_value(&mut compact, slot, "public_role_label");
-                insert_existing_value(&mut compact, slot, "counts_as");
-                insert_existing_value(&mut compact, slot, "display_group");
-                insert_existing_value(&mut compact, slot, "count_note");
+                if compaction_level <= 2 {
+                    insert_existing_value(&mut compact, slot, "counts_as");
+                    insert_existing_value(&mut compact, slot, "display_group");
+                    insert_existing_value(&mut compact, slot, "count_note");
+                    insert_existing_value(&mut compact, slot, "source_layer");
+                }
                 insert_existing_value(&mut compact, slot, "evidence_id");
-                insert_existing_value(&mut compact, slot, "source_layer");
                 insert_trimmed_string(&mut compact, slot, "source_title", source_title_chars);
                 Value::Object(compact)
             })
@@ -4495,9 +4499,11 @@ fn compact_evidence_slot_rules_for_message(rules: &Value, compaction_level: usiz
                 if compaction_level <= 1 {
                     insert_existing_value(&mut compact, rule, "role");
                 }
-                insert_existing_value(&mut compact, rule, "counts_as");
-                insert_existing_value(&mut compact, rule, "display_group");
-                insert_existing_value(&mut compact, rule, "count_note");
+                if compaction_level <= 2 {
+                    insert_existing_value(&mut compact, rule, "counts_as");
+                    insert_existing_value(&mut compact, rule, "display_group");
+                    insert_existing_value(&mut compact, rule, "count_note");
+                }
                 Value::Object(compact)
             })
             .collect(),
@@ -4689,7 +4695,7 @@ fn evidence_set_ref_from_output(trace_id: &str, output: &Value) -> Option<String
 fn agent_runtime_result_summary_contract(step: &RuntimeWorkflowStepReport) -> &'static str {
     match step.operation.as_str() {
         "draft_answer" => {
-            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, if evidence_slot_count_policy.direct_count is present, use that number exactly; direct_slots are counted evidence, related_slots are separate clues that must not change direct_count. The visible draft_answer must name public event/source labels from evidence_slot_rules.label or count policy slot labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
+            "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}. Copy step_output_json.source_scope_policy exactly. Use only step_output_json.evidence_brief and step_output_json.evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids. Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers. For count questions, if evidence_slot_count_policy.direct_count is present, use that number exactly; direct_slots are counted evidence, related_slots are separate clues that must not change direct_count. For fate, ending, or interpretive questions, coverage_assessment.status is passed when the draft gives the strongest answer supported inside source_scope_policy and states the evidence boundary; do not mark partial merely because excluded later-forty or unavailable final narrative details could say more. Use partial only when missing in-scope evidence prevents even a bounded answer. The visible draft_answer must name public event/source labels from evidence_slot_rules.label or count policy slot labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'. Local reviewer remains authoritative. Do not add nested result_summary."
         }
         "review_answer" => {
             "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}. This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
@@ -4989,6 +4995,7 @@ fn agent_runtime_profile_step_repair_message_content(
         "package_binding": "package_id, source_scope_policy, and evidence_refs must come only from step_output_json",
         "count_rule": "for count questions, use evidence_slot_count_policy.direct_count exactly when present; direct_slots are counted evidence and related_slots are separate clues",
         "public_answer_rule": "the visible draft_answer must use public labels from evidence_slot_rules.label or evidence_slot_count_policy slot labels, embed short evidence/source cues, and avoid internal runtime terms",
+        "coverage_rule": "for fate, ending, or interpretive questions, status=passed is correct when the answer is bounded to source_scope_policy and states what the evidence can and cannot prove; excluded later-forty material is out_of_scope, not missing_in_scope",
         "failure_boundary": "if the repaired bundle cannot satisfy these constraints, return coverage_assessment.status=insufficient with concrete missing_in_scope_slots",
     });
     format!(

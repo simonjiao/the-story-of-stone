@@ -6829,6 +6829,12 @@ fn runtime_count_policy_exposes_public_slot_context_for_upstream() {
         vec!["凤姐扫雪拾玉", "良儿偷玉"]
     );
     assert_eq!(value["related_slots"][0]["label"], json!("甄宝玉送玉"));
+
+    let compact = compact_evidence_slot_count_policy_for_message(value, 3);
+    assert_eq!(compact["direct_count"], json!(2));
+    assert_eq!(compact["direct_slots"][0]["label"], json!("凤姐扫雪拾玉"));
+    assert_eq!(compact["related_slots"][0]["label"], json!("甄宝玉送玉"));
+    assert!(compact["direct_slots"][0].get("counts_as").is_none());
 }
 
 #[test]
