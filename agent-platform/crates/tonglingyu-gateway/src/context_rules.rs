@@ -15,12 +15,14 @@ pub(crate) const ELLIPSIS_RESOLUTION_RULES_PATH_ENV: &str =
     "TONGLINGYU_ELLIPSIS_RESOLUTION_RULES_PATH";
 pub(crate) const CURRENT_WINDOW_COMPRESSION_RULES_PATH_ENV: &str =
     "TONGLINGYU_CURRENT_WINDOW_COMPRESSION_RULES_PATH";
+pub(crate) const QUESTION_FRAME_RULES_PATH_ENV: &str = "TONGLINGYU_QUESTION_FRAME_RULES_PATH";
 
 const SUBJECT_ONTOLOGY_SCHEMA_VERSION: &str = "tonglingyu.subject_ontology.v1";
 const REFERENT_CANDIDATE_RULES_SCHEMA_VERSION: &str = "tonglingyu.referent_candidate_rules.v1";
 const ELLIPSIS_RESOLUTION_RULES_SCHEMA_VERSION: &str = "tonglingyu.ellipsis_resolution_rules.v1";
 const CURRENT_WINDOW_COMPRESSION_RULES_SCHEMA_VERSION: &str =
     "tonglingyu.current_window_compression_rules.v1";
+const QUESTION_FRAME_RULES_SCHEMA_VERSION: &str = "tonglingyu.question_frame_rules.v1";
 
 const DEFAULT_SUBJECT_ONTOLOGY_JSON: &str = include_str!("../resources/subject_ontology.json");
 const DEFAULT_REFERENT_CANDIDATE_RULES_JSON: &str =
@@ -29,6 +31,8 @@ const DEFAULT_ELLIPSIS_RESOLUTION_RULES_JSON: &str =
     include_str!("../resources/ellipsis_resolution_rules.json");
 const DEFAULT_CURRENT_WINDOW_COMPRESSION_RULES_JSON: &str =
     include_str!("../resources/current_window_compression_rules.json");
+const DEFAULT_QUESTION_FRAME_RULES_JSON: &str =
+    include_str!("../resources/question_frame_rules.json");
 
 static CONTEXT_RULES_CACHE: OnceLock<Mutex<ContextRulesCache>> = OnceLock::new();
 
@@ -95,12 +99,50 @@ struct CurrentWindowCompressionRules {
     allow_rejected_digest_on_main_path: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameRules {
+    schema_version: String,
+    catalog_version: String,
+    default_source_scope: String,
+    relation_question: RelationQuestionRules,
+    predicates: Vec<PredicateRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelationQuestionRules {
+    object_placeholder_terms: Vec<String>,
+    yes_no_terms: Vec<String>,
+    followup_prefix_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PredicateRule {
+    id: String,
+    label: String,
+    aliases: Vec<String>,
+    evidence_terms: Vec<String>,
+    required_evidence_types: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PredicateRuleView {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) aliases: Vec<String>,
+    pub(crate) evidence_terms: Vec<String>,
+    pub(crate) required_evidence_types: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ContextRuleCatalogs {
     subject_ontology: SubjectOntologyCatalog,
     referent_candidate_rules: ReferentCandidateRules,
     ellipsis_resolution_rules: EllipsisResolutionRules,
     current_window_compression_rules: CurrentWindowCompressionRules,
+    question_frame_rules: QuestionFrameRules,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +201,7 @@ struct ContextRulesCache {
     referent_candidate_rules: RuleFileCache<ReferentCandidateRules>,
     ellipsis_resolution_rules: RuleFileCache<EllipsisResolutionRules>,
     current_window_compression_rules: RuleFileCache<CurrentWindowCompressionRules>,
+    question_frame_rules: RuleFileCache<QuestionFrameRules>,
 }
 
 impl Default for ContextRulesCache {
@@ -181,6 +224,10 @@ impl Default for ContextRulesCache {
                     DEFAULT_CURRENT_WINDOW_COMPRESSION_RULES_JSON,
                 )
                 .expect("embedded current-window compression rules must parse"),
+            ),
+            question_frame_rules: RuleFileCache::new(
+                parse_question_frame_rules(DEFAULT_QUESTION_FRAME_RULES_JSON)
+                    .expect("embedded question-frame rules must parse"),
             ),
         }
     }
@@ -219,6 +266,13 @@ impl ContextRulesCache {
                 .expect("embedded current-window compression rules must parse"),
                 parse_current_window_compression_rules,
             )?,
+            question_frame_rules: self.question_frame_rules.catalog(
+                QUESTION_FRAME_RULES_PATH_ENV,
+                configured_path(QUESTION_FRAME_RULES_PATH_ENV),
+                parse_question_frame_rules(DEFAULT_QUESTION_FRAME_RULES_JSON)
+                    .expect("embedded question-frame rules must parse"),
+                parse_question_frame_rules,
+            )?,
         })
     }
 }
@@ -246,6 +300,7 @@ pub(crate) fn context_rule_versions() -> Result<Value> {
         "referent_candidate_rules": catalogs.referent_candidate_rules.catalog_version,
         "ellipsis_resolution_rules": catalogs.ellipsis_resolution_rules.catalog_version,
         "current_window_compression_rules": catalogs.current_window_compression_rules.catalog_version,
+        "question_frame_rules": catalogs.question_frame_rules.catalog_version,
     }))
 }
 
@@ -270,21 +325,97 @@ pub(crate) fn current_window_compression_policy() -> Result<Value> {
 }
 
 pub(crate) fn latest_subject_in_text(text: &str) -> Result<Option<String>> {
+    Ok(subject_mentions_in_text(text)?.into_iter().next_back())
+}
+
+pub(crate) fn subject_mentions_in_text(text: &str) -> Result<Vec<String>> {
     let catalog = context_rule_catalogs()?.subject_ontology;
-    let mut best: Option<(usize, usize, String)> = None;
+    let mut matches = Vec::<(usize, usize, String)>::new();
+    let mut seen = Vec::<String>::new();
     for subject in catalog.subjects {
         for term in subject_terms(&subject) {
             for (index, _) in text.match_indices(&term) {
                 let len = term.chars().count();
+                matches.push((index, len, subject.canonical.clone()));
+            }
+        }
+    }
+    matches.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+    let mut subjects = Vec::new();
+    for (_, _, canonical) in matches {
+        if !seen.iter().any(|item| item == &canonical) {
+            seen.push(canonical.clone());
+            subjects.push(canonical);
+        }
+    }
+    Ok(subjects)
+}
+
+pub(crate) fn subject_aliases(canonical: &str) -> Result<Vec<String>> {
+    let catalog = context_rule_catalogs()?.subject_ontology;
+    let Some(subject) = catalog
+        .subjects
+        .into_iter()
+        .find(|subject| subject.canonical == canonical)
+    else {
+        return Ok(vec![canonical.to_string()]);
+    };
+    Ok(subject_terms(&subject))
+}
+
+pub(crate) fn predicate_in_text(text: &str) -> Result<Option<PredicateRuleView>> {
+    let catalog = context_rule_catalogs()?.question_frame_rules;
+    let mut best: Option<(usize, usize, String)> = None;
+    let mut best_rule: Option<PredicateRule> = None;
+    for rule in catalog.predicates {
+        for term in &rule.aliases {
+            for (index, _) in text.match_indices(term.as_str()) {
+                let len = term.chars().count();
                 if best.as_ref().is_none_or(|(best_index, best_len, _)| {
                     index > *best_index || (index == *best_index && len > *best_len)
                 }) {
-                    best = Some((index, len, subject.canonical.clone()));
+                    best = Some((index, len, rule.id.clone()));
+                    best_rule = Some(rule.clone());
                 }
             }
         }
     }
-    Ok(best.map(|(_, _, canonical)| canonical))
+    Ok(best_rule.map(predicate_rule_view))
+}
+
+pub(crate) fn default_question_frame_source_scope() -> Result<String> {
+    Ok(context_rule_catalogs()?
+        .question_frame_rules
+        .default_source_scope)
+}
+
+pub(crate) fn relation_question_has_object_placeholder(text: &str) -> Result<bool> {
+    let rules = context_rule_catalogs()?
+        .question_frame_rules
+        .relation_question;
+    Ok(contains_any(text, &rules.object_placeholder_terms))
+}
+
+pub(crate) fn relation_followup_has_prefix(text: &str) -> Result<bool> {
+    let rules = context_rule_catalogs()?
+        .question_frame_rules
+        .relation_question;
+    let key = question_key(text);
+    Ok(rules
+        .followup_prefix_terms
+        .iter()
+        .map(|term| question_key(term))
+        .any(|term| !term.is_empty() && key.starts_with(&term)))
+}
+
+fn predicate_rule_view(rule: PredicateRule) -> PredicateRuleView {
+    PredicateRuleView {
+        id: rule.id,
+        label: rule.label,
+        aliases: rule.aliases,
+        evidence_terms: rule.evidence_terms,
+        required_evidence_types: rule.required_evidence_types,
+    }
 }
 
 pub(crate) fn contains_referential_pronoun(text: &str) -> Result<bool> {
@@ -514,6 +645,48 @@ fn parse_current_window_compression_rules(source: &str) -> Result<CurrentWindowC
     Ok(rules)
 }
 
+fn parse_question_frame_rules(source: &str) -> Result<QuestionFrameRules> {
+    let rules: QuestionFrameRules =
+        serde_json::from_str(source).context("question-frame rules must be JSON")?;
+    if rules.schema_version != QUESTION_FRAME_RULES_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "question-frame rules schema_version must be {}",
+            QUESTION_FRAME_RULES_SCHEMA_VERSION
+        ));
+    }
+    if rules.catalog_version.trim().is_empty() || rules.default_source_scope.trim().is_empty() {
+        return Err(anyhow!(
+            "question-frame rules require catalog_version and default_source_scope"
+        ));
+    }
+    require_non_empty_terms(
+        "question_frame.relation_question.object_placeholder_terms",
+        &rules.relation_question.object_placeholder_terms,
+    )?;
+    require_non_empty_terms(
+        "question_frame.relation_question.yes_no_terms",
+        &rules.relation_question.yes_no_terms,
+    )?;
+    require_non_empty_terms(
+        "question_frame.relation_question.followup_prefix_terms",
+        &rules.relation_question.followup_prefix_terms,
+    )?;
+    if rules.predicates.is_empty() {
+        return Err(anyhow!("question-frame rules require predicates"));
+    }
+    for predicate in &rules.predicates {
+        if predicate.id.trim().is_empty() || predicate.label.trim().is_empty() {
+            return Err(anyhow!("question-frame predicate requires id and label"));
+        }
+        require_non_empty_terms("question_frame.predicates.aliases", &predicate.aliases)?;
+        require_non_empty_terms(
+            "question_frame.predicates.required_evidence_types",
+            &predicate.required_evidence_types,
+        )?;
+    }
+    Ok(rules)
+}
+
 fn require_non_empty_terms(name: &str, terms: &[String]) -> Result<()> {
     if terms.is_empty() || terms.iter().all(|term| term.trim().is_empty()) {
         return Err(anyhow!("{name} must define non-empty terms"));
@@ -528,7 +701,8 @@ mod tests {
     #[test]
     fn embedded_catalogs_parse_and_expose_versions() {
         let versions = context_rule_versions().expect("versions load");
-        assert_eq!(versions["subject_ontology"], json!("2026-05-24.1"));
+        assert_eq!(versions["subject_ontology"], json!("2026-05-24.2"));
+        assert_eq!(versions["question_frame_rules"], json!("2026-05-24.1"));
         assert_eq!(
             current_window_compression_policy().expect("policy loads")["policy_id"],
             json!("current_window.llm_compression.v1")

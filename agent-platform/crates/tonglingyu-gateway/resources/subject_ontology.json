@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.subject_ontology.v1",
-  "catalog_version": "2026-05-24.1",
+  "catalog_version": "2026-05-24.2",
   "subjects": [
     {
       "canonical": "贾宝玉",
@@ -43,6 +43,12 @@
       "type": "character",
       "work": "hongloumeng",
       "aliases": ["袭人", "襲人", "花袭人", "花襲人"]
+    },
+    {
+      "canonical": "紫鹃",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["紫鹃", "紫鵑", "鹦哥", "鸚哥"]
     },
     {
       "canonical": "晴雯",

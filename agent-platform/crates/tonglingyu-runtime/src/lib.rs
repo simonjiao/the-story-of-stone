@@ -32,6 +32,7 @@ mod answer_composer;
 mod evidence_slot_rules;
 mod governance_rules;
 mod ontology_aliases;
+mod question_frame;
 mod retrieval_rules;
 mod upstream_bundle;
 
@@ -52,6 +53,10 @@ use governance_rules::{
     preferred_answer_evidence_types, triggered_review_rule_issues,
 };
 use ontology_aliases::seed_aliases;
+use question_frame::{
+    question_frame_from_context, relation_boundary_answer, relation_required_evidence_types,
+    relation_review_issues, relation_search_query,
+};
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, evidence_card_is_later_forty, evidence_card_source_layer,
     extract_upstream_bundle_draft, filter_cards_for_source_scope, source_scope_policy_for_question,
@@ -114,6 +119,8 @@ pub struct EvidencePackage {
     pub claim_evidence_map: Vec<ClaimEvidenceMap>,
     #[serde(default = "default_knowledge_state_summary")]
     pub knowledge_state_summary: KnowledgeStateSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_frame: Option<Value>,
     pub review: ReviewRecord,
 }
 
@@ -3330,23 +3337,30 @@ pub fn execute_runtime_workflow(
     if input.limit == 0 {
         return Err(anyhow!("runtime workflow limit must be greater than 0"));
     }
+    let question_frame = question_frame_from_context(&input.context);
+    let search_question = relation_search_query(&input.question, question_frame.as_ref());
+    let required_evidence_types =
+        relation_required_evidence_types(&input.required_evidence_types, question_frame.as_ref());
     let workflow_plan = runtime_workflow_plan(RuntimeWorkflowPlanInput {
         question_type: "runtime_workflow".to_string(),
-        required_evidence_types: input.required_evidence_types.clone(),
+        required_evidence_types: required_evidence_types.clone(),
         blocked_controls: Vec::new(),
         profiles: input.profiles.clone(),
     });
     validate_runtime_context_contract(&input, &workflow_plan)?;
     validate_runtime_context_pack_digest(conn, &input.context)?;
+    let question_frame_value = question_frame
+        .as_ref()
+        .and_then(|frame| serde_json::to_value(frame).ok());
     let mut steps = Vec::new();
     let mut cards = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
-    let text_required_types = text_search_required_evidence_types(&input.required_evidence_types);
+    let text_required_types = text_search_required_evidence_types(&required_evidence_types);
     let text_started = Instant::now();
     let (text_cards, text_quality_report) = match execute_tool(
         conn,
         TonglingyuToolCall::TextSearch {
-            question: input.question.clone(),
+            question: search_question.clone(),
             limit: input.limit,
             required_evidence_types: text_required_types,
         },
@@ -3377,15 +3391,16 @@ pub fn execute_runtime_workflow(
             "object": "tonglingyu.text.evidence_analysis",
             "card_count": text_cards.len(),
             "evidence_ids": evidence_ids(&text_cards),
-            "evidence_types": evidence_types(&text_cards),
-            "quality_report": &text_quality_report,
+                "evidence_types": evidence_types(&text_cards),
+                "query_frame_bound": question_frame.is_some(),
+                "query_sha256": hash_text(&search_question),
+                "quality_report": &text_quality_report,
             }),
             context: &input.context,
         },
     )?);
 
-    if input
-        .required_evidence_types
+    if required_evidence_types
         .iter()
         .any(|item| item == "commentary")
     {
@@ -3393,7 +3408,7 @@ pub fn execute_runtime_workflow(
         let (commentary_cards, commentary_quality_report) = match execute_tool(
             conn,
             TonglingyuToolCall::CommentarySearch {
-                question: input.question.clone(),
+                question: search_question.clone(),
                 limit: input.limit,
             },
         )? {
@@ -3428,6 +3443,8 @@ pub fn execute_runtime_workflow(
                 "card_count": commentary_cards.len(),
                 "evidence_ids": evidence_ids(&commentary_cards),
                 "evidence_types": evidence_types(&commentary_cards),
+                "query_frame_bound": question_frame.is_some(),
+                "query_sha256": hash_text(&search_question),
                 "scope_notes": "commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope",
                 "quality_report": &commentary_quality_report,
             }),
@@ -3439,23 +3456,19 @@ pub fn execute_runtime_workflow(
     let source_scope_filter = filter_cards_for_source_scope(&input.question, cards);
     let source_scope_report = source_scope_filter.report;
     let package_started = Instant::now();
-    let package = match execute_tool(
+    let package = create_evidence_package_with_question_frame(
         conn,
-        TonglingyuToolCall::EvidencePackageCreate {
-            trace_id: input.trace_id.clone(),
-            question: input.question.clone(),
-            cards: source_scope_filter.included_cards,
-        },
-    )? {
-        TonglingyuToolOutput::EvidencePackage { package, .. } => *package,
-        other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-    };
+        &input.trace_id,
+        &input.question,
+        source_scope_filter.included_cards,
+        question_frame_value.clone(),
+    )?;
     for (quality_report, selected_evidence_ids) in retrieval_failure_candidates {
         record_retrieval_failure_if_needed(
             conn,
             &input.trace_id,
             &package.package_id,
-            &input.question,
+            &search_question,
             quality_report,
             selected_evidence_ids,
         )?;
@@ -4314,6 +4327,10 @@ fn context_projection_message_payload(projection: &RuntimeContextProjection) -> 
         "projection_payload_sha256": hash_json(payload),
         "consumer_name": &projection.consumer_name,
         "visible_question": json_trimmed_string(payload, "visible_question", 512),
+        "question_frame": payload
+            .get("question_frame")
+            .cloned()
+            .unwrap_or(Value::Null),
         "resolved_question": resolver
             .get("resolved_question")
             .and_then(Value::as_str)
@@ -14184,11 +14201,36 @@ pub fn create_evidence_package(
     question: &str,
     cards: Vec<EvidenceCard>,
 ) -> Result<EvidencePackage> {
+    create_evidence_package_with_question_frame(conn, trace_id, question, cards, None)
+}
+
+fn create_evidence_package_with_question_frame(
+    conn: &Connection,
+    trace_id: &str,
+    question: &str,
+    cards: Vec<EvidenceCard>,
+    question_frame: Option<Value>,
+) -> Result<EvidencePackage> {
     let claims = claims_from_cards(question, &cards);
     let knowledge_policy = runtime_knowledge_policy_index(conn, &cards)?;
     let claim_evidence_map =
         claim_evidence_map_with_knowledge(&claims, &cards, &knowledge_policy.refs_by_evidence_id);
     let mut review = review(question, &cards, &claims);
+    let parsed_question_frame = question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame);
+    for issue in relation_review_issues(parsed_question_frame.as_ref(), &cards) {
+        if !review.issues.iter().any(|existing| existing == &issue) {
+            review.issues.push(issue);
+        }
+    }
+    if !review.issues.is_empty() {
+        review.status = "needs_revision".to_string();
+        if review.severity == "none" {
+            review.severity = "medium".to_string();
+        }
+        review.summary = format!("reviewer 要求谨慎降级：{} 个问题。", review.issues.len());
+    }
     apply_knowledge_state_review(&mut review, &knowledge_policy.summary);
     let package_id = format!("pkg-{}", uuid::Uuid::now_v7().simple());
     let now = now_rfc3339();
@@ -14302,6 +14344,7 @@ pub fn create_evidence_package(
         claims,
         claim_evidence_map,
         knowledge_state_summary: knowledge_policy.summary,
+        question_frame,
         review,
     })
 }
@@ -14450,6 +14493,7 @@ pub fn load_evidence_package_from_conn(
         claims,
         claim_evidence_map,
         knowledge_state_summary,
+        question_frame: None,
         review: serde_json::from_str(&review_json)?,
     }))
 }
@@ -15120,6 +15164,7 @@ pub fn package_json(package: &EvidencePackage) -> Value {
         "claims": &package.claims,
         "claim_evidence_map": public_claim_evidence_map(&package.claim_evidence_map),
         "knowledge_state_summary": public_knowledge_state_summary(&package.knowledge_state_summary),
+        "question_frame": &package.question_frame,
         "evidence_ids": evidence_ids,
         "cards": &package.cards,
         "review": public_review_record(&package.review),
@@ -15368,6 +15413,13 @@ pub fn review(question: &str, cards: &[EvidenceCard], claims: &[String]) -> Revi
 pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
         return "我暂时找不到足够的原文依据，不能可靠回答这个问题。".to_string();
+    }
+    let parsed_question_frame = package
+        .question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame);
+    if let Some(answer) = relation_boundary_answer(parsed_question_frame.as_ref(), &package.cards) {
+        return answer;
     }
     if let Some(answer) = local_slot_count_answer(question, package) {
         return answer;
@@ -15770,6 +15822,13 @@ fn generic_question_term(term: &str) -> bool {
 pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
     if package.review.status == "passed" {
         return draft;
+    }
+    let parsed_question_frame = package
+        .question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame);
+    if let Some(answer) = relation_boundary_answer(parsed_question_frame.as_ref(), &package.cards) {
+        return answer;
     }
     format!(
         "这个问题目前缺少足够证据支持：{}\n\n{}",

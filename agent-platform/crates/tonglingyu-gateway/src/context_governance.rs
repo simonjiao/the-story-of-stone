@@ -34,6 +34,7 @@ use crate::{
     },
     llm_contracts::{CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_TRIGGERS},
     llm_modes::LlmMode,
+    question_frame::{self, QuestionFrame},
 };
 
 pub(crate) const CONTEXT_SCHEMA_VERSION: &str = "tonglingyu-scoped-context-v1";
@@ -127,6 +128,7 @@ pub(crate) struct ContextResolution {
 pub(crate) struct ContextPackProfileView {
     pub(crate) profile_name: String,
     pub(crate) visible_question: String,
+    pub(crate) question_frame: Value,
     pub(crate) session_summary: Option<String>,
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) forbidden_context: Vec<String>,
@@ -597,7 +599,11 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         )
         .await;
         resolver = if let Some(sealed) = decision.accepted_resolution() {
-            ResolverOutput::from_agent_decision(sealed, Some(decision.audit_json()))
+            ResolverOutput::from_agent_decision(
+                sealed,
+                Some(decision.audit_json()),
+                resolver.question_frame.clone(),
+            )
         } else {
             let audit = decision.audit_json();
             if question_agent_mode == LlmMode::Enforced {
@@ -637,13 +643,8 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
             conversation_state_summary = Some(sealed.summary().clone());
             conversation_state_source = "llm_agent_validated";
         } else if conversation_state_mode == LlmMode::Enforced {
-            return Err(enforced_llm_agent_rejection(
-                CONVERSATION_STATE_WRITER_PROFILE_ID,
-                conversation_state_agent_audit
-                    .as_ref()
-                    .expect("conversation state agent audit was just recorded"),
-                decision.errors(),
-            ));
+            conversation_state_summary = None;
+            conversation_state_source = "llm_agent_rejected_no_projection";
         }
     }
 
@@ -830,11 +831,7 @@ fn create_context_pack_from_validated_parts(
         &active_scopes,
         &candidate_scopes,
     )?;
-    let profile_views = profile_views(
-        &resolver.resolved_question,
-        &session_summary,
-        &memory_read_set.reads,
-    );
+    let profile_views = profile_views(&resolver, &session_summary, &memory_read_set.reads);
     let memory_read_refs = memory_read_set
         .reads
         .iter()
@@ -4762,6 +4759,7 @@ struct ResolverOutput {
     unsupported_reason: Option<String>,
     strategy: String,
     agent_audit: Option<Value>,
+    question_frame: QuestionFrame,
 }
 
 impl ResolverOutput {
@@ -4776,6 +4774,7 @@ impl ResolverOutput {
             "needs_clarification": self.needs_clarification,
             "clarification_question": self.clarification_question,
             "unsupported_reason": self.unsupported_reason,
+            "question_frame": self.question_frame.audit_json(),
             "llm_used": self.agent_audit
                 .as_ref()
                 .and_then(|audit| audit.get("accepted_for_main"))
@@ -4789,6 +4788,7 @@ impl ResolverOutput {
     fn from_agent_decision(
         sealed: &crate::llm_agent_validator::SealedQuestionResolution,
         agent_audit: Option<Value>,
+        fallback_frame: QuestionFrame,
     ) -> Self {
         Self {
             resolved_question: sealed.resolved_question().to_string(),
@@ -4800,6 +4800,8 @@ impl ResolverOutput {
             unsupported_reason: sealed.unsupported_reason().map(str::to_string),
             strategy: "llm_agent_enforced".to_string(),
             agent_audit,
+            question_frame: fallback_frame
+                .with_canonical_question(sealed.resolved_question().to_string()),
         }
     }
 }
@@ -4920,6 +4922,7 @@ fn resolve_question(
     prior_subject: Option<&str>,
     prior_user_question: Option<&str>,
 ) -> Result<ResolverOutput> {
+    let base_frame = question_frame::build_question_frame(question)?;
     if is_continue_only_question(question)? {
         let (resolved_question, used_context_ref) =
             if let Some(anchor) = latest_prior_user_question(messages, question) {
@@ -4931,6 +4934,7 @@ fn resolve_question(
             };
         if !resolved_question.is_empty() {
             return Ok(ResolverOutput {
+                question_frame: question_frame::build_question_frame(&resolved_question)?,
                 resolved_question,
                 referent_bindings: Vec::new(),
                 used_context_refs: vec![used_context_ref.to_string()],
@@ -4952,6 +4956,34 @@ fn resolve_question(
             unsupported_reason: Some("unresolved_continuation".to_string()),
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
+            question_frame: question_frame::unresolved_frame(
+                question,
+                "unresolved_continuation",
+                "请说明要继续回答哪个问题。",
+            )?,
+        });
+    }
+    let relation_followup_anchor = latest_prior_user_question(messages, question)
+        .map(|value| (value, "current_window"))
+        .or_else(|| {
+            prior_user_question.map(|value| (value.to_string(), "session_journal_candidate"))
+        });
+    if let Some((anchor, used_context_ref)) = relation_followup_anchor
+        && let Some((resolved_question, question_frame, used_context_ref)) =
+            question_frame::resolve_relation_entity_followup(question, &anchor, used_context_ref)?
+    {
+        let referent_bindings = question_frame.entities();
+        return Ok(ResolverOutput {
+            resolved_question,
+            referent_bindings,
+            used_context_refs: vec![used_context_ref],
+            confidence: question_frame.confidence,
+            needs_clarification: false,
+            clarification_question: None,
+            unsupported_reason: None,
+            strategy: "deterministic_relation_followup".to_string(),
+            agent_audit: None,
+            question_frame,
         });
     }
     if context_rules::is_elliptical_followup_question(question)? {
@@ -4965,7 +4997,8 @@ fn resolve_question(
             if let Some(resolved_question) =
                 context_rules::resolve_elliptical_followup(question, &anchor)?
             {
-                let referent_bindings = latest_subject_in_text(&anchor)?.into_iter().collect();
+                let question_frame = question_frame::build_question_frame(&resolved_question)?;
+                let referent_bindings = question_frame.entities();
                 return Ok(ResolverOutput {
                     resolved_question,
                     referent_bindings,
@@ -4976,6 +5009,7 @@ fn resolve_question(
                     unsupported_reason: None,
                     strategy: "deterministic_elliptical_followup".to_string(),
                     agent_audit: None,
+                    question_frame,
                 });
             }
         }
@@ -4989,13 +5023,24 @@ fn resolve_question(
             unsupported_reason: Some("unresolved_elliptical_followup".to_string()),
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
+            question_frame: question_frame::unresolved_frame(
+                question,
+                "unresolved_elliptical_followup",
+                "请说明这条追问承接上一条中的哪个问题。",
+            )?,
         });
     }
     let current_subject = latest_subject_in_text(question)?;
     if let Some(subject) = current_subject {
         return Ok(ResolverOutput {
             resolved_question: question.to_string(),
-            referent_bindings: vec![subject],
+            referent_bindings: base_frame
+                .entities()
+                .into_iter()
+                .chain([subject])
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             used_context_refs: Vec::new(),
             confidence: 1.0,
             needs_clarification: false,
@@ -5003,6 +5048,7 @@ fn resolve_question(
             unsupported_reason: None,
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
+            question_frame: base_frame,
         });
     }
     if contains_referential_pronoun(question)? {
@@ -5010,9 +5056,16 @@ fn resolve_question(
             latest_subject_from_messages(messages)?.or_else(|| prior_subject.map(str::to_string));
         if let Some(referent) = referent {
             let resolved_question = bind_referent(question, &referent)?;
+            let question_frame = question_frame::build_question_frame(&resolved_question)?;
             return Ok(ResolverOutput {
                 resolved_question,
-                referent_bindings: vec![referent],
+                referent_bindings: question_frame
+                    .entities()
+                    .into_iter()
+                    .chain([referent])
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
                 used_context_refs: vec!["session_summary".to_string()],
                 confidence: 0.86,
                 needs_clarification: false,
@@ -5020,6 +5073,7 @@ fn resolve_question(
                 unsupported_reason: None,
                 strategy: "deterministic_rules".to_string(),
                 agent_audit: None,
+                question_frame,
             });
         }
         return Ok(ResolverOutput {
@@ -5034,11 +5088,16 @@ fn resolve_question(
             unsupported_reason: Some("unresolved_referent".to_string()),
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
+            question_frame: question_frame::unresolved_frame(
+                question,
+                "unresolved_referent",
+                "请明确你指的是哪位人物或对象，我再继续回答。",
+            )?,
         });
     }
     Ok(ResolverOutput {
         resolved_question: question.to_string(),
-        referent_bindings: Vec::new(),
+        referent_bindings: base_frame.entities(),
         used_context_refs: Vec::new(),
         confidence: 1.0,
         needs_clarification: false,
@@ -5046,6 +5105,7 @@ fn resolve_question(
         unsupported_reason: None,
         strategy: "deterministic_rules".to_string(),
         agent_audit: None,
+        question_frame: base_frame,
     })
 }
 
@@ -5393,7 +5453,7 @@ fn reviewer_memory_usage_summary(memory_reads: &[ScopedMemoryRead]) -> Value {
 }
 
 fn profile_views(
-    resolved_question: &str,
+    resolver: &ResolverOutput,
     session_summary: &str,
     memory_reads: &[ScopedMemoryRead],
 ) -> Vec<ContextPackProfileView> {
@@ -5406,10 +5466,12 @@ fn profile_views(
     let text_read_refs = memory_read_refs_for_reads(&text_reads);
     let commentary_read_refs = memory_read_refs_for_reads(&commentary_reads);
     let reviewer_read_refs = Vec::<String>::new();
+    let question_frame = resolver.question_frame.audit_json();
     vec![
         ContextPackProfileView {
             profile_name: "honglou-main".to_string(),
-            visible_question: resolved_question.to_string(),
+            visible_question: resolver.resolved_question.to_string(),
+            question_frame: question_frame.clone(),
             session_summary: Some(session_summary.to_string()),
             allowed_tools: vec![
                 "tonglingyu.evidence.package.create".to_string(),
@@ -5429,7 +5491,8 @@ fn profile_views(
         },
         ContextPackProfileView {
             profile_name: "honglou-text".to_string(),
-            visible_question: resolved_question.to_string(),
+            visible_question: resolver.resolved_question.to_string(),
+            question_frame: question_frame.clone(),
             session_summary: None,
             allowed_tools: vec!["tonglingyu.text.search".to_string()],
             forbidden_context: vec![
@@ -5446,7 +5509,8 @@ fn profile_views(
         },
         ContextPackProfileView {
             profile_name: "honglou-commentary".to_string(),
-            visible_question: resolved_question.to_string(),
+            visible_question: resolver.resolved_question.to_string(),
+            question_frame: question_frame.clone(),
             session_summary: None,
             allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
             forbidden_context: vec![
@@ -5465,7 +5529,8 @@ fn profile_views(
         },
         ContextPackProfileView {
             profile_name: "honglou-reviewer".to_string(),
-            visible_question: resolved_question.to_string(),
+            visible_question: resolver.resolved_question.to_string(),
+            question_frame,
             session_summary: None,
             allowed_tools: vec!["tonglingyu.evidence.package.read".to_string()],
             forbidden_context: vec![
@@ -5529,6 +5594,7 @@ fn build_context_projection(
     let projection_payload = json!({
         "object": "tonglingyu.context_projection_payload",
         "visible_question": &view.visible_question,
+        "question_frame": &view.question_frame,
         "session_summary": &view.session_summary,
         "conversation_state_summary": &projected_conversation_state,
         "conversation_state_summary_digest": &projected_conversation_state_digest,
@@ -6536,6 +6602,39 @@ mod tests {
     }
 
     #[test]
+    fn resolver_inherits_relation_frame_for_entity_followup() {
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "紫鹃服侍过谁？".to_string(),
+            },
+            ContextMessage {
+                role: "assistant".to_string(),
+                content: "当前证据需要逐条核实。".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "那史湘云呢？".to_string(),
+            },
+        ];
+
+        let resolved = resolve_question("那史湘云呢？", &messages, None, None).expect("resolves");
+
+        assert_eq!(resolved.resolved_question, "紫鹃服侍过史湘云吗？");
+        assert_eq!(resolved.used_context_refs, vec!["current_window"]);
+        assert_eq!(resolved.referent_bindings, vec!["紫鹃", "史湘云"]);
+        assert_eq!(resolved.question_frame.intent, "relation_query");
+        assert_eq!(
+            resolved
+                .question_frame
+                .predicate
+                .as_ref()
+                .map(|predicate| predicate.id.as_str()),
+            Some("serve")
+        );
+    }
+
+    #[test]
     fn unresolved_continue_only_turn_fails_closed() {
         let resolved = resolve_question("继续", &[], None, None).expect("resolves");
 
@@ -6673,7 +6772,7 @@ mod tests {
         assert_eq!(context.context_pack["resolver"]["llm_used"], json!(false));
         assert_eq!(
             context.context_pack["policy_versions"]["context_rules"]["subject_ontology"],
-            json!("2026-05-24.1")
+            json!("2026-05-24.2")
         );
         remove_file_db(&db_path);
     }
@@ -7065,7 +7164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_conversation_state_agent_fails_closed_when_enforced() {
+    async fn rejected_conversation_state_agent_rejects_projection_without_blocking_frame() {
         let db_path = temp_context_db_path("conversation-state-agent-reject");
         let conn = file_conn(&db_path);
         drop(conn);
@@ -7081,7 +7180,7 @@ mod tests {
             content: "晴雯后来怎么样？".to_string(),
         }];
 
-        let result = create_context_for_request_with_agent_runtime_and_modes(
+        let context = create_context_for_request_with_agent_runtime_and_modes(
             &db_path,
             ContextRequestInput {
                 trace_id: "trace-conversation-state-agent-reject",
@@ -7098,19 +7197,27 @@ mod tests {
             LlmMode::Disabled,
             LlmMode::Enforced,
         )
-        .await;
+        .await
+        .expect("context still created from deterministic frame");
 
-        let error = result.expect_err("enforced invalid conversation state should fail closed");
-        let error_text = format!("{error:#}");
-        assert!(error_text.contains("llm_agent_enforced_rejected"));
-        assert!(error_text.contains(CONVERSATION_STATE_WRITER_PROFILE_ID));
-        assert!(error_text.contains("contract_accepted=false"));
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_summary_source"],
+            json!("llm_agent_rejected_no_projection")
+        );
+        assert_eq!(
+            context.context_pack["conversation_state_summary_projection_visible"],
+            json!(false)
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["contract_accepted"],
+            json!(false)
+        );
         assert_eq!(runtime.profile_inputs().len(), 2);
         let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
         let context_pack_count: i64 = persisted_conn
             .query_row("SELECT COUNT(*) FROM context_packs", [], |row| row.get(0))
             .expect("context pack count");
-        assert_eq!(context_pack_count, 0);
+        assert_eq!(context_pack_count, 1);
         drop(persisted_conn);
         remove_file_db(&db_path);
     }

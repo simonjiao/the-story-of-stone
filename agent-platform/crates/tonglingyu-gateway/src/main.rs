@@ -67,6 +67,7 @@ mod llm_modes;
 mod llm_provider;
 mod llm_resolver;
 mod plan;
+mod question_frame;
 mod retrieval_suggestion;
 mod user_response_safety;
 
@@ -1140,6 +1141,29 @@ fn runtime_context_contract(scoped_context: &ContextResolution) -> RuntimeContex
             .map(runtime_context_projection)
             .collect(),
     }
+}
+
+fn apply_question_frame_required_evidence_types(policy: &mut SearchPolicy, context_pack: &Value) {
+    let Some(items) = context_pack
+        .get("resolver")
+        .and_then(|resolver| resolver.get("question_frame"))
+        .and_then(|frame| frame.get("required_evidence_types"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let mut required = policy
+        .required_evidence_types
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for item in items.iter().filter_map(Value::as_str) {
+        let item = item.trim();
+        if !item.is_empty() {
+            required.insert(item.to_string());
+        }
+    }
+    policy.required_evidence_types = required.into_iter().collect();
 }
 
 fn runtime_context_projection(projection: &ContextProjection) -> RuntimeContextProjection {
@@ -8994,6 +9018,7 @@ async fn chat_completions(
     }
 
     let mut policy = search_policy(&scoped_context.resolved_question);
+    apply_question_frame_required_evidence_types(&mut policy, &scoped_context.context_pack);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
@@ -11331,6 +11356,7 @@ mod tests {
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
             knowledge_state_summary: Default::default(),
+            question_frame: None,
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -11914,6 +11940,7 @@ mod tests {
             claims: vec!["证据不足，不能给出确定结论。".to_string()],
             claim_evidence_map: Vec::new(),
             knowledge_state_summary: Default::default(),
+            question_frame: None,
             review: ReviewRecord {
                 status: "needs_revision".to_string(),
                 severity: "high".to_string(),
@@ -13853,6 +13880,7 @@ USER: 介绍尤三姐
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
             knowledge_state_summary: Default::default(),
+            question_frame: None,
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),
@@ -13957,6 +13985,7 @@ USER: 介绍尤三姐
             claims: vec!["通灵玉回答必须受证据包约束。".to_string()],
             claim_evidence_map: Vec::new(),
             knowledge_state_summary: Default::default(),
+            question_frame: None,
             review: ReviewRecord {
                 status: "passed".to_string(),
                 severity: "none".to_string(),

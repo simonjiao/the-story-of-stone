@@ -1,0 +1,19 @@
+{
+  "schema_version": "tonglingyu.question_frame_rules.v1",
+  "catalog_version": "2026-05-24.1",
+  "default_source_scope": "pre_80_base_text_and_commentary",
+  "relation_question": {
+    "object_placeholder_terms": ["谁", "誰", "哪一个人", "哪個人", "什么人", "什麼人"],
+    "yes_no_terms": ["吗", "嗎", "是否", "有没有", "有沒有"],
+    "followup_prefix_terms": ["那", "那么", "那麼", "这个", "這個"]
+  },
+  "predicates": [
+    {
+      "id": "serve",
+      "label": "服侍",
+      "aliases": ["服侍", "伏侍", "侍候", "伺候", "服事", "伏事"],
+      "evidence_terms": ["丫鬟", "丫头", "丫頭", "贴身", "貼身", "跟着", "跟著", "房里", "房裏"],
+      "required_evidence_types": ["base_text", "commentary"]
+    }
+  ]
+}

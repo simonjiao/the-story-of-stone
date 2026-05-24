@@ -402,6 +402,48 @@ fn test_workflow_input(
     }
 }
 
+fn test_workflow_input_with_question_frame(
+    trace_id: &str,
+    question: &str,
+    limit: usize,
+    required_evidence_types: Vec<String>,
+    question_frame: Value,
+) -> RuntimeWorkflowInput {
+    let mut input = test_workflow_input(trace_id, question, limit, required_evidence_types);
+    for projection in &mut input.context.projections {
+        projection.projection_payload["question_frame"] = question_frame.clone();
+        projection.context_projection_digest = hash_json(&projection.digest_value());
+    }
+    input
+}
+
+fn relation_question_frame_value() -> Value {
+    json!({
+        "schema_version": "tonglingyu.question_frame.v1",
+        "intent": "relation_query",
+        "canonical_question": "紫鹃服侍过史湘云吗？",
+        "subject": {
+            "canonical": "紫鹃",
+            "aliases": ["紫鹃", "紫鵑", "鹦哥"]
+        },
+        "predicate": {
+            "id": "serve",
+            "label": "服侍",
+            "aliases": ["服侍", "伏侍", "侍候"],
+            "evidence_terms": ["丫鬟", "丫头", "跟着"]
+        },
+        "object": {
+            "canonical": "史湘云",
+            "aliases": ["史湘云", "史湘雲", "湘云"]
+        },
+        "source_scope": "pre_80_base_text_and_commentary",
+        "required_evidence_types": ["base_text", "commentary"],
+        "confidence": 0.91,
+        "needs_clarification": false,
+        "clarification_question": null
+    })
+}
+
 #[async_trait]
 impl RuntimeClient for CalibrationJudgeRuntimeClient {
     async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -1494,6 +1536,40 @@ fn seed_basic_tonglingyu_runtime_block(conn: &Connection) {
     .expect("insert basic tonglingyu runtime block");
 }
 
+fn seed_relation_object_only_runtime_block(conn: &Connection) {
+    seed_retrieval_quality_source(
+        conn,
+        json!({
+            "license": "CC-BY-SA-4.0",
+            "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+            "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+            "attribution": "Wikisource contributors",
+            "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+        }),
+    );
+    let source_title = "紅樓夢/第070回";
+    let text = "時值暮春之際，史湘雲無聊，因見柳花飄舞，便偶成一小令，調寄《如夢令》。";
+    conn.execute(
+        r#"
+        INSERT INTO blocks (
+            block_id, source_id, section_id, source_title, normalized_source_title,
+            source_url, revision_id, block_index, kind, tag, text, normalized_text,
+            evidence_type, chapter_no
+        ) VALUES (?1, 'quality-source', 'quality-section-relation-object-only',
+            ?2, ?3, 'https://example.test/source/relation-object-only',
+            1, 1, 'paragraph', NULL, ?4, ?5, 'base_text', 70)
+        "#,
+        params![
+            "quality-block-relation-object-only",
+            source_title,
+            normalize_title(source_title),
+            text,
+            normalize_text(text),
+        ],
+    )
+    .expect("insert relation object-only runtime block");
+}
+
 fn yousanjie_test_package() -> EvidencePackage {
     let cards = yousanjie_test_cards();
     EvidencePackage {
@@ -1507,6 +1583,7 @@ fn yousanjie_test_package() -> EvidencePackage {
         ),
         knowledge_state_summary: KnowledgeStateSummary::default(),
         cards,
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2724,6 +2801,7 @@ fn local_answer_keeps_raw_quotes_without_intro_synthesis() {
         cards: vec![card],
         claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2768,6 +2846,7 @@ fn local_answer_prefers_requested_commentary_and_cleans_markup() {
         cards: vec![base, weak_commentary, commentary],
         claims: vec!["命中的脂批材料可作为默认回答证据。".to_string()],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2801,6 +2880,7 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
             "涉及事件归纳或次数统计的问题必须按当前证据包命中的证据槽位说明范围。".to_string(),
         ],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2834,6 +2914,7 @@ fn local_answer_uses_slot_semantics_for_lost_jade_count() {
                 .to_string(),
         ],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2873,6 +2954,7 @@ fn local_answer_skips_broken_shell_evidence_cards() {
         cards: vec![broken, usable],
         claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2913,6 +2995,7 @@ fn local_answer_deduplicates_repeated_base_text_evidence() {
         cards: vec![chengjia, wikisource, commentary],
         claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -2964,6 +3047,7 @@ fn local_answer_deduplicates_long_edition_variants_in_evidence_brief() {
         cards: vec![chengjia, wikisource, commentary, chengyi, index],
         claims: vec!["命中的正文材料可支持相应版本和位置中的直接文本事实。".to_string()],
         claim_evidence_map: Vec::new(),
+        question_frame: None,
         review: ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -6663,6 +6747,7 @@ fn replay_keeps_package_id_and_review_downgrade() {
         claims: vec!["当前知识库未找到可追溯证据，不能给出确定结论。".to_string()],
         claim_evidence_map: vec![],
         knowledge_state_summary: KnowledgeStateSummary::default(),
+        question_frame: None,
         review: review("量子计算机是什么？", &[], &[]),
     };
     let answer = replay_answer(&package);
@@ -6757,6 +6842,52 @@ fn runtime_workflow_emits_profile_step_refs_and_review() {
         )
         .expect("audit count");
     assert_eq!(profile_step_events, workflow.steps.len() as i64);
+}
+
+#[test]
+fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+    seed_relation_object_only_runtime_block(&conn);
+
+    let workflow = execute_runtime_workflow(
+        &conn,
+        test_workflow_input_with_question_frame(
+            "trace-relation-frame-workflow",
+            "紫鹃服侍过史湘云吗？",
+            4,
+            vec!["base_text".to_string()],
+            relation_question_frame_value(),
+        ),
+    )
+    .expect("workflow executes");
+
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .any(|step| step.operation == "commentary_evidence_search"),
+        "frame required evidence types should add commentary search"
+    );
+    assert!(
+        workflow
+            .steps
+            .iter()
+            .filter(|step| step.operation == "text_evidence_search")
+            .any(|step| step.output["query_frame_bound"] == json!(true))
+    );
+    assert!(workflow.package.question_frame.is_some());
+    assert!(
+        workflow
+            .package
+            .review
+            .issues
+            .iter()
+            .any(|issue| issue == "relation_predicate_evidence_missing")
+    );
+    assert!(workflow.final_answer.contains("未见直接证据"));
+    assert!(workflow.final_answer.contains("紫鹃服侍过史湘云"));
 }
 
 #[test]
@@ -8083,6 +8214,7 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
         claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
         claim_evidence_map: vec![],
         knowledge_state_summary: KnowledgeStateSummary::default(),
+        question_frame: None,
         review,
     };
     let default_draft_summary = upstream_bundle_summary(

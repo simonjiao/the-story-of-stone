@@ -48,6 +48,7 @@ fn composer_counts_direct_slots_and_separates_related_clues() {
         claims: Vec::new(),
         claim_evidence_map: Vec::new(),
         knowledge_state_summary: Default::default(),
+        question_frame: None,
         review: crate::ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -111,6 +112,7 @@ fn composer_strips_internal_markup_from_public_quotes() {
         claims: Vec::new(),
         claim_evidence_map: Vec::new(),
         knowledge_state_summary: Default::default(),
+        question_frame: None,
         review: crate::ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),

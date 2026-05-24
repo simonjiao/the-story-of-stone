@@ -41,6 +41,27 @@ are implementation constraints, not general style preferences.
 - Keep cross-module APIs typed and domain-shaped. Do not expose broad catch-all
   helpers just to share implementation details.
 
+## External Rule Catalog Boundaries
+
+- External rule catalogs may hold variable language and domain vocabulary:
+  entity aliases, predicate aliases, source-scope terms, query expansion terms,
+  evidence slot labels, and public answer boundary phrases.
+- External rule catalogs must not own workflow invariants, fail-open behavior,
+  role boundaries, source-scope gates, reviewer authority, package binding,
+  current-window semantics, or question-frame propagation. Those decisions must
+  live in typed Rust code with tests.
+- Do not fix a single eval miss by adding a question-specific catalog entry that
+  encodes the answer. Catalog changes must represent reusable language, source,
+  ontology, or evidence semantics across more than one phrasing or case.
+- Query expansion, ontology, evidence slot rules, answer rules, and review rules
+  must remain separate responsibilities. A query expansion term can help retrieve
+  material, but it cannot prove what the material supports or decide how the
+  answer is phrased.
+- When adding a catalog-driven capability, add code-level gates that preserve the
+  stable system invariant even if the catalog is incomplete, stale, or overbroad.
+  The degraded outcome must be explicit: clarification, insufficient coverage,
+  review rejection, or auditable fail-closed status.
+
 ## Reuse and Templates
 
 - Do not copy-paste the same handler, repository, DTO mapping, config loading,
