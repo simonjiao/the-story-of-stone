@@ -49,6 +49,8 @@ pub(crate) struct RankingRules {
     pub version_source_boosts: Vec<VersionSourceBoostRule>,
     pub inscription_question_terms: Vec<String>,
     pub inscription_text_terms: Vec<String>,
+    pub fate_question_terms: Vec<String>,
+    pub fate_text_terms: Vec<String>,
     pub tonglingyu_terms: Vec<String>,
 }
 
@@ -221,6 +223,11 @@ fn parse_retrieval_rule_catalog(source: &str) -> Result<RetrievalRuleCatalog> {
         "ranking.inscription_text_terms",
         &catalog.ranking.inscription_text_terms,
     )?;
+    require_non_empty_terms(
+        "ranking.fate_question_terms",
+        &catalog.ranking.fate_question_terms,
+    )?;
+    require_non_empty_terms("ranking.fate_text_terms", &catalog.ranking.fate_text_terms)?;
     for rule in &catalog.ranking.version_source_boosts {
         require_non_empty_terms(
             "ranking.version_source_boosts.question_terms",

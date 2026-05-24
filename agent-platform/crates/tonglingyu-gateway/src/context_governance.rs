@@ -1129,7 +1129,9 @@ fn question_normalizer_trigger(
     deterministic: &ResolverOutput,
     prior_subject: Option<&str>,
 ) -> Result<Option<String>> {
-    let trigger = if context_rules::is_elliptical_followup_question(question)? {
+    let trigger = if context_rules::is_elliptical_followup_question(question)?
+        && (deterministic.needs_clarification || deterministic.confidence < 0.75)
+    {
         context_rules::ellipsis_trigger()?
     } else if deterministic.needs_clarification
         && deterministic.unsupported_reason.as_deref() == Some("unresolved_referent")
@@ -4934,6 +4936,37 @@ fn resolve_question(
             agent_audit: None,
         });
     }
+    if context_rules::is_elliptical_followup_question(question)? {
+        if let Some(anchor) = latest_prior_user_question(messages, question) {
+            if let Some(resolved_question) =
+                context_rules::resolve_elliptical_followup(question, &anchor)?
+            {
+                let referent_bindings = latest_subject_in_text(&anchor)?.into_iter().collect();
+                return Ok(ResolverOutput {
+                    resolved_question,
+                    referent_bindings,
+                    used_context_refs: vec!["session_history".to_string()],
+                    confidence: 0.9,
+                    needs_clarification: false,
+                    clarification_question: None,
+                    unsupported_reason: None,
+                    strategy: "deterministic_elliptical_followup".to_string(),
+                    agent_audit: None,
+                });
+            }
+        }
+        return Ok(ResolverOutput {
+            resolved_question: question.to_string(),
+            referent_bindings: Vec::new(),
+            used_context_refs: Vec::new(),
+            confidence: 0.2,
+            needs_clarification: true,
+            clarification_question: Some("请说明这条追问承接上一条中的哪个问题。".to_string()),
+            unsupported_reason: Some("unresolved_elliptical_followup".to_string()),
+            strategy: "deterministic_rules".to_string(),
+            agent_audit: None,
+        });
+    }
     let current_subject = latest_subject_in_text(question)?;
     if let Some(subject) = current_subject {
         return Ok(ResolverOutput {
@@ -6526,20 +6559,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn elliptical_followup_uses_current_window_subject_candidates() {
+    async fn elliptical_followup_preserves_prior_question_task_boundary() {
         let db_path = temp_context_db_path("question-agent-ellipsis");
         let conn = file_conn(&db_path);
         drop(conn);
-        let runtime = FakeRuntimeClient::new(vec![json!({
-            "schema_version": RESOLVER_SCHEMA_VERSION,
-            "resolved_question": "关于史湘云的结局，脂批中有哪些证据？",
-            "referent_bindings": ["史湘云"],
-            "used_context_refs": ["recent_user_messages"],
-            "confidence": 0.91,
-            "needs_clarification": false,
-            "clarification_question": null,
-            "unsupported_reason": null
-        })]);
+        let runtime = FakeRuntimeClient::new(Vec::new());
         let messages = vec![
             ContextMessage {
                 role: "user".to_string(),
@@ -6577,12 +6601,13 @@ mod tests {
 
         assert_eq!(
             context.resolved_question,
-            "关于史湘云的结局，脂批中有哪些证据？"
+            "关于史湘云的结局，脂批中的证据呢"
         );
         assert_eq!(
-            context.context_pack["resolver"]["agent_decision"]["trigger"],
-            json!("elliptical_followup")
+            context.context_pack["resolver"]["strategy"],
+            json!("deterministic_elliptical_followup")
         );
+        assert_eq!(context.context_pack["resolver"]["llm_used"], json!(false));
         assert_eq!(
             context.context_pack["policy_versions"]["context_rules"]["subject_ontology"],
             json!("2026-05-24.1")

@@ -16116,6 +16116,14 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
     {
         score += 20;
     }
+    let asks_fate = retrieval_rules::contains_any_term(question, &ranking.fate_question_terms);
+    let looks_like_fate = retrieval_rules::contains_any_term(&block.text, &ranking.fate_text_terms);
+    if asks_fate && looks_like_fate {
+        score += 55;
+        if retrieval_rules::contains_any_term(term, &ranking.fate_text_terms) {
+            score += 20;
+        }
+    }
     score
 }
 

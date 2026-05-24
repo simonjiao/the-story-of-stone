@@ -2003,6 +2003,93 @@ fn text_search_matches_simplified_query_to_traditional_alias_and_raw_evidence() 
 }
 
 #[test]
+fn commentary_search_for_character_fate_prefers_fate_markers_over_mentions() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+    seed_retrieval_quality_source(
+        &conn,
+        json!({
+            "license": "CC-BY-SA-4.0",
+            "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+            "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+            "attribution": "Wikisource contributors",
+            "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+        }),
+    );
+    conn.execute(
+        r#"
+        INSERT INTO sources (
+            source_id, source_category, format, title, work, edition, language,
+            source_url, api_url, fetched_at, license, license_url,
+            license_source_url, attribution, usage_boundary, notes,
+            snapshot_contract_json, source_hash
+        ) VALUES (
+            'quality-source-zhiyanzhai-fate', 'commentary_material', 'mediawiki',
+            '质量测试脂批 source', '红楼梦', '测试脂批', 'zh',
+            'https://example.test/source/zhiyanzhai-fate',
+            'https://example.test/api/zhiyanzhai-fate',
+            '2026-05-15T00:00:00Z', 'CC-BY-SA-4.0',
+            'https://creativecommons.org/licenses/by-sa/4.0/',
+            'https://wikisource.org/wiki/Wikisource:Copyright_policy',
+            'Wikisource contributors',
+            '可作为默认回答证据；与前八十回正文同属 in-scope，证据来源层记录为脂批。',
+            '测试 commentary source snapshot', '{}', 'hash-quality-source-zhiyanzhai-fate'
+        )
+        "#,
+        [],
+    )
+    .expect("insert commentary source");
+    for (block_id, text, block_index) in [
+        (
+            "quality-block-xiangyun-ordinary-commentary",
+            "史湘雲問道：「寶玉哥哥不在家麽？」寶釵笑道：「他再不想著別人，只想寶兄弟。」",
+            1_i64,
+        ),
+        (
+            "quality-block-xiangyun-fate-commentary",
+            "第六支，樂中悲：襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。{{~~|【甲眉：悲壯之極，北曲中不能多得。】}}",
+            2_i64,
+        ),
+    ] {
+        conn.execute(
+            r#"
+            INSERT INTO blocks (
+                block_id, source_id, section_id, source_title, normalized_source_title,
+                source_url, revision_id, block_index, kind, tag, text, normalized_text,
+                evidence_type, chapter_no
+            ) VALUES (?1, 'quality-source-zhiyanzhai-fate', 'quality-section-fate',
+                '脂硯齋重評石頭記/第五回', ?2, 'https://example.test/source/fate',
+                1, ?3, 'paragraph', NULL, ?4, ?5, 'commentary', 5)
+            "#,
+            params![
+                block_id,
+                normalize_title("脂硯齋重評石頭記/第五回"),
+                block_index,
+                text,
+                normalize_text(text),
+            ],
+        )
+        .expect("insert commentary block");
+    }
+
+    let output = execute_tool(
+        &conn,
+        TonglingyuToolCall::CommentarySearch {
+            question: "关于史湘云的结局，脂批中的证据呢".to_string(),
+            limit: 4,
+        },
+    )
+    .expect("search executes");
+
+    let TonglingyuToolOutput::EvidenceCards { cards, .. } = output else {
+        panic!("expected evidence cards");
+    };
+    assert_eq!(cards[0].block_id, "quality-block-xiangyun-fate-commentary");
+    assert!(cards[0].text.contains("樂中悲"));
+}
+
+#[test]
 fn text_search_expands_tonglingyu_loss_question_to_lost_jade_event_terms() {
     let conn = Connection::open_in_memory().expect("in-memory sqlite");
     init_runtime_schema(&conn).expect("runtime schema");
@@ -6231,6 +6318,37 @@ fn reviewer_allows_commentary_original_text_question() {
     let question = "脂批原文如何评价石头？";
     let claims = claims_from_cards(question, &cards);
     let review = review(question, &cards, &claims);
+
+    assert_eq!(review.status, "passed");
+    assert!(review.issues.is_empty());
+}
+
+#[test]
+fn reviewer_rejects_fate_question_when_cards_are_only_character_mentions() {
+    let mut card = sample_card("base_text");
+    card.text = "話說史湘雲回家後，寶玉等仍不過在園中嬉遊吟詠。".to_string();
+    let question = "史湘云的结局";
+    let claims = claims_from_cards(question, &[card.clone()]);
+    let review = review(question, &[card], &claims);
+
+    assert_eq!(review.status, "needs_revision");
+    assert!(
+        review
+            .issues
+            .iter()
+            .any(|issue| { issue.contains("人物结局") && issue.contains("判词") })
+    );
+}
+
+#[test]
+fn reviewer_allows_fate_question_when_commentary_contains_fate_markers() {
+    let mut card = sample_card("commentary");
+    card.text =
+        "第六支，樂中悲：襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。{{~~|【甲眉：悲壯之極。】}}"
+            .to_string();
+    let question = "关于史湘云的结局，脂批中的证据呢";
+    let claims = claims_from_cards(question, &[card.clone()]);
+    let review = review(question, &[card], &claims);
 
     assert_eq!(review.status, "passed");
     assert!(review.issues.is_empty());

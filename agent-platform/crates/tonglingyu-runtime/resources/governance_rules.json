@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.governance_rules.v1",
-  "catalog_version": "2026-05-23.1",
+  "catalog_version": "2026-05-24.1",
   "draft_boundary": {
     "user_opt_in_stop_terms": [
       "如果你愿意",
@@ -125,10 +125,39 @@
         "issue": "脂批或甲戌相关问题缺少脂批证据，必须标注限制。"
       },
       {
-        "id": "fate_requires_base_text",
-        "trigger": { "question_any": ["结局", "命运"] },
-        "require": { "evidence_type_any": ["base_text"] },
-        "issue": "人物命运问题缺少正文证据，必须标注限制。"
+        "id": "fate_requires_fate_evidence_terms",
+        "trigger": { "question_any": ["结局", "結局", "命运", "命運", "最后", "最後", "后来", "後來", "判词", "判詞"] },
+        "require": {
+          "card_text_any": [
+            "判词",
+            "判詞",
+            "红楼梦曲",
+            "紅樓夢曲",
+            "樂中悲",
+            "乐中悲",
+            "終久",
+            "终久",
+            "湘江水逝",
+            "楚雲飛",
+            "楚云飞",
+            "雲散高唐",
+            "云散高唐",
+            "水涸湘江",
+            "襁褓",
+            "父母嘆雙亡",
+            "父母叹双亡",
+            "才貌仙郎",
+            "冊子",
+            "册子",
+            "正冊",
+            "正册",
+            "副冊",
+            "副册",
+            "又副冊",
+            "又副册"
+          ]
+        },
+        "issue": "人物结局或命运问题缺少判词、曲文或结局相关直接线索，必须标注限制。"
       },
       {
         "id": "high_risk_conclusion_requires_card_terms",

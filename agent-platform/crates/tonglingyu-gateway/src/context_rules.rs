@@ -71,6 +71,7 @@ struct EllipsisResolutionRules {
     followup_questions: Vec<String>,
     followup_suffix_terms: Vec<String>,
     trigger: String,
+    contextual_followup_template: String,
     clarification_template: String,
 }
 
@@ -332,6 +333,24 @@ pub(crate) fn ellipsis_trigger() -> Result<String> {
     Ok(context_rule_catalogs()?.ellipsis_resolution_rules.trigger)
 }
 
+pub(crate) fn resolve_elliptical_followup(question: &str, anchor: &str) -> Result<Option<String>> {
+    if !is_elliptical_followup_question(question)? {
+        return Ok(None);
+    }
+    let rules = context_rule_catalogs()?.ellipsis_resolution_rules;
+    let question = question.trim();
+    let anchor = anchor.trim();
+    if question.is_empty() || anchor.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        rules
+            .contextual_followup_template
+            .replace("{anchor}", anchor)
+            .replace("{question}", question),
+    ))
+}
+
 pub(crate) fn max_referent_candidates() -> Result<usize> {
     Ok(context_rule_catalogs()?
         .referent_candidate_rules
@@ -431,10 +450,18 @@ fn parse_ellipsis_resolution_rules(source: &str) -> Result<EllipsisResolutionRul
     }
     if rules.catalog_version.trim().is_empty()
         || rules.trigger.trim().is_empty()
+        || rules.contextual_followup_template.trim().is_empty()
         || rules.clarification_template.trim().is_empty()
     {
         return Err(anyhow!(
-            "ellipsis resolution rules require catalog_version, trigger, and clarification_template"
+            "ellipsis resolution rules require catalog_version, trigger, contextual_followup_template, and clarification_template"
+        ));
+    }
+    if !rules.contextual_followup_template.contains("{anchor}")
+        || !rules.contextual_followup_template.contains("{question}")
+    {
+        return Err(anyhow!(
+            "ellipsis resolution contextual_followup_template must include {{anchor}} and {{question}}"
         ));
     }
     require_non_empty_terms(
@@ -528,6 +555,11 @@ mod tests {
     fn ellipsis_and_referent_terms_are_catalog_driven() {
         assert!(is_continue_only_question("继续？").expect("continue check"));
         assert!(is_elliptical_followup_question("脂批中的证据呢？").expect("ellipsis check"));
+        assert_eq!(
+            resolve_elliptical_followup("脂批中的证据呢？", "史湘云的结局")
+                .expect("followup resolves"),
+            Some("关于史湘云的结局，脂批中的证据呢？".to_string())
+        );
         assert!(contains_referential_pronoun("她的结局呢").expect("pronoun check"));
         assert_eq!(
             bind_referent("她的结局呢", "史湘云").expect("binds"),
