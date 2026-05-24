@@ -686,9 +686,18 @@ fn prepare_context_request(
     let interaction_context_id = get_or_create_interaction_context(conn, &user_session_id)?;
     assert_read_enabled_memory_has_policy_decisions(conn)?;
     let prior_subject = latest_subject_from_journal(conn, &user_session_id)?;
-    let session_summary = session_summary(input.messages, prior_subject.as_deref())?;
-    let deterministic_resolver =
-        resolve_question(input.question, input.messages, prior_subject.as_deref())?;
+    let prior_user_question = latest_prior_user_question_from_journal(conn, &user_session_id)?;
+    let session_summary = session_summary(
+        input.messages,
+        prior_subject.as_deref(),
+        prior_user_question.as_deref(),
+    )?;
+    let deterministic_resolver = resolve_question(
+        input.question,
+        input.messages,
+        prior_subject.as_deref(),
+        prior_user_question.as_deref(),
+    )?;
     let last_public_answer = latest_public_answer_boundary(conn, &user_session_id)?;
     Ok(PreparedContext {
         user_session_id,
@@ -4909,13 +4918,22 @@ fn resolve_question(
     question: &str,
     messages: &[ContextMessage],
     prior_subject: Option<&str>,
+    prior_user_question: Option<&str>,
 ) -> Result<ResolverOutput> {
     if is_continue_only_question(question)? {
-        if let Some(resolved_question) = latest_prior_user_question(messages, question) {
+        let (resolved_question, used_context_ref) =
+            if let Some(anchor) = latest_prior_user_question(messages, question) {
+                (anchor, "session_history")
+            } else if let Some(anchor) = prior_user_question {
+                (anchor.to_string(), "session_journal_prior_question")
+            } else {
+                ("".to_string(), "")
+            };
+        if !resolved_question.is_empty() {
             return Ok(ResolverOutput {
                 resolved_question,
                 referent_bindings: Vec::new(),
-                used_context_refs: vec!["session_history".to_string()],
+                used_context_refs: vec![used_context_ref.to_string()],
                 confidence: 0.88,
                 needs_clarification: false,
                 clarification_question: None,
@@ -4937,7 +4955,13 @@ fn resolve_question(
         });
     }
     if context_rules::is_elliptical_followup_question(question)? {
-        if let Some(anchor) = latest_prior_user_question(messages, question) {
+        let anchor = latest_prior_user_question(messages, question)
+            .map(|value| (value, "session_history"))
+            .or_else(|| {
+                prior_user_question
+                    .map(|value| (value.to_string(), "session_journal_prior_question"))
+            });
+        if let Some((anchor, used_context_ref)) = anchor {
             if let Some(resolved_question) =
                 context_rules::resolve_elliptical_followup(question, &anchor)?
             {
@@ -4945,7 +4969,7 @@ fn resolve_question(
                 return Ok(ResolverOutput {
                     resolved_question,
                     referent_bindings,
-                    used_context_refs: vec!["session_history".to_string()],
+                    used_context_refs: vec![used_context_ref.to_string()],
                     confidence: 0.9,
                     needs_clarification: false,
                     clarification_question: None,
@@ -5053,12 +5077,25 @@ fn latest_prior_user_question(
     })
 }
 
-fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> Result<String> {
+fn session_summary(
+    messages: &[ContextMessage],
+    prior_subject: Option<&str>,
+    prior_user_question: Option<&str>,
+) -> Result<String> {
     let mut parts = Vec::new();
     if let Some(subject) = latest_subject_from_messages(messages)? {
         parts.push(format!("当前窗口候选主体：{subject}"));
     } else if let Some(subject) = prior_subject {
         parts.push(format!("session_journal_candidate：{subject}"));
+    }
+    if let Some(prior_question) = prior_user_question
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!(
+            "session_journal_prior_question：{}",
+            bounded_summary(prior_question, 80)
+        ));
     }
     let recent_users = messages
         .iter()
@@ -5617,6 +5654,32 @@ fn latest_subject_from_journal(conn: &Connection, user_session_id: &str) -> Resu
         }
     }
     Ok(None)
+}
+
+fn latest_prior_user_question_from_journal(
+    conn: &Connection,
+    user_session_id: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT content, summary FROM session_journal
+         WHERE user_session_id = ?1 AND entry_type = 'user_message'
+         ORDER BY created_at DESC, journal_id DESC LIMIT 1",
+        params![user_session_id],
+        |row| {
+            let content = row.get::<_, Option<String>>(0)?;
+            let summary = row.get::<_, String>(1)?;
+            Ok(content
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    let value = summary.trim().to_string();
+                    (!value.is_empty()).then_some(value)
+                }))
+        },
+    )
+    .optional()
+    .map(|value| value.flatten())
+    .map_err(Into::into)
 }
 
 fn latest_subject_from_messages(messages: &[ContextMessage]) -> Result<Option<String>> {
@@ -6441,7 +6504,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_question("她最后怎么样？", &messages, None).expect("resolves");
+        let resolved = resolve_question("她最后怎么样？", &messages, None, None).expect("resolves");
 
         assert_eq!(resolved.resolved_question, "尤三姐最后怎么样？");
         assert!(!resolved.needs_clarification);
@@ -6465,7 +6528,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_question("继续", &messages, None).expect("resolves");
+        let resolved = resolve_question("继续", &messages, None, None).expect("resolves");
 
         assert_eq!(resolved.resolved_question, "通灵宝玉丢了几次");
         assert!(!resolved.needs_clarification);
@@ -6474,7 +6537,7 @@ mod tests {
 
     #[test]
     fn unresolved_continue_only_turn_fails_closed() {
-        let resolved = resolve_question("继续", &[], None).expect("resolves");
+        let resolved = resolve_question("继续", &[], None, None).expect("resolves");
 
         assert!(resolved.needs_clarification);
         assert_eq!(
@@ -6485,7 +6548,7 @@ mod tests {
 
     #[test]
     fn unresolved_referent_fails_closed() {
-        let resolved = resolve_question("她最后怎么样？", &[], None).expect("resolves");
+        let resolved = resolve_question("她最后怎么样？", &[], None, None).expect("resolves");
 
         assert!(resolved.needs_clarification);
         assert!(resolved.confidence < 0.45);
@@ -6611,6 +6674,76 @@ mod tests {
         assert_eq!(
             context.context_pack["policy_versions"]["context_rules"]["subject_ontology"],
             json!("2026-05-24.1")
+        );
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn elliptical_followup_uses_session_journal_prior_question_when_history_is_absent() {
+        let db_path = temp_context_db_path("question-agent-ellipsis-journal");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::new(Vec::new());
+        let first_messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "史湘云的结局".to_string(),
+        }];
+        let second_messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "脂批中的证据呢".to_string(),
+        }];
+
+        create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-question-agent-ellipsis-journal-first",
+                model_id: "tonglingyu",
+                external_user_ref: "user-question-agent-ellipsis-journal",
+                external_session_id: "session-question-agent-ellipsis-journal",
+                external_message_id: "message-question-agent-ellipsis-journal-first",
+                question: "史湘云的结局",
+                messages: &first_messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Disabled,
+        )
+        .await
+        .expect("first context created");
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-question-agent-ellipsis-journal-second",
+                model_id: "tonglingyu",
+                external_user_ref: "user-question-agent-ellipsis-journal",
+                external_session_id: "session-question-agent-ellipsis-journal",
+                external_message_id: "message-question-agent-ellipsis-journal-second",
+                question: "脂批中的证据呢",
+                messages: &second_messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Disabled,
+        )
+        .await
+        .expect("second context created");
+
+        assert_eq!(
+            context.resolved_question,
+            "关于史湘云的结局，脂批中的证据呢"
+        );
+        assert_eq!(
+            context.context_pack["resolver"]["used_context_refs"],
+            json!(["session_journal_prior_question"])
+        );
+        assert_eq!(
+            context.context_pack["resolver"]["strategy"],
+            json!("deterministic_elliptical_followup")
         );
         remove_file_db(&db_path);
     }

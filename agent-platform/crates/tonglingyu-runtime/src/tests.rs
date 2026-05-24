@@ -6991,6 +6991,17 @@ fn runtime_rejects_loss_count_draft_that_negates_direct_slot() {
 }
 
 #[test]
+fn runtime_allows_loss_count_draft_that_excludes_related_slot_after_direct_count_clause() {
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "通灵宝玉丢了几次",
+        "按现有前八十回正文与评语证据，通灵宝玉可明确算到 2 处失玉/被盗线索：第23回“凤姐扫雪拾玉”，以及第52回“良儿偷玉”；另有第18回“甄宝玉送玉”只是“送玉/流转疑似线索”，不计入这 2 次明确失玉。",
+        &in_scope_lost_jade_event_cards(),
+    );
+
+    assert_eq!(rejected, None);
+}
+
+#[test]
 fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_forty_scope() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",

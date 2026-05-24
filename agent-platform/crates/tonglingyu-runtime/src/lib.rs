@@ -5940,9 +5940,16 @@ fn direct_slot_is_negated_after_label(
         return false;
     }
     draft_text.match_indices(&label).any(|(index, _)| {
-        let window = draft_text[index..].chars().take(80).collect::<String>();
-        negation_terms.iter().any(|term| window.contains(term))
+        let clause = direct_slot_clause_after_label(draft_text, index);
+        negation_terms.iter().any(|term| clause.contains(term))
     })
+}
+
+fn direct_slot_clause_after_label(draft_text: &str, label_index: usize) -> String {
+    draft_text[label_index..]
+        .chars()
+        .take_while(|ch| !matches!(*ch, '；' | ';' | '。' | '！' | '!' | '？' | '?' | '\n'))
+        .collect()
 }
 
 fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
