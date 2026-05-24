@@ -5628,7 +5628,7 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
     )?;
     let rows = stmt.query_map(params![trace_id], |row| {
         let memory_read_refs = parse_json_column(row.get::<_, String>(10)?);
-        Ok(json!({
+        let mut pack = json!({
             "context_pack_id": row.get::<_, String>(0)?,
             "context_pack_ref": row.get::<_, String>(1)?,
             "interaction_context_id": row.get::<_, String>(2)?,
@@ -5649,7 +5649,9 @@ fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
             "schema_version": row.get::<_, String>(16)?,
             "digest": row.get::<_, String>(17)?,
             "created_at": row.get::<_, String>(18)?,
-        }))
+        });
+        redact_admin_trace_content_fields(&mut pack);
+        Ok(pack)
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
@@ -5744,6 +5746,8 @@ fn load_journal_summaries(conn: &Connection, clause: &str, value: &str) -> Resul
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![value], |row| {
+        let mut metadata = redact_journal_metadata(parse_json_column(row.get::<_, String>(13)?));
+        redact_admin_trace_content_fields(&mut metadata);
         Ok(json!({
             "journal_id": row.get::<_, String>(0)?,
             "trace_id": row.get::<_, String>(1)?,
@@ -5758,7 +5762,7 @@ fn load_journal_summaries(conn: &Connection, clause: &str, value: &str) -> Resul
             "content_ref": row.get::<_, Option<String>>(10)?,
             "retention_policy": row.get::<_, String>(11)?,
             "sensitivity": row.get::<_, String>(12)?,
-            "metadata": redact_journal_metadata(parse_json_column(row.get::<_, String>(13)?)),
+            "metadata": metadata,
             "created_at": row.get::<_, String>(14)?,
             "raw_content_included": false,
         }))
@@ -5776,6 +5780,57 @@ fn redact_journal_metadata(mut value: Value) -> Value {
         );
     }
     value
+}
+
+pub(crate) fn redact_admin_trace_content_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if let Some(raw_content) = object.remove("content") {
+                object.insert("raw_content_redacted".to_string(), json!(true));
+                object.insert(
+                    "raw_content_value_type".to_string(),
+                    json!(json_type_name(&raw_content)),
+                );
+                object.insert(
+                    "raw_content_sha256".to_string(),
+                    json!(format!("sha256:{}", digest_redacted_content(&raw_content))),
+                );
+                if let Some(text) = raw_content.as_str() {
+                    object.insert(
+                        "raw_content_char_count".to_string(),
+                        json!(text.chars().count()),
+                    );
+                }
+            }
+            for child in object.values_mut() {
+                redact_admin_trace_content_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_admin_trace_content_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn digest_redacted_content(value: &Value) -> String {
+    value
+        .as_str()
+        .map(hash_text)
+        .unwrap_or_else(|| digest_json(value))
 }
 
 fn parse_json_column(value: String) -> Value {
@@ -6819,13 +6874,33 @@ mod tests {
             json!(false)
         );
         let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
+        let persisted_raw_context_path_json: String = persisted_conn
+            .query_row(
+                "SELECT llm_agent_context_path_json FROM context_packs WHERE trace_id = ?1",
+                params!["trace-provider-features-context"],
+                |row| row.get(0),
+            )
+            .expect("raw context path persisted");
+        let persisted_raw_context_path: Value =
+            serde_json::from_str(&persisted_raw_context_path_json).expect("raw context path json");
+        assert_eq!(
+            persisted_raw_context_path["conversation_state_agent"]["provider_request"]["provider_request"]
+                ["messages"][0]["content"],
+            json!("Tonglingyu conversation-state writer system prompt")
+        );
         let persisted_trace =
             load_trace_context(&persisted_conn, "trace-provider-features-context")
                 .expect("persisted trace context");
-        assert_eq!(
-            persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
-                ["provider_request"]["provider_request"]["messages"][0]["content"],
-            json!("Tonglingyu conversation-state writer system prompt")
+        let persisted_message = &persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
+            ["provider_request"]["provider_request"]["messages"][0];
+        assert_eq!(persisted_message["role"], json!("system"));
+        assert!(persisted_message.get("content").is_none());
+        assert_eq!(persisted_message["raw_content_redacted"], json!(true));
+        assert_eq!(persisted_message["raw_content_value_type"], json!("string"));
+        assert!(
+            persisted_message["raw_content_sha256"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
         );
         drop(persisted_conn);
         remove_file_db(&db_path);

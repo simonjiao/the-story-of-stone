@@ -10163,7 +10163,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
             packages.push(package_json(&package));
         }
     }
-    Ok(Some(json!({
+    let mut trace = json!({
         "object": "tonglingyu.trace",
         "trace_id": trace_id,
         "workflow_states": workflow_states,
@@ -10176,7 +10176,9 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "governance_tasks": governance_tasks,
         "scoped_context": scoped_context,
         "packages": packages,
-    })))
+    });
+    context_governance::redact_admin_trace_content_fields(&mut trace);
+    Ok(Some(trace))
 }
 
 fn latest_agent_runtime_summary(audit_events: &[Value]) -> Value {
