@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime};
 
 const ONLINE_INGEST_SCHEMA_VERSION: &str = "tonglingyu-online-evidence-card-ingest-v1";
 const ONLINE_CARD_SCHEMA_VERSION: &str = "tonglingyu.online_evidence_card.v1";
@@ -14,6 +15,10 @@ const ONLINE_CARD_BUILDER_VERSION: &str = "tonglingyu-online-card-builder-v1";
 const ONLINE_CARD_VALIDATOR_VERSION: &str = "tonglingyu-online-card-validator-v1";
 const DEFAULT_WORKER_LIMIT: usize = 8;
 const DEFAULT_RETRIEVAL_LIMIT: usize = 12;
+const CARD_INGEST_JOB_LEASE_SECS: i64 = 60;
+const CARD_INGEST_JOB_MAX_ATTEMPTS: i64 = 3;
+const CARD_INGEST_JOB_BACKOFF_BASE_SECS: i64 = 5;
+const CARD_INGEST_JOB_BACKOFF_MAX_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineEvidenceCardUpdateRequestInput {
@@ -86,6 +91,26 @@ pub struct RawEvidenceCandidateRecord {
     pub rule_gap_reason: String,
     pub cluster_key: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CardIngestJobRecord {
+    pub job_id: String,
+    pub update_request_id: String,
+    pub trace_id: String,
+    pub status: String,
+    pub stage: String,
+    pub leased_by: Option<String>,
+    pub lease_until: Option<String>,
+    pub heartbeat_at: Option<String>,
+    pub attempt_count: i64,
+    pub max_attempts: i64,
+    pub next_run_at: String,
+    pub last_error: Option<String>,
+    pub candidate_id: Option<String>,
+    pub staged_card_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +191,25 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS card_ingest_jobs (
+            job_id TEXT PRIMARY KEY,
+            update_request_id TEXT NOT NULL UNIQUE REFERENCES online_evidence_card_update_requests(update_request_id),
+            trace_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            leased_by TEXT,
+            lease_until TEXT,
+            heartbeat_at TEXT,
+            attempt_count INTEGER NOT NULL,
+            max_attempts INTEGER NOT NULL,
+            next_run_at TEXT NOT NULL,
+            last_error TEXT,
+            candidate_id TEXT,
+            staged_card_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS canonical_staged_cards (
             staged_card_id TEXT PRIMARY KEY,
             exact_span_key TEXT NOT NULL,
@@ -218,6 +262,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             ON raw_evidence_candidates(trace_id);
         CREATE INDEX IF NOT EXISTS idx_raw_evidence_candidates_cluster
             ON raw_evidence_candidates(cluster_key);
+        CREATE INDEX IF NOT EXISTS idx_card_ingest_jobs_status
+            ON card_ingest_jobs(status, next_run_at, lease_until);
+        CREATE INDEX IF NOT EXISTS idx_card_ingest_jobs_trace
+            ON card_ingest_jobs(trace_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_staged_exact_claim
             ON canonical_staged_cards(exact_span_key, claim_key);
         CREATE INDEX IF NOT EXISTS idx_canonical_staged_claim
@@ -270,6 +318,7 @@ pub fn create_online_evidence_card_update_request(
         "recall_advice_ref": &recall_advice_ref,
     }))?;
     if let Some(existing) = load_update_request_by_idempotency(conn, &idempotency_key)? {
+        ensure_card_ingest_job_for_request(conn, &existing)?;
         return Ok(existing);
     }
     let update_request_id = format!("ecur-{}", uuid::Uuid::now_v7().simple());
@@ -307,8 +356,243 @@ pub fn create_online_evidence_card_update_request(
             "recall_advice_ref": &recall_advice_ref,
         }),
     )?;
-    load_update_request(conn, &update_request_id)?
-        .ok_or_else(|| anyhow!("online evidence card update request unreadable after insert"))
+    let request = load_update_request(conn, &update_request_id)?
+        .ok_or_else(|| anyhow!("online evidence card update request unreadable after insert"))?;
+    ensure_card_ingest_job_for_request(conn, &request)?;
+    Ok(request)
+}
+
+fn ensure_card_ingest_job_for_request(
+    conn: &Connection,
+    request: &OnlineEvidenceCardUpdateRequestRecord,
+) -> Result<CardIngestJobRecord> {
+    if let Some(existing) = load_card_ingest_job_by_request(conn, &request.update_request_id)? {
+        return Ok(existing);
+    }
+    let now = now_rfc3339();
+    let job_id = format!(
+        "ecj-{}",
+        &stable_hash(&json!({
+            "update_request_id": &request.update_request_id,
+            "trace_id": &request.trace_id,
+        }))?[..32]
+    );
+    conn.execute(
+        r#"
+        INSERT OR IGNORE INTO card_ingest_jobs (
+            job_id, update_request_id, trace_id, status, stage,
+            leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+            next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, 'queued', 'request_queued',
+                  NULL, NULL, NULL, 0, ?4, ?5, NULL, NULL, NULL, ?5, ?5)
+        "#,
+        params![
+            &job_id,
+            &request.update_request_id,
+            &request.trace_id,
+            CARD_INGEST_JOB_MAX_ATTEMPTS,
+            &now,
+        ],
+    )?;
+    insert_staged_card_event(
+        conn,
+        StagedCardEventInput {
+            trace_id: &request.trace_id,
+            update_request_id: Some(&request.update_request_id),
+            staged_card_id: None,
+            candidate_id: None,
+            event_type: "card_ingest_job_created",
+            from_status: None,
+            to_status: Some("queued"),
+            reason_code: "update_request_queued",
+            rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
+            payload: &json!({"job_id": &job_id}),
+        },
+    )?;
+    load_card_ingest_job(conn, &job_id)?
+        .ok_or_else(|| anyhow!("card ingest job unreadable after insert"))
+}
+
+fn reconcile_card_ingest_jobs(conn: &Connection) -> Result<usize> {
+    let mut repaired = 0;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT update_request_id, trace_id, session_id, resolved_question,
+               question_frame_json, coverage_gap_reason, source_scope_policy_json,
+               recall_advice_ref, status, created_at, updated_at
+        FROM online_evidence_card_update_requests
+        WHERE status IN ('queued', 'processing')
+          AND update_request_id NOT IN (SELECT update_request_id FROM card_ingest_jobs)
+        ORDER BY created_at, update_request_id
+        "#,
+    )?;
+    let missing = query_update_request_rows(&mut stmt, [])?;
+    for request in missing {
+        ensure_card_ingest_job_for_request(conn, &request)?;
+        repaired += 1;
+    }
+
+    let expired_jobs = load_expired_processing_jobs(conn)?;
+    for job in expired_jobs {
+        let previous = job.status.clone();
+        let now = now_rfc3339();
+        conn.execute(
+            r#"
+            UPDATE card_ingest_jobs
+            SET status = 'queued',
+                stage = 'lease_expired',
+                leased_by = NULL,
+                lease_until = NULL,
+                heartbeat_at = NULL,
+                updated_at = ?2
+            WHERE job_id = ?1 AND status = 'processing'
+            "#,
+            params![&job.job_id, &now],
+        )?;
+        conn.execute(
+            "UPDATE online_evidence_card_update_requests SET status = 'queued', updated_at = ?2 WHERE update_request_id = ?1 AND status = 'processing'",
+            params![&job.update_request_id, &now],
+        )?;
+        insert_staged_card_event(
+            conn,
+            StagedCardEventInput {
+                trace_id: &job.trace_id,
+                update_request_id: Some(&job.update_request_id),
+                staged_card_id: job.staged_card_id.as_deref(),
+                candidate_id: job.candidate_id.as_deref(),
+                event_type: "card_ingest_job_recovered",
+                from_status: Some(&previous),
+                to_status: Some("queued"),
+                reason_code: "lease_expired",
+                rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
+                payload: &json!({"job_id": &job.job_id}),
+            },
+        )?;
+        repaired += 1;
+    }
+
+    let retry_ready_jobs = load_retry_ready_jobs(conn)?;
+    for job in retry_ready_jobs {
+        let previous = job.status.clone();
+        let now = now_rfc3339();
+        conn.execute(
+            r#"
+            UPDATE card_ingest_jobs
+            SET status = 'queued',
+                stage = 'retry_ready',
+                updated_at = ?2
+            WHERE job_id = ?1 AND status = 'retry_wait'
+            "#,
+            params![&job.job_id, &now],
+        )?;
+        insert_staged_card_event(
+            conn,
+            StagedCardEventInput {
+                trace_id: &job.trace_id,
+                update_request_id: Some(&job.update_request_id),
+                staged_card_id: job.staged_card_id.as_deref(),
+                candidate_id: job.candidate_id.as_deref(),
+                event_type: "card_ingest_job_recovered",
+                from_status: Some(&previous),
+                to_status: Some("queued"),
+                reason_code: "retry_backoff_elapsed",
+                rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
+                payload: &json!({"job_id": &job.job_id}),
+            },
+        )?;
+        repaired += 1;
+    }
+    Ok(repaired)
+}
+
+fn lease_card_ingest_jobs(
+    conn: &Connection,
+    actor: &str,
+    limit: usize,
+) -> Result<Vec<CardIngestJobRecord>> {
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let now = now_rfc3339();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id
+        FROM card_ingest_jobs
+        WHERE status = 'queued'
+          AND next_run_at <= ?1
+        ORDER BY next_run_at, created_at, job_id
+        LIMIT ?2
+        "#,
+    )?;
+    let ids = stmt
+        .query_map(params![&now, limit_i64], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let lease_until = rfc3339_after_seconds(CARD_INGEST_JOB_LEASE_SECS);
+    let mut jobs = Vec::new();
+    for id in ids {
+        let updated = conn.execute(
+            r#"
+            UPDATE card_ingest_jobs
+            SET status = 'processing',
+                stage = 'worker_processing',
+                leased_by = ?2,
+                lease_until = ?3,
+                heartbeat_at = ?4,
+                attempt_count = attempt_count + 1,
+                updated_at = ?4
+            WHERE job_id = ?1 AND status = 'queued'
+            "#,
+            params![&id, actor, &lease_until, &now],
+        )?;
+        if updated == 0 {
+            continue;
+        }
+        let Some(job) = load_card_ingest_job(conn, &id)? else {
+            continue;
+        };
+        conn.execute(
+            "UPDATE online_evidence_card_update_requests SET status = 'processing', updated_at = ?2 WHERE update_request_id = ?1",
+            params![&job.update_request_id, &now],
+        )?;
+        insert_staged_card_event(
+            conn,
+            StagedCardEventInput {
+                trace_id: &job.trace_id,
+                update_request_id: Some(&job.update_request_id),
+                staged_card_id: job.staged_card_id.as_deref(),
+                candidate_id: job.candidate_id.as_deref(),
+                event_type: "card_ingest_job_leased",
+                from_status: Some("queued"),
+                to_status: Some("processing"),
+                reason_code: "worker_lease_acquired",
+                rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
+                payload: &json!({
+                    "job_id": &job.job_id,
+                    "actor_sha256": hash_text(actor),
+                    "lease_until": &job.lease_until,
+                    "attempt_count": job.attempt_count,
+                }),
+            },
+        )?;
+        jobs.push(job);
+    }
+    Ok(jobs)
+}
+
+pub fn heartbeat_card_ingest_job(conn: &Connection, job_id: &str, actor: &str) -> Result<bool> {
+    let now = now_rfc3339();
+    let lease_until = rfc3339_after_seconds(CARD_INGEST_JOB_LEASE_SECS);
+    let updated = conn.execute(
+        r#"
+        UPDATE card_ingest_jobs
+        SET heartbeat_at = ?3,
+            lease_until = ?4,
+            updated_at = ?3
+        WHERE job_id = ?1
+          AND status = 'processing'
+          AND leased_by = ?2
+        "#,
+        params![job_id, actor, &now, &lease_until],
+    )?;
+    Ok(updated == 1)
 }
 
 pub fn run_online_evidence_card_worker_once(
@@ -320,11 +604,12 @@ pub fn run_online_evidence_card_worker_once(
         .ok_or_else(|| anyhow!("online evidence card worker actor is required"))?;
     let limit = input.limit.clamp(1, 100);
     let retrieval_limit = input.retrieval_limit.clamp(1, 64);
-    let requests = lease_update_requests(conn, &actor, limit)?;
+    reconcile_card_ingest_jobs(conn)?;
+    let jobs = lease_card_ingest_jobs(conn, &actor, limit)?;
     let mut report = OnlineEvidenceCardWorkerRunReport {
         object: "tonglingyu.online_evidence_card_worker_run".to_string(),
         schema_version: ONLINE_INGEST_SCHEMA_VERSION.to_string(),
-        actor,
+        actor: actor.clone(),
         processed_count: 0,
         raw_candidate_count: 0,
         staged_count: 0,
@@ -332,19 +617,28 @@ pub fn run_online_evidence_card_worker_once(
         conflicted_count: 0,
         failed_count: 0,
     };
-    for request in requests {
+    for job in jobs {
         report.processed_count += 1;
-        match process_update_request(conn, &request, retrieval_limit) {
+        let request = match load_update_request(conn, &job.update_request_id)? {
+            Some(request) => request,
+            None => {
+                report.failed_count += 1;
+                fail_card_ingest_job(conn, &job, "update_request_missing")?;
+                continue;
+            }
+        };
+        heartbeat_card_ingest_job(conn, &job.job_id, &actor)?;
+        match process_update_request(conn, &job, &request, retrieval_limit) {
             Ok(processed) => {
                 report.raw_candidate_count += processed.raw_candidate_count;
                 report.staged_count += processed.staged_count;
                 report.promoted_count += processed.promoted_count;
                 report.conflicted_count += processed.conflicted_count;
-                complete_update_request(conn, &request)?;
+                complete_card_ingest_job(conn, &job, &request)?;
             }
             Err(error) => {
                 report.failed_count += 1;
-                fail_update_request(conn, &request, &error.to_string())?;
+                fail_card_ingest_job(conn, &job, &error.to_string())?;
             }
         }
     }
@@ -428,6 +722,27 @@ pub fn list_online_evidence_card_update_requests_for_trace(
             }))
         })
         .collect()
+}
+
+pub fn list_online_evidence_card_jobs_for_trace(
+    conn: &Connection,
+    trace_id: &str,
+    limit: usize,
+) -> Result<Vec<CardIngestJobRecord>> {
+    init_schema(conn)?;
+    let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, update_request_id, trace_id, status, stage,
+               leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+               next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        FROM card_ingest_jobs
+        WHERE trace_id = ?1
+        ORDER BY created_at, job_id
+        LIMIT ?2
+        "#,
+    )?;
+    query_card_ingest_job_rows(&mut stmt, params![trace_id, limit])
 }
 
 pub fn list_online_evidence_card_staged_for_trace(
@@ -518,6 +833,7 @@ struct ProcessedUpdateRequest {
 
 fn process_update_request(
     conn: &Connection,
+    job: &CardIngestJobRecord,
     request: &OnlineEvidenceCardUpdateRequestRecord,
     retrieval_limit: usize,
 ) -> Result<ProcessedUpdateRequest> {
@@ -547,6 +863,7 @@ fn process_update_request(
             stage_candidate_from_frame(request, frame.as_ref(), card.clone(), source_hash.clone())?
         {
             let staged = stage_evidence_card_candidate(conn, candidate)?;
+            record_card_ingest_job_stage_ref(conn, job, None, Some(&staged.staged_card_id))?;
             if staged.status == "conflicted" {
                 processed.conflicted_count += 1;
                 continue;
@@ -560,13 +877,14 @@ fn process_update_request(
                 processed.promoted_count += 1;
             }
         } else {
-            insert_raw_candidate_for_card(
+            let raw_candidate = insert_raw_candidate_for_card(
                 conn,
                 request,
                 &card,
                 &source_hash,
                 "rule_gap_no_supported_card_assertion",
             )?;
+            record_card_ingest_job_stage_ref(conn, job, Some(&raw_candidate.candidate_id), None)?;
             processed.raw_candidate_count += 1;
         }
     }
@@ -1241,58 +1559,26 @@ fn insert_raw_candidate_for_card(
         .ok_or_else(|| anyhow!("raw evidence candidate unreadable after insert"))
 }
 
-fn lease_update_requests(
+fn complete_card_ingest_job(
     conn: &Connection,
-    actor: &str,
-    limit: usize,
-) -> Result<Vec<OnlineEvidenceCardUpdateRequestRecord>> {
-    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT update_request_id
-        FROM online_evidence_card_update_requests
-        WHERE status = 'queued'
-        ORDER BY created_at, update_request_id
-        LIMIT ?1
-        "#,
-    )?;
-    let ids = stmt
-        .query_map(params![limit_i64], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let now = now_rfc3339();
-    let mut requests = Vec::new();
-    for id in ids {
-        conn.execute(
-            "UPDATE online_evidence_card_update_requests SET status = 'processing', updated_at = ?2 WHERE update_request_id = ?1 AND status = 'queued'",
-            params![&id, &now],
-        )?;
-        if let Some(request) = load_update_request(conn, &id)? {
-            insert_staged_card_event(
-                conn,
-                StagedCardEventInput {
-                    trace_id: &request.trace_id,
-                    update_request_id: Some(&request.update_request_id),
-                    staged_card_id: None,
-                    candidate_id: None,
-                    event_type: "online_update_request_processing",
-                    from_status: Some("queued"),
-                    to_status: Some("processing"),
-                    reason_code: "worker_lease_without_job_runtime",
-                    rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
-                    payload: &json!({"actor_sha256": hash_text(actor)}),
-                },
-            )?;
-            requests.push(request);
-        }
-    }
-    Ok(requests)
-}
-
-fn complete_update_request(
-    conn: &Connection,
+    job: &CardIngestJobRecord,
     request: &OnlineEvidenceCardUpdateRequestRecord,
 ) -> Result<()> {
     let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE card_ingest_jobs
+        SET status = 'completed',
+            stage = 'completed',
+            leased_by = NULL,
+            lease_until = NULL,
+            heartbeat_at = NULL,
+            last_error = NULL,
+            updated_at = ?2
+        WHERE job_id = ?1
+        "#,
+        params![&job.job_id, &now],
+    )?;
     conn.execute(
         "UPDATE online_evidence_card_update_requests SET status = 'completed', updated_at = ?2 WHERE update_request_id = ?1",
         params![&request.update_request_id, &now],
@@ -1304,41 +1590,116 @@ fn complete_update_request(
             update_request_id: Some(&request.update_request_id),
             staged_card_id: None,
             candidate_id: None,
-            event_type: "online_update_request_completed",
+            event_type: "card_ingest_job_completed",
             from_status: Some("processing"),
             to_status: Some("completed"),
-            reason_code: "worker_completed",
+            reason_code: "job_completed",
             rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
-            payload: &json!({}),
+            payload: &json!({"job_id": &job.job_id}),
         },
     )
 }
 
-fn fail_update_request(
-    conn: &Connection,
-    request: &OnlineEvidenceCardUpdateRequestRecord,
-    error: &str,
-) -> Result<()> {
+fn fail_card_ingest_job(conn: &Connection, job: &CardIngestJobRecord, error: &str) -> Result<()> {
     let now = now_rfc3339();
+    let terminal = job.attempt_count >= job.max_attempts;
+    let next_status = if terminal {
+        "dead_letter"
+    } else {
+        "retry_wait"
+    };
+    let next_run_at = if terminal {
+        now.clone()
+    } else {
+        rfc3339_after_seconds(job_retry_backoff_secs(job.attempt_count))
+    };
+    let reason_code = if terminal {
+        "max_attempts_exhausted"
+    } else {
+        "retry_scheduled"
+    };
     conn.execute(
-        "UPDATE online_evidence_card_update_requests SET status = 'failed', updated_at = ?2 WHERE update_request_id = ?1",
-        params![&request.update_request_id, &now],
+        r#"
+        UPDATE card_ingest_jobs
+        SET status = ?2,
+            stage = ?3,
+            leased_by = NULL,
+            lease_until = NULL,
+            heartbeat_at = NULL,
+            next_run_at = ?4,
+            last_error = ?5,
+            updated_at = ?6
+        WHERE job_id = ?1
+        "#,
+        params![
+            &job.job_id,
+            next_status,
+            reason_code,
+            &next_run_at,
+            bounded_optional_text(error, 2000),
+            &now,
+        ],
+    )?;
+    conn.execute(
+        "UPDATE online_evidence_card_update_requests SET status = ?2, updated_at = ?3 WHERE update_request_id = ?1",
+        params![
+            &job.update_request_id,
+            if terminal { "failed" } else { "queued" },
+            &now,
+        ],
     )?;
     insert_staged_card_event(
         conn,
         StagedCardEventInput {
-            trace_id: &request.trace_id,
-            update_request_id: Some(&request.update_request_id),
-            staged_card_id: None,
-            candidate_id: None,
-            event_type: "online_update_request_failed",
+            trace_id: &job.trace_id,
+            update_request_id: Some(&job.update_request_id),
+            staged_card_id: job.staged_card_id.as_deref(),
+            candidate_id: job.candidate_id.as_deref(),
+            event_type: "card_ingest_job_failed",
             from_status: Some("processing"),
-            to_status: Some("failed"),
-            reason_code: "worker_failed",
+            to_status: Some(next_status),
+            reason_code,
             rule_id: Some(ONLINE_INGEST_SCHEMA_VERSION),
-            payload: &json!({"error_sha256": hash_text(error)}),
+            payload: &json!({
+                "job_id": &job.job_id,
+                "attempt_count": job.attempt_count,
+                "max_attempts": job.max_attempts,
+                "next_run_at": &next_run_at,
+                "error_sha256": hash_text(error),
+            }),
         },
     )
+}
+
+fn record_card_ingest_job_stage_ref(
+    conn: &Connection,
+    job: &CardIngestJobRecord,
+    candidate_id: Option<&str>,
+    staged_card_id: Option<&str>,
+) -> Result<()> {
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE card_ingest_jobs
+        SET candidate_id = COALESCE(?2, candidate_id),
+            staged_card_id = COALESCE(?3, staged_card_id),
+            stage = ?4,
+            updated_at = ?5
+        WHERE job_id = ?1
+        "#,
+        params![
+            &job.job_id,
+            candidate_id,
+            staged_card_id,
+            if staged_card_id.is_some() {
+                "staged_card_observed"
+            } else {
+                "raw_candidate_observed"
+            },
+            &now,
+        ],
+    )?;
+    Ok(())
 }
 
 fn first_claim_conflict(
@@ -1652,6 +2013,7 @@ pub fn online_evidence_card_ingest_stats(conn: &Connection) -> Result<Value> {
         "object": "tonglingyu.online_evidence_card_ingest_stats",
         "schema_version": ONLINE_INGEST_SCHEMA_VERSION,
         "update_requests": grouped_count_json(conn, "online_evidence_card_update_requests", "status")?,
+        "jobs": grouped_count_json(conn, "card_ingest_jobs", "status")?,
         "staged_cards": grouped_count_json(conn, "canonical_staged_cards", "status")?,
         "raw_candidate_count": table_count(conn, "raw_evidence_candidates")?,
         "event_count": table_count(conn, "staged_card_events")?,
@@ -1760,7 +2122,17 @@ fn query_optional_update_request<P>(
 where
     P: rusqlite::Params,
 {
-    stmt.query_row(params, |row| {
+    Ok(query_update_request_rows(stmt, params)?.pop())
+}
+
+fn query_update_request_rows<P>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Vec<OnlineEvidenceCardUpdateRequestRecord>>
+where
+    P: rusqlite::Params,
+{
+    let rows = stmt.query_map(params, |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -1774,24 +2146,130 @@ where
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
         ))
-    })
-    .optional()?
-    .map(|row| {
-        Ok(OnlineEvidenceCardUpdateRequestRecord {
-            update_request_id: row.0,
-            trace_id: row.1,
-            session_id: row.2,
-            resolved_question: row.3,
-            question_frame: row.4.as_deref().map(serde_json::from_str).transpose()?,
-            coverage_gap_reason: row.5,
-            source_scope_policy: serde_json::from_str(&row.6)?,
-            recall_advice_ref: row.7,
-            status: row.8,
-            created_at: row.9,
-            updated_at: row.10,
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|row| {
+            Ok(OnlineEvidenceCardUpdateRequestRecord {
+                update_request_id: row.0,
+                trace_id: row.1,
+                session_id: row.2,
+                resolved_question: row.3,
+                question_frame: row.4.as_deref().map(serde_json::from_str).transpose()?,
+                coverage_gap_reason: row.5,
+                source_scope_policy: serde_json::from_str(&row.6)?,
+                recall_advice_ref: row.7,
+                status: row.8,
+                created_at: row.9,
+                updated_at: row.10,
+            })
         })
-    })
-    .transpose()
+        .collect()
+}
+
+fn load_card_ingest_job_by_request(
+    conn: &Connection,
+    update_request_id: &str,
+) -> Result<Option<CardIngestJobRecord>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, update_request_id, trace_id, status, stage,
+               leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+               next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        FROM card_ingest_jobs
+        WHERE update_request_id = ?1
+        LIMIT 1
+        "#,
+    )?;
+    query_optional_card_ingest_job(&mut stmt, params![update_request_id])
+}
+
+fn load_card_ingest_job(conn: &Connection, job_id: &str) -> Result<Option<CardIngestJobRecord>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, update_request_id, trace_id, status, stage,
+               leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+               next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        FROM card_ingest_jobs
+        WHERE job_id = ?1
+        LIMIT 1
+        "#,
+    )?;
+    query_optional_card_ingest_job(&mut stmt, params![job_id])
+}
+
+fn load_expired_processing_jobs(conn: &Connection) -> Result<Vec<CardIngestJobRecord>> {
+    let now = now_rfc3339();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, update_request_id, trace_id, status, stage,
+               leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+               next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        FROM card_ingest_jobs
+        WHERE status = 'processing'
+          AND lease_until IS NOT NULL
+          AND lease_until <= ?1
+        ORDER BY lease_until, job_id
+        "#,
+    )?;
+    query_card_ingest_job_rows(&mut stmt, params![&now])
+}
+
+fn load_retry_ready_jobs(conn: &Connection) -> Result<Vec<CardIngestJobRecord>> {
+    let now = now_rfc3339();
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, update_request_id, trace_id, status, stage,
+               leased_by, lease_until, heartbeat_at, attempt_count, max_attempts,
+               next_run_at, last_error, candidate_id, staged_card_id, created_at, updated_at
+        FROM card_ingest_jobs
+        WHERE status = 'retry_wait'
+          AND next_run_at <= ?1
+        ORDER BY next_run_at, job_id
+        "#,
+    )?;
+    query_card_ingest_job_rows(&mut stmt, params![&now])
+}
+
+fn query_optional_card_ingest_job<P>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Option<CardIngestJobRecord>>
+where
+    P: rusqlite::Params,
+{
+    Ok(query_card_ingest_job_rows(stmt, params)?.pop())
+}
+
+fn query_card_ingest_job_rows<P>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Vec<CardIngestJobRecord>>
+where
+    P: rusqlite::Params,
+{
+    let rows = stmt.query_map(params, |row| {
+        Ok(CardIngestJobRecord {
+            job_id: row.get(0)?,
+            update_request_id: row.get(1)?,
+            trace_id: row.get(2)?,
+            status: row.get(3)?,
+            stage: row.get(4)?,
+            leased_by: row.get(5)?,
+            lease_until: row.get(6)?,
+            heartbeat_at: row.get(7)?,
+            attempt_count: row.get(8)?,
+            max_attempts: row.get(9)?,
+            next_run_at: row.get(10)?,
+            last_error: row.get(11)?,
+            candidate_id: row.get(12)?,
+            staged_card_id: row.get(13)?,
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 struct StagedCardEventInput<'a> {
@@ -1874,6 +2352,19 @@ fn promoted_evidence_id(exact_span_key: &str, claim_key: &str) -> String {
         "evc-{}",
         &hash_text(&format!("{exact_span_key}:{claim_key}"))[..32]
     )
+}
+
+fn rfc3339_after_seconds(seconds: i64) -> String {
+    (OffsetDateTime::now_utc() + Duration::seconds(seconds))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| now_rfc3339())
+}
+
+fn job_retry_backoff_secs(attempt_count: i64) -> i64 {
+    let exponent = attempt_count.saturating_sub(1).clamp(0, 8) as u32;
+    CARD_INGEST_JOB_BACKOFF_BASE_SECS
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .clamp(1, CARD_INGEST_JOB_BACKOFF_MAX_SECS)
 }
 
 fn stable_hash(value: &Value) -> Result<String> {

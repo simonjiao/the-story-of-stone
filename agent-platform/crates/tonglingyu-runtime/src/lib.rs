@@ -68,11 +68,12 @@ use upstream_bundle::{
 };
 
 pub use online_evidence_card_ingest::{
-    CanonicalStagedCardRecord, OnlineEvidenceCardUpdateRequestInput,
+    CanonicalStagedCardRecord, CardIngestJobRecord, OnlineEvidenceCardUpdateRequestInput,
     OnlineEvidenceCardUpdateRequestRecord, OnlineEvidenceCardWorkerRunInput,
     OnlineEvidenceCardWorkerRunReport, RawEvidenceCandidateRecord,
     create_online_evidence_card_update_request, list_online_evidence_card_events_for_trace,
-    list_online_evidence_card_raw_candidates_for_trace, list_online_evidence_card_staged_for_trace,
+    list_online_evidence_card_jobs_for_trace, list_online_evidence_card_raw_candidates_for_trace,
+    list_online_evidence_card_staged_for_trace,
     list_online_evidence_card_update_requests_for_trace, online_evidence_card_ingest_stats,
     run_online_evidence_card_worker_once,
 };
@@ -1623,6 +1624,17 @@ impl TonglingyuRuntimeStore {
     ) -> Result<Vec<RawEvidenceCandidateRecord>> {
         let conn = self.open_connection()?;
         online_evidence_card_ingest::list_online_evidence_card_raw_candidates_for_trace(
+            &conn, trace_id, limit,
+        )
+    }
+
+    pub fn online_evidence_card_jobs_for_trace(
+        &self,
+        trace_id: &str,
+        limit: usize,
+    ) -> Result<Vec<CardIngestJobRecord>> {
+        let conn = self.open_connection()?;
+        online_evidence_card_ingest::list_online_evidence_card_jobs_for_trace(
             &conn, trace_id, limit,
         )
     }

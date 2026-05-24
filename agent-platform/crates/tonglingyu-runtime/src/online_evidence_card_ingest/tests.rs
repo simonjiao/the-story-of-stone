@@ -84,6 +84,15 @@ fn relation_request(conn: &Connection) -> OnlineEvidenceCardUpdateRequestRecord 
     .expect("request created")
 }
 
+fn job_for_request(
+    conn: &Connection,
+    request: &OnlineEvidenceCardUpdateRequestRecord,
+) -> CardIngestJobRecord {
+    load_card_ingest_job_by_request(conn, &request.update_request_id)
+        .expect("load job")
+        .expect("job exists")
+}
+
 #[test]
 fn creates_update_request_idempotently() {
     let conn = test_conn();
@@ -92,6 +101,10 @@ fn creates_update_request_idempotently() {
 
     assert_eq!(first.update_request_id, second.update_request_id);
     assert_eq!(second.status, "queued");
+    let jobs = list_online_evidence_card_jobs_for_trace(&conn, &first.trace_id, 10)
+        .expect("jobs for trace");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, "queued");
 }
 
 #[test]
@@ -110,7 +123,156 @@ fn update_requests_and_stats_are_queryable() {
     );
     assert_eq!(requests[0]["status"], json!("queued"));
     assert_eq!(stats["update_requests"]["by_status"]["queued"], json!(1));
+    assert_eq!(stats["jobs"]["by_status"]["queued"], json!(1));
     assert_eq!(stats["raw_candidate_count"], json!(0));
+}
+
+#[test]
+fn job_lease_heartbeat_and_expired_reconcile() {
+    let conn = test_conn();
+    let request = relation_request(&conn);
+    let jobs = lease_card_ingest_jobs(&conn, "worker-a", 1).expect("lease job");
+
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].status, "processing");
+    assert_eq!(jobs[0].leased_by.as_deref(), Some("worker-a"));
+    assert_eq!(jobs[0].attempt_count, 1);
+    assert!(heartbeat_card_ingest_job(&conn, &jobs[0].job_id, "worker-a").expect("heartbeat"));
+
+    conn.execute(
+        "UPDATE card_ingest_jobs SET lease_until = '1970-01-01T00:00:00Z' WHERE job_id = ?1",
+        [&jobs[0].job_id],
+    )
+    .expect("expire lease");
+    let repaired = reconcile_card_ingest_jobs(&conn).expect("reconcile");
+    let recovered = job_for_request(&conn, &request);
+
+    assert_eq!(repaired, 1);
+    assert_eq!(recovered.status, "queued");
+    assert_eq!(recovered.stage, "lease_expired");
+    assert!(recovered.leased_by.is_none());
+    let request_after =
+        load_update_request(&conn, &request.update_request_id).expect("request reload");
+    assert_eq!(request_after.expect("request").status, "queued");
+}
+
+#[test]
+fn job_failure_retries_then_dead_letters() {
+    let conn = test_conn();
+    let request = relation_request(&conn);
+
+    for expected_attempt in 1..=CARD_INGEST_JOB_MAX_ATTEMPTS {
+        let leased = lease_card_ingest_jobs(&conn, "worker-a", 1).expect("lease");
+        assert_eq!(leased.len(), 1);
+        assert_eq!(leased[0].attempt_count, expected_attempt);
+        fail_card_ingest_job(&conn, &leased[0], "synthetic worker failure").expect("fail job");
+        let failed = job_for_request(&conn, &request);
+        if expected_attempt < CARD_INGEST_JOB_MAX_ATTEMPTS {
+            assert_eq!(failed.status, "retry_wait");
+            assert!(
+                failed
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("synthetic worker failure"))
+            );
+            conn.execute(
+                "UPDATE card_ingest_jobs SET next_run_at = '1970-01-01T00:00:00Z' WHERE job_id = ?1",
+                [&failed.job_id],
+            )
+            .expect("make retry ready");
+            reconcile_card_ingest_jobs(&conn).expect("retry reconcile");
+            assert_eq!(job_for_request(&conn, &request).status, "queued");
+        } else {
+            assert_eq!(failed.status, "dead_letter");
+            let request_after =
+                load_update_request(&conn, &request.update_request_id).expect("request reload");
+            assert_eq!(request_after.expect("request").status, "failed");
+        }
+    }
+}
+
+#[test]
+fn reconciler_recovers_promote_failed_retry_job() {
+    let conn = test_conn();
+    let request = relation_request(&conn);
+    let job = job_for_request(&conn, &request);
+    conn.execute(
+        r#"
+        UPDATE card_ingest_jobs
+        SET status = 'retry_wait',
+            stage = 'promote_failed',
+            attempt_count = 1,
+            next_run_at = '1970-01-01T00:00:00Z',
+            last_error = 'promote failed'
+        WHERE job_id = ?1
+        "#,
+        [&job.job_id],
+    )
+    .expect("set promote failed retry");
+
+    let repaired = reconcile_card_ingest_jobs(&conn).expect("reconcile");
+    let recovered = job_for_request(&conn, &request);
+
+    assert_eq!(repaired, 1);
+    assert_eq!(recovered.status, "queued");
+    assert_eq!(recovered.stage, "retry_ready");
+}
+
+#[test]
+fn reconciler_recreates_missing_job_for_queued_request() {
+    let conn = test_conn();
+    let request = relation_request(&conn);
+    conn.execute(
+        "DELETE FROM card_ingest_jobs WHERE update_request_id = ?1",
+        [&request.update_request_id],
+    )
+    .expect("delete job");
+
+    let repaired = reconcile_card_ingest_jobs(&conn).expect("reconcile");
+
+    assert_eq!(repaired, 1);
+    assert_eq!(job_for_request(&conn, &request).status, "queued");
+}
+
+#[test]
+fn completed_job_replay_does_not_reprocess_request() {
+    let conn = test_conn();
+    relation_request(&conn);
+    let first = run_online_evidence_card_worker_once(
+        &conn,
+        OnlineEvidenceCardWorkerRunInput {
+            actor: "worker-a".to_string(),
+            limit: 10,
+            retrieval_limit: 5,
+        },
+    )
+    .expect("first worker run");
+    let second = run_online_evidence_card_worker_once(
+        &conn,
+        OnlineEvidenceCardWorkerRunInput {
+            actor: "worker-a".to_string(),
+            limit: 10,
+            retrieval_limit: 5,
+        },
+    )
+    .expect("second worker run");
+
+    assert_eq!(first.processed_count, 1);
+    assert_eq!(second.processed_count, 0);
+    let stats = online_evidence_card_ingest_stats(&conn).expect("stats");
+    assert_eq!(stats["jobs"]["by_status"]["completed"], json!(1));
+    let events = list_online_evidence_card_events_for_trace(&conn, "trace-online-card-test", 100)
+        .expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "card_ingest_job_leased")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "card_ingest_job_completed")
+    );
 }
 
 #[test]

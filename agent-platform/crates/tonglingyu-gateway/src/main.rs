@@ -10353,6 +10353,8 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
     let governance_tasks = runtime_store.list_governance_tasks_for_trace(trace_id, 100)?;
     let online_evidence_card_update_requests =
         runtime_store.online_evidence_card_update_requests_for_trace(trace_id, 100)?;
+    let online_evidence_card_jobs =
+        runtime_store.online_evidence_card_jobs_for_trace(trace_id, 100)?;
     let online_evidence_card_raw_candidates =
         runtime_store.online_evidence_card_raw_candidates_for_trace(trace_id, 100)?;
     let online_evidence_card_staged =
@@ -10373,6 +10375,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         && workflow_states.is_empty()
         && audit_events.is_empty()
         && online_evidence_card_update_requests.is_empty()
+        && online_evidence_card_jobs.is_empty()
         && online_evidence_card_raw_candidates.is_empty()
         && online_evidence_card_staged.is_empty()
         && online_evidence_card_events.is_empty()
@@ -10399,6 +10402,7 @@ fn load_trace(db: &Path, trace_id: &str) -> Result<Option<Value>> {
         "governance_tasks": governance_tasks,
         "online_evidence_card_ingest": {
             "update_requests": online_evidence_card_update_requests,
+            "jobs": online_evidence_card_jobs,
             "raw_candidates": online_evidence_card_raw_candidates,
             "staged_cards": online_evidence_card_staged,
             "events": online_evidence_card_events,
@@ -12280,6 +12284,14 @@ mod tests {
             trace["online_evidence_card_ingest"]["update_requests"][0]["status"],
             json!("queued")
         );
+        assert_eq!(
+            trace["online_evidence_card_ingest"]["jobs"][0]["update_request_id"],
+            json!(request.update_request_id)
+        );
+        assert_eq!(
+            trace["online_evidence_card_ingest"]["jobs"][0]["status"],
+            json!("queued")
+        );
         assert!(trace["audit_events"].as_array().is_some_and(|events| {
             events
                 .iter()
@@ -12330,6 +12342,7 @@ mod tests {
             .online_evidence_card_ingest_stats()
             .expect("ingest stats");
         assert_eq!(stats["update_requests"]["by_status"]["completed"], json!(1));
+        assert_eq!(stats["jobs"]["by_status"]["completed"], json!(1));
         remove_sqlite_file_set(&db_path);
     }
 
