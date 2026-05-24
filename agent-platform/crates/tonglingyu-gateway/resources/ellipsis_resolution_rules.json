@@ -1,0 +1,9 @@
+{
+  "schema_version": "tonglingyu.ellipsis_resolution_rules.v1",
+  "catalog_version": "2026-05-24.1",
+  "continuation_questions": ["继续", "繼續", "继续回答", "繼續回答", "接着", "接著", "接着说", "接著說"],
+  "followup_questions": ["证据呢", "證據呢", "脂批中的证据呢", "脂批中的證據呢", "出处呢", "出處呢", "原文呢", "这个呢", "這個呢", "继续这个", "繼續這個"],
+  "followup_suffix_terms": ["证据呢", "證據呢", "出处呢", "出處呢", "原文呢"],
+  "trigger": "elliptical_followup",
+  "clarification_template": "你问“{question}”，是继续问上一条“{anchor}”吗？"
+}

@@ -3688,6 +3688,21 @@ async fn execute_agent_runtime_profile_step(
                 .get("schema_version")
                 .cloned()
                 .unwrap_or(Value::Null),
+            "provider_request": output
+                .metadata
+                .get("provider_request")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "provider_request_sha256": output
+                .metadata
+                .get("provider_request_sha256")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "provider_request_embedded": output
+                .metadata
+                .get("provider_request_embedded")
+                .cloned()
+                .unwrap_or(Value::Null),
             "effective_tool_set": output
                 .metadata
                 .get("effective_tool_set")

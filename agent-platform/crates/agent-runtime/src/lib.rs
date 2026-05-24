@@ -1479,6 +1479,17 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "OpenAI-compatible Runtime URL was invalid",
             )
         })?;
+        let provider_request =
+            openai_provider_request_snapshot(OpenAiProviderRequestSnapshotInput {
+                request: &request,
+                trace_id: &input.trace_id,
+                profile_id: &input.profile_id,
+                attempt,
+                base_url: &self.config.base_url,
+                requested_tools,
+                retry_instruction_applied: retry_instruction.is_some(),
+            });
+        let provider_request_sha256 = format!("sha256:{}", sha256_json(&provider_request));
         let mut builder = self
             .client
             .post(url)
@@ -1487,18 +1498,17 @@ impl OpenAiCompatibleNetworkRuntimeClient {
         if let Some(api_key) = &self.config.api_key {
             builder = builder.bearer_auth(api_key);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(classify_openai_reqwest_error)?;
+        let response = builder.send().await.map_err(|error| {
+            classify_openai_reqwest_error(error).with_provider_request(provider_request.clone())
+        })?;
         let status = response.status();
         let response_provider_request_id = provider_request_id(response.headers());
-        let body_text = response
-            .text()
-            .await
-            .map_err(classify_openai_reqwest_error)?;
+        let body_text = response.text().await.map_err(|error| {
+            classify_openai_reqwest_error(error).with_provider_request(provider_request.clone())
+        })?;
         if !status.is_success() {
-            return Err(classify_openai_http_error(status, &body_text));
+            return Err(classify_openai_http_error(status, &body_text)
+                .with_provider_request(provider_request.clone()));
         }
         let raw_response_sha256 = sha256_hex(&body_text);
         let body_value = serde_json::from_str::<Value>(&body_text).map_err(|_| {
@@ -1506,6 +1516,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "provider_malformed_json",
                 "OpenAI-compatible Runtime response was malformed",
             )
+            .with_provider_request(provider_request.clone())
         })?;
         let body =
             serde_json::from_value::<OpenAiCompatibleChatCompletionResponse>(body_value.clone())
@@ -1514,6 +1525,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                         "provider_malformed_json",
                         "OpenAI-compatible Runtime response was malformed",
                     )
+                    .with_provider_request(provider_request.clone())
                 })?;
         let provider_request_id = response_provider_request_id.or_else(|| body.id.clone());
         let provider_model = body.model.clone().unwrap_or_else(|| model.to_string());
@@ -1523,6 +1535,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "provider_malformed_json",
                 "OpenAI-compatible Runtime response did not include a choice",
             )
+            .with_provider_request(provider_request.clone())
         })?;
         if choice
             .message
@@ -1533,7 +1546,8 @@ impl OpenAiCompatibleNetworkRuntimeClient {
             return Err(OpenAiRuntimeAttemptError::fatal(
                 "safety_refusal",
                 "OpenAI-compatible Runtime returned a safety refusal",
-            ));
+            )
+            .with_provider_request(provider_request.clone()));
         }
         let raw_content = choice.message.content.as_deref().unwrap_or_default();
         let reasoning_details = choice.message.reasoning_details.clone();
@@ -1554,7 +1568,8 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "provider_empty_content",
                 "OpenAI-compatible Runtime response did not include assistant content",
             )
-            .with_diagnostic(diagnostic));
+            .with_diagnostic(diagnostic)
+            .with_provider_request(provider_request.clone()));
         }
         let provider_output = openai_provider_output_envelope(
             raw_content,
@@ -1606,6 +1621,9 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "latency_ms": latency_ms,
                 "attempt_count": attempt,
                 "retry_instruction_applied": retry_instruction.is_some(),
+                "provider_request": provider_request,
+                "provider_request_sha256": provider_request_sha256,
+                "provider_request_embedded": true,
                 "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
                 "parsed_json_sha256": content_json_digest.map(|value| format!("sha256:{value}")),
                 "provider_output": provider_output.to_metadata(),
@@ -4145,6 +4163,33 @@ impl OpenAiRuntimeAttemptError {
         self.diagnostic = Some(diagnostic);
         self
     }
+
+    fn with_provider_request(mut self, provider_request: Value) -> Self {
+        let provider_request_sha256 = format!("sha256:{}", sha256_json(&provider_request));
+        let mut diagnostic = self.diagnostic.take().unwrap_or_else(|| {
+            json!({
+                "schema_version": "openai-compatible-runtime-failure-v1",
+                "error_type": self.error_type,
+                "secret_values_printed": false,
+            })
+        });
+        if let Value::Object(map) = &mut diagnostic {
+            map.insert("provider_request".to_string(), provider_request);
+            map.insert(
+                "provider_request_sha256".to_string(),
+                Value::String(provider_request_sha256),
+            );
+            map.insert("provider_request_embedded".to_string(), Value::Bool(true));
+            map.insert(
+                "authorization_header_embedded".to_string(),
+                Value::Bool(false),
+            );
+            map.insert("api_key_embedded".to_string(), Value::Bool(false));
+            map.insert("secret_values_printed".to_string(), Value::Bool(false));
+        }
+        self.diagnostic = Some(diagnostic);
+        self
+    }
 }
 
 fn classify_openai_reqwest_error(error: reqwest::Error) -> OpenAiRuntimeAttemptError {
@@ -4252,6 +4297,45 @@ struct OpenAiCompatibleChatCompletionRequest {
 struct OpenAiCompatibleChatMessage {
     role: String,
     content: String,
+}
+
+struct OpenAiProviderRequestSnapshotInput<'a> {
+    request: &'a OpenAiCompatibleChatCompletionRequest,
+    trace_id: &'a str,
+    profile_id: &'a str,
+    attempt: usize,
+    base_url: &'a str,
+    requested_tools: &'a [String],
+    retry_instruction_applied: bool,
+}
+
+fn openai_provider_request_snapshot(input: OpenAiProviderRequestSnapshotInput<'_>) -> Value {
+    json!({
+        "schema_version": "openai-compatible-provider-request-v1",
+        "runtime_adapter": "openai-compatible-network",
+        "provider_kind": "openai_compatible",
+        "method": "POST",
+        "endpoint": "/chat/completions",
+        "base_url_host": base_url_host(input.base_url),
+        "trace_id": input.trace_id,
+        "profile_id": input.profile_id,
+        "attempt": input.attempt,
+        "model": &input.request.model,
+        "messages": &input.request.messages,
+        "message_count": input.request.messages.len(),
+        "stream": input.request.stream,
+        "temperature": input.request.temperature,
+        "max_tokens": input.request.max_tokens,
+        "response_format": input.request.response_format.clone().unwrap_or(Value::Null),
+        "response_format_json_requested": input.request.response_format.is_some(),
+        "reasoning_split": input.request.reasoning_split,
+        "requested_tools": input.requested_tools,
+        "requested_tool_count": input.requested_tools.len(),
+        "retry_instruction_applied": input.retry_instruction_applied,
+        "authorization_header_embedded": false,
+        "api_key_embedded": false,
+        "secret_values_printed": false,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -4713,6 +4797,7 @@ mod tests {
 
     type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
     type SeenOpenAiRequest = (Arc<Mutex<Option<Value>>>, Arc<Mutex<Option<String>>>);
+    type SeenOpenAiRetryRequests = (Arc<Mutex<usize>>, Arc<Mutex<Vec<Value>>>);
 
     #[test]
     fn summarize_json_omits_values_and_object_keys() {
@@ -5437,6 +5522,29 @@ mod tests {
         assert_eq!(output.metadata["attempt_count"], json!(1));
         assert_eq!(output.metadata["secret_values_printed"], json!(false));
         assert_eq!(output.metadata["tool_calling_supported"], json!(false));
+        assert_eq!(output.metadata["provider_request_embedded"], json!(true));
+        assert_eq!(
+            output.metadata["provider_request"]["schema_version"],
+            json!("openai-compatible-provider-request-v1")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["messages"][0]["content"],
+            json!("return json")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["messages"][1]["content"],
+            json!("{\"input\":true}")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["authorization_header_embedded"],
+            json!(false)
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["api_key_embedded"],
+            json!(false)
+        );
+        let metadata_text = output.metadata.to_string();
+        assert!(!metadata_text.contains("test-key"));
         assert_eq!(
             output.metadata["requested_tools_exposed_as_text"],
             json!(true)
@@ -5754,10 +5862,7 @@ mod tests {
             .route(
                 "/chat/completions",
                 post(
-                    |State((calls, requests)): State<(
-                        Arc<Mutex<usize>>,
-                        Arc<Mutex<Vec<Value>>>,
-                    )>,
+                    |State((calls, requests)): State<SeenOpenAiRetryRequests>,
                      Json(request): Json<Value>| async move {
                         requests.lock().unwrap().push(request);
                         let call = {
@@ -5849,10 +5954,15 @@ mod tests {
         assert_eq!(failure["content_len"], json!(0));
         assert_eq!(failure["raw_response_body_embedded"], json!(false));
         assert_eq!(failure["raw_content_embedded"], json!(false));
+        assert_eq!(failure["provider_request_embedded"], json!(true));
+        assert_eq!(
+            failure["provider_request"]["messages"][0]["content"],
+            json!("{\"normalized_question\":\"secret prompt should not leak\"}")
+        );
         assert_eq!(failure["secret_values_printed"], json!(false));
         let encoded = serde_json::to_string(&output.metadata).unwrap();
         assert!(!encoded.contains("SECRET_PROVIDER_EMPTY_BODY"));
-        assert!(!encoded.contains("secret prompt should not leak"));
+        assert!(encoded.contains("secret prompt should not leak"));
         assert_eq!(*calls.lock().unwrap(), 2);
     }
 
@@ -5916,10 +6026,19 @@ mod tests {
         assert_eq!(diagnostic["attempt_failures"][1]["attempt"], json!(2));
         assert_eq!(diagnostic["raw_response_body_embedded"], json!(false));
         assert_eq!(diagnostic["raw_content_embedded"], json!(false));
+        assert_eq!(diagnostic["provider_request_embedded"], json!(true));
+        assert_eq!(
+            diagnostic["provider_request"]["messages"][0]["content"],
+            json!("{\"normalized_question\":\"secret prompt should not leak\"}")
+        );
+        assert_eq!(
+            diagnostic["provider_request"]["authorization_header_embedded"],
+            json!(false)
+        );
         assert_eq!(diagnostic["secret_values_printed"], json!(false));
         let encoded = serde_json::to_string(diagnostic).unwrap();
         assert!(!encoded.contains("SECRET_REPEATED_EMPTY_BODY"));
-        assert!(!encoded.contains("secret prompt should not leak"));
+        assert!(encoded.contains("secret prompt should not leak"));
         assert_eq!(*calls.lock().unwrap(), 2);
     }
 

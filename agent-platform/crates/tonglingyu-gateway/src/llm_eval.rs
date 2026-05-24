@@ -680,7 +680,16 @@ fn evaluate_session_summary(fixture: &LlmEvalFixture, failures: &mut Vec<String>
                 });
             }
         },
-        None => write_conversation_state_summary(&state_input),
+        None => match write_conversation_state_summary(&state_input) {
+            Ok(summary) => summary,
+            Err(error) => {
+                failures.push(format!("summary write failed: {error}"));
+                return json!({
+                    "accepted": false,
+                    "write_error": true,
+                });
+            }
+        },
     };
     let validation_context = conversation_state_validation_context(
         &state_input,

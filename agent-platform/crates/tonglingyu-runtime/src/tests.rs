@@ -16,6 +16,9 @@ struct DraftRuntimeClient;
 struct NoToolRuntimeClient;
 
 #[derive(Debug, Default)]
+struct ProviderRequestRuntimeClient;
+
+#[derive(Debug, Default)]
 struct BadOutputRefRuntimeClient;
 
 #[derive(Debug, Default)]
@@ -710,6 +713,46 @@ impl RuntimeClient for NoToolRuntimeClient {
                     "tool_audit_events": [],
                 }),
             })
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for ProviderRequestRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "provider-request runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "provider-request runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let provider_request = json!({
+            "schema_version": "openai-compatible-provider-request-v1",
+            "runtime_adapter": "openai-compatible-network",
+            "trace_id": &input.trace_id,
+            "profile_id": &input.profile_id,
+            "model": "provider-request-test-model",
+            "messages": &input.messages,
+            "message_count": input.messages.len(),
+            "stream": false,
+            "response_format": {"type": "json_object"},
+            "authorization_header_embedded": false,
+            "api_key_embedded": false,
+            "secret_values_printed": false,
+        });
+        let mut output = NoToolRuntimeClient.execute_profile_step(input).await?;
+        output.metadata["provider_request_sha256"] =
+            json!(format!("sha256:{}", hash_json(&provider_request)));
+        output.metadata["provider_request_embedded"] = json!(true);
+        output.metadata["provider_request"] = provider_request;
+        Ok(output)
     }
 }
 
@@ -8020,6 +8063,78 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
             && event["payload"]["profile_observation_complete"] == json!(true)
             && event["payload"]["profile_content_execution_complete"] == json!(true)
     }));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+}
+
+#[tokio::test]
+async fn runtime_store_audits_openai_compatible_provider_request_payload() {
+    let db_path = std::env::temp_dir().join(format!(
+        "tonglingyu-runtime-provider-request-audit-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let store = TonglingyuRuntimeStore::new(db_path.clone());
+    {
+        let conn = store.open_connection().expect("runtime conn");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+    }
+    let trace_id = "trace-provider-request-audit-test";
+    let workflow = store
+        .execute_workflow_with_agent_runtime_client(
+            test_workflow_input(trace_id, "史湘云的结局", 2, vec!["base_text".to_string()]),
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+            Arc::new(ProviderRequestRuntimeClient),
+        )
+        .await
+        .expect("provider request audit workflow executes");
+
+    assert_eq!(
+        workflow.agent_runtime_summary["profile_execution_status"],
+        json!("openai_compatible_profile_observed_with_local_governance")
+    );
+    let events = store
+        .audit_events_for_trace(trace_id)
+        .expect("audit events");
+    let draft_event = events
+        .iter()
+        .find(|event| {
+            event["event_type"] == "agent_runtime_profile_step_executed"
+                && event["payload"]["operation"] == "draft_answer"
+        })
+        .expect("draft profile audit event");
+    let provider_request = &draft_event["payload"]["agent_runtime"]["provider_request"];
+    assert_eq!(
+        provider_request["schema_version"],
+        json!("openai-compatible-provider-request-v1")
+    );
+    assert_eq!(provider_request["message_count"], json!(1));
+    assert_eq!(provider_request["messages"][0]["role"], json!("user"));
+    assert!(
+        provider_request["messages"][0]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("Tonglingyu profile step execution context"))
+    );
+    assert_eq!(
+        draft_event["payload"]["agent_runtime"]["provider_request_embedded"],
+        json!(true)
+    );
+    assert_eq!(
+        provider_request["authorization_header_embedded"],
+        json!(false)
+    );
+    assert_eq!(provider_request["api_key_embedded"], json!(false));
+    assert!(!draft_event.to_string().contains("test-secret"));
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

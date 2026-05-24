@@ -1,0 +1,132 @@
+{
+  "schema_version": "tonglingyu.subject_ontology.v1",
+  "catalog_version": "2026-05-24.1",
+  "subjects": [
+    {
+      "canonical": "贾宝玉",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾宝玉", "賈寶玉", "宝玉", "寶玉", "寳玉", "宝二爷", "寶二爺"]
+    },
+    {
+      "canonical": "林黛玉",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["林黛玉", "黛玉", "林姑娘", "颦儿", "顰兒"]
+    },
+    {
+      "canonical": "薛宝钗",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["薛宝钗", "薛寶釵", "宝钗", "寶釵", "寳釵", "宝姐姐", "薛姑娘"]
+    },
+    {
+      "canonical": "史湘云",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["史湘云", "史湘雲", "湘云", "湘雲", "云妹妹", "雲妹妹", "史大姑娘"]
+    },
+    {
+      "canonical": "王熙凤",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["王熙凤", "王熙鳳", "凤姐", "鳳姐", "凤姐儿", "鳳姐兒", "琏二奶奶", "璉二奶奶"]
+    },
+    {
+      "canonical": "贾母",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾母", "賈母", "老太太", "史太君"]
+    },
+    {
+      "canonical": "袭人",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["袭人", "襲人", "花袭人", "花襲人"]
+    },
+    {
+      "canonical": "晴雯",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["晴雯"]
+    },
+    {
+      "canonical": "妙玉",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["妙玉"]
+    },
+    {
+      "canonical": "贾探春",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾探春", "賈探春", "探春", "三姑娘"]
+    },
+    {
+      "canonical": "贾迎春",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾迎春", "賈迎春", "迎春", "二姑娘"]
+    },
+    {
+      "canonical": "贾惜春",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾惜春", "賈惜春", "惜春", "四姑娘"]
+    },
+    {
+      "canonical": "贾元春",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾元春", "賈元春", "元春", "元妃"]
+    },
+    {
+      "canonical": "巧姐",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["巧姐", "巧姐儿", "巧姐兒"]
+    },
+    {
+      "canonical": "李纨",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["李纨", "李紈", "宫裁", "宮裁"]
+    },
+    {
+      "canonical": "秦可卿",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["秦可卿", "可卿"]
+    },
+    {
+      "canonical": "尤三姐",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["尤三姐"]
+    },
+    {
+      "canonical": "刘姥姥",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["刘姥姥", "劉姥姥"]
+    },
+    {
+      "canonical": "甄士隐",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["甄士隐", "甄士隱"]
+    },
+    {
+      "canonical": "贾雨村",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["贾雨村", "賈雨村"]
+    },
+    {
+      "canonical": "通灵宝玉",
+      "type": "object",
+      "work": "hongloumeng",
+      "aliases": ["通灵宝玉", "通靈寶玉", "通灵玉", "通靈玉", "那块玉", "那塊玉"]
+    }
+  ]
+}

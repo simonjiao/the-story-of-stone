@@ -12,6 +12,13 @@ Open WebUI browser review、saved report validator 和 full remote release autom
 但它们绑定旧 Story commit / image。当前 HEAD 必须重新部署并重跑 full remote release
 automation 后，才能声明目标环境也已按默认 enforced 闭合。
 
+2026-05-24 设计更新：多轮省略问句、`current_window`、LLM current-window
+compression、`current_window_digest`、`current_window_projection`、
+`session_journal_candidate`、subject ontology、referent candidate 降权、agent
+可见性矩阵、composer/reviewer 受控用法和澄清业务响应的后续重构设计已单独冻结在
+`35_Current_Window_Context_Path_Design.md`。该文档约束下一轮 question normalizer /
+context path 调整；当前文档继续记录既有 LLM Agent 接入与 readiness 口径。
+
 2026-05-21 实现更新：repo-local 已新增网络型
 `openai-compatible-network` Runtime Adapter。Gateway 的 question normalizer /
 conversation state writer 现在通过 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 选择

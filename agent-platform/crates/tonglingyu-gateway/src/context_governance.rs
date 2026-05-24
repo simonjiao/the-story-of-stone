@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 use crate::{
+    context_rules,
     conversation_state::{
         ConversationStateInput, ConversationStateMessage, ConversationStateSummary,
         conversation_state_summary_digest, conversation_state_validation_context,
@@ -585,7 +586,7 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         input.question,
         &prepared.deterministic_resolver,
         prepared.prior_subject.as_deref(),
-    ) && question_agent_mode != LlmMode::Disabled
+    )? && question_agent_mode != LlmMode::Disabled
     {
         let decision = run_question_normalizer_agent(
             runtime_client,
@@ -685,9 +686,9 @@ fn prepare_context_request(
     let interaction_context_id = get_or_create_interaction_context(conn, &user_session_id)?;
     assert_read_enabled_memory_has_policy_decisions(conn)?;
     let prior_subject = latest_subject_from_journal(conn, &user_session_id)?;
-    let session_summary = session_summary(input.messages, prior_subject.as_deref());
+    let session_summary = session_summary(input.messages, prior_subject.as_deref())?;
     let deterministic_resolver =
-        resolve_question(input.question, input.messages, prior_subject.as_deref());
+        resolve_question(input.question, input.messages, prior_subject.as_deref())?;
     let last_public_answer = latest_public_answer_boundary(conn, &user_session_id)?;
     Ok(PreparedContext {
         user_session_id,
@@ -739,7 +740,10 @@ fn deterministic_conversation_state_summary(
         evidence_package_refs: &evidence_package_ref_views,
         reviewer_warnings: &[],
     };
-    let summary = write_conversation_state_summary(&conversation_state_input);
+    let summary = match write_conversation_state_summary(&conversation_state_input) {
+        Ok(summary) => summary,
+        Err(_) => return None,
+    };
     let validation_context = conversation_state_validation_context(
         &conversation_state_input,
         &[],
@@ -773,6 +777,8 @@ fn create_context_pack_from_validated_parts(
     let conversation_state_digest = conversation_state_summary
         .as_ref()
         .map(conversation_state_summary_digest);
+    let context_rule_versions = context_rules::context_rule_versions()?;
+    let current_window_compression_policy = context_rules::current_window_compression_policy()?;
     let context_pack_id = format!("context-pack-{}", uuid::Uuid::now_v7().simple());
     let context_pack_ref = context_pack_ref(input.trace_id, &context_pack_id);
     let active_scopes = vec![
@@ -836,6 +842,8 @@ fn create_context_pack_from_validated_parts(
         "conversation_state_agent": &conversation_state_agent_audit,
         "conversation_state_summary_source": conversation_state_source,
         "raw_agent_output_embedded": false,
+        "context_rule_versions": &context_rule_versions,
+        "current_window_compression_policy": &current_window_compression_policy,
     });
     let mut context_pack = json!({
         "context_pack_id": &context_pack_id,
@@ -878,6 +886,7 @@ fn create_context_pack_from_validated_parts(
             "scoped_memory_policy": SCOPED_MEMORY_POLICY_VERSION,
             "scoped_memory_llm_filter": SCOPED_MEMORY_LLM_FILTER_SCHEMA_VERSION,
             "conversation_state_summary": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+            "context_rules": &context_rule_versions,
             "llm_agent_validator": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
         },
         "resolver": resolver.audit_json(),
@@ -1119,23 +1128,25 @@ fn question_normalizer_trigger(
     question: &str,
     deterministic: &ResolverOutput,
     prior_subject: Option<&str>,
-) -> Option<String> {
-    let trigger = if deterministic.needs_clarification
+) -> Result<Option<String>> {
+    let trigger = if context_rules::is_elliptical_followup_question(question)? {
+        context_rules::ellipsis_trigger()?
+    } else if deterministic.needs_clarification
         && deterministic.unsupported_reason.as_deref() == Some("unresolved_referent")
     {
-        "unresolved_referent"
-    } else if contains_referential_pronoun(question)
+        "unresolved_referent".to_string()
+    } else if context_rules::contains_referential_pronoun(question)?
         && (prior_subject.is_some() || !deterministic.referent_bindings.is_empty())
     {
-        "prior_subject_needed"
+        "prior_subject_needed".to_string()
     } else if deterministic.confidence < 0.75 {
-        "low_confidence_binding"
+        "low_confidence_binding".to_string()
     } else {
-        return None;
+        return Ok(None);
     };
-    LLM_RESOLVER_ALLOWED_TRIGGERS
-        .contains(&trigger)
-        .then(|| trigger.to_string())
+    Ok(LLM_RESOLVER_ALLOWED_TRIGGERS
+        .contains(&trigger.as_str())
+        .then_some(trigger))
 }
 
 async fn run_question_normalizer_agent(
@@ -1145,12 +1156,34 @@ async fn run_question_normalizer_agent(
     input: &ContextRequestInput<'_>,
     prepared: &PreparedContext,
 ) -> QuestionNormalizerValidationDecision {
-    let allowed_referents = allowed_referents_for_agent(
+    let allowed_referents = match allowed_referents_for_agent(
         input.question,
         input.messages,
         prepared.prior_subject.as_deref(),
         &prepared.deterministic_resolver,
-    );
+    ) {
+        Ok(referents) => referents,
+        Err(error) => {
+            return question_normalizer_runtime_error_decision(
+                mode,
+                trigger,
+                &LlmAgentRequestEnvelope::new(
+                    new_id("req"),
+                    QUESTION_NORMALIZER_AGENT_TYPE,
+                    QUESTION_NORMALIZER_PROFILE_ID,
+                    mode.as_str(),
+                    input.trace_id,
+                    prepared.user_session_id.clone(),
+                    prepared.interaction_context_id.clone(),
+                    "llm-agent-input://tonglingyu/context-rules-error".to_string(),
+                    "sha256:context-rules-error".to_string(),
+                    QUESTION_NORMALIZER_TIMEOUT_MS,
+                    json!({}),
+                ),
+                error.to_string(),
+            );
+        }
+    };
     let agent_input = QuestionNormalizerAgentInput::new(
         trigger,
         input.question,
@@ -1427,22 +1460,23 @@ fn allowed_referents_for_agent(
     messages: &[ContextMessage],
     prior_subject: Option<&str>,
     deterministic: &ResolverOutput,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let mut referents = deterministic
         .referent_bindings
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    if let Some(subject) = latest_subject_in_text(question) {
+    if let Some(subject) = latest_subject_in_text(question)? {
         referents.insert(subject);
     }
-    if let Some(subject) = latest_subject_from_messages(messages) {
+    if let Some(subject) = latest_subject_from_messages(messages)? {
         referents.insert(subject);
     }
     if let Some(subject) = prior_subject {
         referents.insert(subject.to_string());
     }
-    referents.into_iter().collect()
+    let max_candidates = context_rules::max_referent_candidates()?;
+    Ok(referents.into_iter().take(max_candidates).collect())
 }
 
 fn recent_messages_for_agent(messages: &[ContextMessage], role: &str) -> Vec<String> {
@@ -1557,7 +1591,7 @@ fn deterministic_public_answer_boundary(content: &str) -> String {
         return content;
     }
 
-    let subject = latest_subject_in_text(&content);
+    let subject = latest_subject_in_text(&content).unwrap_or(None);
     let clause = extract_public_answer_boundary_clause(&content);
     let boundary = match (subject, clause) {
         (Some(subject), Some(clause)) => format!("上一轮回答围绕{subject}；{clause}"),
@@ -4873,10 +4907,10 @@ fn resolve_question(
     question: &str,
     messages: &[ContextMessage],
     prior_subject: Option<&str>,
-) -> ResolverOutput {
-    if is_continue_only_question(question) {
+) -> Result<ResolverOutput> {
+    if is_continue_only_question(question)? {
         if let Some(resolved_question) = latest_prior_user_question(messages, question) {
-            return ResolverOutput {
+            return Ok(ResolverOutput {
                 resolved_question,
                 referent_bindings: Vec::new(),
                 used_context_refs: vec!["session_history".to_string()],
@@ -4886,9 +4920,9 @@ fn resolve_question(
                 unsupported_reason: None,
                 strategy: "deterministic_rules".to_string(),
                 agent_audit: None,
-            };
+            });
         }
-        return ResolverOutput {
+        return Ok(ResolverOutput {
             resolved_question: question.to_string(),
             referent_bindings: Vec::new(),
             used_context_refs: Vec::new(),
@@ -4898,11 +4932,11 @@ fn resolve_question(
             unsupported_reason: Some("unresolved_continuation".to_string()),
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
-        };
+        });
     }
-    let current_subject = latest_subject_in_text(question);
+    let current_subject = latest_subject_in_text(question)?;
     if let Some(subject) = current_subject {
-        return ResolverOutput {
+        return Ok(ResolverOutput {
             resolved_question: question.to_string(),
             referent_bindings: vec![subject],
             used_context_refs: Vec::new(),
@@ -4912,14 +4946,14 @@ fn resolve_question(
             unsupported_reason: None,
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
-        };
+        });
     }
-    if contains_referential_pronoun(question) {
+    if contains_referential_pronoun(question)? {
         let referent =
-            latest_subject_from_messages(messages).or_else(|| prior_subject.map(str::to_string));
+            latest_subject_from_messages(messages)?.or_else(|| prior_subject.map(str::to_string));
         if let Some(referent) = referent {
-            let resolved_question = bind_referent(question, &referent);
-            return ResolverOutput {
+            let resolved_question = bind_referent(question, &referent)?;
+            return Ok(ResolverOutput {
                 resolved_question,
                 referent_bindings: vec![referent],
                 used_context_refs: vec!["session_summary".to_string()],
@@ -4929,9 +4963,9 @@ fn resolve_question(
                 unsupported_reason: None,
                 strategy: "deterministic_rules".to_string(),
                 agent_audit: None,
-            };
+            });
         }
-        return ResolverOutput {
+        return Ok(ResolverOutput {
             resolved_question: question.to_string(),
             referent_bindings: Vec::new(),
             used_context_refs: Vec::new(),
@@ -4943,9 +4977,9 @@ fn resolve_question(
             unsupported_reason: Some("unresolved_referent".to_string()),
             strategy: "deterministic_rules".to_string(),
             agent_audit: None,
-        };
+        });
     }
-    ResolverOutput {
+    Ok(ResolverOutput {
         resolved_question: question.to_string(),
         referent_bindings: Vec::new(),
         used_context_refs: Vec::new(),
@@ -4955,14 +4989,11 @@ fn resolve_question(
         unsupported_reason: None,
         strategy: "deterministic_rules".to_string(),
         agent_audit: None,
-    }
+    })
 }
 
-fn is_continue_only_question(text: &str) -> bool {
-    matches!(
-        text.trim(),
-        "继续" | "繼續" | "继续回答" | "繼續回答" | "接着" | "接著" | "接着说" | "接著說"
-    )
+fn is_continue_only_question(text: &str) -> Result<bool> {
+    context_rules::is_continue_only_question(text)
 }
 
 fn latest_prior_user_question(
@@ -4980,7 +5011,7 @@ fn latest_prior_user_question(
             return None;
         }
         if content.is_empty()
-            || is_continue_only_question(content)
+            || is_continue_only_question(content).unwrap_or(false)
             || is_openwebui_metadata_prompt(content)
         {
             return None;
@@ -4989,12 +5020,12 @@ fn latest_prior_user_question(
     })
 }
 
-fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> String {
+fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> Result<String> {
     let mut parts = Vec::new();
-    if let Some(subject) =
-        latest_subject_from_messages(messages).or_else(|| prior_subject.map(str::to_string))
-    {
-        parts.push(format!("最近讨论对象：{subject}"));
+    if let Some(subject) = latest_subject_from_messages(messages)? {
+        parts.push(format!("当前窗口候选主体：{subject}"));
+    } else if let Some(subject) = prior_subject {
+        parts.push(format!("session_journal_candidate：{subject}"));
     }
     let recent_users = messages
         .iter()
@@ -5014,9 +5045,12 @@ fn session_summary(messages: &[ContextMessage], prior_subject: Option<&str>) -> 
         ));
     }
     if parts.is_empty() {
-        "无可用会话摘要。".to_string()
+        Ok("无可用会话摘要。".to_string())
     } else {
-        bounded_summary(&parts.join("；"), SESSION_SUMMARY_MAX_CHARS)
+        Ok(bounded_summary(
+            &parts.join("；"),
+            SESSION_SUMMARY_MAX_CHARS,
+        ))
     }
 }
 
@@ -5545,75 +5579,40 @@ fn latest_subject_from_journal(conn: &Connection, user_session_id: &str) -> Resu
     )?;
     let rows = stmt.query_map(params![user_session_id], |row| row.get::<_, String>(0))?;
     for row in rows {
-        if let Some(subject) = latest_subject_in_text(&row?) {
+        if let Some(subject) = latest_subject_in_text(&row?)? {
             return Ok(Some(subject));
         }
     }
     Ok(None)
 }
 
-fn latest_subject_from_messages(messages: &[ContextMessage]) -> Option<String> {
-    messages
+fn latest_subject_from_messages(messages: &[ContextMessage]) -> Result<Option<String>> {
+    for message in messages
         .iter()
         .rev()
         .filter(|message| message.role == "user" || message.role == "assistant")
-        .find_map(|message| latest_subject_in_text(&message.content))
-}
-
-fn latest_subject_in_text(text: &str) -> Option<String> {
-    known_subjects()
-        .iter()
-        .find(|subject| text.contains(*subject))
-        .map(|subject| (*subject).to_string())
-}
-
-fn contains_referential_pronoun(text: &str) -> bool {
-    ["她", "他", "那个人", "这个人", "刚才那个人", "刚才的人"]
-        .iter()
-        .any(|needle| text.contains(needle))
-}
-
-fn bind_referent(question: &str, referent: &str) -> String {
-    let mut output = question.to_string();
-    for needle in ["刚才那个人", "刚才的人", "那个人", "这个人", "她", "他"] {
-        if output.contains(needle) {
-            output = output.replacen(needle, referent, 1);
-            break;
+    {
+        if let Some(subject) = latest_subject_in_text(&message.content)? {
+            return Ok(Some(subject));
         }
     }
-    output
+    Ok(None)
+}
+
+fn latest_subject_in_text(text: &str) -> Result<Option<String>> {
+    context_rules::latest_subject_in_text(text)
+}
+
+fn contains_referential_pronoun(text: &str) -> Result<bool> {
+    context_rules::contains_referential_pronoun(text)
+}
+
+fn bind_referent(question: &str, referent: &str) -> Result<String> {
+    context_rules::bind_referent(question, referent)
 }
 
 fn is_openwebui_metadata_prompt(text: &str) -> bool {
     text.contains("### Task:") && text.contains("### Chat History:")
-}
-
-fn known_subjects() -> &'static [&'static str] {
-    &[
-        "尤三姐",
-        "林黛玉",
-        "黛玉",
-        "贾宝玉",
-        "宝玉",
-        "薛宝钗",
-        "宝钗",
-        "王熙凤",
-        "凤姐",
-        "贾母",
-        "袭人",
-        "晴雯",
-        "妙玉",
-        "探春",
-        "迎春",
-        "惜春",
-        "元春",
-        "巧姐",
-        "李纨",
-        "秦可卿",
-        "刘姥姥",
-        "甄士隐",
-        "贾雨村",
-    ]
 }
 
 fn load_context_packs(conn: &Connection, trace_id: &str) -> Result<Vec<Value>> {
@@ -6354,7 +6353,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_question("她最后怎么样？", &messages, None);
+        let resolved = resolve_question("她最后怎么样？", &messages, None).expect("resolves");
 
         assert_eq!(resolved.resolved_question, "尤三姐最后怎么样？");
         assert!(!resolved.needs_clarification);
@@ -6378,7 +6377,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_question("继续", &messages, None);
+        let resolved = resolve_question("继续", &messages, None).expect("resolves");
 
         assert_eq!(resolved.resolved_question, "通灵宝玉丢了几次");
         assert!(!resolved.needs_clarification);
@@ -6387,7 +6386,7 @@ mod tests {
 
     #[test]
     fn unresolved_continue_only_turn_fails_closed() {
-        let resolved = resolve_question("继续", &[], None);
+        let resolved = resolve_question("继续", &[], None).expect("resolves");
 
         assert!(resolved.needs_clarification);
         assert_eq!(
@@ -6398,7 +6397,7 @@ mod tests {
 
     #[test]
     fn unresolved_referent_fails_closed() {
-        let resolved = resolve_question("她最后怎么样？", &[], None);
+        let resolved = resolve_question("她最后怎么样？", &[], None).expect("resolves");
 
         assert!(resolved.needs_clarification);
         assert!(resolved.confidence < 0.45);
@@ -6467,6 +6466,71 @@ mod tests {
         assert_eq!(
             context.context_pack["resolver"]["agent_decision"]["raw_output_embedded"],
             json!(false)
+        );
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn elliptical_followup_uses_current_window_subject_candidates() {
+        let db_path = temp_context_db_path("question-agent-ellipsis");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::new(vec![json!({
+            "schema_version": RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "关于史湘云的结局，脂批中有哪些证据？",
+            "referent_bindings": ["史湘云"],
+            "used_context_refs": ["recent_user_messages"],
+            "confidence": 0.91,
+            "needs_clarification": false,
+            "clarification_question": null,
+            "unsupported_reason": null
+        })]);
+        let messages = vec![
+            ContextMessage {
+                role: "user".to_string(),
+                content: "史湘云的结局".to_string(),
+            },
+            ContextMessage {
+                role: "assistant".to_string(),
+                content: "目前先按前八十回和脂批边界回答。".to_string(),
+            },
+            ContextMessage {
+                role: "user".to_string(),
+                content: "脂批中的证据呢".to_string(),
+            },
+        ];
+
+        let context = create_context_for_request_with_agent_runtime_and_modes(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-question-agent-ellipsis",
+                model_id: "tonglingyu",
+                external_user_ref: "user-question-agent-ellipsis",
+                external_session_id: "session-question-agent-ellipsis",
+                external_message_id: "message-question-agent-ellipsis",
+                question: "脂批中的证据呢",
+                messages: &messages,
+                history_over_limit: false,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Enforced,
+            LlmMode::Disabled,
+        )
+        .await
+        .expect("context created");
+
+        assert_eq!(
+            context.resolved_question,
+            "关于史湘云的结局，脂批中有哪些证据？"
+        );
+        assert_eq!(
+            context.context_pack["resolver"]["agent_decision"]["trigger"],
+            json!("elliptical_followup")
+        );
+        assert_eq!(
+            context.context_pack["policy_versions"]["context_rules"]["subject_ontology"],
+            json!("2026-05-24.1")
         );
         remove_file_db(&db_path);
     }
@@ -6639,7 +6703,29 @@ mod tests {
             result_ref: Some(format!(
                 "openai-compatible-network://profiles/{CONVERSATION_STATE_WRITER_PROFILE_ID}/trace-provider-features-context"
             )),
-            metadata: provider_output_metadata(json!({
+            metadata: {
+                let provider_request = json!({
+                    "schema_version": "openai-compatible-provider-request-v1",
+                    "runtime_adapter": "openai-compatible-network",
+                    "profile_id": CONVERSATION_STATE_WRITER_PROFILE_ID,
+                    "model": "provider-request-test-model",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Tonglingyu conversation-state writer system prompt"
+                        },
+                        {
+                            "role": "user",
+                            "content": "晴雯后来怎么样？"
+                        }
+                    ],
+                    "message_count": 2,
+                    "stream": false,
+                    "authorization_header_embedded": false,
+                    "api_key_embedded": false,
+                    "secret_values_printed": false
+                });
+                let mut metadata = provider_output_metadata(json!({
                 "schema_version": "openai-compatible-provider-output-v1",
                 "response_format_json_requested": true,
                 "content_present": true,
@@ -6657,7 +6743,13 @@ mod tests {
                     "content": "<think>{\"not\":\"context\"}</think>",
                     "reasoning_details": {"items": [{"text": "internal reasoning"}]}
                 }
-            })),
+                }));
+                metadata["provider_request_sha256"] =
+                    json!(format!("sha256:{}", digest_json(&provider_request)));
+                metadata["provider_request_embedded"] = json!(true);
+                metadata["provider_request"] = provider_request;
+                metadata
+            },
         }]);
         let messages = vec![ContextMessage {
             role: "user".to_string(),
@@ -6699,6 +6791,26 @@ mod tests {
             agent_audit["provider_output_features"]["raw_provider_fields_embedded_in_validator_audit"],
             json!(false)
         );
+        assert_eq!(
+            agent_audit["provider_request"]["provider_request_embedded"],
+            json!(true)
+        );
+        assert_eq!(
+            agent_audit["provider_request"]["provider_request"]["messages"][0]["role"],
+            json!("system")
+        );
+        assert_eq!(
+            agent_audit["provider_request"]["provider_request"]["messages"][0]["content"],
+            json!("Tonglingyu conversation-state writer system prompt")
+        );
+        assert_eq!(
+            agent_audit["provider_request"]["provider_request"]["authorization_header_embedded"],
+            json!(false)
+        );
+        assert_eq!(
+            agent_audit["provider_request"]["provider_request"]["api_key_embedded"],
+            json!(false)
+        );
         let context_text = context.context_pack["llm_agent_context_path"].to_string();
         assert!(!context_text.contains("<think>"));
         assert!(!context_text.contains("internal reasoning"));
@@ -6706,6 +6818,16 @@ mod tests {
             context.context_pack["llm_agent_context_path"]["raw_agent_output_embedded"],
             json!(false)
         );
+        let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
+        let persisted_trace =
+            load_trace_context(&persisted_conn, "trace-provider-features-context")
+                .expect("persisted trace context");
+        assert_eq!(
+            persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
+                ["provider_request"]["provider_request"]["messages"][0]["content"],
+            json!("Tonglingyu conversation-state writer system prompt")
+        );
+        drop(persisted_conn);
         remove_file_db(&db_path);
     }
 

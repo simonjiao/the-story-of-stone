@@ -1,0 +1,15 @@
+{
+  "schema_version": "tonglingyu.referent_candidate_rules.v1",
+  "catalog_version": "2026-05-24.1",
+  "pronoun_terms": ["她", "他", "它", "那个人", "这个人", "刚才那个人", "刚才的人", "那块玉", "那塊玉"],
+  "replacement_terms": ["刚才那个人", "刚才的人", "那个人", "这个人", "那块玉", "那塊玉", "她", "他", "它"],
+  "history_reference_terms": ["之前", "上次", "刚才", "剛才", "前面", "第几条", "第幾條", "上一条", "上一條", "那段", "那个证据包", "那個證據包"],
+  "source_priority": [
+    "current_question",
+    "current_window",
+    "conversation_state_summary",
+    "session_journal_candidate",
+    "memory_candidate"
+  ],
+  "max_candidates": 8
+}

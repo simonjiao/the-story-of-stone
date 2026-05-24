@@ -55,6 +55,7 @@ use tonglingyu_runtime::{
 use tower_http::trace::TraceLayer;
 
 mod context_governance;
+mod context_rules;
 mod conversation_state;
 mod draft_revision;
 mod llm_agent_contracts;
@@ -11190,10 +11191,9 @@ mod tests {
     }
 
     fn infer_test_subject(text: &str) -> Option<String> {
-        ["尤三姐", "晴雯", "林黛玉", "贾宝玉"]
-            .into_iter()
-            .find(|name| text.contains(name))
-            .map(str::to_string)
+        crate::context_rules::latest_subject_in_text(text)
+            .ok()
+            .flatten()
     }
 
     fn test_conversation_state_output(payload: &Value) -> Value {

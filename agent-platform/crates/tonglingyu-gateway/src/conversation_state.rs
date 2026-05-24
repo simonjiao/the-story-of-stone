@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION;
+use crate::{context_rules, llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION};
 
 pub(crate) const CONVERSATION_STATE_SUMMARY_OBJECT: &str = "tonglingyu.conversation_state_summary";
 
@@ -69,9 +70,9 @@ pub(crate) struct ConversationStateValidation {
 
 pub(crate) fn write_conversation_state_summary(
     input: &ConversationStateInput<'_>,
-) -> ConversationStateSummary {
+) -> Result<ConversationStateSummary> {
     let source_text = source_text_for_input(input);
-    let active_entities = extract_active_entities(&source_text);
+    let active_entities = extract_active_entities(&source_text)?;
     let current_topic = if let Some(entity) = active_entities.first() {
         format!("{entity}相关问题")
     } else if is_metadata_prompt(input.current_question) {
@@ -115,7 +116,7 @@ pub(crate) fn write_conversation_state_summary(
         0.92
     };
 
-    ConversationStateSummary {
+    Ok(ConversationStateSummary {
         object: CONVERSATION_STATE_SUMMARY_OBJECT.to_string(),
         schema_version: CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION.to_string(),
         current_topic,
@@ -129,7 +130,7 @@ pub(crate) fn write_conversation_state_summary(
         reviewer_warnings,
         memory_allowed_as_evidence: false,
         summary_confidence,
-    }
+    })
 }
 
 pub(crate) fn validate_conversation_state_summary(
@@ -302,13 +303,11 @@ pub(crate) fn source_text_for_input(input: &ConversationStateInput<'_>) -> Strin
     parts.join("\n")
 }
 
-fn extract_active_entities(text: &str) -> Vec<String> {
-    known_subjects()
-        .iter()
-        .filter(|subject| text.contains(**subject))
-        .map(|subject| (*subject).to_string())
+fn extract_active_entities(text: &str) -> Result<Vec<String>> {
+    Ok(context_rules::latest_subject_in_text(text)?
+        .into_iter()
         .take(MAX_OPEN_QUESTIONS)
-        .collect()
+        .collect())
 }
 
 fn validate_bounded_array(
@@ -376,34 +375,6 @@ fn hash_text(value: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn known_subjects() -> &'static [&'static str] {
-    &[
-        "尤三姐",
-        "林黛玉",
-        "黛玉",
-        "贾宝玉",
-        "宝玉",
-        "薛宝钗",
-        "宝钗",
-        "王熙凤",
-        "凤姐",
-        "贾母",
-        "袭人",
-        "晴雯",
-        "妙玉",
-        "探春",
-        "迎春",
-        "惜春",
-        "元春",
-        "巧姐",
-        "李纨",
-        "秦可卿",
-        "刘姥姥",
-        "甄士隐",
-        "贾雨村",
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,7 +394,7 @@ mod tests {
             evidence_package_refs: &evidence_refs,
             reviewer_warnings: &[],
         };
-        let summary = write_conversation_state_summary(&input);
+        let summary = write_conversation_state_summary(&input).expect("summary writes");
         let context =
             conversation_state_validation_context(&input, &["晴雯"], &["上一轮只确认晴雯判词位置"]);
         let validation = validate_conversation_state_summary(&summary, &context);

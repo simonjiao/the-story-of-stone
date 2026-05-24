@@ -167,6 +167,39 @@ impl ConversationStateValidationDecision {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ProviderAuditSnapshot {
+    output_features: Value,
+    request: Value,
+}
+
+impl ProviderAuditSnapshot {
+    fn from_runtime_metadata(runtime_metadata: Option<&Value>) -> Self {
+        Self {
+            output_features: provider_output_audit_features(runtime_metadata),
+            request: provider_request_audit_snapshot(runtime_metadata),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            output_features: Value::Null,
+            request: Value::Null,
+        }
+    }
+}
+
+struct RejectedConversationStateDecisionInput<'a> {
+    mode: LlmMode,
+    envelope: &'a LlmAgentRequestEnvelope,
+    output_ref: Option<&'a str>,
+    raw_output_sha256: String,
+    errors: Vec<String>,
+    contract_accepted: bool,
+    schema_repaired_locally: bool,
+    provider_audit: &'a ProviderAuditSnapshot,
+}
+
 pub(crate) fn validate_question_normalizer_runtime_output(
     mode: LlmMode,
     trigger: &str,
@@ -177,7 +210,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
     allowed_referents: &[String],
 ) -> QuestionNormalizerValidationDecision {
     let raw_output_sha256 = hash_text(raw_output);
-    let provider_output_features = provider_output_audit_features(runtime_metadata);
+    let provider_audit = ProviderAuditSnapshot::from_runtime_metadata(runtime_metadata);
     let parsed = parse_agent_json_for_validation(raw_output, runtime_metadata);
     let (value, local_json_extraction_applied) = match parsed {
         Ok(parsed) => parsed,
@@ -191,7 +224,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
                 vec![error],
                 false,
                 false,
-                provider_output_features,
+                &provider_audit,
             );
         }
     };
@@ -216,7 +249,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
                 errors,
                 false,
                 schema_repaired_locally,
-                provider_output_features,
+                &provider_audit,
             );
         }
     };
@@ -303,7 +336,7 @@ pub(crate) fn validate_question_normalizer_runtime_output(
             accepted_for_main,
             &decision,
             schema_repaired_locally,
-            provider_output_features,
+            &provider_audit,
         ),
         accepted,
         errors,
@@ -325,7 +358,7 @@ pub(crate) fn question_normalizer_runtime_error_decision(
         vec![format!("runtime_error: {}", error.into())],
         false,
         false,
-        Value::Null,
+        &ProviderAuditSnapshot::empty(),
     )
 }
 
@@ -338,21 +371,21 @@ pub(crate) fn validate_conversation_state_runtime_output(
     validation_context: &ConversationStateValidationContext<'_>,
 ) -> ConversationStateValidationDecision {
     let raw_output_sha256 = hash_text(raw_output);
-    let provider_output_features = provider_output_audit_features(runtime_metadata);
+    let provider_audit = ProviderAuditSnapshot::from_runtime_metadata(runtime_metadata);
     let parsed = parse_agent_json_for_validation(raw_output, runtime_metadata);
     let (value, local_json_extraction_applied) = match parsed {
         Ok(parsed) => parsed,
         Err(error) => {
-            return rejected_conversation_state_decision(
+            return rejected_conversation_state_decision(RejectedConversationStateDecisionInput {
                 mode,
                 envelope,
                 output_ref,
                 raw_output_sha256,
-                vec![error],
-                false,
-                false,
-                provider_output_features,
-            );
+                errors: vec![error],
+                contract_accepted: false,
+                schema_repaired_locally: false,
+                provider_audit: &provider_audit,
+            });
         }
     };
     let mut errors = Vec::new();
@@ -362,16 +395,16 @@ pub(crate) fn validate_conversation_state_runtime_output(
         Ok(summary) => summary,
         Err(error) => {
             errors.push(format!("schema_deserialize_failed: {error}"));
-            return rejected_conversation_state_decision(
+            return rejected_conversation_state_decision(RejectedConversationStateDecisionInput {
                 mode,
                 envelope,
                 output_ref,
                 raw_output_sha256,
                 errors,
-                false,
-                local_json_extraction_applied,
-                provider_output_features,
-            );
+                contract_accepted: false,
+                schema_repaired_locally: local_json_extraction_applied,
+                provider_audit: &provider_audit,
+            });
         }
     };
     if summary.schema_version != CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION {
@@ -403,7 +436,7 @@ pub(crate) fn validate_conversation_state_runtime_output(
             accepted_for_projection,
             &decision,
             local_json_extraction_applied,
-            provider_output_features,
+            &provider_audit,
         ),
         accepted,
         errors,
@@ -415,16 +448,16 @@ pub(crate) fn conversation_state_runtime_error_decision(
     envelope: &LlmAgentRequestEnvelope,
     error: impl Into<String>,
 ) -> ConversationStateValidationDecision {
-    rejected_conversation_state_decision(
+    rejected_conversation_state_decision(RejectedConversationStateDecisionInput {
         mode,
         envelope,
-        None,
-        hash_text("runtime_error_without_output"),
-        vec![format!("runtime_error: {}", error.into())],
-        false,
-        false,
-        Value::Null,
-    )
+        output_ref: None,
+        raw_output_sha256: hash_text("runtime_error_without_output"),
+        errors: vec![format!("runtime_error: {}", error.into())],
+        contract_accepted: false,
+        schema_repaired_locally: false,
+        provider_audit: &ProviderAuditSnapshot::empty(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -437,7 +470,7 @@ fn rejected_question_decision(
     errors: Vec<String>,
     contract_accepted: bool,
     schema_repaired_locally: bool,
-    provider_output_features: Value,
+    provider_audit: &ProviderAuditSnapshot,
 ) -> QuestionNormalizerValidationDecision {
     let decision = AgentValidationDecision::Rejected;
     QuestionNormalizerValidationDecision {
@@ -452,7 +485,7 @@ fn rejected_question_decision(
             false,
             &decision,
             schema_repaired_locally,
-            provider_output_features,
+            provider_audit,
         ),
         accepted: None,
         errors,
@@ -460,31 +493,24 @@ fn rejected_question_decision(
 }
 
 fn rejected_conversation_state_decision(
-    mode: LlmMode,
-    envelope: &LlmAgentRequestEnvelope,
-    output_ref: Option<&str>,
-    raw_output_sha256: String,
-    errors: Vec<String>,
-    contract_accepted: bool,
-    schema_repaired_locally: bool,
-    provider_output_features: Value,
+    input: RejectedConversationStateDecisionInput<'_>,
 ) -> ConversationStateValidationDecision {
     let decision = AgentValidationDecision::Rejected;
     ConversationStateValidationDecision {
         audit: conversation_state_audit(
-            mode,
-            envelope,
-            output_ref,
-            raw_output_sha256,
-            &errors,
-            contract_accepted,
+            input.mode,
+            input.envelope,
+            input.output_ref,
+            input.raw_output_sha256,
+            &input.errors,
+            input.contract_accepted,
             false,
             &decision,
-            schema_repaired_locally,
-            provider_output_features,
+            input.schema_repaired_locally,
+            input.provider_audit,
         ),
         accepted: None,
-        errors,
+        errors: input.errors,
     }
 }
 
@@ -500,7 +526,7 @@ fn question_audit(
     accepted_for_main: bool,
     decision: &AgentValidationDecision,
     local_json_extraction_applied: bool,
-    provider_output_features: Value,
+    provider_audit: &ProviderAuditSnapshot,
 ) -> Value {
     json!({
         "schema_version": LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -521,7 +547,8 @@ fn question_audit(
         "output_ref": output_ref,
         "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
-        "provider_output_features": provider_output_features,
+        "provider_output_features": provider_audit.output_features.clone(),
+        "provider_request": provider_audit.request.clone(),
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
     })
@@ -538,7 +565,7 @@ fn conversation_state_audit(
     accepted_for_projection: bool,
     decision: &AgentValidationDecision,
     local_json_extraction_applied: bool,
-    provider_output_features: Value,
+    provider_audit: &ProviderAuditSnapshot,
 ) -> Value {
     json!({
         "schema_version": LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -558,7 +585,8 @@ fn conversation_state_audit(
         "output_ref": output_ref,
         "runtime_adapter": runtime_adapter_from_output_ref(output_ref),
         "errors": errors,
-        "provider_output_features": provider_output_features,
+        "provider_output_features": provider_audit.output_features.clone(),
+        "provider_request": provider_audit.request.clone(),
         "schema_repair_attempted": false,
         "local_json_extraction_applied": local_json_extraction_applied,
     })
@@ -655,6 +683,32 @@ fn provider_output_audit_features(runtime_metadata: Option<&Value>) -> Value {
         "validator_content_sha256": provider.get("validator_content_sha256").cloned().unwrap_or(Value::Null),
         "raw_provider_fields_embedded_in_validator_audit": false,
         "raw_agent_output_embedded": false,
+    })
+}
+
+fn provider_request_audit_snapshot(runtime_metadata: Option<&Value>) -> Value {
+    let Some(metadata) = runtime_metadata else {
+        return Value::Null;
+    };
+    let provider_request = metadata
+        .get("provider_request")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "schema_version": "tonglingyu-llm-agent-provider-request-audit-v1",
+        "provider_request_embedded": metadata
+            .get("provider_request_embedded")
+            .and_then(Value::as_bool)
+            .unwrap_or(provider_request.is_object()),
+        "provider_request_sha256": metadata
+            .get("provider_request_sha256")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "provider_request": provider_request,
+        "authorization_header_embedded": false,
+        "api_key_embedded": false,
+        "secret_values_printed": false,
     })
 }
 
