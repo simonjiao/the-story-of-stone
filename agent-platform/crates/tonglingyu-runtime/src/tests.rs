@@ -7438,6 +7438,39 @@ fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
 }
 
 #[test]
+fn hermes_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary() {
+    let mut workflow = runtime_draft_workflow(
+        vec![sample_card("base_text"), sample_card("commentary")],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "关于史湘云的结局，脂批中的证据呢".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "就现有前八十回正文与脂批看，史湘云的结局只能说是有结局意象、无终局定论；这些证据只够支持她的命运基调与悲剧倾向，不能据此证明后四十回的具体终局。",
+            "默认范围内只使用前八十回正文和脂批，并把后四十回排除在证据范围外。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+            .expect("boundary-only later-forty mention is allowed");
+
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
+    assert!(workflow.final_answer.contains("不能据此证明后四十回"));
+}
+
+#[test]
 fn hermes_mode_rejects_partial_coverage_count_draft() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text"), sample_card("commentary")],

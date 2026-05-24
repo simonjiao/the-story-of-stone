@@ -43,6 +43,7 @@ pub(crate) struct DraftBoundaryRules {
 struct SourceScopeGovernanceRules {
     later_forty_question_terms: Vec<String>,
     later_forty_draft_terms: Vec<String>,
+    later_forty_boundary_context_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -352,11 +353,51 @@ pub(crate) fn draft_mentions_unscoped_later_forty_material(draft: &str) -> Resul
     let catalog = governance_rule_catalog()?;
     let normalized = normalize_text(draft);
     let compact = normalized.split_whitespace().collect::<String>();
-    Ok(catalog
-        .source_scope
-        .later_forty_draft_terms
+    for term in &catalog.source_scope.later_forty_draft_terms {
+        let term = normalize_text(term);
+        if term.is_empty() {
+            continue;
+        }
+        let mut matched_with_position = false;
+        for (index, _) in normalized.match_indices(&term) {
+            matched_with_position = true;
+            let window = later_forty_context_window(&normalized, index);
+            if !contains_later_forty_boundary_context(
+                &window,
+                &catalog.source_scope.later_forty_boundary_context_terms,
+            ) {
+                return Ok(true);
+            }
+        }
+        if !matched_with_position && compact.contains(&term.split_whitespace().collect::<String>())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn later_forty_context_window(normalized: &str, term_index: usize) -> String {
+    let before = normalized[..term_index]
+        .chars()
+        .rev()
+        .take(18)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let after = normalized[term_index..]
+        .chars()
+        .take(28)
+        .collect::<String>();
+    format!("{before}{after}")
+}
+
+fn contains_later_forty_boundary_context(window: &str, terms: &[String]) -> bool {
+    let compact = window.split_whitespace().collect::<String>();
+    terms
         .iter()
-        .any(|term| term_matches(&normalized, &compact, term)))
+        .any(|term| term_matches(window, &compact, term))
 }
 
 pub(crate) fn claim_rules() -> Result<ClaimGovernanceRules> {
