@@ -4993,25 +4993,24 @@ fn resolve_question(
                 prior_user_question
                     .map(|value| (value.to_string(), "session_journal_prior_question"))
             });
-        if let Some((anchor, used_context_ref)) = anchor {
-            if let Some(resolved_question) =
+        if let Some((anchor, used_context_ref)) = anchor
+            && let Some(resolved_question) =
                 context_rules::resolve_elliptical_followup(question, &anchor)?
-            {
-                let question_frame = question_frame::build_question_frame(&resolved_question)?;
-                let referent_bindings = question_frame.entities();
-                return Ok(ResolverOutput {
-                    resolved_question,
-                    referent_bindings,
-                    used_context_refs: vec![used_context_ref.to_string()],
-                    confidence: 0.9,
-                    needs_clarification: false,
-                    clarification_question: None,
-                    unsupported_reason: None,
-                    strategy: "deterministic_elliptical_followup".to_string(),
-                    agent_audit: None,
-                    question_frame,
-                });
-            }
+        {
+            let question_frame = question_frame::build_question_frame(&resolved_question)?;
+            let referent_bindings = question_frame.entities();
+            return Ok(ResolverOutput {
+                resolved_question,
+                referent_bindings,
+                used_context_refs: vec![used_context_ref.to_string()],
+                confidence: 0.9,
+                needs_clarification: false,
+                clarification_question: None,
+                unsupported_reason: None,
+                strategy: "deterministic_elliptical_followup".to_string(),
+                agent_audit: None,
+                question_frame,
+            });
         }
         return Ok(ResolverOutput {
             resolved_question: question.to_string(),
