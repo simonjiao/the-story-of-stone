@@ -40,6 +40,11 @@ struct DiagnosticFailingProfileRuntimeClient;
 struct TimeoutProfileRuntimeClient;
 
 #[derive(Debug, Default)]
+struct FlakyProfileRuntimeClient {
+    failures: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Debug, Default)]
 struct CalibrationJudgeRuntimeClient;
 
 #[test]
@@ -1070,6 +1075,35 @@ impl RuntimeClient for TimeoutProfileRuntimeClient {
             ErrorCode::InternalError,
             "Hermes Runtime timed out",
         ))
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for FlakyProfileRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "flaky-profile runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "flaky-profile runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        use std::sync::atomic::Ordering;
+
+        if self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "transient profile failure",
+            ));
+        }
+        DraftRuntimeClient.execute_profile_step(input).await
     }
 }
 
@@ -8266,6 +8300,59 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
             && event["payload"]["profile_observation_complete"] == json!(true)
             && event["payload"]["profile_content_execution_complete"] == json!(true)
     }));
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+}
+
+#[tokio::test]
+async fn runtime_profile_step_retries_transient_failure_without_local_fallback() {
+    let db_path = std::env::temp_dir().join(format!(
+        "tonglingyu-runtime-profile-retry-{}.db",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let store = TonglingyuRuntimeStore::new(db_path.clone());
+    {
+        let conn = store.open_connection().expect("runtime conn");
+        init_knowledge_base_schema(&conn).expect("kb schema");
+        seed_retrieval_quality_source(
+            &conn,
+            json!({
+                "license": "CC-BY-SA-4.0",
+                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
+                "attribution": "Wikisource contributors",
+                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
+            }),
+        );
+    }
+    let trace_id = "trace-openai-compatible-profile-retry-test";
+    let workflow = store
+        .execute_workflow_with_agent_runtime_client(
+            test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+            Arc::new(FlakyProfileRuntimeClient::default()),
+        )
+        .await
+        .expect("transient profile failure should retry");
+
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_with_local_review"
+    );
+    assert!(workflow.steps.iter().any(|step| {
+        step.agent_runtime.as_ref().is_some_and(|runtime| {
+            runtime["attempt_count"] == json!(2) && runtime["retry_error_count"] == json!(1)
+        })
+    }));
+    let events = store
+        .audit_events_for_trace(trace_id)
+        .expect("audit events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event_type"] == "agent_runtime_profile_local_answer_fallback")
+    );
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));

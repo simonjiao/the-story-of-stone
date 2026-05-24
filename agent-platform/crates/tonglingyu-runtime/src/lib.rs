@@ -1,6 +1,6 @@
 use agent_core::{
     AgentCoreError, CoreResult, ErrorCode, ProfileContract as AgentProfileContract, RuntimeClient,
-    RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep as AgentRuntimeStep,
+    RuntimeOutput, RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep as AgentRuntimeStep,
     RuntimeStepPlan as AgentRuntimeStepPlan, RuntimeStepPlanInput as AgentRuntimeStepPlanInput,
     RuntimeStepPlanOwner, RuntimeToolCall, RuntimeToolExecutor, RuntimeToolPolicy,
     RuntimeToolResult, RuntimeToolSpec,
@@ -135,6 +135,7 @@ pub const ONTOLOGY_ALIASES_PATH_ENV: &str = "TONGLINGYU_ONTOLOGY_ALIASES_PATH";
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
 const AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES: usize = 8192;
+const AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS: usize = 2;
 const UPSTREAM_EVIDENCE_BRIEF_CARD_LIMIT: usize = 5;
 const UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS: usize = 120;
 const UPSTREAM_EVIDENCE_BRIEF_SOURCE_TITLE_CHARS: usize = 80;
@@ -3587,6 +3588,12 @@ struct AgentRuntimeStepExecution {
     agent_runtime: Value,
 }
 
+struct AgentRuntimeProfileStepRun {
+    output: RuntimeOutput,
+    attempt_count: usize,
+    retry_error_count: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_agent_runtime_profile_step(
     index: usize,
@@ -3617,34 +3624,21 @@ async fn execute_agent_runtime_profile_step(
             AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES
         ));
     }
-    let output = runtime
-        .execute_profile_step(RuntimeProfileInput {
-            profile_id: step.profile.clone(),
-            messages: vec![message],
-            metadata: json!({
-                "runtime": "tonglingyu",
-                "workflow_step_id": &step.step_id,
-                "operation": &step.operation,
-                "input_ref": &step.input_ref,
-                "output_ref": &step.output_ref,
-                "context_pack_ref": &context.context_pack_ref,
-                "context_pack_schema_version": &context.context_pack_schema_version,
-                "context_pack_digest": &context.context_pack_digest,
-                "context_projection": projection.audit_contract(),
-                "step_output": &step.output,
-                "result_summary_contract": &result_summary_contract,
-                "question_chars": visible_question.chars().count(),
-                "question_sha256": hash_text(visible_question),
-                "message_bytes": message_bytes,
-                "message_max_bytes": AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES,
-                "content_source": "tonglingyu-deterministic-workflow",
-            }),
-            profile_contract: Some(contract),
-            runtime_step: Some(runtime_step),
-            requested_tools: step.allowed_tools.clone(),
-            trace_id,
-        })
-        .await?;
+    let execution = execute_agent_runtime_profile_step_with_retry(
+        &step,
+        &trace_id,
+        &message,
+        &result_summary_contract,
+        &contract,
+        &runtime_step,
+        &projection,
+        &context,
+        visible_question,
+        message_bytes,
+        runtime,
+    )
+    .await?;
+    let output = execution.output;
     let mut tool_results = output
         .metadata
         .get("tool_results")
@@ -3694,6 +3688,9 @@ async fn execute_agent_runtime_profile_step(
                 .get("provider_request")
                 .cloned()
                 .unwrap_or(Value::Null),
+            "attempt_count": execution.attempt_count,
+            "retry_error_count": execution.retry_error_count,
+            "max_attempts": AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS,
             "provider_request_sha256": output
                 .metadata
                 .get("provider_request_sha256")
@@ -3716,6 +3713,104 @@ async fn execute_agent_runtime_profile_step(
                 .unwrap_or_else(|| json!({})),
         }),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_agent_runtime_profile_step_with_retry(
+    step: &RuntimeWorkflowStepReport,
+    trace_id: &str,
+    message: &RuntimeProfileMessage,
+    result_summary_contract: &str,
+    contract: &AgentProfileContract,
+    runtime_step: &AgentRuntimeStep,
+    projection: &RuntimeContextProjection,
+    context: &RuntimeContextContract,
+    visible_question: &str,
+    message_bytes: usize,
+    runtime: Arc<dyn RuntimeClient>,
+) -> Result<AgentRuntimeProfileStepRun> {
+    let mut attempt_count = 1;
+    let mut retry_error_count = 0;
+    loop {
+        let input = runtime_profile_input_for_attempt(
+            step,
+            trace_id,
+            message,
+            result_summary_contract,
+            contract,
+            runtime_step,
+            projection,
+            context,
+            visible_question,
+            message_bytes,
+            attempt_count,
+        );
+        match runtime.execute_profile_step(input).await {
+            Ok(output) => {
+                return Ok(AgentRuntimeProfileStepRun {
+                    output,
+                    attempt_count,
+                    retry_error_count,
+                });
+            }
+            Err(error) if attempt_count < AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS => {
+                retry_error_count += 1;
+                attempt_count += 1;
+                let _ = error;
+            }
+            Err(error) => {
+                let error_text = error.to_string();
+                return Err(anyhow::Error::new(error).context(format!(
+                    "runtime profile step failed after {} attempts: step_id={} operation={} error={}",
+                    attempt_count, step.step_id, step.operation, error_text
+                )));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_profile_input_for_attempt(
+    step: &RuntimeWorkflowStepReport,
+    trace_id: &str,
+    message: &RuntimeProfileMessage,
+    result_summary_contract: &str,
+    contract: &AgentProfileContract,
+    runtime_step: &AgentRuntimeStep,
+    projection: &RuntimeContextProjection,
+    context: &RuntimeContextContract,
+    visible_question: &str,
+    message_bytes: usize,
+    attempt: usize,
+) -> RuntimeProfileInput {
+    RuntimeProfileInput {
+        profile_id: step.profile.clone(),
+        messages: vec![message.clone()],
+        metadata: json!({
+            "runtime": "tonglingyu",
+            "workflow_step_id": &step.step_id,
+            "operation": &step.operation,
+            "input_ref": &step.input_ref,
+            "output_ref": &step.output_ref,
+            "context_pack_ref": &context.context_pack_ref,
+            "context_pack_schema_version": &context.context_pack_schema_version,
+            "context_pack_digest": &context.context_pack_digest,
+            "context_projection": projection.audit_contract(),
+            "step_output": &step.output,
+            "result_summary_contract": result_summary_contract,
+            "question_chars": visible_question.chars().count(),
+            "question_sha256": hash_text(visible_question),
+            "message_bytes": message_bytes,
+            "message_max_bytes": AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES,
+            "content_source": "tonglingyu-deterministic-workflow",
+            "attempt": attempt,
+            "max_attempts": AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS,
+        }),
+        profile_contract: Some(contract.clone()),
+        runtime_step: Some(runtime_step.clone()),
+        requested_tools: step.allowed_tools.clone(),
+        trace_id: trace_id.to_string(),
+    }
 }
 
 fn host_enforce_missing_required_tool_results(
