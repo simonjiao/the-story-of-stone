@@ -27,12 +27,12 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
 #[cfg(test)]
-use tonglingyu_runtime::OnlineEvidenceCardUpdateRequestInput;
+use tonglingyu_runtime::{OnlineEvidenceCardUpdateRequestInput, RuntimeWorkflowStreamEvent};
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
@@ -50,12 +50,13 @@ use tonglingyu_runtime::{
     RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
     RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
-    RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode,
-    TonglingyuRuntimeStore, agent_runtime_profile_contracts, append_rqa_lifecycle_tombstone,
-    append_runtime_audit_event, execute_agent_runtime_plan_gate, package_json,
+    TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
+    agent_runtime_profile_contracts, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
+    execute_agent_runtime_plan_gate, package_json,
 };
 use tower_http::trace::TraceLayer;
 
+mod auth;
 mod context_governance;
 mod context_rules;
 mod conversation_state;
@@ -70,9 +71,15 @@ mod llm_provider;
 mod llm_resolver;
 mod plan;
 mod question_frame;
+mod response;
 mod retrieval_suggestion;
 mod user_response_safety;
 
+use crate::auth::{
+    GatewayRateLimiter, PackageAccessContext, admin_auth_and_rate_limit, audit_subject_ref,
+    configured_keys, gateway_auth_and_rate_limit, header_value, is_admin_key_isolated,
+    package_access_context, validate_admin_key_isolation,
+};
 #[cfg(test)]
 use crate::context_governance::create_context_for_request;
 use crate::context_governance::{
@@ -91,6 +98,13 @@ use crate::llm_agent_contracts::{
 };
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
+};
+#[cfg(test)]
+use crate::response::cached_runtime_stream_events;
+use crate::response::{
+    cache_completion_value, completion_value, public_completion_value,
+    streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
+    streaming_response_from_runtime_events,
 };
 
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
@@ -116,18 +130,6 @@ const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
 const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
 const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
 const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
-const PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS: &[&str] = &[
-    "system_calibrated",
-    "runtime_usable",
-    "human_marked",
-    "knowledge_item_ref",
-    "knowledge_item_refs",
-    "calibration_report_ref",
-    "runtime_policy",
-    "policy_version",
-    "state_version",
-    "release_run_id",
-];
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -1065,85 +1067,6 @@ fn host_label_from_url(value: &str) -> String {
         .unwrap_or_else(|| "invalid-url".to_string())
 }
 
-#[derive(Debug)]
-struct GatewayRateLimiter {
-    max_per_window: usize,
-    window: Duration,
-    buckets: Mutex<BTreeMap<String, RateLimitBucket>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RateLimitBucket {
-    window_start: Instant,
-    count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RateLimitDecision {
-    allowed: bool,
-    limit: usize,
-    remaining: usize,
-    retry_after_secs: u64,
-}
-
-impl GatewayRateLimiter {
-    fn per_minute(max_per_minute: usize) -> Self {
-        Self::new(max_per_minute, Duration::from_secs(60))
-    }
-
-    fn new(max_per_window: usize, window: Duration) -> Self {
-        Self {
-            max_per_window,
-            window,
-            buckets: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn check(&self, subject: &str) -> RateLimitDecision {
-        if self.max_per_window == 0 {
-            return RateLimitDecision {
-                allowed: true,
-                limit: 0,
-                remaining: usize::MAX,
-                retry_after_secs: 0,
-            };
-        }
-        let now = Instant::now();
-        let mut buckets = self
-            .buckets
-            .lock()
-            .expect("gateway rate limiter mutex poisoned");
-        buckets.retain(|_, bucket| now.duration_since(bucket.window_start) < self.window);
-        let bucket = buckets
-            .entry(subject.to_string())
-            .or_insert(RateLimitBucket {
-                window_start: now,
-                count: 0,
-            });
-        if now.duration_since(bucket.window_start) >= self.window {
-            bucket.window_start = now;
-            bucket.count = 0;
-        }
-        if bucket.count >= self.max_per_window {
-            let elapsed = now.duration_since(bucket.window_start);
-            let retry_after = self.window.saturating_sub(elapsed).as_secs().max(1);
-            return RateLimitDecision {
-                allowed: false,
-                limit: self.max_per_window,
-                remaining: 0,
-                retry_after_secs: retry_after,
-            };
-        }
-        bucket.count += 1;
-        RateLimitDecision {
-            allowed: true,
-            limit: self.max_per_window,
-            remaining: self.max_per_window.saturating_sub(bucket.count),
-            retry_after_secs: 0,
-        }
-    }
-}
-
 fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProfiles {
     RuntimeWorkflowProfiles {
         main: profiles.main.clone(),
@@ -1492,12 +1415,6 @@ struct MemoryCardTransitionRequest {
 }
 
 #[derive(Debug, Clone)]
-struct PackageAccessContext {
-    subject: String,
-    user_ref: String,
-}
-
-#[derive(Debug, Clone)]
 struct UserFeedbackSource {
     trace_id: String,
     package_id: Option<String>,
@@ -1518,227 +1435,6 @@ struct UserFeedbackTaskInput<'a> {
     feedback_char_count: usize,
     access: &'a PackageAccessContext,
     proposed_fix: String,
-}
-
-type AuthResult<T> = std::result::Result<T, Box<Response>>;
-
-fn gateway_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
-    authorize_with_keys(
-        headers,
-        &state.gateway_api_keys,
-        "gateway_unauthorized",
-        false,
-    )
-}
-
-fn gateway_auth_and_rate_limit(
-    state: &AppState,
-    headers: &HeaderMap,
-    trace_id: Option<&str>,
-) -> AuthResult<String> {
-    let subject = gateway_auth_subject(state, headers)?;
-    let decision = state.rate_limiter.check(&subject);
-    if decision.allowed {
-        Ok(subject)
-    } else {
-        Err(Box::new(rate_limit_response(&decision, trace_id)))
-    }
-}
-
-fn admin_auth_and_rate_limit(
-    state: &AppState,
-    headers: &HeaderMap,
-    action: &str,
-) -> AuthResult<String> {
-    let request_subject = request_subject(headers);
-    let subject = match admin_auth_subject(state, headers) {
-        Ok(subject) => subject,
-        Err(response) => {
-            let subject_ref = audit_subject_ref(&request_subject);
-            let _ = append_admin_audit_event(
-                &state.db,
-                "rqa_admin_access_denied",
-                &subject_ref,
-                json!({
-                    "action": action,
-                    "denial": "auth_failed",
-                    "subject_ref": subject_ref,
-                }),
-            );
-            return Err(response);
-        }
-    };
-    let decision = state.admin_rate_limiter.check(&subject);
-    if decision.allowed {
-        Ok(subject)
-    } else {
-        let subject_ref = audit_subject_ref(&subject);
-        let _ = append_admin_audit_event(
-            &state.db,
-            "rqa_admin_access_denied",
-            &subject_ref,
-            json!({
-                "action": action,
-                "denial": "rate_limited",
-                "subject_ref": subject_ref,
-                "limit_per_minute": decision.limit,
-                "retry_after_secs": decision.retry_after_secs,
-            }),
-        );
-        Err(Box::new(rate_limit_response(&decision, None)))
-    }
-}
-
-fn admin_auth_subject(state: &AppState, headers: &HeaderMap) -> AuthResult<String> {
-    let keys = if state.admin_api_keys.is_empty() && state.allow_admin_with_gateway_key {
-        &state.gateway_api_keys
-    } else {
-        &state.admin_api_keys
-    };
-    authorize_with_keys(headers, keys, "admin_unauthorized", true)
-}
-
-fn authorize_with_keys(
-    headers: &HeaderMap,
-    expected_keys: &[String],
-    code: &str,
-    require_configured_key: bool,
-) -> AuthResult<String> {
-    let subject = request_subject(headers);
-    if expected_keys.is_empty() && !require_configured_key {
-        return Ok(subject);
-    }
-    if expected_keys.is_empty() {
-        return Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            code,
-            "admin credential is not configured",
-            None,
-        )));
-    }
-    let bearer = bearer_token(headers);
-    let api_key = header_value(headers, "x-api-key");
-    if bearer
-        .as_deref()
-        .is_some_and(|token| expected_keys.iter().any(|key| key == token))
-        || api_key
-            .as_deref()
-            .is_some_and(|token| expected_keys.iter().any(|key| key == token))
-    {
-        Ok(subject)
-    } else {
-        Err(Box::new(error_response(
-            StatusCode::UNAUTHORIZED,
-            code,
-            "missing or invalid gateway credential",
-            None,
-        )))
-    }
-}
-
-fn request_subject(headers: &HeaderMap) -> String {
-    header_value(headers, "x-tonglingyu-subject")
-        .or_else(|| header_value(headers, "x-open-webui-user-id"))
-        .unwrap_or_else(|| "open-webui".to_string())
-}
-
-fn audit_subject_ref(subject: &str) -> String {
-    let digest = hash_text(subject);
-    format!("sha256:{}", &digest[..16])
-}
-
-fn rate_limit_response(decision: &RateLimitDecision, trace_id: Option<&str>) -> Response {
-    let _ = trace_id;
-    let value = json!({
-        "error": {
-            "code": "gateway_rate_limited",
-            "message": "gateway rate limit exceeded",
-            "limit_per_minute": decision.limit,
-            "remaining": decision.remaining,
-            "retry_after_secs": decision.retry_after_secs,
-        }
-    });
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, decision.retry_after_secs.to_string())],
-        Json(value),
-    )
-        .into_response()
-}
-
-fn configured_keys(primary: Option<String>, additional: Option<String>) -> Vec<String> {
-    primary
-        .into_iter()
-        .chain(additional.into_iter().flat_map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        }))
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-fn validate_admin_key_isolation(
-    gateway_api_keys: &[String],
-    admin_api_keys: &[String],
-    allow_admin_with_gateway_key: bool,
-) -> Result<()> {
-    let gateway_keys = gateway_api_keys
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if admin_api_keys
-        .iter()
-        .any(|key| gateway_keys.contains(key.as_str()))
-    {
-        return Err(anyhow!(
-            "TONGLINGYU admin API keys must not overlap gateway API keys"
-        ));
-    }
-    if allow_admin_with_gateway_key && !admin_api_keys.is_empty() {
-        return Err(anyhow!(
-            "TONGLINGYU_ALLOW_ADMIN_WITH_GATEWAY_KEY requires empty admin API key configuration"
-        ));
-    }
-    Ok(())
-}
-
-fn is_admin_key_isolated(state: &AppState) -> bool {
-    if state.admin_api_keys.is_empty() || state.allow_admin_with_gateway_key {
-        return false;
-    }
-    let gateway_keys = state
-        .gateway_api_keys
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    state
-        .admin_api_keys
-        .iter()
-        .all(|key| !gateway_keys.contains(key.as_str()))
-}
-
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
-    let value = header_value(headers, "authorization")?;
-    value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))
-        .map(|token| token.trim().to_string())
-}
-
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn metadata_string(payload: &Value, keys: &[&str]) -> Option<String> {
@@ -1782,14 +1478,6 @@ fn request_context(
         external_message_id_provided,
         auth_subject,
     }
-}
-
-fn package_access_context(headers: &HeaderMap, subject: String) -> PackageAccessContext {
-    let user_ref = header_value(headers, "x-tonglingyu-user-id")
-        .or_else(|| header_value(headers, "x-open-webui-user-id"))
-        .or_else(|| header_value(headers, "x-user-id"))
-        .unwrap_or_else(|| subject.clone());
-    PackageAccessContext { subject, user_ref }
 }
 
 fn forbidden_control_fields(payload: &Value) -> Vec<String> {
@@ -9506,292 +9194,6 @@ async fn chat_completions(
     } else {
         Json(public_completion_value(&value)).into_response()
     }
-}
-
-fn completion_value(
-    model: &str,
-    content: String,
-    package: Option<&EvidencePackage>,
-    session_id: Option<&str>,
-) -> Value {
-    let mut value = json!({
-        "id": format!("chatcmpl-{}", uuid::Uuid::now_v7().simple()),
-        "object": "chat.completion",
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop"
-        }]
-    });
-    if let Some(package) = package {
-        value["trace_id"] = json!(&package.trace_id);
-        value["evidence_package_id"] = json!(&package.package_id);
-        value["review"] = json!(&package.review);
-    }
-    if let Some(session_id) = session_id {
-        value["session_id"] = json!(session_id);
-    }
-    value
-}
-
-fn cache_completion_value(value: &Value, events: &[RuntimeWorkflowStreamEvent]) -> Value {
-    let mut cached = value.clone();
-    if let Value::Object(map) = &mut cached {
-        map.insert("_runtime_stream_events".to_string(), json!(events));
-        map.insert("_stream_source".to_string(), json!("runtime_workflow"));
-    }
-    cached
-}
-
-fn public_completion_value(value: &Value) -> Value {
-    let mut public = value.clone();
-    if let Value::Object(map) = &mut public {
-        map.remove("_runtime_stream_events");
-        map.remove("_stream_source");
-        map.remove("trace_id");
-        map.remove("evidence_package_id");
-        map.remove("review");
-        map.remove("session_id");
-        map.remove("user_session_id");
-        map.remove("interaction_context_id");
-        map.remove("context_pack_id");
-        map.remove("context_pack_ref");
-        map.remove("context_projection_id");
-        map.remove("context_projection_ref");
-        map.remove("context_projections");
-        map.remove("session_journal");
-        map.remove("context_pack");
-        map.remove("memory_read_refs");
-        map.remove("memory_read_ref_digest");
-        map.remove("memory_read_policy_digest");
-        map.remove("memory_summaries");
-        map.remove("memory_policy");
-        map.remove("memory_policy_digest");
-        map.remove("memory_usage_summary");
-        map.remove("memory_candidate");
-        map.remove("memory_candidate_id");
-        map.remove("memory_candidate_ref");
-        map.remove("memory_candidates");
-        map.remove("memory_card");
-        map.remove("memory_card_id");
-        map.remove("memory_card_ref");
-        map.remove("memory_cards");
-        map.remove("memory_policy_decision");
-        map.remove("memory_policy_decision_id");
-        map.remove("memory_policy_decision_ref");
-        map.remove("memory_policy_decisions");
-        map.remove("memory_transition_audit");
-        map.remove("llm_extraction");
-        map.remove("llm_filter");
-        map.remove("rule_filter");
-        map.remove("read_enabled");
-    }
-    if let Some(content) = public
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .map(public_answer_content)
-    {
-        public["choices"][0]["message"]["content"] = json!(content);
-    }
-    public
-}
-
-fn public_answer_content(content: &str) -> String {
-    if contains_public_forbidden_knowledge_state_term(content) {
-        "当前回答未通过公开输出检查，不能直接返回。请基于可追溯证据重新提问。".to_string()
-    } else {
-        content.to_string()
-    }
-}
-
-fn contains_public_forbidden_knowledge_state_term(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    PUBLIC_OUTPUT_FORBIDDEN_KNOWLEDGE_STATE_TERMS
-        .iter()
-        .any(|term| lower.contains(term))
-}
-
-fn cached_runtime_stream_events(value: &Value) -> Option<Vec<RuntimeWorkflowStreamEvent>> {
-    serde_json::from_value::<Vec<RuntimeWorkflowStreamEvent>>(
-        value.get("_runtime_stream_events")?.clone(),
-    )
-    .ok()
-    .filter(|events| {
-        events
-            .iter()
-            .any(|event| event.event_type == "content_delta")
-    })
-}
-
-fn streaming_response_from_completion_value(value: &Value) -> Response {
-    let model = value
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_MODEL_ID);
-    let content = public_answer_content(
-        value
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
-    let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
-    let mut chunks = Vec::new();
-    chunks.push(format!(
-        "data: {}\n\n",
-        json!({
-            "id": &completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"role": "assistant"},
-                "finish_reason": null
-            }]
-        })
-    ));
-    for piece in text_stream_chunks(&content, 96) {
-        chunks.push(format!(
-            "data: {}\n\n",
-            json!({
-            "id": &completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"content": piece},
-                    "finish_reason": null
-                }]
-            })
-        ));
-    }
-    chunks.push(format!(
-        "data: {}\n\n",
-        json!({
-            "id": &completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        })
-    ));
-    chunks.push("data: [DONE]\n\n".to_string());
-    let body = chunks.join("");
-    (
-        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
-        body,
-    )
-        .into_response()
-}
-
-fn streaming_response_from_cached_completion_value(value: &Value) -> Response {
-    let public = public_completion_value(value);
-    let model = public
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_MODEL_ID);
-    if let Some(events) = cached_runtime_stream_events(value) {
-        streaming_response_from_runtime_events(model, &public, &events)
-    } else {
-        streaming_response_from_completion_value(&public)
-    }
-}
-
-fn streaming_response_from_runtime_events(
-    model: &str,
-    value: &Value,
-    events: &[RuntimeWorkflowStreamEvent],
-) -> Response {
-    let streamed_content = events
-        .iter()
-        .filter(|event| event.event_type == "content_delta")
-        .filter_map(|event| event.content_delta.as_deref())
-        .collect::<String>();
-    if contains_public_forbidden_knowledge_state_term(&streamed_content) {
-        return streaming_response_from_completion_value(&public_completion_value(value));
-    }
-    let completion_id = format!("chatcmpl-{}", uuid::Uuid::now_v7().simple());
-    let mut chunks = Vec::new();
-    chunks.push(format!(
-        "data: {}\n\n",
-        json!({
-            "id": &completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {"role": "assistant"},
-                "finish_reason": null
-            }]
-        })
-    ));
-    let mut forwarded_delta = false;
-    for event in events
-        .iter()
-        .filter(|event| event.event_type == "content_delta")
-    {
-        let Some(piece) = event.content_delta.as_deref() else {
-            continue;
-        };
-        forwarded_delta = true;
-        chunks.push(format!(
-            "data: {}\n\n",
-            json!({
-                "id": &completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": piece},
-                    "finish_reason": null
-                }]
-            })
-        ));
-    }
-    if !forwarded_delta {
-        return streaming_response_from_completion_value(value);
-    }
-    chunks.push(format!(
-        "data: {}\n\n",
-        json!({
-            "id": &completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        })
-    ));
-    chunks.push("data: [DONE]\n\n".to_string());
-    let body = chunks.join("");
-    (
-        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
-        body,
-    )
-        .into_response()
-}
-
-fn text_stream_chunks(content: &str, max_chars: usize) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    for ch in content.chars() {
-        current.push(ch);
-        if current.chars().count() >= max_chars || ch == '\n' {
-            chunks.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() {
-        chunks.push(String::new());
-    }
-    chunks
 }
 
 fn load_package_for_subject(
