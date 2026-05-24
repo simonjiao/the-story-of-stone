@@ -31,6 +31,8 @@ use std::{
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
+#[cfg(test)]
+use tonglingyu_runtime::OnlineEvidenceCardUpdateRequestInput;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
@@ -40,13 +42,12 @@ use tonglingyu_runtime::{
     KnowledgeGovernanceTaskRecord, KnowledgeGovernanceTaskUpdateInput,
     KnowledgeItemHumanReviewDecision, KnowledgeItemHumanReviewInput, KnowledgeItemKind,
     KnowledgeItemListInput, KnowledgePatchProposalCreateInput, KnowledgeState,
-    OnlineEvidenceCardUpdateRequestInput, OnlineEvidenceCardWorkerRunInput,
-    RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION, RETRIEVAL_FAILURE_SCHEMA_VERSION,
-    RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION, RQA_LIFECYCLE_POLICY_VERSION,
-    RUNTIME_CONTEXT_CONSUMER_TYPE, RUNTIME_CONTEXT_PACK_SCHEMA_VERSION,
-    RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION, RetrievalEvidenceTypeCoverage,
-    RetrievalFailureClusterInput, RetrievalFailureCreateInput, RetrievalFailureListInput,
-    RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
+    OnlineEvidenceCardWorkerRunInput, RETRIEVAL_FAILURE_CLUSTER_SCHEMA_VERSION,
+    RETRIEVAL_FAILURE_SCHEMA_VERSION, RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION,
+    RQA_LIFECYCLE_POLICY_VERSION, RUNTIME_CONTEXT_CONSUMER_TYPE,
+    RUNTIME_CONTEXT_PACK_SCHEMA_VERSION, RUNTIME_CONTEXT_PROJECTION_SCHEMA_VERSION,
+    RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
+    RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
     RuntimeWorkflowInput, RuntimeWorkflowOutput, RuntimeWorkflowProfiles,
     RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode,
