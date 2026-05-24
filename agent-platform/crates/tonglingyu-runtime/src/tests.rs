@@ -7085,6 +7085,19 @@ fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
     assert!(workflow.final_answer.contains("没有直接证据"));
     assert!(workflow.final_answer.contains("不能确认"));
     assert!(workflow.final_answer.contains("紫鹃服侍过史湘云"));
+    let online_requests = list_online_evidence_card_update_requests_for_trace(
+        &conn,
+        "trace-relation-frame-workflow",
+        10,
+    )
+    .expect("online evidence card requests list");
+    assert_eq!(online_requests.len(), 1);
+    assert_eq!(online_requests[0]["status"], json!("queued"));
+    assert!(
+        online_requests[0]["coverage_gap_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("review:reviewer_evidence_insufficient"))
+    );
 }
 
 #[test]

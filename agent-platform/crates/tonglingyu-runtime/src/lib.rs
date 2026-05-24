@@ -3544,17 +3544,35 @@ pub fn execute_runtime_workflow(
         source_scope_filter.included_cards,
         question_frame_value.clone(),
     )?;
+    let mut online_evidence_card_gap_reasons = Vec::new();
     for (quality_report, selected_evidence_ids) in retrieval_failure_candidates {
-        record_retrieval_failure_if_needed(
+        if let Some(failure) = record_retrieval_failure_if_needed(
             conn,
             &input.trace_id,
             &package.package_id,
             &search_question,
             quality_report,
             selected_evidence_ids,
-        )?;
+        )? {
+            push_unique_text(
+                &mut online_evidence_card_gap_reasons,
+                &format!("retrieval:{}", failure.failure_type),
+            );
+        }
     }
-    record_reviewer_failure_if_needed(conn, &input, &package)?;
+    if let Some(failure) = record_reviewer_failure_if_needed(conn, &input, &package)? {
+        push_unique_text(
+            &mut online_evidence_card_gap_reasons,
+            &format!("review:{}", failure.failure_type),
+        );
+    }
+    let online_evidence_card_update_request = record_online_evidence_card_update_request_if_needed(
+        conn,
+        &input,
+        question_frame_value.clone(),
+        serde_json::to_value(&source_scope_report.policy)?,
+        &online_evidence_card_gap_reasons,
+    )?;
     let package_plan_step = workflow_plan_step(&workflow_plan, "evidence_package_create")?;
     let package_step_id = package_plan_step.step_id.clone();
     let package_output_ref = workflow_output_ref(&input.trace_id, &package_step_id);
@@ -3578,6 +3596,11 @@ pub fn execute_runtime_workflow(
             "review_status": &package.review.status,
             "source_scope_policy": &source_scope_report.policy,
             "out_of_scope_hints": &source_scope_report.out_of_scope_hints,
+            "online_evidence_card_update_request": online_evidence_card_update_request.as_ref().map(|request| json!({
+                "update_request_id": &request.update_request_id,
+                "status": &request.status,
+                "coverage_gap_reason": &request.coverage_gap_reason,
+            })),
             }),
             context: &input.context,
         },
@@ -10560,6 +10583,47 @@ fn record_reviewer_failure_if_needed(
     .map(Some)
 }
 
+fn record_online_evidence_card_update_request_if_needed(
+    conn: &Connection,
+    input: &RuntimeWorkflowInput,
+    question_frame: Option<Value>,
+    source_scope_policy: Value,
+    gap_reasons: &[String],
+) -> Result<Option<OnlineEvidenceCardUpdateRequestRecord>> {
+    let Some(coverage_gap_reason) = online_evidence_card_coverage_gap_reason(gap_reasons) else {
+        return Ok(None);
+    };
+    create_online_evidence_card_update_request(
+        conn,
+        OnlineEvidenceCardUpdateRequestInput {
+            trace_id: input.trace_id.clone(),
+            session_id: None,
+            resolved_question: input.question.clone(),
+            question_frame,
+            coverage_gap_reason,
+            source_scope_policy,
+            recall_advice_ref: None,
+        },
+    )
+    .map(Some)
+}
+
+fn online_evidence_card_coverage_gap_reason(gap_reasons: &[String]) -> Option<String> {
+    let mut unique = gap_reasons
+        .iter()
+        .map(|reason| reason.trim())
+        .filter(|reason| !reason.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(6)
+        .collect::<Vec<_>>();
+    if unique.is_empty() {
+        return None;
+    }
+    unique.sort_unstable();
+    Some(format!("package_coverage_gap:{}", unique.join("+")))
+}
+
 fn reviewer_retrieval_quality_report(
     input: &RuntimeWorkflowInput,
     package: &EvidencePackage,
@@ -14683,6 +14747,16 @@ fn search_evidence_result(
                 .and_modify(|(existing, _)| *existing += score)
                 .or_insert((score, card));
         }
+        for card in query_promoted_evidence_cards_like(conn, term, limit * 4)? {
+            let card_key = format!("promoted:{}", card.evidence_id);
+            candidate_block_ids.insert(card_key.clone());
+            record_card_match_channels(&mut match_channel_blocks, &card_key, &card, term);
+            let score = score_promoted_card(question, term, &card);
+            scored
+                .entry(card_key)
+                .and_modify(|(existing, _)| *existing += score)
+                .or_insert((score, card));
+        }
     }
     if scored.is_empty() {
         for block in query_blocks_like(conn, question, limit * 2)? {
@@ -14690,6 +14764,13 @@ fn search_evidence_result(
             record_match_channels(&mut match_channel_blocks, &block, question);
             let card = evidence_card_from_block_with_focus(block, question);
             scored.insert(card.block_id.clone(), (1, card));
+        }
+        for card in query_promoted_evidence_cards_like(conn, question, limit * 2)? {
+            let card_key = format!("promoted:{}", card.evidence_id);
+            candidate_block_ids.insert(card_key.clone());
+            record_card_match_channels(&mut match_channel_blocks, &card_key, &card, question);
+            let score = score_promoted_card(question, question, &card);
+            scored.insert(card_key, (score, card));
         }
     }
     let mut ranked: Vec<_> = scored.into_values().collect();
@@ -14784,6 +14865,20 @@ fn record_match_channels(
     }
 }
 
+fn record_card_match_channels(
+    channels: &mut BTreeMap<String, BTreeSet<String>>,
+    card_key: &str,
+    card: &EvidenceCard,
+    term: &str,
+) {
+    for channel in evidence_card_match_channels(card, term) {
+        channels
+            .entry(channel)
+            .or_default()
+            .insert(card_key.to_string());
+    }
+}
+
 fn block_match_channels(block: &SearchBlockRecord, term: &str) -> Vec<String> {
     let normalized_term = normalize_text(term);
     let mut channels = Vec::new();
@@ -14798,6 +14893,24 @@ fn block_match_channels(block: &SearchBlockRecord, term: &str) -> Vec<String> {
     }
     if block.normalized_source_title.contains(&normalized_term) {
         channels.push("normalized_source_title".to_string());
+    }
+    channels
+}
+
+fn evidence_card_match_channels(card: &EvidenceCard, term: &str) -> Vec<String> {
+    let normalized_term = normalize_text(term);
+    let mut channels = Vec::new();
+    if card.text.contains(term) {
+        channels.push("promoted_card_raw_text".to_string());
+    }
+    if card.source_title.contains(term) {
+        channels.push("promoted_card_source_title".to_string());
+    }
+    if normalize_text(&card.text).contains(&normalized_term) {
+        channels.push("promoted_card_normalized_text".to_string());
+    }
+    if normalize_text(&card.source_title).contains(&normalized_term) {
+        channels.push("promoted_card_normalized_source_title".to_string());
     }
     channels
 }
@@ -16912,6 +17025,41 @@ fn query_blocks_like(
         .map_err(Into::into)
 }
 
+fn query_promoted_evidence_cards_like(
+    conn: &Connection,
+    term: &str,
+    limit: usize,
+) -> Result<Vec<EvidenceCard>> {
+    if term.trim().is_empty() || !sqlite_table_exists(conn, "evidence_cards")? {
+        return Ok(Vec::new());
+    }
+    let like = format!("%{}%", term.replace('%', "\\%").replace('_', "\\_"));
+    let normalized_term = normalize_text(term);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT evidence_json
+        FROM evidence_cards
+        WHERE package_id IS NULL
+          AND evidence_json LIKE ?1 ESCAPE '\'
+        ORDER BY created_at DESC, evidence_id DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![like, limit as i64], |row| row.get::<_, String>(0))?;
+    let mut cards = Vec::new();
+    for row in rows {
+        let card = serde_json::from_str::<EvidenceCard>(&row?)?;
+        if card.text.contains(term)
+            || card.source_title.contains(term)
+            || normalize_text(&card.text).contains(&normalized_term)
+            || normalize_text(&card.source_title).contains(&normalized_term)
+        {
+            cards.push(card);
+        }
+    }
+    Ok(cards)
+}
+
 fn query_blocks_exact_text(
     conn: &Connection,
     term: &str,
@@ -17086,6 +17234,32 @@ fn score_block(question: &str, term: &str, block: &SearchBlockRecord) -> i64 {
         if retrieval_rules::contains_any_term(term, &ranking.fate_text_terms) {
             score += 20;
         }
+    }
+    score
+}
+
+fn score_promoted_card(question: &str, term: &str, card: &EvidenceCard) -> i64 {
+    let mut score = 80;
+    let normalized_term = normalize_text(term);
+    if card.text.contains(term) {
+        score += 18;
+    }
+    if normalize_text(&card.text).contains(&normalized_term) {
+        score += 12;
+    }
+    if card.source_title.contains(term) {
+        score += 5;
+    }
+    if normalize_text(&card.source_title).contains(&normalized_term) {
+        score += 3;
+    }
+    if card.verification_status == "online_promoted_source_backed" {
+        score += 20;
+    }
+    if card.text.contains(question)
+        || normalize_text(&card.text).contains(&normalize_text(question))
+    {
+        score += 10;
     }
     score
 }
@@ -17391,6 +17565,13 @@ fn push_term(terms: &mut Vec<String>, term: &str) {
     let term = term.trim();
     if !term.is_empty() && !terms.iter().any(|item| item == term) {
         terms.push(term.to_string());
+    }
+}
+
+fn push_unique_text(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() && !values.iter().any(|item| item == value) {
+        values.push(value.to_string());
     }
 }
 

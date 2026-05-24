@@ -661,7 +661,68 @@ fn stage_evidence_card_candidate(
         "entities": &input.entities,
     }))?;
     if let Some(existing) = load_staged_card_by_exact_claim(conn, &exact_span_key, &claim_key)? {
-        return merge_staged_card(conn, existing, &input.trace_id, span);
+        return merge_staged_card(
+            conn,
+            existing,
+            &input,
+            span,
+            StagedCardMergeReason::SameExactSpanAndClaim,
+        );
+    }
+    if canonical_entity_participants_key(&input.entities).is_none() {
+        return insert_needs_disambiguation_staged_card(
+            conn,
+            input,
+            exact_span_key,
+            claim_key,
+            cluster_key,
+            span,
+            "entity_resolution_conflict",
+        );
+    }
+    if let Some(existing) = load_staged_card_by_claim(conn, &claim_key)? {
+        if staged_source_hash_conflicts(&existing, &input) {
+            return insert_conflicted_staged_card(
+                conn,
+                input,
+                exact_span_key,
+                claim_key,
+                cluster_key,
+                span,
+                &existing,
+                "source_hash_conflict",
+            );
+        }
+        if existing.status == "promoted" {
+            return insert_superseded_staged_card(
+                conn,
+                input,
+                exact_span_key,
+                claim_key,
+                cluster_key,
+                span,
+                &existing,
+            );
+        }
+        return merge_staged_card(
+            conn,
+            existing,
+            &input,
+            span,
+            StagedCardMergeReason::SameClaim,
+        );
+    }
+    if let Some(conflict) = first_role_conflict(conn, &input)? {
+        return insert_conflicted_staged_card(
+            conn,
+            input,
+            exact_span_key,
+            claim_key,
+            cluster_key,
+            span,
+            &conflict,
+            "role_conflict",
+        );
     }
     if let Some(conflict) = first_claim_conflict(
         conn,
@@ -678,6 +739,7 @@ fn stage_evidence_card_candidate(
             cluster_key,
             span,
             &conflict,
+            "claim_dimension_conflict",
         );
     }
     insert_staged_card(conn, input, exact_span_key, claim_key, cluster_key, span)
@@ -761,7 +823,9 @@ fn insert_conflicted_staged_card(
     cluster_key: String,
     span: Value,
     conflict: &CanonicalStagedCardRecord,
+    reason_code: &'static str,
 ) -> Result<CanonicalStagedCardRecord> {
+    let update_request_id = input.update_request_id.clone();
     let mut record = insert_staged_card(conn, input, exact_span_key, claim_key, cluster_key, span)?;
     let previous = record.status.clone();
     let now = now_rfc3339();
@@ -777,13 +841,13 @@ fn insert_conflicted_staged_card(
                 .first()
                 .map(String::as_str)
                 .unwrap_or("online-evidence-card"),
-            update_request_id: None,
+            update_request_id: Some(&update_request_id),
             staged_card_id: Some(&record.staged_card_id),
             candidate_id: None,
             event_type: "staged_card_conflicted",
             from_status: Some(&previous),
             to_status: Some("conflicted"),
-            reason_code: "claim_dimension_conflict",
+            reason_code,
             rule_id: Some(&record.rules_version),
             payload: &json!({
                 "conflicting_staged_card_id": &conflict.staged_card_id,
@@ -798,19 +862,130 @@ fn insert_conflicted_staged_card(
     Ok(record)
 }
 
+fn insert_needs_disambiguation_staged_card(
+    conn: &Connection,
+    input: StageCandidateInput,
+    exact_span_key: String,
+    claim_key: String,
+    cluster_key: String,
+    span: Value,
+    reason_code: &'static str,
+) -> Result<CanonicalStagedCardRecord> {
+    let update_request_id = input.update_request_id.clone();
+    let mut record = insert_staged_card(conn, input, exact_span_key, claim_key, cluster_key, span)?;
+    let previous = record.status.clone();
+    let now = now_rfc3339();
+    conn.execute(
+        "UPDATE canonical_staged_cards SET status = 'needs_disambiguation', updated_at = ?2 WHERE staged_card_id = ?1",
+        params![&record.staged_card_id, &now],
+    )?;
+    insert_staged_card_event(
+        conn,
+        StagedCardEventInput {
+            trace_id: record
+                .created_from_trace_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("online-evidence-card"),
+            update_request_id: Some(&update_request_id),
+            staged_card_id: Some(&record.staged_card_id),
+            candidate_id: None,
+            event_type: "staged_card_needs_disambiguation",
+            from_status: Some(&previous),
+            to_status: Some("needs_disambiguation"),
+            reason_code,
+            rule_id: Some(&record.rules_version),
+            payload: &json!({
+                "claim_key": &record.claim_key,
+                "entities_key": &record.entities_key,
+            }),
+        },
+    )?;
+    record.status = "needs_disambiguation".to_string();
+    record.updated_at = now;
+    Ok(record)
+}
+
+fn insert_superseded_staged_card(
+    conn: &Connection,
+    input: StageCandidateInput,
+    exact_span_key: String,
+    claim_key: String,
+    cluster_key: String,
+    span: Value,
+    promoted: &CanonicalStagedCardRecord,
+) -> Result<CanonicalStagedCardRecord> {
+    let update_request_id = input.update_request_id.clone();
+    let mut record = insert_staged_card(conn, input, exact_span_key, claim_key, cluster_key, span)?;
+    let previous = record.status.clone();
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        UPDATE canonical_staged_cards
+        SET status = 'superseded_by_promoted',
+            promoted_evidence_id = ?2,
+            updated_at = ?3
+        WHERE staged_card_id = ?1
+        "#,
+        params![&record.staged_card_id, &promoted.promoted_evidence_id, &now,],
+    )?;
+    insert_staged_card_event(
+        conn,
+        StagedCardEventInput {
+            trace_id: record
+                .created_from_trace_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("online-evidence-card"),
+            update_request_id: Some(&update_request_id),
+            staged_card_id: Some(&record.staged_card_id),
+            candidate_id: None,
+            event_type: "staged_card_superseded_by_promoted",
+            from_status: Some(&previous),
+            to_status: Some("superseded_by_promoted"),
+            reason_code: "same_claim_already_promoted",
+            rule_id: Some(&record.rules_version),
+            payload: &json!({
+                "promoted_staged_card_id": &promoted.staged_card_id,
+                "promoted_evidence_id": &promoted.promoted_evidence_id,
+                "claim_key": &record.claim_key,
+            }),
+        },
+    )?;
+    record.status = "superseded_by_promoted".to_string();
+    record.promoted_evidence_id = promoted.promoted_evidence_id.clone();
+    record.updated_at = now;
+    Ok(record)
+}
+
+enum StagedCardMergeReason {
+    SameExactSpanAndClaim,
+    SameClaim,
+}
+
 fn merge_staged_card(
     conn: &Connection,
     mut existing: CanonicalStagedCardRecord,
-    trace_id: &str,
+    input: &StageCandidateInput,
     span: Value,
+    reason: StagedCardMergeReason,
 ) -> Result<CanonicalStagedCardRecord> {
     let previous = existing.status.clone();
     append_unique_json(&mut existing.supporting_spans, span);
-    push_unique(&mut existing.created_from_trace_ids, trace_id);
-    let next_status = if previous == "promoted" {
-        "promoted"
-    } else {
-        "merged"
+    push_unique(&mut existing.created_from_trace_ids, &input.trace_id);
+    if should_replace_canonical_evidence(&existing.evidence, &input.card) {
+        existing.evidence = input.card.clone();
+    }
+    let next_status = match previous.as_str() {
+        "promoted" => "promoted",
+        "conflicted" | "needs_disambiguation" | "superseded_by_promoted" | "rejected" => {
+            previous.as_str()
+        }
+        _ => "merged",
+    };
+    let reason_code = match reason {
+        StagedCardMergeReason::SameExactSpanAndClaim => "same_exact_span_and_claim",
+        StagedCardMergeReason::SameClaim => "same_claim",
     };
     let now = now_rfc3339();
     conn.execute(
@@ -819,7 +994,8 @@ fn merge_staged_card(
         SET supporting_spans_json = ?2,
             created_from_trace_ids_json = ?3,
             status = ?4,
-            updated_at = ?5
+            evidence_json = ?5,
+            updated_at = ?6
         WHERE staged_card_id = ?1
         "#,
         params![
@@ -827,30 +1003,38 @@ fn merge_staged_card(
             serde_json::to_string(&existing.supporting_spans)?,
             serde_json::to_string(&existing.created_from_trace_ids)?,
             next_status,
+            serde_json::to_string(&existing.evidence)?,
             &now,
         ],
     )?;
     insert_staged_card_event(
         conn,
         StagedCardEventInput {
-            trace_id,
-            update_request_id: None,
+            trace_id: &input.trace_id,
+            update_request_id: Some(&input.update_request_id),
             staged_card_id: Some(&existing.staged_card_id),
             candidate_id: None,
             event_type: "staged_card_merged",
             from_status: Some(&previous),
             to_status: Some(next_status),
-            reason_code: "same_exact_span_and_claim",
+            reason_code,
             rule_id: Some(&existing.rules_version),
             payload: &json!({
                 "supporting_span_count": existing.supporting_spans.len(),
                 "trace_count": existing.created_from_trace_ids.len(),
+                "source_hash": &input.source_hash,
             }),
         },
     )?;
     existing.status = next_status.to_string();
     existing.updated_at = now;
     Ok(existing)
+}
+
+fn should_replace_canonical_evidence(existing: &EvidenceCard, candidate: &EvidenceCard) -> bool {
+    existing.source_id == candidate.source_id
+        && existing.block_id == candidate.block_id
+        && candidate.text.chars().count() > existing.text.chars().count()
 }
 
 fn validate_and_promote_staged_card(
@@ -1188,6 +1372,60 @@ fn first_claim_conflict(
     )
 }
 
+fn first_role_conflict(
+    conn: &Connection,
+    input: &StageCandidateInput,
+) -> Result<Option<CanonicalStagedCardRecord>> {
+    let Some(input_participants_key) = canonical_entity_participants_key(&input.entities) else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT staged_card_id, exact_span_key, claim_key, cluster_key, source_scope,
+               slot_id, entities_key, entities_json, polarity, modality,
+               evidence_strength, supporting_spans_json, evidence_json, schema_version,
+               source_corpus_version, source_hash, rules_version, builder_version,
+               validator_version, status, promoted_evidence_id, created_from_trace_ids_json,
+               created_at, updated_at
+        FROM canonical_staged_cards
+        WHERE slot_id = ?1
+          AND source_scope = ?2
+          AND entities_key <> ?3
+          AND status IN ('staged', 'merged', 'validated', 'promoted')
+        ORDER BY updated_at, staged_card_id
+        "#,
+    )?;
+    let candidates = query_staged_card_rows(
+        &mut stmt,
+        params![&input.slot_id, &input.source_scope, &input.entities_key],
+    )?;
+    Ok(candidates.into_iter().find(|record| {
+        canonical_entity_participants_key(&record.entities).as_deref()
+            == Some(input_participants_key.as_str())
+    }))
+}
+
+fn canonical_entity_participants_key(entities: &Value) -> Option<String> {
+    let mut participants = entities
+        .as_array()?
+        .iter()
+        .filter_map(|entity| {
+            entity
+                .get("canonical")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    participants.sort();
+    participants.dedup();
+    if participants.len() < 2 {
+        return None;
+    }
+    Some(participants.join("\u{1f}"))
+}
+
 fn load_staged_card_by_exact_claim(
     conn: &Connection,
     exact_span_key: &str,
@@ -1207,6 +1445,44 @@ fn load_staged_card_by_exact_claim(
         "#,
     )?;
     query_optional_staged_card(&mut stmt, params![exact_span_key, claim_key])
+}
+
+fn load_staged_card_by_claim(
+    conn: &Connection,
+    claim_key: &str,
+) -> Result<Option<CanonicalStagedCardRecord>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT staged_card_id, exact_span_key, claim_key, cluster_key, source_scope,
+               slot_id, entities_key, entities_json, polarity, modality,
+               evidence_strength, supporting_spans_json, evidence_json, schema_version,
+               source_corpus_version, source_hash, rules_version, builder_version,
+               validator_version, status, promoted_evidence_id, created_from_trace_ids_json,
+               created_at, updated_at
+        FROM canonical_staged_cards
+        WHERE claim_key = ?1
+          AND status IN ('staged', 'merged', 'validated', 'promoted')
+        ORDER BY CASE status
+            WHEN 'promoted' THEN 0
+            WHEN 'validated' THEN 1
+            WHEN 'merged' THEN 2
+            ELSE 3
+          END,
+          updated_at,
+          staged_card_id
+        LIMIT 1
+        "#,
+    )?;
+    query_optional_staged_card(&mut stmt, params![claim_key])
+}
+
+fn staged_source_hash_conflicts(
+    existing: &CanonicalStagedCardRecord,
+    input: &StageCandidateInput,
+) -> bool {
+    existing.evidence.source_id == input.card.source_id
+        && existing.evidence.block_id == input.card.block_id
+        && existing.source_hash != input.source_hash
 }
 
 fn load_staged_card(
