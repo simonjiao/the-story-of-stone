@@ -31,6 +31,7 @@ use time::OffsetDateTime;
 mod answer_composer;
 mod evidence_slot_rules;
 mod governance_rules;
+mod online_evidence_card_ingest;
 mod ontology_aliases;
 mod question_frame;
 mod retrieval_rules;
@@ -64,6 +65,13 @@ use upstream_bundle::{
     evidence_card_source_layer, extract_upstream_bundle_draft, filter_cards_for_source_scope,
     source_scope_policy_for_question, source_title_in_later_forty,
     text_mentions_later_forty_boundary,
+};
+
+pub use online_evidence_card_ingest::{
+    OnlineEvidenceCardUpdateRequestInput, OnlineEvidenceCardWorkerRunInput,
+    create_online_evidence_card_update_request, list_online_evidence_card_events_for_trace,
+    list_online_evidence_card_raw_candidates_for_trace, list_online_evidence_card_staged_for_trace,
+    run_online_evidence_card_worker_once,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6616,6 +6624,7 @@ fn apply_runtime_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(knowledge_item_state_schema_sql())?;
     migrate_knowledge_item_calibration_columns(conn)?;
     conn.execute_batch(knowledge_calibration_schema_sql())?;
+    online_evidence_card_ingest::init_schema(conn)?;
     let backfilled_governance_tasks = conn.execute(
         r#"
         INSERT OR IGNORE INTO knowledge_governance_tasks (
