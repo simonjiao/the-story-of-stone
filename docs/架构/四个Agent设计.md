@@ -14,7 +14,7 @@
 目标 Runtime 接入后，四个内部 Agent 都是受 profile contract 约束的 Runtime
 profile。`honglou-text` 和 `honglou-commentary` 也走 LLM profile，通过
 read-only tools 获取证据，而不是 Gateway 内的确定性检索 step。完整接入计划见
-`20_Runtime接入设计与实施计划.md`。
+`Runtime接入设计与实施计划.md`。
 
 ## `honglou-main`
 
@@ -181,7 +181,7 @@ read-only tools 获取证据，而不是 Gateway 内的确定性检索 step。�
 
 ## Runtime Profile Contract 摘要
 
-完整字段以 `20_Runtime接入设计与实施计划.md` 为准。这里保留职责摘要：
+完整字段以 `Runtime接入设计与实施计划.md` 为准。这里保留职责摘要：
 
 1. `honglou-text`：输入用户问题、检索意图、版本/回目/人物条件和 top_k；
    输出正文证据分析、支持范围、不支持范围和 evidence refs。

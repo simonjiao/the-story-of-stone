@@ -52,7 +52,7 @@ Android / iOS / Desktop / Web
    `text/event-stream`。
 4. `tonglingyu-runtime` 已能执行 RQA workflow，生成 evidence package、reviewer
    结果、final answer 和 `RuntimeWorkflowStreamEvent`。
-5. SQLite 仍是证据包、审计、context、memory、knowledge governance 的正式持久化
+5. SQLite 仍是证据包、审计、context、memory、runtime governance 的正式持久化
    边界。
 
 当前缺口是：

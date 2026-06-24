@@ -1,4 +1,4 @@
-# Question Frame 与关系题治理 Checklist
+# Question Frame 与关系题治理
 
 本文用于约束关系题、追问题和外部规则治理的实现。目标不是修某个
 small10 用例，而是建立稳定的 question frame 主路径，避免把答案逻辑
@@ -41,8 +41,8 @@ small10 用例，而是建立稳定的 question frame 主路径，避免把答�
         已覆盖已识别 relation 的 insufficient coverage / review rejection；
         未识别 predicate 进入 `unknown_relation_predicate` 澄清，不让
         question normalizer 作为 oracle 改写成已知关系。
-  - [x] 未识别 predicate 若能确定抽出候选词，只进入 staged `predicate_alias`
-        review 队列；不自动绑定目标 predicate，不改变 active path。
+  - [x] 未识别 predicate 若能确定抽出候选词，只进入待审核 `predicate_alias`
+        复核队列；不自动绑定目标 predicate，不改变 active path。
 
 - [x] WP4: frame 驱动检索
   - [x] 关系题检索必须同时使用 subject alias、predicate alias、object alias。
@@ -58,7 +58,7 @@ small10 用例，而是建立稳定的 question frame 主路径，避免把答�
 - [x] WP6: reviewer predicate-preservation gate
   - [x] `predicate=serve` 时最终回答必须回答服侍关系；draft 文本层 gate 已覆盖。
   - [x] 回答跑到人物介绍、诗词、结局等其他维度时必须拒绝。
-  - [x] 拒绝后由本地 relation answer / boundary 接管；证据不足时继续进入在线补卡队列，
+  - [x] 拒绝后由本地 relation answer / boundary 接管；证据不足时记录证据缺口审计，
         不接受偏题答案。
 
 - [ ] WP7: Eval 与回归

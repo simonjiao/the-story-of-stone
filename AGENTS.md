@@ -26,9 +26,8 @@
 
 ## 文档规则
 
-- 通灵玉产品和架构以 `docs/tonglingyu-agent-design/` 为准。
-- 根 `docs/PROGRESS.md` 只是通灵玉文档入口索引；当前现实状态以
-  `docs/tonglingyu-agent-design/PROGRESS.md` 为准。
+- 通灵玉产品和架构以 `docs/README.md` 中的分类索引为准。
+- 当前现实状态以 `docs/PROGRESS.md` 为准。
 - 运行命令只写当前可执行命令；计划中的命令必须明确标记为尚未实现。
 - 设计文档必须描述完整目标、全量边界和最终验收条件；分阶段只用于安排实施顺序，
   不用于降低目标、隐藏困难或替换主流程。

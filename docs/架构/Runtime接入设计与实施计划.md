@@ -2,20 +2,20 @@
 
 ## 文档定位
 
-本文定义“通灵玉”接入 Agent Runtime 的目标架构、职责边界和实施 checklist。
+本文定义“通灵玉”接入 Agent Runtime 的目标架构、职责边界和实施验收。
 它属于通灵玉领域设计，不属于 Agent Runtime 本体设计。
 
 本文引用并整合以下通灵玉文档：
 
-1. `05_总体架构.md`：Open WebUI 单入口、Gateway、四 Agent 和 RAG 分层。
-2. `06_四个Agent设计.md`：`honglou-main`、`honglou-text`、
+1. `总体架构.md`：Open WebUI 单入口、Gateway、四 Agent 和 RAG 分层。
+2. `四个Agent设计.md`：`honglou-main`、`honglou-text`、
    `honglou-commentary`、`honglou-reviewer` 的职责边界。
-3. `07_Gateway设计.md`：通灵玉 Gateway 的入口、安全和编排边界。
-4. `04_概念模型与证据分层.md`：正文、脂批、版本、人物和证据包语义。
-5. `10_内部接口契约.md`：Gateway、Runtime profile、知识服务和审计协作。
-6. `11_权限审计与安全治理.md`：内部 profile 不暴露、reviewer 不可关闭。
-7. `12_验证方案与验收标准.md`：证据、审校、Gateway 和上线验证。
-8. `48_Gateway_Realtime_Redis_Architecture.md`：Gateway realtime/Redis 边界。
+3. `Gateway设计.md`：通灵玉 Gateway 的入口、安全和编排边界。
+4. `../需求/概念模型与证据分层.md`：正文、脂批、版本、人物和证据包语义。
+5. `../内部/内部接口契约.md`：Gateway、Runtime profile、证据检索服务和审计协作。
+6. `../内部/权限审计与安全治理.md`：内部 profile 不暴露、reviewer 不可关闭。
+7. `../需求/验证方案与验收标准.md`：证据、审校、Gateway 和上线验证。
+8. `Gateway_Realtime_Redis_Architecture.md`：Gateway realtime/Redis 边界。
 
 ## 目标
 
@@ -217,7 +217,7 @@ LLM profile。输入用户问题、草稿、证据包 ref、claim statements 和
 
 禁止：重写最终答案、替代 text/commentary 大规模检索、泄露内部规则全文。
 
-## 实施 Checklist
+## 实施阶段与验收
 
 ### R5A 薄 Gateway 边界
 
@@ -633,8 +633,8 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
 若未来任一 R5 gate 或 Open WebUI browser review 回退，才只能声明：
 
 ```text
-通灵玉已有可运行的 Gateway 内部闭环；目标 Runtime 接入仍在 R5 checklist 中。
+通灵玉已有可运行的 Gateway 内部闭环；目标 Runtime 接入仍在 R5 阶段验收中。
 ```
 
-Agent Runtime 本体完成不等于通灵玉接入完成；通灵玉接入必须以本文 checklist、
+Agent Runtime 本体完成不等于通灵玉接入完成；通灵玉接入必须以本文阶段验收、
 Gateway 回归测试和目标环境 Open WebUI 单入口复测为准。

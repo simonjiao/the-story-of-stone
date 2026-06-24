@@ -30,7 +30,7 @@ Gateway 不等于：
 6. 自主推理系统。
 
 Scoped Context 与受控 Memory 的详细设计见
-`26_Scoped_Context与受控Memory设计.md`。该设计不改变 Gateway 的薄边界：
+`../子模块/Scoped_Context与受控Memory.md`。该设计不改变 Gateway 的薄边界：
 Gateway 只负责 context pack 调用、trace、step plan、journal 索引和响应封装，
 不直接沉淀长期 memory，也不把 memory 当作正式事实源。
 
@@ -82,7 +82,7 @@ Gateway 只负责 context pack 调用、trace、step plan、journal 索引和响
 
 ### 错误降级
 
-当某个 Agent 或知识服务失败时，Gateway 负责返回谨慎的降级响应，而不是让系统编造答案。
+当某个 Agent 或证据检索服务失败时，Gateway 负责返回谨慎的降级响应，而不是让系统编造答案。
 
 ### 审计日志
 
@@ -109,7 +109,7 @@ Gateway 只负责 context pack 调用、trace、step plan、journal 索引和响
 
 Gateway 不应保存：
 
-1. 红楼梦领域知识；
+1. 红楼梦领域事实；
 2. 用户长期偏好；
 3. Agent 私有推理；
 4. 原始数据库内容；
@@ -129,8 +129,8 @@ Gateway 可以保存：
 7. 必要的审计摘要；
 8. scoped context 所需的 context/journal 索引和限长摘要。
 
-这些 context/journal 数据必须遵循 `11_权限审计与安全治理.md` 和
-`26_Scoped_Context与受控Memory设计.md`：默认不保存不必要的完整隐私文本，
+这些 context/journal 数据必须遵循 `../内部/权限审计与安全治理.md` 和
+`../子模块/Scoped_Context与受控Memory.md`：默认不保存不必要的完整隐私文本，
 长期 memory 只能由延迟 collector 和审核策略生成。
 
 ## 验收标准
@@ -149,7 +149,7 @@ Gateway 合格标准：
 ## Runtime 接入目标
 
 通灵玉 Gateway 的目标接入形态由
-`20_Runtime接入设计与实施计划.md` 统一维护。简化边界是：
+`Runtime接入设计与实施计划.md` 统一维护。简化边界是：
 
 ```text
 Open WebUI
@@ -184,7 +184,7 @@ Gateway 新增实时能力时仍不是第 5 个 Agent。目标边界是：
 10. 公开 SSE/WS/status 不能泄露 trace、context、memory、tool policy、raw provider
     output 或 reviewer 内部对象。
 
-新增文档 `48_Gateway_Realtime_Redis_Architecture.md` 已把该能力拆到实施层：
+新增文档 `Gateway_Realtime_Redis_Architecture.md` 已把该能力拆到实施层：
 `ResponseEvent`、Redis key、状态机、`/v1/responses`、`/v1/realtime/ws`、
 chat SSE 桥接、worker、取消、恢复、部署配置和测试矩阵。
 
@@ -192,7 +192,7 @@ chat SSE 桥接、worker、取消、恢复、部署配置和测试矩阵。
 
 当前 Rust `tonglingyu-gateway` 已补齐完整产品 Gateway 的服务端、容器内和
 公网入口验证边界。该实现是运行基线和回归基线；目标 Runtime 化仍按
-`20_Runtime接入设计与实施计划.md` 迁移。真实登录态页面点击仍需使用实际
+`Runtime接入设计与实施计划.md` 迁移。真实登录态页面点击仍需使用实际
 Open WebUI 账号做发布复核，不改变 Gateway 合同。
 
 <!-- markdownlint-disable MD013 -->

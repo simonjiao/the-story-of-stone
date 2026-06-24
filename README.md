@@ -5,7 +5,7 @@
 - `agent-platform/`：通灵玉 Gateway、Runtime 和共享 Agent runtime 组件。
 - `open-webui/functions/`：Open WebUI Function/Filter 正式代码。
 - `deploy/`：本地 Tonglingyu stack 入口。
-- `docs/`：Gateway、Runtime、Open WebUI、运行手册和实时文字协议文档。
+- `docs/`：按需求、架构、外部、内部、子模块组织的 Gateway/Runtime 文档。
 
 Gateway 只消费外部发布的 runtime SQLite DB。DB 路径由 `TONGLINGYU_DB_PATH`
 或 CLI `--db` 指定；本仓库负责 schema preflight/migration、协议入口、
@@ -18,19 +18,19 @@ Gateway 只消费外部发布的 runtime SQLite DB。DB 路径由 `TONGLINGYU_DB
 <!-- markdownlint-disable MD013 -->
 | 项目 | 代码入口 | 文档入口 | 进展 |
 | --- | --- | --- | --- |
-| 通灵玉 Gateway/Runtime | `agent-platform/crates/tonglingyu-gateway/`、`agent-platform/crates/tonglingyu-runtime/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
-| Open WebUI Functions | `open-webui/functions/` | `docs/tonglingyu-agent-design/` | `docs/tonglingyu-agent-design/PROGRESS.md` |
+| 通灵玉 Gateway/Runtime | `agent-platform/crates/tonglingyu-gateway/`、`agent-platform/crates/tonglingyu-runtime/` | `docs/` | `docs/PROGRESS.md` |
+| Open WebUI Functions | `open-webui/functions/` | `docs/` | `docs/PROGRESS.md` |
 | Local Stack | `deploy/` | `deploy/README.md` | `deploy/README.md` |
 <!-- markdownlint-enable MD013 -->
 
 ## 文档入口
 
-- [通灵玉设计文档地图](docs/tonglingyu-agent-design/00_阅读路径与文档地图.md)
-- [通灵玉进展](docs/tonglingyu-agent-design/PROGRESS.md)
-- [Gateway 设计](docs/tonglingyu-agent-design/07_Gateway设计.md)
-- [Gateway 总体架构与实时能力改造方案](docs/tonglingyu-agent-design/48_Gateway_Realtime_Redis_Architecture.md)
+- [通灵玉文档地图](docs/README.md)
+- [通灵玉进展](docs/PROGRESS.md)
+- [Gateway 设计](docs/架构/Gateway设计.md)
+- [Gateway 总体架构与实时能力改造方案](docs/架构/Gateway_Realtime_Redis_Architecture.md)
 - [运行手册](docs/RUNBOOK.md)
-- [跨项目进展索引](docs/PROGRESS.md)
+- [进展索引](docs/PROGRESS.md)
 - [Lint and Test Rules](docs/LINT_AND_TEST_RULES.md)
 - [Versioning Rules](docs/VERSIONING_RULES.md)
 

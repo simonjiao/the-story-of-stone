@@ -91,7 +91,7 @@ Gateway smoke 默认验证 schema、health、auth、models 和 metrics：
 agent-platform/scripts/tonglingyu-gateway-smoke.sh
 ```
 
-如需额外验证 RQA 查询和聊天链路，提供已构建的 runtime DB：
+如需额外验证 RQA 查询和聊天链路，提供外部发布的 runtime DB：
 
 ```bash
 TONGLINGYU_SMOKE_DB_PATH=/path/to/tonglingyu.db \
@@ -107,7 +107,7 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
 
 ## 运行期操作
 
-查询并生成证据包，要求 DB 已包含知识数据：
+查询并生成证据包，要求 DB 已包含外部发布的 runtime 证据数据：
 
 ```bash
 cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
@@ -126,7 +126,7 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
   pkg-example
 ```
 
-运行内置评测样例，要求 DB 已包含评测所需知识数据：
+运行内置评测样例，要求 DB 已包含评测所需 runtime 证据数据：
 
 ```bash
 cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \

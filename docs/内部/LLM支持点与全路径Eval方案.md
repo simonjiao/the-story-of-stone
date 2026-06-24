@@ -10,7 +10,7 @@
 
 本文的第一原则是：没有证据就不宣布完成；没有 gate 通过就不宣布 ready；有不一致就明确指出，不猜测、不折中。
 
-本文不使用状态表记录实现进度。实现进度应放在 checklist、progress、release report 或提交记录中；本文件只回答“设计上允许什么、禁止什么、如何验证”。
+本文不使用状态表记录实现进度。实现进度应放在 progress、子模块验收、release report 或提交记录中；本文件只回答“设计上允许什么、禁止什么、如何验证”。
 
 禁止口径：
 
@@ -29,12 +29,9 @@
 1. `agent-platform/crates/tonglingyu-gateway/src/main.rs`
 2. `agent-platform/crates/tonglingyu-gateway/src/context_governance.rs`
 3. `agent-platform/crates/tonglingyu-runtime/src/lib.rs`
-4. `docs/tonglingyu-agent-design/20_Runtime接入设计与实施计划.md`
-5. `docs/tonglingyu-agent-design/26_Scoped_Context与受控Memory设计.md`
-6. `docs/tonglingyu-agent-design/27_Scoped_Context_Request_Path_Checklist.md`
-7. `docs/tonglingyu-agent-design/28_Context_Projection_Runtime_Checklist.md`
-8. `docs/tonglingyu-agent-design/30_Scoped_Memory_Production_Checklist.md`
-9. `docs/tonglingyu-agent-design/PROGRESS.md`
+4. `docs/架构/Runtime接入设计与实施计划.md`
+5. `docs/子模块/Scoped_Context与受控Memory.md`
+6. `docs/PROGRESS.md`
 
 外部实现只能作为工程模式参考。OpenAI、Anthropic、LangGraph、Hermes/AiBot 等不能作为本仓库当前实现事实。
 
@@ -216,7 +213,7 @@ Provider adapter 不能做：
 | I4 | Question Resolver 当前可见受控 memory summary | 基线 resolver 在 memory read 之前执行；D3 已决策允许目标设计读取受控 memory summary | 不能把 D3 写成无需新增节点；必须新增 pre-resolver memory authorization 并补 ACL/budget/fail-closed。 |
 | I5 | 显式 Question Resolution 完全未实现 | 当前已有 `resolved_question`、context pack、admin trace、fail-closed 澄清 | 正确口径：显式节点已存在，LLM resolver 未生产接入。 |
 | I6 | 四个 Runtime profile 是完整 LLM 生成链 | 当前仍受本地工具、package、reviewer enforcement 约束 | profile 是 observation/candidate，不是最终事实链。 |
-| I7 | 27/28 checklist 的 active memory 未实现代表全局事实 | 30 checklist 和 PROGRESS 属于后续阶段 | 必须按阶段解释，不能用旧阶段覆盖新事实。 |
+| I7 | 早期 Scoped Context 子阶段未实现代表全局事实 | `Scoped_Context与受控Memory.md` 和 PROGRESS 属于当前口径 | 必须按阶段解释，不能用旧阶段覆盖新事实。 |
 | I8 | Retrieval policy 当前由 LLM suggested policy 决定 | 当前主路径是确定性 `search_policy(resolved_question)` | LLM suggested policy 只能作为目标增强。 |
 | I9 | Evidence package 示例可写 `review: null` | 当前主链路需要 review/journal/wrapper 过滤 | 示例必须表达 review record 存在或可回放。 |
 | I10 | Eval 百分比是已通过事实 | 多数据集 eval suite 尚未整体落地 | 百分比只能作为目标门槛。 |
@@ -966,7 +963,7 @@ Runner 规则：
 3. 用户响应安全 gate 没有回退。
 4. 文档同步更新设计事实和剩余风险。
 5. 未通过的 gate 必须写成 blocker，不能写成完成。
-6. 本设计文档不记录阶段实现进度；阶段进度必须写入专门 checklist、progress 或 release report。
+6. 本设计文档不记录阶段实现进度；阶段进度必须写入 `PROGRESS.md`、子模块验收或 release report。
 7. 若 PR 需要跨阶段修改，必须先拆 PR；不能用“顺手补齐”绕过阶段边界。
 
 ## 10. 回滚与开关要求
@@ -1012,7 +1009,7 @@ cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway
 回滚后必须复跑：
 
 1. `git diff --check`
-2. `npx --yes markdownlint-cli2 docs/tonglingyu-agent-design/31_LLM支持点与全路径Eval方案.md`
+2. `npx --yes markdownlint-cli2 docs/内部/LLM支持点与全路径Eval方案.md`
 3. `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
 4. S1 之后还必须运行用户响应泄露 fixture gate。
 
@@ -1253,7 +1250,7 @@ S1 完成后才能进入 S2。S1 的提交必须同时包含：
 
 本文只定义判断标准，不替代审阅记录、实现证据或上线证据。
 
-## 13. 实施前冻结 Checklist
+## 13. 实施前冻结验收
 
 进入代码实现前，本文件必须满足以下条件：
 
