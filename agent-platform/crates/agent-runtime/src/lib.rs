@@ -1,0 +1,9633 @@
+use agent_core::{
+    AgentCoreError, AgentSessionMessage, ConnectorClient, ConnectorSnapshot, CoreResult,
+    CredentialLease, CredentialLeaseRequest, CredentialProvider, ErrorCode, ExternalActionMode,
+    MessageRole, ProfileContract, RuntimeClient, RuntimeOutput, RuntimeProfileInput,
+    RuntimeProfileMessage, RuntimeRunInput, RuntimeSessionInput, RuntimeStreamEvent,
+    RuntimeStreamEventType, RuntimeToolCall, RuntimeToolExecutor, RuntimeToolResult,
+    RuntimeToolSpec, WriteConnector, WriteConnectorCompensateInput, WriteConnectorCompensateOutput,
+    WriteConnectorDryRunInput, WriteConnectorDryRunOutput, WriteConnectorExecuteInput,
+    WriteConnectorExecuteOutput, metric_names, new_id, runtime_failure, runtime_stream_error_event,
+    validate_json_schema_value,
+};
+use async_trait::async_trait;
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode as HttpStatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use futures_util::StreamExt;
+use reqwest::{StatusCode as ReqwestStatusCode, Url};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex, sync::Semaphore};
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeProfileRegistry {
+    contracts: Arc<BTreeMap<String, ProfileContract>>,
+}
+
+impl RuntimeProfileRegistry {
+    pub fn new(contracts: impl IntoIterator<Item = ProfileContract>) -> Self {
+        Self {
+            contracts: Arc::new(
+                contracts
+                    .into_iter()
+                    .map(|contract| (contract.profile_id.clone(), contract))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub fn get(&self, profile_id: &str) -> Option<ProfileContract> {
+        self.contracts.get(profile_id).cloned()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DenyRuntimeToolExecutor;
+
+#[async_trait]
+impl RuntimeToolExecutor for DenyRuntimeToolExecutor {
+    async fn execute_tool(
+        &self,
+        _call: RuntimeToolCall,
+        _spec: RuntimeToolSpec,
+    ) -> CoreResult<RuntimeToolResult> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Forbidden,
+            "runtime tool executor is not configured",
+        ))
+    }
+}
+
+#[async_trait]
+pub trait RuntimeAuditSink: Send + Sync {
+    async fn append_runtime_event(&self, event: Value) -> CoreResult<()>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopRuntimeAuditSink;
+
+#[async_trait]
+impl RuntimeAuditSink for NoopRuntimeAuditSink {
+    async fn append_runtime_event(&self, _event: Value) -> CoreResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonlRuntimeAuditSink {
+    path: PathBuf,
+    file_lock: Arc<Mutex<()>>,
+}
+
+impl JsonlRuntimeAuditSink {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            file_lock: Arc::new(Mutex::new(())),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeAuditSink for JsonlRuntimeAuditSink {
+    async fn append_runtime_event(&self, event: Value) -> CoreResult<()> {
+        let _guard = self.file_lock.lock().await;
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| runtime_failure("runtime audit directory is not writable"))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await
+            .map_err(|_| runtime_failure("runtime audit log is not writable"))?;
+        let encoded = serde_json::to_vec(&event)
+            .map_err(|_| runtime_failure("runtime audit event was not serializable"))?;
+        file.write_all(&encoded)
+            .await
+            .map_err(|_| runtime_failure("runtime audit log write failed"))?;
+        file.write_all(b"\n")
+            .await
+            .map_err(|_| runtime_failure("runtime audit log write failed"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticRuntimeToolExecutor {
+    outputs: Arc<BTreeMap<String, Value>>,
+}
+
+impl StaticRuntimeToolExecutor {
+    pub fn new(outputs: impl IntoIterator<Item = (String, Value)>) -> Self {
+        Self {
+            outputs: Arc::new(outputs.into_iter().collect()),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeToolExecutor for StaticRuntimeToolExecutor {
+    async fn execute_tool(
+        &self,
+        call: RuntimeToolCall,
+        _spec: RuntimeToolSpec,
+    ) -> CoreResult<RuntimeToolResult> {
+        let output = self.outputs.get(&call.tool_name).cloned().ok_or_else(|| {
+            AgentCoreError::coded(ErrorCode::NotFound, "runtime tool was not registered")
+        })?;
+        Ok(RuntimeToolResult {
+            call_id: call.call_id,
+            profile_id: call.profile_id,
+            tool_name: call.tool_name,
+            output_ref: Some(format!("runtime://tool-results/{}", new_id("rttoolout"))),
+            output,
+            metadata: json!({
+                "runtime_tool_executor": "static",
+                "trace_id": call.trace_id,
+            }),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MinimalRuntimeClient {
+    profile: String,
+    registry: RuntimeProfileRegistry,
+}
+
+impl MinimalRuntimeClient {
+    pub fn new(profile: impl Into<String>) -> Self {
+        Self {
+            profile: profile.into(),
+            registry: RuntimeProfileRegistry::default(),
+        }
+    }
+
+    pub fn with_profile_registry(mut self, registry: RuntimeProfileRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    fn ensure_read_only_runtime(&self, external_action_mode: ExternalActionMode) -> CoreResult<()> {
+        if matches!(external_action_mode, ExternalActionMode::Authorized) {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Forbidden,
+                "Minimal Runtime refuses authorized external actions",
+            ));
+        }
+        Ok(())
+    }
+
+    fn result_ref(kind: &str, id: &str) -> String {
+        format!("result://{kind}/{id}")
+    }
+}
+
+impl Default for MinimalRuntimeClient {
+    fn default() -> Self {
+        Self::new("tonglingyu-minimal")
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for MinimalRuntimeClient {
+    async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        self.ensure_read_only_runtime(input.run.external_action_mode)?;
+        let runtime_profile = runtime_profile_for_run(&input, &self.profile);
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&runtime_profile));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_run_contract_payload(&input, &runtime_profile),
+            &input.requested_tools,
+            &runtime_profile,
+        )?;
+        let context_size = input
+            .context
+            .as_ref()
+            .map(|context| context.recent_messages.len())
+            .unwrap_or(0);
+        let snapshot_summary = input
+            .snapshot
+            .as_ref()
+            .map(summarize_json)
+            .unwrap_or_else(|| "no snapshot".to_string());
+        let result_summary = format!(
+            "Minimal Runtime profile={} executed run {} for {} with {} recent messages; snapshot={}.",
+            runtime_profile,
+            input.run.id,
+            input.run.target_resource,
+            context_size,
+            snapshot_summary
+        );
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary,
+                result_ref: Some(Self::result_ref("agent-runs", &input.run.id)),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": runtime_profile,
+                    "trace_id": input.trace_id,
+                    "external_action_mode": input.run.external_action_mode,
+                    "read_only": true,
+                }),
+            },
+            contract.as_ref(),
+            &input.requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn send_session_message(&self, input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        let runtime_profile = runtime_profile_for_session(&input, &self.profile);
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&runtime_profile));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_session_contract_payload(&input, &runtime_profile),
+            &input.requested_tools,
+            &runtime_profile,
+        )?;
+        let user_summary = input.message.content_summary.clone().unwrap_or_default();
+        let response = format!(
+            "Minimal Runtime profile={} received session {} message: {}",
+            runtime_profile, input.session_id, user_summary
+        );
+        let assistant_message = AgentSessionMessage::new(
+            input.session_id.clone(),
+            input.message.sequence + 1,
+            MessageRole::Assistant,
+            Some(response.clone()),
+            input.message.run_id.clone(),
+            input.trace_id.clone(),
+        );
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: response,
+                result_ref: Some(Self::result_ref("agent-sessions", &input.session_id)),
+                messages: vec![assistant_message],
+                metadata: json!({
+                    "runtime_profile": runtime_profile,
+                    "trace_id": input.trace_id,
+                    "read_only": true,
+                }),
+            },
+            contract.as_ref(),
+            &input.requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&input.profile_id));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_profile_contract_payload(&input),
+            &input.requested_tools,
+            &input.profile_id,
+        )?;
+        let content = input
+            .messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: format!(
+                    "Minimal Runtime profile={} received profile step: {}",
+                    input.profile_id, content
+                ),
+                result_ref: Some(Self::result_ref("runtime-profiles", &input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                    "read_only": true,
+                }),
+            },
+            contract.as_ref(),
+            &input.requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = runtime_profile_for_run(&input, &self.profile);
+        let trace_id = input.trace_id.clone();
+        let run_id = input.run.id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.execute_run(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.run_id = Some(run_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
+
+    async fn stream_session_message(
+        &self,
+        input: RuntimeSessionInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = runtime_profile_for_session(&input, &self.profile);
+        let trace_id = input.trace_id.clone();
+        let session_id = input.session_id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.send_session_message(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.session_id = Some(session_id);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
+
+    async fn stream_profile_step(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let profile_id = input.profile_id.clone();
+        let trace_id = input.trace_id.clone();
+        let schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &profile_id,
+        );
+        match self.execute_profile_step(input).await {
+            Ok(output) => {
+                let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+            Err(error) => {
+                let mut event = runtime_stream_error_event(0, profile_id, trace_id, &error);
+                event.schema_version = schema_version;
+                Ok(vec![event])
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HermesRuntimeConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub profile_models: BTreeMap<String, String>,
+    pub timeout: Duration,
+}
+
+impl HermesRuntimeConfig {
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            base_url: trim_base_url(base_url.into()),
+            api_key: None,
+            model: model.into(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let base_url = std::env::var("AGENT_RUNTIME_HERMES_BASE_URL")
+            .or_else(|_| std::env::var("HERMES_RUNTIME_BASE_URL"))
+            .unwrap_or_else(|_| "http://hermes:8642/v1".to_string());
+        let model = std::env::var("AGENT_RUNTIME_HERMES_MODEL")
+            .or_else(|_| std::env::var("HERMES_API_SERVER_MODEL_NAME"))
+            .unwrap_or_else(|_| "hermes-agent".to_string());
+        let timeout = std::env::var("AGENT_RUNTIME_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(30));
+        Self {
+            base_url: trim_base_url(base_url),
+            api_key: std::env::var("AGENT_RUNTIME_HERMES_API_KEY")
+                .or_else(|_| std::env::var("HERMES_API_KEY"))
+                .ok()
+                .filter(|value| !value.is_empty()),
+            model,
+            profile_models: std::env::var("AGENT_RUNTIME_HERMES_PROFILE_MODELS")
+                .ok()
+                .map(|value| parse_profile_models(&value))
+                .unwrap_or_default(),
+            timeout,
+        }
+    }
+
+    pub fn model_for_profile(&self, runtime_profile: &str) -> String {
+        self.profile_models
+            .get(runtime_profile)
+            .or_else(|| {
+                runtime_profile
+                    .rsplit_once(':')
+                    .and_then(|(_, suffix)| self.profile_models.get(suffix))
+            })
+            .cloned()
+            .unwrap_or_else(|| self.model.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct HermesRuntimeClient {
+    config: HermesRuntimeConfig,
+    client: reqwest::Client,
+    registry: RuntimeProfileRegistry,
+    tool_executor: Arc<dyn RuntimeToolExecutor>,
+    audit_sink: Arc<dyn RuntimeAuditSink>,
+    max_tool_rounds: usize,
+}
+
+impl HermesRuntimeClient {
+    pub fn new(config: HermesRuntimeConfig) -> CoreResult<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .map_err(runtime_error)?;
+        Ok(Self {
+            config,
+            client,
+            registry: RuntimeProfileRegistry::default(),
+            tool_executor: Arc::new(DenyRuntimeToolExecutor),
+            audit_sink: Arc::new(NoopRuntimeAuditSink),
+            max_tool_rounds: 4,
+        })
+    }
+
+    pub fn from_env() -> CoreResult<Self> {
+        let mut client = Self::new(HermesRuntimeConfig::from_env())?;
+        if let Some(config) = HttpRuntimeToolExecutorConfig::from_env() {
+            client.tool_executor = Arc::new(HttpRuntimeToolExecutor::new(config)?);
+        }
+        if let Ok(path) = std::env::var("AGENT_RUNTIME_AUDIT_LOG")
+            && !path.trim().is_empty()
+        {
+            client.audit_sink = Arc::new(JsonlRuntimeAuditSink::new(path));
+        }
+        Ok(client)
+    }
+
+    pub fn with_profile_registry(mut self, registry: RuntimeProfileRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn with_tool_executor(mut self, executor: Arc<dyn RuntimeToolExecutor>) -> Self {
+        self.tool_executor = executor;
+        self
+    }
+
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn RuntimeAuditSink>) -> Self {
+        self.audit_sink = audit_sink;
+        self
+    }
+
+    pub fn with_max_tool_rounds(mut self, max_tool_rounds: usize) -> Self {
+        self.max_tool_rounds = max_tool_rounds;
+        self
+    }
+
+    fn ensure_read_only_runtime(&self, external_action_mode: ExternalActionMode) -> CoreResult<()> {
+        if matches!(external_action_mode, ExternalActionMode::Authorized) {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Forbidden,
+                "Hermes Runtime refuses authorized external actions in read-only runtime mode",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<(String, Value)> {
+        let (message, metadata) = self
+            .chat_completion_message(messages, trace_id, runtime_profile, Vec::new())
+            .await?;
+        self.reject_unexpected_tool_calls(
+            &message.tool_calls,
+            runtime_profile,
+            trace_id,
+            contract,
+            requested_tools,
+        )
+        .await?;
+        let content = message_content(message)?;
+        Ok((content, metadata))
+    }
+
+    async fn chat_completion_with_budget(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<(String, Value)> {
+        let started = Instant::now();
+        ensure_profile_budget(started, contract)?;
+        let result = self
+            .chat_completion(
+                messages,
+                trace_id,
+                runtime_profile,
+                contract,
+                requested_tools,
+            )
+            .await?;
+        ensure_profile_budget(started, contract)?;
+        Ok(result)
+    }
+
+    async fn reject_unexpected_tool_calls(
+        &self,
+        tool_calls: &[HermesToolCall],
+        runtime_profile: &str,
+        trace_id: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<()> {
+        if tool_calls.is_empty() {
+            return Ok(());
+        }
+        let error = AgentCoreError::coded(
+            ErrorCode::Forbidden,
+            "runtime profile requested a tool outside authorized scope",
+        );
+        for tool_call in tool_calls {
+            let audit_tool_name =
+                runtime_tool_audit_name(contract, requested_tools, &tool_call.function.name);
+            let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+            let call_event = runtime_tool_call_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+            );
+            self.audit_sink.append_runtime_event(call_event).await?;
+            let failure_event = runtime_tool_error_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+                &error,
+            );
+            self.audit_sink.append_runtime_event(failure_event).await?;
+        }
+        Err(error)
+    }
+
+    async fn chat_completion_message(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        tools: Vec<HermesToolDefinition>,
+    ) -> CoreResult<(HermesMessage, Value)> {
+        let started = Instant::now();
+        let model = self.config.model_for_profile(runtime_profile);
+        let request = HermesChatCompletionRequest {
+            model: model.clone(),
+            messages,
+            stream: false,
+            metadata: json!({
+                "trace_id": trace_id,
+                "runtime_profile": runtime_profile,
+                "agent_platform_phase": "p1",
+                "read_only": true,
+            }),
+            tool_choice: tool_choice_for_tools(&tools),
+            tools,
+        };
+        let url = chat_url(&self.config.base_url)?;
+        let mut builder = self
+            .client
+            .post(url)
+            .header("x-agent-trace-id", trace_id)
+            .json(&request);
+        if let Some(api_key) = &self.config.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = builder.send().await.map_err(map_reqwest_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == ReqwestStatusCode::TOO_MANY_REQUESTS {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::RateLimited,
+                    "Hermes Runtime rate limited request",
+                ));
+            }
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                format!("Hermes Runtime returned HTTP {}", status.as_u16()),
+            ));
+        }
+        let body = response
+            .json::<HermesChatCompletionResponse>()
+            .await
+            .map_err(|_| {
+                AgentCoreError::coded(
+                    ErrorCode::InternalError,
+                    "Hermes Runtime response was malformed",
+                )
+            })?;
+        let message = body
+            .choices
+            .first()
+            .map(|choice| choice.message.clone())
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::InternalError,
+                    "Hermes Runtime response did not include assistant message",
+                )
+            })?;
+        let elapsed = started.elapsed().as_secs_f64();
+        metrics::counter!(metric_names::RUNTIME_CALL_TOTAL, "runtime" => "hermes").increment(1);
+        metrics::histogram!(metric_names::RUNTIME_DURATION_SECONDS, "runtime" => "hermes")
+            .record(elapsed);
+        Ok((
+            message,
+            json!({
+                "runtime": "hermes",
+                "runtime_profile": runtime_profile,
+                "hermes_model": model,
+                "trace_id": trace_id,
+                "read_only": true,
+                "duration_ms": (elapsed * 1000.0).round() as i64,
+            }),
+        ))
+    }
+
+    async fn profile_chat_completion(
+        &self,
+        mut messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<(String, Value)> {
+        let tools = tool_definitions(contract, requested_tools);
+        let started = Instant::now();
+        let mut tool_results = Vec::new();
+        let mut tool_audit_events = Vec::new();
+        for round in 0..=self.max_tool_rounds {
+            ensure_profile_budget(started, contract)?;
+            let (message, mut metadata) = self
+                .chat_completion_message(messages.clone(), trace_id, runtime_profile, tools.clone())
+                .await?;
+            ensure_profile_budget(started, contract)?;
+            if !message.tool_calls.is_empty() {
+                let tool_calls = message.tool_calls.clone();
+                if round >= self.max_tool_rounds {
+                    let error = AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "runtime profile exceeded maximum tool rounds",
+                    );
+                    for tool_call in &tool_calls {
+                        let audit_tool_name = runtime_tool_audit_name(
+                            contract,
+                            requested_tools,
+                            &tool_call.function.name,
+                        );
+                        let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+                        let call_event = runtime_tool_call_audit_event(
+                            runtime_profile,
+                            trace_id,
+                            audit_call_id.as_deref(),
+                            audit_tool_name.as_deref(),
+                        );
+                        self.audit_sink
+                            .append_runtime_event(call_event.clone())
+                            .await?;
+                        tool_audit_events.push(call_event);
+                        let failure_event = runtime_tool_error_audit_event(
+                            runtime_profile,
+                            trace_id,
+                            audit_call_id.as_deref(),
+                            audit_tool_name.as_deref(),
+                            &error,
+                        );
+                        self.audit_sink
+                            .append_runtime_event(failure_event.clone())
+                            .await?;
+                        tool_audit_events.push(failure_event);
+                    }
+                    return Err(error);
+                }
+                messages.push(HermesChatMessage::assistant_tool_calls(tool_calls.clone()));
+                for tool_call in tool_calls {
+                    ensure_profile_budget(started, contract)?;
+                    let audit_tool_name = runtime_tool_audit_name(
+                        contract,
+                        requested_tools,
+                        &tool_call.function.name,
+                    );
+                    let audit_call_id = audit_tool_name.as_ref().map(|_| tool_call.id.clone());
+                    let call_event = runtime_tool_call_audit_event(
+                        runtime_profile,
+                        trace_id,
+                        audit_call_id.as_deref(),
+                        audit_tool_name.as_deref(),
+                    );
+                    self.audit_sink
+                        .append_runtime_event(call_event.clone())
+                        .await?;
+                    tool_audit_events.push(call_event);
+                    let (result, output_schema) = match self
+                        .execute_runtime_tool_call(
+                            contract,
+                            requested_tools,
+                            runtime_profile,
+                            trace_id,
+                            tool_call,
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let failure_event = runtime_tool_error_audit_event(
+                                runtime_profile,
+                                trace_id,
+                                audit_call_id.as_deref(),
+                                audit_tool_name.as_deref(),
+                                &error,
+                            );
+                            self.audit_sink
+                                .append_runtime_event(failure_event.clone())
+                                .await?;
+                            tool_audit_events.push(failure_event);
+                            return Err(error);
+                        }
+                    };
+                    ensure_profile_budget(started, contract)?;
+                    let result_summary = runtime_tool_result_summary(&result, &output_schema);
+                    let result_event = runtime_tool_result_audit_event(&result, &output_schema);
+                    self.audit_sink
+                        .append_runtime_event(result_event.clone())
+                        .await?;
+                    tool_audit_events.push(result_event);
+                    messages.push(HermesChatMessage::tool_result(
+                        result.call_id.clone(),
+                        runtime_tool_result_message(&result)?,
+                    ));
+                    tool_results.push(result_summary);
+                }
+                continue;
+            }
+
+            let content = message_content(message)?;
+            metadata["tool_rounds"] = json!(round);
+            metadata["tool_results"] = json!(tool_results);
+            metadata["tool_audit_events"] = json!(tool_audit_events);
+            return Ok((content, metadata));
+        }
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile did not produce a final answer",
+        ))
+    }
+
+    async fn execute_runtime_tool_call(
+        &self,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+        runtime_profile: &str,
+        trace_id: &str,
+        tool_call: HermesToolCall,
+    ) -> CoreResult<(RuntimeToolResult, Value)> {
+        let Some(contract) = contract else {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Forbidden,
+                "runtime profile requested a tool without a profile contract",
+            ));
+        };
+        let spec = contract
+            .tool_policy
+            .validate_tool_call(&tool_call.function.name, requested_tools)?;
+        let arguments = parse_tool_arguments(&tool_call.function.arguments)?;
+        validate_json_schema_value(&spec.input_schema, &arguments)?;
+        let call_id = tool_call.id.clone();
+        let tool_name = tool_call.function.name.clone();
+        let call = RuntimeToolCall {
+            call_id: tool_call.id,
+            profile_id: runtime_profile.to_string(),
+            tool_name: tool_call.function.name,
+            arguments,
+            trace_id: trace_id.to_string(),
+            metadata: json!({
+                "runtime": "hermes",
+                "tool_call_type": tool_call.kind,
+            }),
+        };
+        let mut result = self
+            .tool_executor
+            .execute_tool(call, spec.clone())
+            .await
+            .map_err(runtime_tool_executor_error)?;
+        result.call_id = call_id;
+        result.profile_id = runtime_profile.to_string();
+        result.tool_name = tool_name;
+        if !result.metadata.is_object() {
+            result.metadata = json!({});
+        }
+        result.metadata["trace_id"] = json!(trace_id);
+        if spec.output_ref_required && result.output_ref.is_none() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime tool result did not include output_ref",
+            ));
+        }
+        if result.output_ref.is_none() {
+            result.output_ref = Some(format!("runtime://tool-results/{}", result.call_id));
+        }
+        validate_json_schema_value(&spec.output_schema, &result.output)?;
+        Ok((result, spec.output_schema))
+    }
+
+    async fn chat_completion_stream(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<(String, Value, Vec<RuntimeStreamEvent>)> {
+        let started = Instant::now();
+        let model = self.config.model_for_profile(runtime_profile);
+        let request = HermesChatCompletionRequest {
+            model: model.clone(),
+            messages,
+            stream: true,
+            metadata: json!({
+                "trace_id": trace_id,
+                "runtime_profile": runtime_profile,
+                "agent_platform_phase": "runtime-streaming",
+                "read_only": true,
+            }),
+            tool_choice: None,
+            tools: Vec::new(),
+        };
+        let url = chat_url(&self.config.base_url)?;
+        let mut builder = self
+            .client
+            .post(url)
+            .header("x-agent-trace-id", trace_id)
+            .json(&request);
+        if let Some(api_key) = &self.config.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = builder.send().await.map_err(map_reqwest_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(AgentCoreError::coded(
+                if status == ReqwestStatusCode::TOO_MANY_REQUESTS {
+                    ErrorCode::RateLimited
+                } else {
+                    ErrorCode::InternalError
+                },
+                format!("Hermes Runtime stream returned HTTP {}", status.as_u16()),
+            ));
+        }
+
+        let mut events = vec![RuntimeStreamEvent {
+            sequence: 0,
+            event_type: RuntimeStreamEventType::Started,
+            profile_id: runtime_profile.to_string(),
+            trace_id: trace_id.to_string(),
+            run_id: None,
+            session_id: None,
+            schema_version: None,
+            content_delta: None,
+            output: None,
+            error_code: None,
+            metadata: json!({
+                "runtime": "hermes",
+                "hermes_model": model,
+            }),
+        }];
+        let mut content = String::new();
+        let mut sequence = 1;
+        let mut pending = String::new();
+        let mut unexpected_tool_calls = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_reqwest_error)?;
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+            process_sse_lines(
+                &mut pending,
+                &SseLineContext {
+                    runtime_profile,
+                    trace_id,
+                    model: &model,
+                },
+                &mut SseStreamState {
+                    sequence: &mut sequence,
+                    content: &mut content,
+                    events: &mut events,
+                    unexpected_tool_calls: &mut unexpected_tool_calls,
+                },
+                false,
+            )?;
+            self.reject_unexpected_stream_tool_calls(
+                &unexpected_tool_calls,
+                runtime_profile,
+                trace_id,
+                contract,
+                requested_tools,
+            )
+            .await?;
+        }
+        process_sse_lines(
+            &mut pending,
+            &SseLineContext {
+                runtime_profile,
+                trace_id,
+                model: &model,
+            },
+            &mut SseStreamState {
+                sequence: &mut sequence,
+                content: &mut content,
+                events: &mut events,
+                unexpected_tool_calls: &mut unexpected_tool_calls,
+            },
+            true,
+        )?;
+        self.reject_unexpected_stream_tool_calls(
+            &unexpected_tool_calls,
+            runtime_profile,
+            trace_id,
+            contract,
+            requested_tools,
+        )
+        .await?;
+        let content = content.trim().to_string();
+        if content.is_empty() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "Hermes Runtime stream did not include assistant content",
+            ));
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        metrics::counter!(metric_names::RUNTIME_CALL_TOTAL, "runtime" => "hermes_stream")
+            .increment(1);
+        metrics::histogram!(metric_names::RUNTIME_DURATION_SECONDS, "runtime" => "hermes_stream")
+            .record(elapsed);
+        Ok((
+            content,
+            json!({
+                "runtime": "hermes",
+                "runtime_profile": runtime_profile,
+                "hermes_model": model,
+                "trace_id": trace_id,
+                "read_only": true,
+                "streaming": true,
+                "duration_ms": (elapsed * 1000.0).round() as i64,
+            }),
+            events,
+        ))
+    }
+
+    async fn chat_completion_stream_with_budget(
+        &self,
+        messages: Vec<HermesChatMessage>,
+        trace_id: &str,
+        runtime_profile: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<(String, Value, Vec<RuntimeStreamEvent>)> {
+        let started = Instant::now();
+        ensure_profile_budget(started, contract)?;
+        let result = self
+            .chat_completion_stream(
+                messages,
+                trace_id,
+                runtime_profile,
+                contract,
+                requested_tools,
+            )
+            .await?;
+        ensure_profile_budget(started, contract)?;
+        Ok(result)
+    }
+
+    async fn reject_unexpected_stream_tool_calls(
+        &self,
+        tool_calls: &[HermesStreamToolCall],
+        runtime_profile: &str,
+        trace_id: &str,
+        contract: Option<&ProfileContract>,
+        requested_tools: &[String],
+    ) -> CoreResult<()> {
+        if tool_calls.is_empty() {
+            return Ok(());
+        }
+        let error = AgentCoreError::coded(
+            ErrorCode::Forbidden,
+            "runtime profile requested a tool outside authorized scope",
+        );
+        for tool_call in tool_calls {
+            let audit_tool_name = tool_call
+                .name
+                .as_deref()
+                .and_then(|name| runtime_tool_audit_name(contract, requested_tools, name));
+            let audit_call_id = audit_tool_name.as_ref().and_then(|_| tool_call.id.clone());
+            let call_event = runtime_tool_call_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+            );
+            self.audit_sink.append_runtime_event(call_event).await?;
+            let failure_event = runtime_tool_error_audit_event(
+                runtime_profile,
+                trace_id,
+                audit_call_id.as_deref(),
+                audit_tool_name.as_deref(),
+                &error,
+            );
+            self.audit_sink.append_runtime_event(failure_event).await?;
+        }
+        Err(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatibleNetworkRuntimeConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub profile_models: BTreeMap<String, String>,
+    pub connect_timeout: Duration,
+    pub read_timeout: Duration,
+    pub total_deadline: Duration,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    pub max_attempts: usize,
+    pub retry_base_delay: Duration,
+    pub unhealthy_window: Duration,
+    pub max_concurrency: usize,
+    pub response_format_json: bool,
+    pub reasoning_split: Option<bool>,
+}
+
+impl OpenAiCompatibleNetworkRuntimeConfig {
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            base_url: trim_base_url(base_url.into()),
+            api_key: None,
+            model: model.into(),
+            profile_models: BTreeMap::new(),
+            connect_timeout: Duration::from_millis(1500),
+            read_timeout: Duration::from_millis(45000),
+            total_deadline: Duration::from_millis(120000),
+            max_tokens: 768,
+            temperature: 0.0,
+            max_attempts: 3,
+            retry_base_delay: Duration::from_millis(120),
+            unhealthy_window: Duration::from_secs(5),
+            max_concurrency: 2,
+            response_format_json: true,
+            reasoning_split: None,
+        }
+    }
+
+    pub fn from_env() -> CoreResult<Self> {
+        let base_url = env_nonempty("AGENT_RUNTIME_OPENAI_BASE_URL")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_BASE_URL"))
+            .or_else(|| env_nonempty("OPENAI_BASE_URL"))
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "AGENT_RUNTIME_OPENAI_BASE_URL must be configured",
+                )
+            })?;
+        let model = env_nonempty("AGENT_RUNTIME_OPENAI_MODEL")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_MODEL"))
+            .or_else(|| env_nonempty("OPENAI_MODEL"))
+            .ok_or_else(|| {
+                AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "AGENT_RUNTIME_OPENAI_MODEL must be configured",
+                )
+            })?;
+        let mut config = Self::new(base_url, model);
+        config.api_key = env_nonempty("AGENT_RUNTIME_OPENAI_API_KEY")
+            .or_else(|| env_nonempty("LOCAL_OPENAI_API_KEY"))
+            .or_else(|| env_nonempty("OPENAI_API_KEY"));
+        config.profile_models = env_nonempty("AGENT_RUNTIME_OPENAI_PROFILE_MODELS")
+            .map(|value| parse_profile_models(&value))
+            .unwrap_or_default();
+        config.connect_timeout = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS",
+            config.connect_timeout.as_millis() as u64,
+        ));
+        config.read_timeout = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS",
+            config.read_timeout.as_millis() as u64,
+        ));
+        config.total_deadline = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS",
+            config.total_deadline.as_millis() as u64,
+        ));
+        config.max_tokens = env_u64("AGENT_RUNTIME_OPENAI_MAX_TOKENS", config.max_tokens as u64)
+            .min(u32::MAX as u64) as u32;
+        config.temperature = env_f32("AGENT_RUNTIME_OPENAI_TEMPERATURE", config.temperature);
+        config.max_attempts =
+            env_usize("AGENT_RUNTIME_OPENAI_MAX_ATTEMPTS", config.max_attempts).max(1);
+        config.retry_base_delay = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_RETRY_BASE_DELAY_MS",
+            config.retry_base_delay.as_millis() as u64,
+        ));
+        config.unhealthy_window = Duration::from_millis(env_u64(
+            "AGENT_RUNTIME_OPENAI_UNHEALTHY_WINDOW_MS",
+            config.unhealthy_window.as_millis() as u64,
+        ));
+        config.max_concurrency = env_usize(
+            "AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY",
+            config.max_concurrency,
+        )
+        .max(1);
+        config.response_format_json = env_bool(
+            "AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON",
+            config.response_format_json,
+        );
+        config.reasoning_split = env_optional_bool("AGENT_RUNTIME_OPENAI_REASONING_SPLIT");
+        if config.api_key.as_deref().unwrap_or_default().is_empty() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Unauthorized,
+                "AGENT_RUNTIME_OPENAI_API_KEY must be configured",
+            ));
+        }
+        Ok(config)
+    }
+
+    pub fn apply_tuning_from_prefix(
+        &mut self,
+        prefix: &str,
+        get_env: &dyn Fn(&str) -> Option<String>,
+    ) -> CoreResult<()> {
+        self.connect_timeout = Duration::from_millis(prefixed_env_u64(
+            prefix,
+            "CONNECT_TIMEOUT_MS",
+            self.connect_timeout.as_millis() as u64,
+            get_env,
+        )?);
+        self.read_timeout = Duration::from_millis(prefixed_env_u64(
+            prefix,
+            "READ_TIMEOUT_MS",
+            self.read_timeout.as_millis() as u64,
+            get_env,
+        )?);
+        self.total_deadline = Duration::from_millis(prefixed_env_u64(
+            prefix,
+            "TOTAL_DEADLINE_MS",
+            self.total_deadline.as_millis() as u64,
+            get_env,
+        )?);
+        self.max_tokens = prefixed_env_u64(prefix, "MAX_TOKENS", self.max_tokens as u64, get_env)?
+            .min(u32::MAX as u64) as u32;
+        self.temperature = prefixed_env_f32(prefix, "TEMPERATURE", self.temperature, get_env)?;
+        self.max_attempts =
+            prefixed_env_usize(prefix, "MAX_ATTEMPTS", self.max_attempts, get_env)?.max(1);
+        self.retry_base_delay = Duration::from_millis(prefixed_env_u64(
+            prefix,
+            "RETRY_BASE_DELAY_MS",
+            self.retry_base_delay.as_millis() as u64,
+            get_env,
+        )?);
+        self.unhealthy_window = Duration::from_millis(prefixed_env_u64(
+            prefix,
+            "UNHEALTHY_WINDOW_MS",
+            self.unhealthy_window.as_millis() as u64,
+            get_env,
+        )?);
+        self.max_concurrency =
+            prefixed_env_usize(prefix, "MAX_CONCURRENCY", self.max_concurrency, get_env)?.max(1);
+        self.response_format_json = prefixed_env_bool(
+            prefix,
+            "RESPONSE_FORMAT_JSON",
+            self.response_format_json,
+            get_env,
+        )?;
+        if let Some(value) = prefixed_env_optional_bool(prefix, "REASONING_SPLIT", get_env)? {
+            self.reasoning_split = value.then_some(true);
+        }
+        Ok(())
+    }
+
+    pub fn model_for_profile(&self, runtime_profile: &str) -> String {
+        self.profile_models
+            .get(runtime_profile)
+            .or_else(|| {
+                runtime_profile
+                    .rsplit_once(':')
+                    .and_then(|(_, suffix)| self.profile_models.get(suffix))
+            })
+            .cloned()
+            .unwrap_or_else(|| self.model.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct OpenAiCompatibleNetworkRuntimeClient {
+    config: OpenAiCompatibleNetworkRuntimeConfig,
+    client: reqwest::Client,
+    registry: RuntimeProfileRegistry,
+    audit_sink: Arc<dyn RuntimeAuditSink>,
+    default_limiter: Arc<Semaphore>,
+    profile_limiters: Arc<BTreeMap<String, Arc<Semaphore>>>,
+    unhealthy_until: Arc<Mutex<Option<Instant>>>,
+}
+
+impl OpenAiCompatibleNetworkRuntimeClient {
+    pub fn new(config: OpenAiCompatibleNetworkRuntimeConfig) -> CoreResult<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(config.connect_timeout)
+            .read_timeout(config.read_timeout)
+            .timeout(config.total_deadline)
+            .build()
+            .map_err(runtime_error)?;
+        let default_limiter = Arc::new(Semaphore::new(config.max_concurrency));
+        let profile_limiters = config
+            .profile_models
+            .keys()
+            .map(|profile| {
+                (
+                    profile.clone(),
+                    Arc::new(Semaphore::new(config.max_concurrency)),
+                )
+            })
+            .collect();
+        Ok(Self {
+            config,
+            client,
+            registry: RuntimeProfileRegistry::default(),
+            audit_sink: Arc::new(NoopRuntimeAuditSink),
+            default_limiter,
+            profile_limiters: Arc::new(profile_limiters),
+            unhealthy_until: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn from_env() -> CoreResult<Self> {
+        let mut client = Self::new(OpenAiCompatibleNetworkRuntimeConfig::from_env()?)?;
+        if let Ok(path) = std::env::var("AGENT_RUNTIME_AUDIT_LOG")
+            && !path.trim().is_empty()
+        {
+            client.audit_sink = Arc::new(JsonlRuntimeAuditSink::new(path));
+        }
+        Ok(client)
+    }
+
+    pub fn with_profile_registry(mut self, registry: RuntimeProfileRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn RuntimeAuditSink>) -> Self {
+        self.audit_sink = audit_sink;
+        self
+    }
+
+    async fn execute_profile_step_inner(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<RuntimeOutput> {
+        self.ensure_provider_healthy().await?;
+        let limiter = self
+            .profile_limiters
+            .get(&input.profile_id)
+            .cloned()
+            .unwrap_or_else(|| self.default_limiter.clone());
+        let _permit = limiter
+            .acquire_owned()
+            .await
+            .map_err(|_| runtime_failure("OpenAI-compatible Runtime concurrency limiter closed"))?;
+
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&input.profile_id));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_profile_contract_payload(&input),
+            &input.requested_tools,
+            &input.profile_id,
+        )?;
+        let mut effective_contract = contract.clone();
+        let mut requested_tools = input.requested_tools.clone();
+        if let (Some(contract), Some(step)) =
+            (effective_contract.as_mut(), input.runtime_step.as_ref())
+        {
+            if step.tool_policy.has_rules() {
+                requested_tools = step
+                    .tool_policy
+                    .effective_tools_for_request(&input.requested_tools);
+                step.tool_policy
+                    .validate_requested_tools(&requested_tools)?;
+                contract.tool_policy = step.tool_policy.clone();
+            }
+            if !json_schema_is_empty(&step.output_contract) {
+                contract.output_schema = step.output_contract.clone();
+            }
+        }
+        let started = Instant::now();
+        ensure_profile_budget(started, effective_contract.as_ref())?;
+        let model = self.config.model_for_profile(&input.profile_id);
+        let (content, metadata) = self
+            .chat_completion_with_retry(
+                &input,
+                &model,
+                &requested_tools,
+                started,
+                effective_contract.as_ref(),
+            )
+            .await?;
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: content,
+                result_ref: Some(format!(
+                    "openai-compatible-network://profiles/{}/{}",
+                    input.profile_id, input.trace_id
+                )),
+                messages: Vec::new(),
+                metadata,
+            },
+            effective_contract.as_ref(),
+            &requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn chat_completion_with_retry(
+        &self,
+        input: &RuntimeProfileInput,
+        model: &str,
+        requested_tools: &[String],
+        started: Instant,
+        contract: Option<&ProfileContract>,
+    ) -> CoreResult<(String, Value)> {
+        let mut last_error_type = "provider_unavailable";
+        let mut attempt_failures = Vec::new();
+        let mut retry_instruction = None;
+        for attempt in 1..=self.config.max_attempts {
+            let request_timeout =
+                openai_profile_request_timeout(started, self.config.total_deadline, contract)?;
+            if started.elapsed() >= self.config.total_deadline {
+                self.mark_provider_unhealthy().await;
+                return Err(openai_runtime_error_with_diagnostic(
+                    "deadline_exceeded",
+                    "OpenAI-compatible Runtime deadline exceeded",
+                    openai_attempt_failure_diagnostic("deadline_exceeded", None, &attempt_failures),
+                ));
+            }
+            match self
+                .send_chat_completion(
+                    input,
+                    model,
+                    requested_tools,
+                    attempt,
+                    started,
+                    request_timeout,
+                    retry_instruction,
+                )
+                .await
+            {
+                Ok(mut output) => {
+                    self.clear_provider_unhealthy().await;
+                    if !attempt_failures.is_empty()
+                        && let Value::Object(metadata) = &mut output.1
+                    {
+                        metadata.insert(
+                            "previous_attempt_failures".to_string(),
+                            Value::Array(attempt_failures),
+                        );
+                    }
+                    return Ok(output);
+                }
+                Err(error) => {
+                    last_error_type = error.error_type;
+                    let current_diagnostic = error.diagnostic.clone();
+                    if let Some(diagnostic) = current_diagnostic.clone() {
+                        attempt_failures.push(diagnostic);
+                    }
+                    if error.mark_unhealthy {
+                        self.mark_provider_unhealthy().await;
+                    }
+                    retry_instruction = openai_retry_instruction_for_error(error.error_type);
+                    if attempt >= self.config.max_attempts || !error.retryable {
+                        return Err(openai_runtime_error_with_diagnostic(
+                            error.error_type,
+                            error.safe_message,
+                            openai_attempt_failure_diagnostic(
+                                error.error_type,
+                                current_diagnostic,
+                                &attempt_failures,
+                            ),
+                        ));
+                    }
+                    let delay = retry_delay(
+                        self.config.retry_base_delay,
+                        attempt,
+                        &input.trace_id,
+                        &input.profile_id,
+                    );
+                    if openai_retry_delay_exceeds_budget(
+                        started,
+                        delay,
+                        self.config.total_deadline,
+                        contract,
+                    )? {
+                        return Err(openai_runtime_error_with_diagnostic(
+                            "deadline_exceeded",
+                            "OpenAI-compatible Runtime deadline exceeded",
+                            openai_attempt_failure_diagnostic(
+                                "deadline_exceeded",
+                                current_diagnostic,
+                                &attempt_failures,
+                            ),
+                        ));
+                    }
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+        Err(openai_runtime_error_with_diagnostic(
+            last_error_type,
+            "OpenAI-compatible Runtime provider unavailable",
+            openai_attempt_failure_diagnostic(last_error_type, None, &attempt_failures),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_chat_completion(
+        &self,
+        input: &RuntimeProfileInput,
+        model: &str,
+        requested_tools: &[String],
+        attempt: usize,
+        started: Instant,
+        request_timeout: Duration,
+        retry_instruction: Option<&'static str>,
+    ) -> Result<(String, Value), OpenAiRuntimeAttemptError> {
+        let mut messages = input
+            .messages
+            .iter()
+            .map(|message| OpenAiCompatibleChatMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(instruction) = retry_instruction {
+            messages.push(OpenAiCompatibleChatMessage {
+                role: "user".to_string(),
+                content: instruction.to_string(),
+            });
+        }
+        let request = OpenAiCompatibleChatCompletionRequest {
+            model: model.to_string(),
+            messages,
+            stream: false,
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+            response_format: self
+                .config
+                .response_format_json
+                .then(|| json!({"type": "json_object"})),
+            reasoning_split: self.config.reasoning_split,
+        };
+        let url = openai_chat_url(&self.config.base_url).map_err(|_| {
+            OpenAiRuntimeAttemptError::fatal(
+                "invalid_runtime_url",
+                "OpenAI-compatible Runtime URL was invalid",
+            )
+        })?;
+        let provider_request =
+            openai_provider_request_snapshot(OpenAiProviderRequestSnapshotInput {
+                request: &request,
+                trace_id: &input.trace_id,
+                profile_id: &input.profile_id,
+                attempt,
+                base_url: &self.config.base_url,
+                requested_tools,
+                retry_instruction_applied: retry_instruction.is_some(),
+            });
+        let provider_request_sha256 = format!("sha256:{}", sha256_json(&provider_request));
+        let mut builder = self
+            .client
+            .post(url)
+            .timeout(request_timeout)
+            .header("x-agent-trace-id", &input.trace_id)
+            .json(&request);
+        if let Some(api_key) = &self.config.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = builder.send().await.map_err(|error| {
+            classify_openai_reqwest_error(error).with_provider_request(provider_request.clone())
+        })?;
+        let status = response.status();
+        let response_provider_request_id = provider_request_id(response.headers());
+        let body_text = response.text().await.map_err(|error| {
+            classify_openai_reqwest_error(error).with_provider_request(provider_request.clone())
+        })?;
+        if !status.is_success() {
+            return Err(classify_openai_http_error(status, &body_text)
+                .with_provider_request(provider_request.clone()));
+        }
+        let raw_response_sha256 = sha256_hex(&body_text);
+        let body_value = serde_json::from_str::<Value>(&body_text).map_err(|_| {
+            OpenAiRuntimeAttemptError::fatal(
+                "provider_malformed_json",
+                "OpenAI-compatible Runtime response was malformed",
+            )
+            .with_provider_request(provider_request.clone())
+        })?;
+        let body =
+            serde_json::from_value::<OpenAiCompatibleChatCompletionResponse>(body_value.clone())
+                .map_err(|_| {
+                    OpenAiRuntimeAttemptError::fatal(
+                        "provider_malformed_json",
+                        "OpenAI-compatible Runtime response was malformed",
+                    )
+                    .with_provider_request(provider_request.clone())
+                })?;
+        let provider_request_id = response_provider_request_id.or_else(|| body.id.clone());
+        let provider_model = body.model.clone().unwrap_or_else(|| model.to_string());
+        let provider_usage = body.usage.clone().unwrap_or_else(|| json!({}));
+        let choice = body.choices.first().ok_or_else(|| {
+            OpenAiRuntimeAttemptError::fatal(
+                "provider_malformed_json",
+                "OpenAI-compatible Runtime response did not include a choice",
+            )
+            .with_provider_request(provider_request.clone())
+        })?;
+        if choice
+            .message
+            .refusal
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(OpenAiRuntimeAttemptError::fatal(
+                "safety_refusal",
+                "OpenAI-compatible Runtime returned a safety refusal",
+            )
+            .with_provider_request(provider_request.clone()));
+        }
+        let raw_content = choice.message.content.as_deref().unwrap_or_default();
+        let reasoning_details = choice.message.reasoning_details.clone();
+        if raw_content.trim().is_empty() && reasoning_details.is_none() {
+            let diagnostic = openai_empty_content_diagnostic(OpenAiEmptyContentDiagnosticInput {
+                body: &body_value,
+                status_code: status.as_u16(),
+                provider_request_id: provider_request_id.as_deref(),
+                provider_model: &provider_model,
+                attempt,
+                raw_response_sha256: &raw_response_sha256,
+                latency_ms: started.elapsed().as_millis() as u64,
+                base_url_host: &base_url_host(&self.config.base_url),
+                response_format_json_requested: self.config.response_format_json,
+                requested_tool_count: requested_tools.len(),
+            });
+            return Err(OpenAiRuntimeAttemptError::retryable(
+                "provider_empty_content",
+                "OpenAI-compatible Runtime response did not include assistant content",
+            )
+            .with_diagnostic(diagnostic)
+            .with_provider_request(provider_request.clone()));
+        }
+        let provider_output = openai_provider_output_envelope(
+            raw_content,
+            reasoning_details.as_ref(),
+            self.config.response_format_json,
+        );
+        let content = provider_output
+            .business_json_candidate
+            .clone()
+            .unwrap_or_else(|| provider_output.validator_content.clone());
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let input_digest = input
+            .metadata
+            .get("input_digest")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let projection_digest = input
+            .metadata
+            .get("projection_digest")
+            .cloned()
+            .unwrap_or(Value::Null);
+        metrics::counter!(
+            metric_names::RUNTIME_CALL_TOTAL,
+            "runtime" => "openai_compatible_network"
+        )
+        .increment(1);
+        metrics::histogram!(
+            metric_names::RUNTIME_DURATION_SECONDS,
+            "runtime" => "openai_compatible_network"
+        )
+        .record(started.elapsed().as_secs_f64());
+        let content_json_digest = serde_json::from_str::<Value>(&content)
+            .ok()
+            .map(|value| sha256_json(&value));
+        Ok((
+            content,
+            json!({
+                "runtime": "openai-compatible-network",
+                "runtime_adapter": "openai-compatible-network",
+                "runtime_profile": &input.profile_id,
+                "provider_kind": "openai_compatible",
+                "input_digest": input_digest,
+                "projection_digest": projection_digest,
+                "base_url_host": base_url_host(&self.config.base_url),
+                "provider_request_id": provider_request_id,
+                "provider_model": provider_model,
+                "finish_reason": choice.finish_reason.clone().unwrap_or_else(|| "unknown".to_string()),
+                "usage": provider_usage,
+                "latency_ms": latency_ms,
+                "attempt_count": attempt,
+                "retry_instruction_applied": retry_instruction.is_some(),
+                "provider_request": provider_request,
+                "provider_request_sha256": provider_request_sha256,
+                "provider_request_embedded": true,
+                "raw_response_sha256": format!("sha256:{raw_response_sha256}"),
+                "parsed_json_sha256": content_json_digest.map(|value| format!("sha256:{value}")),
+                "provider_output": provider_output.to_metadata(),
+                "tool_calling_supported": false,
+                "requested_tools_exposed_as_text": !requested_tools.is_empty(),
+                "requested_tool_count": requested_tools.len(),
+                "trace_id": &input.trace_id,
+                "read_only": true,
+                "secret_values_printed": false,
+            }),
+        ))
+    }
+
+    async fn ensure_provider_healthy(&self) -> CoreResult<()> {
+        let mut guard = self.unhealthy_until.lock().await;
+        if let Some(deadline) = *guard {
+            if deadline <= Instant::now() {
+                *guard = None;
+                return Ok(());
+            }
+            return Err(openai_runtime_error(
+                "provider_unhealthy",
+                "OpenAI-compatible Runtime provider is temporarily unhealthy",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn mark_provider_unhealthy(&self) {
+        if self.config.unhealthy_window.is_zero() {
+            return;
+        }
+        let mut guard = self.unhealthy_until.lock().await;
+        *guard = Some(Instant::now() + self.config.unhealthy_window);
+    }
+
+    async fn clear_provider_unhealthy(&self) {
+        let mut guard = self.unhealthy_until.lock().await;
+        *guard = None;
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for OpenAiCompatibleNetworkRuntimeClient {
+    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "OpenAI-compatible Runtime only supports profile steps",
+        ))
+    }
+
+    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "OpenAI-compatible Runtime only supports profile steps",
+        ))
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let profile_id = input.profile_id.clone();
+        let trace_id = input.trace_id.clone();
+        let result = self.execute_profile_step_inner(input).await;
+        let event = match &result {
+            Ok(output) => json!({
+                "event": "runtime_profile_step",
+                "runtime_adapter": "openai-compatible-network",
+                "profile_id": profile_id,
+                "trace_id": trace_id,
+                "status": "accepted_json",
+                "result_ref": output.result_ref,
+                "provider_request_id": output.metadata.get("provider_request_id").cloned().unwrap_or(Value::Null),
+                "provider_model": output.metadata.get("provider_model").cloned().unwrap_or(Value::Null),
+                "latency_ms": output.metadata.get("latency_ms").cloned().unwrap_or(Value::Null),
+                "attempt_count": output.metadata.get("attempt_count").cloned().unwrap_or(Value::Null),
+                "input_digest": output.metadata.get("input_digest").cloned().unwrap_or(Value::Null),
+                "raw_response_sha256": output.metadata.get("raw_response_sha256").cloned().unwrap_or(Value::Null),
+                "secret_values_printed": false,
+            }),
+            Err(error) => json!({
+                "event": "runtime_profile_step",
+                "runtime_adapter": "openai-compatible-network",
+                "profile_id": profile_id,
+                "trace_id": trace_id,
+                "status": "provider_failed",
+                "error_code": error.code().as_str(),
+                "error_type": openai_error_type_from_message(&error.to_string()),
+                "provider_diagnostic": error.diagnostic().cloned().unwrap_or(Value::Null),
+                "secret_values_printed": false,
+            }),
+        };
+        let _ = self.audit_sink.append_runtime_event(event).await;
+        result
+    }
+}
+
+#[async_trait]
+impl RuntimeClient for HermesRuntimeClient {
+    async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+        self.ensure_read_only_runtime(input.run.external_action_mode)?;
+        let runtime_profile = runtime_profile_for_run(&input, "tonglingyu-hermes");
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&runtime_profile));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_run_contract_payload(&input, &runtime_profile),
+            &input.requested_tools,
+            &runtime_profile,
+        )?;
+        let messages = run_messages(&input, &runtime_profile);
+        let (content, metadata) =
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                self.profile_chat_completion(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            } else {
+                self.chat_completion_with_budget(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            };
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: content,
+                result_ref: Some(format!("hermes://runs/{}", input.run.id)),
+                messages: Vec::new(),
+                metadata,
+            },
+            contract.as_ref(),
+            &input.requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn send_session_message(&self, input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
+        let runtime_profile = runtime_profile_for_session(&input, &input.agent_id);
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&runtime_profile));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_session_contract_payload(&input, &runtime_profile),
+            &input.requested_tools,
+            &runtime_profile,
+        )?;
+        let messages = session_messages(&input, &runtime_profile);
+        let (content, metadata) =
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                self.profile_chat_completion(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            } else {
+                self.chat_completion_with_budget(
+                    messages,
+                    &input.trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?
+            };
+        let assistant_message = AgentSessionMessage::new(
+            input.session_id.clone(),
+            input.message.sequence + 1,
+            MessageRole::Assistant,
+            Some(content.clone()),
+            input.message.run_id.clone(),
+            input.trace_id.clone(),
+        );
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: content,
+                result_ref: Some(format!("hermes://sessions/{}", input.session_id)),
+                messages: vec![assistant_message],
+                metadata,
+            },
+            contract.as_ref(),
+            &input.requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
+        let contract = input
+            .profile_contract
+            .clone()
+            .or_else(|| self.registry.get(&input.profile_id));
+        validate_contract_input(
+            contract.as_ref(),
+            &runtime_profile_contract_payload(&input),
+            &input.requested_tools,
+            &input.profile_id,
+        )?;
+        let mut effective_contract = contract.clone();
+        let mut requested_tools = input.requested_tools.clone();
+        if let (Some(contract), Some(step)) =
+            (effective_contract.as_mut(), input.runtime_step.as_ref())
+        {
+            if step.tool_policy.has_rules() {
+                requested_tools = step
+                    .tool_policy
+                    .effective_tools_for_request(&input.requested_tools);
+                step.tool_policy
+                    .validate_requested_tools(&requested_tools)?;
+                contract.tool_policy = step.tool_policy.clone();
+            }
+            if !json_schema_is_empty(&step.output_contract) {
+                contract.output_schema = step.output_contract.clone();
+            }
+        }
+        let messages = input
+            .messages
+            .iter()
+            .map(runtime_profile_message_to_hermes)
+            .collect();
+        let (content, metadata) = self
+            .profile_chat_completion(
+                messages,
+                &input.trace_id,
+                &input.profile_id,
+                effective_contract.as_ref(),
+                &requested_tools,
+            )
+            .await?;
+        finalize_runtime_output(
+            RuntimeOutput {
+                result_summary: content,
+                result_ref: Some(format!(
+                    "hermes://profiles/{}/{}",
+                    input.profile_id, input.trace_id
+                )),
+                messages: Vec::new(),
+                metadata,
+            },
+            effective_contract.as_ref(),
+            &requested_tools,
+            input.runtime_step.as_ref(),
+        )
+    }
+
+    async fn stream_run(&self, input: RuntimeRunInput) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let runtime_profile = runtime_profile_for_run(&input, "tonglingyu-hermes");
+        let trace_id = input.trace_id.clone();
+        let run_id = input.run.id.clone();
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &runtime_profile,
+        );
+        let error_profile = runtime_profile.clone();
+        let error_trace_id = trace_id.clone();
+        let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
+            self.ensure_read_only_runtime(input.run.external_action_mode)?;
+            let contract = input
+                .profile_contract
+                .clone()
+                .or_else(|| self.registry.get(&runtime_profile));
+            validate_contract_input(
+                contract.as_ref(),
+                &runtime_run_contract_payload(&input, &runtime_profile),
+                &input.requested_tools,
+                &runtime_profile,
+            )?;
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                let output = self.execute_run(input).await?;
+                return Ok(tool_loop_stream_events(
+                    runtime_profile,
+                    trace_id,
+                    output,
+                    Some(&run_id),
+                    None,
+                    schema_version,
+                ));
+            }
+            let messages = run_messages(&input, &runtime_profile);
+            let (content, metadata, mut events) = self
+                .chat_completion_stream_with_budget(
+                    messages,
+                    &trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?;
+            let output = finalize_runtime_output(
+                RuntimeOutput {
+                    result_summary: content,
+                    result_ref: Some(format!("hermes://runs/{}", input.run.id)),
+                    messages: Vec::new(),
+                    metadata,
+                },
+                contract.as_ref(),
+                &input.requested_tools,
+                input.runtime_step.as_ref(),
+            )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
+            push_schema_partial_event(&mut events, &runtime_profile, &trace_id, &output);
+            push_final_output_event(&mut events, runtime_profile, trace_id, output);
+            annotate_stream_events(&mut events, Some(&run_id), None, schema_version);
+            Ok(events)
+        }
+        .await;
+        Ok(result.unwrap_or_else(|error| {
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.run_id = Some(run_id);
+            event.schema_version = error_schema_version;
+            vec![event]
+        }))
+    }
+
+    async fn stream_session_message(
+        &self,
+        input: RuntimeSessionInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let runtime_profile = runtime_profile_for_session(&input, &input.agent_id);
+        let trace_id = input.trace_id.clone();
+        let session_id = input.session_id.clone();
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &runtime_profile,
+        );
+        let error_profile = runtime_profile.clone();
+        let error_trace_id = trace_id.clone();
+        let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
+            let contract = input
+                .profile_contract
+                .clone()
+                .or_else(|| self.registry.get(&runtime_profile));
+            validate_contract_input(
+                contract.as_ref(),
+                &runtime_session_contract_payload(&input, &runtime_profile),
+                &input.requested_tools,
+                &runtime_profile,
+            )?;
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                let output = self.send_session_message(input).await?;
+                return Ok(tool_loop_stream_events(
+                    runtime_profile,
+                    trace_id,
+                    output,
+                    None,
+                    Some(&session_id),
+                    schema_version,
+                ));
+            }
+            let messages = session_messages(&input, &runtime_profile);
+            let (content, metadata, mut events) = self
+                .chat_completion_stream_with_budget(
+                    messages,
+                    &trace_id,
+                    &runtime_profile,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?;
+            let assistant_message = AgentSessionMessage::new(
+                input.session_id.clone(),
+                input.message.sequence + 1,
+                MessageRole::Assistant,
+                Some(content.clone()),
+                input.message.run_id.clone(),
+                trace_id.clone(),
+            );
+            let output = finalize_runtime_output(
+                RuntimeOutput {
+                    result_summary: content,
+                    result_ref: Some(format!("hermes://sessions/{}", input.session_id)),
+                    messages: vec![assistant_message],
+                    metadata,
+                },
+                contract.as_ref(),
+                &input.requested_tools,
+                input.runtime_step.as_ref(),
+            )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
+            push_schema_partial_event(&mut events, &runtime_profile, &trace_id, &output);
+            push_final_output_event(&mut events, runtime_profile, trace_id, output);
+            annotate_stream_events(&mut events, None, Some(&session_id), schema_version);
+            Ok(events)
+        }
+        .await;
+        Ok(result.unwrap_or_else(|error| {
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.session_id = Some(session_id);
+            event.schema_version = error_schema_version;
+            vec![event]
+        }))
+    }
+
+    async fn stream_profile_step(
+        &self,
+        input: RuntimeProfileInput,
+    ) -> CoreResult<Vec<RuntimeStreamEvent>> {
+        let error_profile = input.profile_id.clone();
+        let error_trace_id = input.trace_id.clone();
+        let error_schema_version = schema_version_for_contract_or_registry(
+            input.profile_contract.as_ref(),
+            &self.registry,
+            &input.profile_id,
+        );
+        let result: CoreResult<Vec<RuntimeStreamEvent>> = async {
+            let contract = input
+                .profile_contract
+                .clone()
+                .or_else(|| self.registry.get(&input.profile_id));
+            validate_contract_input(
+                contract.as_ref(),
+                &runtime_profile_contract_payload(&input),
+                &input.requested_tools,
+                &input.profile_id,
+            )?;
+            if has_effective_runtime_tools(contract.as_ref(), &input.requested_tools) {
+                let profile_id = input.profile_id.clone();
+                let trace_id = input.trace_id.clone();
+                let schema_version = contract
+                    .as_ref()
+                    .map(|contract| contract.version.version.as_str());
+                let output = self.execute_profile_step(input).await?;
+                return Ok(tool_loop_stream_events(
+                    profile_id,
+                    trace_id,
+                    output,
+                    None,
+                    None,
+                    schema_version,
+                ));
+            }
+            let messages = input
+                .messages
+                .iter()
+                .map(runtime_profile_message_to_hermes)
+                .collect();
+            let started = Instant::now();
+            ensure_profile_budget(started, contract.as_ref())?;
+            let (content, metadata, mut events) = self
+                .chat_completion_stream(
+                    messages,
+                    &input.trace_id,
+                    &input.profile_id,
+                    contract.as_ref(),
+                    &input.requested_tools,
+                )
+                .await?;
+            ensure_profile_budget(started, contract.as_ref())?;
+            let output = finalize_runtime_output(
+                RuntimeOutput {
+                    result_summary: content,
+                    result_ref: Some(format!(
+                        "hermes://profiles/{}/{}",
+                        input.profile_id, input.trace_id
+                    )),
+                    messages: Vec::new(),
+                    metadata,
+                },
+                contract.as_ref(),
+                &input.requested_tools,
+                input.runtime_step.as_ref(),
+            )?;
+            let schema_version = contract
+                .as_ref()
+                .map(|contract| contract.version.version.as_str());
+            push_schema_partial_event(&mut events, &input.profile_id, &input.trace_id, &output);
+            push_final_output_event(&mut events, input.profile_id, input.trace_id, output);
+            annotate_stream_events(&mut events, None, None, schema_version);
+            Ok(events)
+        }
+        .await;
+        Ok(result.unwrap_or_else(|error| {
+            let mut event = runtime_stream_error_event(0, error_profile, error_trace_id, &error);
+            event.schema_version = error_schema_version;
+            vec![event]
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LocalReadOnlyConnector;
+
+#[async_trait]
+impl agent_core::ConnectorClient for LocalReadOnlyConnector {
+    async fn read_only_snapshot(
+        &self,
+        connector: &str,
+        resource: &str,
+        trace_id: &str,
+    ) -> CoreResult<agent_core::ConnectorSnapshot> {
+        Ok(agent_core::ConnectorSnapshot {
+            connector: connector.to_string(),
+            resource: resource.to_string(),
+            payload_ref: format!("snapshot://{connector}/{resource}"),
+            summary: json!({
+                "resource": resource,
+                "connector": connector,
+                "mode": "read_only",
+                "trace_id": trace_id,
+            }),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpReadOnlyConnectorConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+}
+
+impl HttpReadOnlyConnectorConfig {
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var("AGENT_READ_ONLY_CONNECTOR_BASE_URL")
+            .ok()
+            .filter(|value| !value.is_empty())?;
+        let timeout = std::env::var("AGENT_READ_ONLY_CONNECTOR_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(10));
+        Some(Self {
+            base_url: trim_base_url(base_url),
+            api_key: std::env::var("AGENT_READ_ONLY_CONNECTOR_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            timeout,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpReadOnlyConnector {
+    config: HttpReadOnlyConnectorConfig,
+    client: reqwest::Client,
+}
+
+impl HttpReadOnlyConnector {
+    pub fn new(config: HttpReadOnlyConnectorConfig) -> CoreResult<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .map_err(runtime_error)?;
+        Ok(Self { config, client })
+    }
+}
+
+#[async_trait]
+impl ConnectorClient for HttpReadOnlyConnector {
+    async fn read_only_snapshot(
+        &self,
+        connector: &str,
+        resource: &str,
+        trace_id: &str,
+    ) -> CoreResult<ConnectorSnapshot> {
+        let mut url = Url::parse(&format!("{}/snapshots", self.config.base_url))
+            .map_err(|_| runtime_failure("invalid read-only connector URL"))?;
+        url.query_pairs_mut()
+            .append_pair("connector", connector)
+            .append_pair("resource", resource);
+        let mut request = self.client.get(url).header("x-agent-trace-id", trace_id);
+        if let Some(api_key) = &self.config.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = request.send().await.map_err(map_reqwest_error)?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                format!(
+                    "read-only connector returned HTTP {}",
+                    response.status().as_u16()
+                ),
+            ));
+        }
+        metrics::counter!(
+            metric_names::CONNECTOR_SNAPSHOT_TOTAL,
+            "connector" => connector.to_string()
+        )
+        .increment(1);
+        response.json::<ConnectorSnapshot>().await.map_err(|_| {
+            AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "read-only connector response was malformed",
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRuntimeToolExecutorConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+}
+
+impl HttpRuntimeToolExecutorConfig {
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var("AGENT_RUNTIME_TOOL_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        Some(Self {
+            base_url: trim_base_url(base_url),
+            api_key: std::env::var("AGENT_RUNTIME_TOOL_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            timeout: Duration::from_secs(env_u64("AGENT_RUNTIME_TOOL_TIMEOUT_SECONDS", 10)),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRuntimeToolExecutor {
+    config: HttpRuntimeToolExecutorConfig,
+    client: reqwest::Client,
+    tool_call_url: Url,
+}
+
+impl HttpRuntimeToolExecutor {
+    pub fn new(config: HttpRuntimeToolExecutorConfig) -> CoreResult<Self> {
+        let tool_call_url = Url::parse(&format!("{}/tool-calls", config.base_url))
+            .map_err(|_| runtime_failure("invalid runtime tool executor URL"))?;
+        Ok(Self {
+            config,
+            client: reqwest::Client::new(),
+            tool_call_url,
+        })
+    }
+}
+
+#[async_trait]
+impl RuntimeToolExecutor for HttpRuntimeToolExecutor {
+    async fn execute_tool(
+        &self,
+        call: RuntimeToolCall,
+        _spec: RuntimeToolSpec,
+    ) -> CoreResult<RuntimeToolResult> {
+        let response = post_json(
+            &self.client,
+            self.tool_call_url.clone(),
+            self.config.api_key.as_deref(),
+            &call.trace_id,
+            self.config.timeout,
+            &call,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                format!(
+                    "runtime tool executor returned HTTP {}",
+                    response.status().as_u16()
+                ),
+            ));
+        }
+        response.json::<RuntimeToolResult>().await.map_err(|_| {
+            AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "runtime tool executor response was malformed",
+            )
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopCredentialProvider;
+
+#[async_trait]
+impl CredentialProvider for NoopCredentialProvider {
+    async fn dry_run_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease> {
+        Ok(CredentialLease::dry_run(
+            request.external_action_plan_id,
+            request.credential_scope,
+            request.trace_id,
+        ))
+    }
+
+    async fn active_lease(&self, _request: CredentialLeaseRequest) -> CoreResult<CredentialLease> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "no-op credential provider cannot issue active credential leases",
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopWriteConnector;
+
+#[async_trait]
+impl WriteConnector for NoopWriteConnector {
+    async fn dry_run(
+        &self,
+        input: WriteConnectorDryRunInput,
+    ) -> CoreResult<WriteConnectorDryRunOutput> {
+        Ok(WriteConnectorDryRunOutput {
+            accepted: true,
+            status: "dry_run_ready".to_string(),
+            result_ref: Some(format!("noop://write-connector/dry-run/{}", input.plan.id)),
+            metadata: json!({
+                "trace_id": input.trace_id,
+                "connector": input.plan.connector,
+                "action": input.plan.action,
+                "readiness_only": true,
+            }),
+        })
+    }
+
+    async fn execute(
+        &self,
+        _input: WriteConnectorExecuteInput,
+    ) -> CoreResult<WriteConnectorExecuteOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "no-op write connector cannot execute external actions",
+        ))
+    }
+
+    async fn compensate(
+        &self,
+        _input: WriteConnectorCompensateInput,
+    ) -> CoreResult<WriteConnectorCompensateOutput> {
+        Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "no-op write connector cannot compensate external actions",
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpCredentialProviderConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+    pub lease_ttl_seconds: i64,
+}
+
+impl HttpCredentialProviderConfig {
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var("AGENT_CREDENTIAL_PROVIDER_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        Some(Self {
+            base_url: trim_base_url(base_url),
+            api_key: std::env::var("AGENT_CREDENTIAL_PROVIDER_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            timeout: Duration::from_secs(env_u64("AGENT_CREDENTIAL_PROVIDER_TIMEOUT_SECONDS", 10)),
+            lease_ttl_seconds: env_i64("AGENT_CREDENTIAL_LEASE_TTL_SECONDS", 300),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpCredentialProvider {
+    config: HttpCredentialProviderConfig,
+    client: reqwest::Client,
+    lease_url: Url,
+}
+
+impl HttpCredentialProvider {
+    pub fn new(config: HttpCredentialProviderConfig) -> CoreResult<Self> {
+        let lease_url = Url::parse(&format!("{}/credential-leases", config.base_url))
+            .map_err(|_| runtime_failure("invalid credential provider URL"))?;
+        Ok(Self {
+            config,
+            client: reqwest::Client::new(),
+            lease_url,
+        })
+    }
+}
+
+#[async_trait]
+impl CredentialProvider for HttpCredentialProvider {
+    async fn dry_run_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease> {
+        Ok(CredentialLease::dry_run(
+            request.external_action_plan_id,
+            request.credential_scope,
+            request.trace_id,
+        ))
+    }
+
+    async fn active_lease(&self, request: CredentialLeaseRequest) -> CoreResult<CredentialLease> {
+        let response = post_json(
+            &self.client,
+            self.lease_url.clone(),
+            self.config.api_key.as_deref(),
+            &request.trace_id,
+            self.config.timeout,
+            &request,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "credential provider refused active lease",
+            ));
+        }
+        let body = response
+            .json::<HttpCredentialLeaseResponse>()
+            .await
+            .map_err(|_| runtime_failure("credential provider response was malformed"))?;
+        if body.provider_ref.trim().is_empty() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "credential provider returned an empty provider_ref",
+            ));
+        }
+        Ok(CredentialLease::active(
+            request.external_action_plan_id,
+            request.credential_scope,
+            body.provider_ref,
+            body.expires_in_seconds
+                .unwrap_or(self.config.lease_ttl_seconds)
+                .max(1),
+            request.trace_id,
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpWriteConnectorConfig {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+}
+
+impl HttpWriteConnectorConfig {
+    pub fn from_env() -> Option<Self> {
+        let base_url = std::env::var("AGENT_WRITE_CONNECTOR_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        Some(Self {
+            base_url: trim_base_url(base_url),
+            api_key: std::env::var("AGENT_WRITE_CONNECTOR_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            timeout: Duration::from_secs(env_u64("AGENT_WRITE_CONNECTOR_TIMEOUT_SECONDS", 30)),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpWriteConnector {
+    config: HttpWriteConnectorConfig,
+    client: reqwest::Client,
+    dry_run_url: Url,
+    execute_url: Url,
+    compensate_url: Url,
+}
+
+impl HttpWriteConnector {
+    pub fn new(config: HttpWriteConnectorConfig) -> CoreResult<Self> {
+        let dry_run_url = Url::parse(&format!("{}/action-executions/dry-run", config.base_url))
+            .map_err(|_| runtime_failure("invalid write connector dry-run URL"))?;
+        let execute_url = Url::parse(&format!("{}/action-executions/execute", config.base_url))
+            .map_err(|_| runtime_failure("invalid write connector execute URL"))?;
+        let compensate_url =
+            Url::parse(&format!("{}/action-executions/compensate", config.base_url))
+                .map_err(|_| runtime_failure("invalid write connector compensate URL"))?;
+        Ok(Self {
+            config,
+            client: reqwest::Client::new(),
+            dry_run_url,
+            execute_url,
+            compensate_url,
+        })
+    }
+}
+
+#[async_trait]
+impl WriteConnector for HttpWriteConnector {
+    async fn dry_run(
+        &self,
+        input: WriteConnectorDryRunInput,
+    ) -> CoreResult<WriteConnectorDryRunOutput> {
+        let response = post_json(
+            &self.client,
+            self.dry_run_url.clone(),
+            self.config.api_key.as_deref(),
+            &input.trace_id,
+            self.config.timeout,
+            &input,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "write connector dry-run failed",
+            ));
+        }
+        response
+            .json::<WriteConnectorDryRunOutput>()
+            .await
+            .map_err(|_| runtime_failure("write connector dry-run response was malformed"))
+    }
+
+    async fn execute(
+        &self,
+        input: WriteConnectorExecuteInput,
+    ) -> CoreResult<WriteConnectorExecuteOutput> {
+        let response = post_json(
+            &self.client,
+            self.execute_url.clone(),
+            self.config.api_key.as_deref(),
+            &input.trace_id,
+            self.config.timeout,
+            &input,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "write connector execute failed",
+            ));
+        }
+        response
+            .json::<WriteConnectorExecuteOutput>()
+            .await
+            .map_err(|_| runtime_failure("write connector execute response was malformed"))
+    }
+
+    async fn compensate(
+        &self,
+        input: WriteConnectorCompensateInput,
+    ) -> CoreResult<WriteConnectorCompensateOutput> {
+        let response = post_json(
+            &self.client,
+            self.compensate_url.clone(),
+            self.config.api_key.as_deref(),
+            &input.trace_id,
+            self.config.timeout,
+            &input,
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "write connector compensate failed",
+            ));
+        }
+        response
+            .json::<WriteConnectorCompensateOutput>()
+            .await
+            .map_err(|_| runtime_failure("write connector compensate response was malformed"))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HttpCredentialLeaseResponse {
+    provider_ref: String,
+    expires_in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActionGatewayConfig {
+    pub target_log_path: PathBuf,
+    pub api_key: Option<String>,
+    pub lease_ttl_seconds: i64,
+    pub connector: String,
+    pub allowed_credential_scopes: Vec<String>,
+}
+
+impl ActionGatewayConfig {
+    pub fn from_env() -> Self {
+        Self {
+            target_log_path: std::env::var("AGENT_ACTION_GATEWAY_TARGET_LOG")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/tmp/tonglingyu-actions.jsonl")),
+            api_key: std::env::var("AGENT_ACTION_GATEWAY_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            lease_ttl_seconds: env_i64("AGENT_ACTION_GATEWAY_LEASE_TTL_SECONDS", 300),
+            connector: std::env::var("AGENT_ACTION_GATEWAY_CONNECTOR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "action-journal".to_string()),
+            allowed_credential_scopes: std::env::var("AGENT_ACTION_GATEWAY_ALLOWED_SCOPES")
+                .ok()
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ActionGatewayState {
+    config: ActionGatewayConfig,
+    executions: Arc<Mutex<BTreeMap<String, WriteConnectorExecuteOutput>>>,
+    compensations: Arc<Mutex<BTreeMap<String, WriteConnectorCompensateOutput>>>,
+    file_lock: Arc<Mutex<()>>,
+}
+
+impl ActionGatewayState {
+    fn new(config: ActionGatewayConfig) -> CoreResult<Self> {
+        let (executions, compensations) = load_action_gateway_log(&config.target_log_path)?;
+        Ok(Self {
+            config,
+            executions: Arc::new(Mutex::new(executions)),
+            compensations: Arc::new(Mutex::new(compensations)),
+            file_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    fn authorize(&self, headers: &HeaderMap) -> Result<(), ActionGatewayError> {
+        let Some(expected) = &self.config.api_key else {
+            return Ok(());
+        };
+        let received = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+        if received == Some(expected.as_str()) {
+            Ok(())
+        } else {
+            Err(ActionGatewayError::unauthorized())
+        }
+    }
+
+    fn credential_scope_allowed(&self, scope: &str) -> bool {
+        self.config.allowed_credential_scopes.is_empty()
+            || self
+                .config
+                .allowed_credential_scopes
+                .iter()
+                .any(|allowed| allowed == scope)
+    }
+
+    async fn append_event(&self, event: Value) -> CoreResult<()> {
+        let _guard = self.file_lock.lock().await;
+        if let Some(parent) = self.config.target_log_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| runtime_failure("action gateway target directory is not writable"))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.config.target_log_path)
+            .await
+            .map_err(|_| runtime_failure("action gateway target log is not writable"))?;
+        let encoded = serde_json::to_vec(&event)
+            .map_err(|_| runtime_failure("action gateway target event was not serializable"))?;
+        file.write_all(&encoded)
+            .await
+            .map_err(|_| runtime_failure("action gateway target log write failed"))?;
+        file.write_all(b"\n")
+            .await
+            .map_err(|_| runtime_failure("action gateway target log write failed"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct ActionGatewayError {
+    status: HttpStatusCode,
+    code: &'static str,
+    message: &'static str,
+}
+
+impl ActionGatewayError {
+    fn unauthorized() -> Self {
+        Self {
+            status: HttpStatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "adapter authentication failed",
+        }
+    }
+
+    fn forbidden(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: HttpStatusCode::FORBIDDEN,
+            code,
+            message,
+        }
+    }
+
+    fn conflict(code: &'static str, message: &'static str) -> Self {
+        Self {
+            status: HttpStatusCode::CONFLICT,
+            code,
+            message,
+        }
+    }
+
+    fn internal() -> Self {
+        Self {
+            status: HttpStatusCode::INTERNAL_SERVER_ERROR,
+            code: "internal_error",
+            message: "action gateway failed",
+        }
+    }
+}
+
+fn action_gateway_error_response(error: ActionGatewayError) -> Response {
+    (
+        error.status,
+        Json(json!({
+            "error": error.code,
+            "message": error.message,
+        })),
+    )
+        .into_response()
+}
+
+pub fn action_gateway_router(config: ActionGatewayConfig) -> CoreResult<Router> {
+    let state = ActionGatewayState::new(config)?;
+    Ok(Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/credential-leases", post(local_credential_lease))
+        .route("/action-executions/dry-run", post(gateway_action_dry_run))
+        .route("/action-executions/execute", post(gateway_action_execute))
+        .route(
+            "/action-executions/compensate",
+            post(gateway_action_compensate),
+        )
+        .with_state(state))
+}
+
+async fn local_credential_lease(
+    State(state): State<ActionGatewayState>,
+    headers: HeaderMap,
+    Json(request): Json<CredentialLeaseRequest>,
+) -> Response {
+    match local_credential_lease_inner(state, headers, request).await {
+        Ok(value) => (HttpStatusCode::OK, Json(value)).into_response(),
+        Err(error) => action_gateway_error_response(error),
+    }
+}
+
+async fn local_credential_lease_inner(
+    state: ActionGatewayState,
+    headers: HeaderMap,
+    request: CredentialLeaseRequest,
+) -> Result<Value, ActionGatewayError> {
+    state.authorize(&headers)?;
+    if request.external_action_plan_id.trim().is_empty()
+        || request.credential_scope.trim().is_empty()
+    {
+        return Err(ActionGatewayError::conflict(
+            "invalid_credential_request",
+            "external_action_plan_id and credential_scope are required",
+        ));
+    }
+    if !state.credential_scope_allowed(&request.credential_scope) {
+        return Err(ActionGatewayError::forbidden(
+            "credential_scope_not_allowed",
+            "credential scope is not allowed by the adapter",
+        ));
+    }
+    let lease_id = new_id("gatewaylease");
+    let provider_ref = format!(
+        "action-journal-credential://leases/{lease_id}/plans/{}",
+        request.external_action_plan_id
+    );
+    state
+        .append_event(json!({
+            "event_type": "credential_lease_issued",
+            "lease_id": lease_id,
+            "external_action_plan_id": request.external_action_plan_id,
+            "credential_scope": request.credential_scope,
+            "provider_ref": provider_ref,
+            "expires_in_seconds": state.config.lease_ttl_seconds.max(1),
+            "trace_id": request.trace_id,
+        }))
+        .await
+        .map_err(|_| ActionGatewayError::internal())?;
+    Ok(json!({
+        "provider_ref": provider_ref,
+        "expires_in_seconds": state.config.lease_ttl_seconds.max(1),
+    }))
+}
+
+async fn gateway_action_dry_run(
+    State(state): State<ActionGatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<WriteConnectorDryRunInput>,
+) -> Response {
+    match gateway_action_dry_run_inner(state, headers, input).await {
+        Ok(value) => (HttpStatusCode::OK, Json(value)).into_response(),
+        Err(error) => action_gateway_error_response(error),
+    }
+}
+
+async fn gateway_action_dry_run_inner(
+    state: ActionGatewayState,
+    headers: HeaderMap,
+    input: WriteConnectorDryRunInput,
+) -> Result<WriteConnectorDryRunOutput, ActionGatewayError> {
+    state.authorize(&headers)?;
+    let accepted = input.plan.connector == state.config.connector;
+    Ok(WriteConnectorDryRunOutput {
+        accepted,
+        status: if accepted {
+            "dry_run_ready".to_string()
+        } else {
+            "rejected".to_string()
+        },
+        result_ref: accepted.then(|| format!("action-journal-dry-run://{}", input.plan.id)),
+        metadata: json!({
+            "connector": state.config.connector,
+            "trace_id": input.trace_id,
+            "target": "local-jsonl",
+        }),
+    })
+}
+
+async fn gateway_action_execute(
+    State(state): State<ActionGatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<WriteConnectorExecuteInput>,
+) -> Response {
+    match gateway_action_execute_inner(state, headers, input).await {
+        Ok(output) => (HttpStatusCode::OK, Json(output)).into_response(),
+        Err(error) => action_gateway_error_response(error),
+    }
+}
+
+async fn gateway_action_execute_inner(
+    state: ActionGatewayState,
+    headers: HeaderMap,
+    input: WriteConnectorExecuteInput,
+) -> Result<WriteConnectorExecuteOutput, ActionGatewayError> {
+    state.authorize(&headers)?;
+    if input.idempotency_key.trim().is_empty() {
+        return Err(ActionGatewayError::conflict(
+            "idempotency_key_required",
+            "idempotency_key is required",
+        ));
+    }
+    let mut executions = state.executions.lock().await;
+    if let Some(output) = executions.get(&input.idempotency_key).cloned() {
+        return Ok(output);
+    }
+
+    if input.plan.connector != state.config.connector {
+        return Ok(rejected_write_output(
+            "connector_mismatch",
+            input.trace_id,
+            json!({"expected_connector": state.config.connector}),
+        ));
+    }
+    let provider_ref = input.credential_provider_ref.as_deref().unwrap_or_default();
+    if !provider_ref.starts_with("action-journal-credential://")
+        || !provider_ref.contains(&input.plan.id)
+    {
+        return Ok(rejected_write_output(
+            "credential_provider_ref_invalid",
+            input.trace_id,
+            json!({"provider_ref_valid": false}),
+        ));
+    }
+
+    let event_id = new_id("gatewaytarget");
+    let result_ref = format!("action-journal-target://events/{event_id}");
+    let compensation_ref = format!(
+        "action-journal-compensation://plans/{}/events/{event_id}",
+        input.plan.id
+    );
+    let output = WriteConnectorExecuteOutput {
+        accepted: true,
+        status: "applied".to_string(),
+        result_ref: Some(result_ref.clone()),
+        compensation_ref: Some(compensation_ref.clone()),
+        error_code: None,
+        metadata: json!({
+            "adapter": "action_gateway",
+            "connector": state.config.connector,
+            "target_event_id": event_id,
+            "idempotency_key": input.idempotency_key,
+            "trace_id": input.trace_id,
+        }),
+    };
+    state
+        .append_event(json!({
+            "event_type": "action_executed",
+            "event_id": event_id,
+            "idempotency_key": input.idempotency_key,
+            "plan_id": input.plan.id,
+            "run_id": input.plan.run_id,
+            "connector": input.plan.connector,
+            "action": input.plan.action,
+            "resource_ref": input.plan.resource_ref,
+            "credential_provider_ref": provider_ref,
+            "payload": input.payload,
+            "result_ref": result_ref,
+            "compensation_ref": compensation_ref,
+            "trace_id": input.trace_id,
+            "output": output,
+        }))
+        .await
+        .map_err(|_| ActionGatewayError::internal())?;
+    executions.insert(input.idempotency_key, output.clone());
+    Ok(output)
+}
+
+fn rejected_write_output(
+    error_code: &'static str,
+    trace_id: String,
+    metadata: Value,
+) -> WriteConnectorExecuteOutput {
+    WriteConnectorExecuteOutput {
+        accepted: false,
+        status: "rejected".to_string(),
+        result_ref: None,
+        compensation_ref: None,
+        error_code: Some(error_code.to_string()),
+        metadata: json!({
+            "trace_id": trace_id,
+            "details": metadata,
+        }),
+    }
+}
+
+async fn gateway_action_compensate(
+    State(state): State<ActionGatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<WriteConnectorCompensateInput>,
+) -> Response {
+    match gateway_action_compensate_inner(state, headers, input).await {
+        Ok(output) => (HttpStatusCode::OK, Json(output)).into_response(),
+        Err(error) => action_gateway_error_response(error),
+    }
+}
+
+async fn gateway_action_compensate_inner(
+    state: ActionGatewayState,
+    headers: HeaderMap,
+    input: WriteConnectorCompensateInput,
+) -> Result<WriteConnectorCompensateOutput, ActionGatewayError> {
+    state.authorize(&headers)?;
+    if !input
+        .compensation_ref
+        .starts_with("action-journal-compensation://")
+    {
+        return Err(ActionGatewayError::conflict(
+            "compensation_ref_invalid",
+            "compensation_ref is not owned by the action gateway",
+        ));
+    }
+    let mut compensations = state.compensations.lock().await;
+    if let Some(output) = compensations.get(&input.compensation_ref).cloned() {
+        return Ok(output);
+    }
+    let known_compensation_ref =
+        state.executions.lock().await.values().any(|output| {
+            output.compensation_ref.as_deref() == Some(input.compensation_ref.as_str())
+        });
+    if !known_compensation_ref {
+        return Err(ActionGatewayError::conflict(
+            "compensation_ref_not_found",
+            "compensation_ref does not match a action gateway execution",
+        ));
+    }
+    let compensation_id = new_id("gatewaycomp");
+    let result_ref = format!("action-journal-compensation-result://events/{compensation_id}");
+    let output = WriteConnectorCompensateOutput {
+        accepted: true,
+        status: "compensated".to_string(),
+        result_ref: Some(result_ref.clone()),
+        error_code: None,
+        metadata: json!({
+            "adapter": "action_gateway",
+            "compensation_id": compensation_id,
+            "trace_id": input.trace_id,
+        }),
+    };
+    state
+        .append_event(json!({
+            "event_type": "action_compensated",
+            "compensation_id": compensation_id,
+            "compensation_ref": input.compensation_ref,
+            "plan_id": input.plan.id,
+            "run_id": input.plan.run_id,
+            "reason": input.reason,
+            "payload": input.payload,
+            "result_ref": result_ref,
+            "trace_id": input.trace_id,
+            "output": output,
+        }))
+        .await
+        .map_err(|_| ActionGatewayError::internal())?;
+    compensations.insert(input.compensation_ref, output.clone());
+    Ok(output)
+}
+
+fn load_action_gateway_log(
+    path: &PathBuf,
+) -> CoreResult<(
+    BTreeMap<String, WriteConnectorExecuteOutput>,
+    BTreeMap<String, WriteConnectorCompensateOutput>,
+)> {
+    if !path.exists() {
+        return Ok((BTreeMap::new(), BTreeMap::new()));
+    }
+    let mut executions = BTreeMap::new();
+    let mut compensations = BTreeMap::new();
+    let content = std::fs::read_to_string(path)
+        .map_err(|_| runtime_failure("action gateway target log is not readable"))?;
+    for line in content.lines().filter(|line| !line.trim().is_empty()) {
+        let event: Value = serde_json::from_str(line)
+            .map_err(|_| runtime_failure("action gateway target log is malformed"))?;
+        match event.get("event_type").and_then(Value::as_str) {
+            Some("action_executed") => {
+                let Some(key) = event.get("idempotency_key").and_then(Value::as_str) else {
+                    return Err(runtime_failure(
+                        "action gateway execution event is missing idempotency_key",
+                    ));
+                };
+                let output = serde_json::from_value::<WriteConnectorExecuteOutput>(
+                    event.get("output").cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|_| runtime_failure("action gateway execution output is malformed"))?;
+                executions.insert(key.to_string(), output);
+            }
+            Some("action_compensated") => {
+                let Some(compensation_ref) = event.get("compensation_ref").and_then(Value::as_str)
+                else {
+                    return Err(runtime_failure(
+                        "action gateway compensation event is missing compensation_ref",
+                    ));
+                };
+                let output = serde_json::from_value::<WriteConnectorCompensateOutput>(
+                    event.get("output").cloned().unwrap_or(Value::Null),
+                )
+                .map_err(|_| runtime_failure("action gateway compensation output is malformed"))?;
+                compensations.insert(compensation_ref.to_string(), output);
+            }
+            _ => {}
+        }
+    }
+    Ok((executions, compensations))
+}
+
+async fn post_json<T: Serialize + ?Sized>(
+    client: &reqwest::Client,
+    url: Url,
+    api_key: Option<&str>,
+    trace_id: &str,
+    timeout: Duration,
+    body: &T,
+) -> CoreResult<reqwest::Response> {
+    let mut request = client
+        .post(url)
+        .timeout(timeout)
+        .header("x-agent-trace-id", trace_id)
+        .json(body);
+    if let Some(api_key) = api_key {
+        request = request.bearer_auth(api_key);
+    }
+    request.send().await.map_err(map_external_connector_error)
+}
+
+fn runtime_profile_for_run(input: &RuntimeRunInput, fallback: &str) -> String {
+    input
+        .profile_contract
+        .as_ref()
+        .map(|contract| contract.profile_id.clone())
+        .or_else(|| {
+            input
+                .agent
+                .as_ref()
+                .map(|agent| agent.hermes_profile.clone())
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn runtime_profile_for_session(input: &RuntimeSessionInput, fallback: &str) -> String {
+    input
+        .profile_contract
+        .as_ref()
+        .map(|contract| contract.profile_id.clone())
+        .or_else(|| {
+            input
+                .agent
+                .as_ref()
+                .map(|agent| agent.hermes_profile.clone())
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn schema_version_for_contract_or_registry(
+    contract: Option<&ProfileContract>,
+    registry: &RuntimeProfileRegistry,
+    profile_id: &str,
+) -> Option<String> {
+    contract
+        .map(|contract| contract.version.version.clone())
+        .or_else(|| {
+            registry
+                .get(profile_id)
+                .map(|contract| contract.version.version)
+        })
+}
+
+fn validate_contract_input(
+    contract: Option<&ProfileContract>,
+    input: &Value,
+    requested_tools: &[String],
+    runtime_profile: &str,
+) -> CoreResult<()> {
+    let Some(contract) = contract else {
+        return Ok(());
+    };
+    if contract.profile_id != runtime_profile {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile contract does not match requested profile",
+        ));
+    }
+    contract
+        .tool_policy
+        .validate_requested_tools(requested_tools)?;
+    validate_contract_context_budget(contract, input)?;
+    validate_contract_safety_policy(contract, input)?;
+    validate_json_schema_value(&contract.input_schema, input)
+}
+
+fn validate_contract_context_budget(contract: &ProfileContract, input: &Value) -> CoreResult<()> {
+    let Some(max_context_messages) = contract.max_context_messages else {
+        return Ok(());
+    };
+    if runtime_context_message_count(input) > max_context_messages {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile exceeded max_context_messages",
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_context_message_count(input: &Value) -> usize {
+    let profile_messages = input
+        .get("messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let context_messages = input
+        .get("context")
+        .and_then(|context| context.get("recent_messages"))
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let current_message = usize::from(input.get("message").is_some());
+    profile_messages + context_messages + current_message
+}
+
+fn validate_contract_safety_policy(contract: &ProfileContract, input: &Value) -> CoreResult<()> {
+    if json_schema_is_empty(&contract.safety_policy) || contract.safety_policy.is_null() {
+        return Ok(());
+    }
+    let Some(policy) = contract.safety_policy.as_object() else {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile safety policy was invalid",
+        ));
+    };
+    for field in policy.keys() {
+        if !matches!(field.as_str(), "deny_message_roles" | "max_message_bytes") {
+            return Err(invalid_safety_policy());
+        }
+    }
+    if let Some(denied_roles) = policy.get("deny_message_roles") {
+        let denied_roles = denied_roles.as_array().ok_or_else(invalid_safety_policy)?;
+        for denied_role in denied_roles {
+            let denied_role = denied_role.as_str().ok_or_else(invalid_safety_policy)?;
+            if runtime_message_values(input).into_iter().any(|message| {
+                message
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .is_some_and(|role| role == denied_role)
+            }) {
+                return Err(AgentCoreError::coded(
+                    ErrorCode::Conflict,
+                    "runtime profile safety policy rejected message role",
+                ));
+            }
+        }
+    }
+    if let Some(max_message_bytes) = policy.get("max_message_bytes") {
+        let max_message_bytes = max_message_bytes
+            .as_u64()
+            .ok_or_else(invalid_safety_policy)? as usize;
+        if runtime_message_values(input)
+            .into_iter()
+            .filter_map(runtime_message_content)
+            .any(|content| content.len() > max_message_bytes)
+        {
+            return Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "runtime profile safety policy rejected oversized message",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_safety_policy() -> AgentCoreError {
+    AgentCoreError::coded(
+        ErrorCode::Conflict,
+        "runtime profile safety policy was invalid",
+    )
+}
+
+fn runtime_message_values(input: &Value) -> Vec<&Value> {
+    let mut messages = Vec::new();
+    if let Some(profile_messages) = input.get("messages").and_then(Value::as_array) {
+        messages.extend(profile_messages);
+    }
+    if let Some(current_message) = input.get("message") {
+        messages.push(current_message);
+    }
+    if let Some(context_messages) = input
+        .get("context")
+        .and_then(|context| context.get("recent_messages"))
+        .and_then(Value::as_array)
+    {
+        messages.extend(context_messages);
+    }
+    messages
+}
+
+fn runtime_message_content(message: &Value) -> Option<&str> {
+    message
+        .get("content")
+        .or_else(|| message.get("content_summary"))
+        .and_then(Value::as_str)
+}
+
+fn finalize_runtime_output(
+    mut output: RuntimeOutput,
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+    runtime_step: Option<&agent_core::RuntimeStep>,
+) -> CoreResult<RuntimeOutput> {
+    if let Some(contract) = contract {
+        if !output.metadata.is_object() {
+            output.metadata = json!({});
+        }
+        output.metadata["profile_id"] = json!(&contract.profile_id);
+        output.metadata["schema_version"] = json!(&contract.version.version);
+        let tool_policy = runtime_step
+            .filter(|step| step.tool_policy.has_rules())
+            .map(|step| &step.tool_policy)
+            .unwrap_or(&contract.tool_policy);
+        output.metadata["effective_tool_set"] =
+            json!(tool_policy.effective_tools_for_request(requested_tools));
+        output.metadata["requested_tools"] = json!(requested_tools);
+        if let Some(step) = runtime_step {
+            let mut step_value = serde_json::to_value(step)
+                .map_err(|_| runtime_failure("runtime step metadata was not serializable"))?;
+            step_value["status"] = json!("completed");
+            output.metadata["runtime_step"] = step_value;
+        }
+        let value = serde_json::to_value(&output)
+            .map_err(|_| runtime_failure("runtime output was not serializable"))?;
+        let output_schema = runtime_step
+            .filter(|step| !json_schema_is_empty(&step.output_contract))
+            .map(|step| &step.output_contract)
+            .unwrap_or(&contract.output_schema);
+        validate_json_schema_value(output_schema, &value)?;
+    }
+    Ok(output)
+}
+
+fn json_schema_is_empty(schema: &Value) -> bool {
+    schema.as_object().is_none_or(serde_json::Map::is_empty)
+}
+
+fn push_tool_progress_events(
+    events: &mut Vec<RuntimeStreamEvent>,
+    profile_id: &str,
+    trace_id: &str,
+    output: &RuntimeOutput,
+) {
+    let Some(tool_events) = output
+        .metadata
+        .get("tool_audit_events")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for tool_event in tool_events {
+        events.push(RuntimeStreamEvent::tool_progress(
+            events.len() as u64,
+            profile_id,
+            trace_id,
+            json!({
+                "runtime": "hermes",
+                "tool_event": tool_event,
+            }),
+        ));
+    }
+}
+
+fn push_schema_partial_event(
+    events: &mut Vec<RuntimeStreamEvent>,
+    profile_id: &str,
+    trace_id: &str,
+    output: &RuntimeOutput,
+) {
+    events.push(RuntimeStreamEvent::schema_partial(
+        events.len() as u64,
+        profile_id,
+        trace_id,
+        json!({
+            "schema_validated": true,
+            "profile_id": output.metadata.get("profile_id"),
+            "schema_version": output.metadata.get("schema_version"),
+            "effective_tool_set": output.metadata.get("effective_tool_set"),
+            "runtime_step": output.metadata.get("runtime_step"),
+            "result_ref": &output.result_ref,
+        }),
+    ));
+}
+
+fn push_final_output_event(
+    events: &mut Vec<RuntimeStreamEvent>,
+    profile_id: impl Into<String>,
+    trace_id: impl Into<String>,
+    output: RuntimeOutput,
+) {
+    let mut event = RuntimeStreamEvent::final_output(profile_id, trace_id, output);
+    event.sequence = events.len() as u64;
+    events.push(event);
+}
+
+fn annotate_stream_events(
+    events: &mut [RuntimeStreamEvent],
+    run_id: Option<&str>,
+    session_id: Option<&str>,
+    schema_version: Option<&str>,
+) {
+    for event in events {
+        if event.run_id.is_none() {
+            event.run_id = run_id.map(ToString::to_string);
+        }
+        if event.session_id.is_none() {
+            event.session_id = session_id.map(ToString::to_string);
+        }
+        if event.schema_version.is_none() {
+            event.schema_version = schema_version.map(ToString::to_string);
+        }
+    }
+}
+
+fn runtime_run_contract_payload(input: &RuntimeRunInput, runtime_profile: &str) -> Value {
+    json!({
+        "kind": "run",
+        "profile_id": runtime_profile,
+        "run": &input.run,
+        "agent": &input.agent,
+        "context": &input.context,
+        "snapshot": &input.snapshot,
+        "runtime_step": &input.runtime_step,
+        "requested_tools": &input.requested_tools,
+        "trace_id": &input.trace_id,
+    })
+}
+
+fn runtime_session_contract_payload(input: &RuntimeSessionInput, runtime_profile: &str) -> Value {
+    json!({
+        "kind": "session_message",
+        "profile_id": runtime_profile,
+        "session_id": &input.session_id,
+        "agent_id": &input.agent_id,
+        "agent": &input.agent,
+        "message": &input.message,
+        "context": &input.context,
+        "snapshot": &input.snapshot,
+        "runtime_step": &input.runtime_step,
+        "requested_tools": &input.requested_tools,
+        "trace_id": &input.trace_id,
+    })
+}
+
+fn runtime_profile_contract_payload(input: &RuntimeProfileInput) -> Value {
+    json!({
+        "kind": "profile_step",
+        "profile_id": &input.profile_id,
+        "messages": &input.messages,
+        "metadata": &input.metadata,
+        "runtime_step": &input.runtime_step,
+        "requested_tools": &input.requested_tools,
+        "trace_id": &input.trace_id,
+    })
+}
+
+fn runtime_profile_message_to_hermes(message: &RuntimeProfileMessage) -> HermesChatMessage {
+    HermesChatMessage::new(message.role.clone(), message.content.clone())
+}
+
+fn message_content(message: HermesMessage) -> CoreResult<String> {
+    message
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "Hermes Runtime response did not include assistant content",
+            )
+        })
+}
+
+fn profile_budget_remaining(
+    started: Instant,
+    contract: Option<&ProfileContract>,
+) -> CoreResult<Option<Duration>> {
+    let Some(max_runtime_seconds) = contract.and_then(|contract| contract.max_runtime_seconds)
+    else {
+        return Ok(None);
+    };
+    let budget = Duration::from_secs(max_runtime_seconds);
+    let elapsed = started.elapsed();
+    if budget.is_zero() || elapsed >= budget {
+        return Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime profile exceeded max_runtime_seconds",
+        ));
+    }
+    Ok(Some(budget.saturating_sub(elapsed)))
+}
+
+fn ensure_profile_budget(started: Instant, contract: Option<&ProfileContract>) -> CoreResult<()> {
+    profile_budget_remaining(started, contract).map(|_| ())
+}
+
+fn openai_profile_request_timeout(
+    started: Instant,
+    total_deadline: Duration,
+    contract: Option<&ProfileContract>,
+) -> CoreResult<Duration> {
+    let elapsed = started.elapsed();
+    if elapsed >= total_deadline {
+        return Err(openai_runtime_error(
+            "deadline_exceeded",
+            "OpenAI-compatible Runtime deadline exceeded",
+        ));
+    }
+    let total_remaining = total_deadline.saturating_sub(elapsed);
+    let profile_remaining = profile_budget_remaining(started, contract)?;
+    Ok(profile_remaining.map_or(total_remaining, |remaining| remaining.min(total_remaining)))
+}
+
+fn openai_retry_delay_exceeds_budget(
+    started: Instant,
+    delay: Duration,
+    total_deadline: Duration,
+    contract: Option<&ProfileContract>,
+) -> CoreResult<bool> {
+    let elapsed_after_delay = started.elapsed().saturating_add(delay);
+    if elapsed_after_delay >= total_deadline {
+        return Ok(true);
+    }
+    if let Some(max_runtime_seconds) = contract.and_then(|contract| contract.max_runtime_seconds)
+        && (max_runtime_seconds == 0
+            || elapsed_after_delay >= Duration::from_secs(max_runtime_seconds))
+    {
+        profile_budget_remaining(started, contract)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn tool_definitions(
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+) -> Vec<HermesToolDefinition> {
+    contract
+        .map(|contract| {
+            contract
+                .tool_policy
+                .effective_tool_specs_for_request(requested_tools)
+                .into_iter()
+                .map(|spec| HermesToolDefinition {
+                    kind: "function".to_string(),
+                    function: HermesToolFunctionDefinition {
+                        name: spec.name,
+                        description: spec.description,
+                        parameters: spec.input_schema,
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn has_effective_runtime_tools(
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+) -> bool {
+    contract.is_some_and(|contract| {
+        !contract
+            .tool_policy
+            .effective_tools_for_request(requested_tools)
+            .is_empty()
+    })
+}
+
+fn tool_loop_stream_events(
+    profile_id: String,
+    trace_id: String,
+    output: RuntimeOutput,
+    run_id: Option<&str>,
+    session_id: Option<&str>,
+    schema_version: Option<&str>,
+) -> Vec<RuntimeStreamEvent> {
+    let mut events = vec![RuntimeStreamEvent {
+        sequence: 0,
+        event_type: RuntimeStreamEventType::Started,
+        profile_id: profile_id.clone(),
+        trace_id: trace_id.clone(),
+        run_id: None,
+        session_id: None,
+        schema_version: None,
+        content_delta: None,
+        output: None,
+        error_code: None,
+        metadata: json!({"runtime": "hermes", "tool_loop": true}),
+    }];
+    push_tool_progress_events(&mut events, &profile_id, &trace_id, &output);
+    push_schema_partial_event(&mut events, &profile_id, &trace_id, &output);
+    push_final_output_event(&mut events, profile_id, trace_id, output);
+    annotate_stream_events(&mut events, run_id, session_id, schema_version);
+    events
+}
+
+fn parse_tool_arguments(arguments: &str) -> CoreResult<Value> {
+    if arguments.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(arguments).map_err(|_| {
+        AgentCoreError::coded(
+            ErrorCode::Conflict,
+            "runtime tool call arguments were malformed",
+        )
+    })
+}
+
+fn runtime_tool_executor_error(error: AgentCoreError) -> AgentCoreError {
+    AgentCoreError::coded(error.code(), "runtime tool executor failed")
+}
+
+fn runtime_tool_call_audit_event(
+    runtime_profile: &str,
+    trace_id: &str,
+    call_id: Option<&str>,
+    tool_name: Option<&str>,
+) -> Value {
+    json!({
+        "event": "runtime_tool_call",
+        "call_id": call_id,
+        "call_id_status": runtime_tool_identity_status(call_id),
+        "profile_id": runtime_profile,
+        "tool_name": tool_name,
+        "tool_name_status": runtime_tool_identity_status(tool_name),
+        "trace_id": trace_id,
+    })
+}
+
+fn runtime_tool_audit_name(
+    contract: Option<&ProfileContract>,
+    requested_tools: &[String],
+    tool_name: &str,
+) -> Option<String> {
+    contract
+        .and_then(|contract| {
+            contract
+                .tool_policy
+                .validate_tool_call(tool_name, requested_tools)
+                .ok()
+        })
+        .map(|spec| spec.name)
+}
+
+fn runtime_tool_identity_status(value: Option<&str>) -> &'static str {
+    if value.is_some() {
+        "validated"
+    } else {
+        "redacted"
+    }
+}
+
+fn runtime_tool_result_audit_event(result: &RuntimeToolResult, output_schema: &Value) -> Value {
+    let mut value = runtime_tool_result_summary(result, output_schema);
+    value["event"] = json!("runtime_tool_result");
+    value
+}
+
+fn runtime_tool_error_audit_event(
+    runtime_profile: &str,
+    trace_id: &str,
+    call_id: Option<&str>,
+    tool_name: Option<&str>,
+    error: &AgentCoreError,
+) -> Value {
+    json!({
+        "event": "runtime_tool_error",
+        "call_id": call_id,
+        "call_id_status": runtime_tool_identity_status(call_id),
+        "profile_id": runtime_profile,
+        "tool_name": tool_name,
+        "tool_name_status": runtime_tool_identity_status(tool_name),
+        "trace_id": trace_id,
+        "error_code": error.code().as_str(),
+    })
+}
+
+fn runtime_tool_result_summary(result: &RuntimeToolResult, output_schema: &Value) -> Value {
+    json!({
+        "call_id": &result.call_id,
+        "profile_id": &result.profile_id,
+        "tool_name": &result.tool_name,
+        "output_schema": output_schema,
+        "output_ref": &result.output_ref,
+        "output_summary": summarize_json(&result.output),
+        "trace_id": result.metadata.get("trace_id").and_then(Value::as_str),
+    })
+}
+
+fn runtime_tool_result_message(result: &RuntimeToolResult) -> CoreResult<String> {
+    let content = json!({
+        "call_id": &result.call_id,
+        "tool_name": &result.tool_name,
+        "output_ref": &result.output_ref,
+        "output_summary": summarize_json(&result.output),
+        "output_omitted": true,
+    });
+    serde_json::to_string(&content)
+        .map_err(|_| runtime_failure("runtime tool result was not serializable"))
+}
+
+struct SseLineContext<'a> {
+    runtime_profile: &'a str,
+    trace_id: &'a str,
+    model: &'a str,
+}
+
+struct SseStreamState<'a> {
+    sequence: &'a mut u64,
+    content: &'a mut String,
+    events: &'a mut Vec<RuntimeStreamEvent>,
+    unexpected_tool_calls: &'a mut Vec<HermesStreamToolCall>,
+}
+
+fn process_sse_lines(
+    pending: &mut String,
+    context: &SseLineContext<'_>,
+    state: &mut SseStreamState<'_>,
+    flush: bool,
+) -> CoreResult<()> {
+    while let Some(index) = pending.find('\n') {
+        let line = pending.drain(..=index).collect::<String>();
+        process_sse_line(line.trim(), context, state)?;
+    }
+    if flush && !pending.trim().is_empty() {
+        let line = std::mem::take(pending);
+        process_sse_line(line.trim(), context, state)?;
+    }
+    Ok(())
+}
+
+fn process_sse_line(
+    line: &str,
+    context: &SseLineContext<'_>,
+    state: &mut SseStreamState<'_>,
+) -> CoreResult<()> {
+    let Some(data) = line.strip_prefix("data:") else {
+        return Ok(());
+    };
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+    let value = serde_json::from_str::<Value>(data)
+        .map_err(|_| runtime_failure("Hermes Runtime stream event was malformed"))?;
+    collect_stream_tool_calls(&value, state.unexpected_tool_calls);
+    let Some(delta) = value
+        .pointer("/choices/0/delta/content")
+        .or_else(|| value.pointer("/choices/0/message/content"))
+        .and_then(Value::as_str)
+        .filter(|delta| !delta.is_empty())
+    else {
+        return Ok(());
+    };
+    state.content.push_str(delta);
+    state.events.push(RuntimeStreamEvent {
+        sequence: *state.sequence,
+        event_type: RuntimeStreamEventType::Delta,
+        profile_id: context.runtime_profile.to_string(),
+        trace_id: context.trace_id.to_string(),
+        run_id: None,
+        session_id: None,
+        schema_version: None,
+        content_delta: Some(delta.to_string()),
+        output: None,
+        error_code: None,
+        metadata: json!({
+            "runtime": "hermes",
+            "hermes_model": context.model,
+        }),
+    });
+    *state.sequence += 1;
+    Ok(())
+}
+
+fn collect_stream_tool_calls(value: &Value, tool_calls: &mut Vec<HermesStreamToolCall>) {
+    for pointer in [
+        "/choices/0/delta/tool_calls",
+        "/choices/0/message/tool_calls",
+    ] {
+        let Some(items) = value.pointer(pointer) else {
+            continue;
+        };
+        let Some(items) = items.as_array() else {
+            if !items.is_null() {
+                tool_calls.push(HermesStreamToolCall {
+                    id: None,
+                    name: None,
+                });
+            }
+            continue;
+        };
+        for item in items {
+            tool_calls.push(HermesStreamToolCall {
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+                name: item
+                    .pointer("/function/name")
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string),
+            });
+        }
+    }
+    for pointer in [
+        "/choices/0/delta/function_call",
+        "/choices/0/message/function_call",
+    ] {
+        let Some(function_call) = value.pointer(pointer) else {
+            continue;
+        };
+        tool_calls.push(HermesStreamToolCall {
+            id: None,
+            name: function_call
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        });
+    }
+}
+
+fn summarize_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => format!("object_keys_len:{}", map.len()),
+        Value::Array(items) => format!("array_len:{}", items.len()),
+        Value::String(value) => format!("string_len:{}", value.chars().count()),
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "bool".to_string(),
+        Value::Number(_) => "number".to_string(),
+    }
+}
+
+fn trim_base_url(value: String) -> String {
+    value.trim_end_matches('/').to_string()
+}
+
+fn parse_profile_models(value: &str) -> BTreeMap<String, String> {
+    if let Ok(parsed) = serde_json::from_str::<BTreeMap<String, String>>(value) {
+        return parsed
+            .into_iter()
+            .filter(|(profile, model)| !profile.trim().is_empty() && !model.trim().is_empty())
+            .map(|(profile, model)| (profile.trim().to_string(), model.trim().to_string()))
+            .collect();
+    }
+
+    value
+        .split(',')
+        .filter_map(|item| item.split_once('='))
+        .map(|(profile, model)| (profile.trim(), model.trim()))
+        .filter(|(profile, model)| !profile.is_empty() && !model.is_empty())
+        .map(|(profile, model)| (profile.to_string(), model.to_string()))
+        .collect()
+}
+
+fn prefixed_env_name(prefix: &str, field: &str) -> String {
+    format!("{}_{}", prefix.trim_end_matches('_'), field)
+}
+
+fn prefixed_env_u64(
+    prefix: &str,
+    field: &str,
+    default: u64,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> CoreResult<u64> {
+    let env_name = prefixed_env_name(prefix, field);
+    let Some(raw) = get_env(&env_name) else {
+        return Ok(default);
+    };
+    raw.parse::<u64>().map_err(|_| {
+        AgentCoreError::coded(
+            ErrorCode::Conflict,
+            format!("{env_name} must be an unsigned integer"),
+        )
+    })
+}
+
+fn prefixed_env_usize(
+    prefix: &str,
+    field: &str,
+    default: usize,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> CoreResult<usize> {
+    let env_name = prefixed_env_name(prefix, field);
+    let Some(raw) = get_env(&env_name) else {
+        return Ok(default);
+    };
+    raw.parse::<usize>().map_err(|_| {
+        AgentCoreError::coded(
+            ErrorCode::Conflict,
+            format!("{env_name} must be an unsigned integer"),
+        )
+    })
+}
+
+fn prefixed_env_f32(
+    prefix: &str,
+    field: &str,
+    default: f32,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> CoreResult<f32> {
+    let env_name = prefixed_env_name(prefix, field);
+    let Some(raw) = get_env(&env_name) else {
+        return Ok(default);
+    };
+    raw.parse::<f32>().map_err(|_| {
+        AgentCoreError::coded(ErrorCode::Conflict, format!("{env_name} must be a number"))
+    })
+}
+
+fn prefixed_env_bool(
+    prefix: &str,
+    field: &str,
+    default: bool,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> CoreResult<bool> {
+    let env_name = prefixed_env_name(prefix, field);
+    let Some(raw) = get_env(&env_name) else {
+        return Ok(default);
+    };
+    parse_bool_value(&env_name, &raw)
+}
+
+fn prefixed_env_optional_bool(
+    prefix: &str,
+    field: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> CoreResult<Option<bool>> {
+    let env_name = prefixed_env_name(prefix, field);
+    let Some(raw) = get_env(&env_name) else {
+        return Ok(None);
+    };
+    parse_bool_value(&env_name, &raw).map(Some)
+}
+
+fn parse_bool_value(name: &str, raw: &str) -> CoreResult<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(AgentCoreError::coded(
+            ErrorCode::Conflict,
+            format!("{name} must be a boolean"),
+        )),
+    }
+}
+
+fn chat_url(base_url: &str) -> CoreResult<Url> {
+    Url::parse(&format!("{base_url}/chat/completions"))
+        .map_err(|_| runtime_failure("invalid Hermes Runtime URL"))
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> AgentCoreError {
+    if error.is_timeout() {
+        metrics::counter!(metric_names::RUNTIME_TIMEOUT_TOTAL, "runtime" => "hermes").increment(1);
+        return AgentCoreError::coded(ErrorCode::InternalError, "Hermes Runtime timed out");
+    }
+    AgentCoreError::coded(ErrorCode::InternalError, "Hermes Runtime request failed")
+}
+
+fn map_external_connector_error(error: reqwest::Error) -> AgentCoreError {
+    if error.is_timeout() {
+        return AgentCoreError::coded(ErrorCode::InternalError, "external connector timed out");
+    }
+    AgentCoreError::coded(
+        ErrorCode::InternalError,
+        "external connector request failed",
+    )
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_i64(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn env_f32(name: &str, default: f32) -> f32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn env_optional_bool(name: &str) -> Option<bool> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| optional_true_bool_value(&value))
+}
+
+fn optional_true_bool_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        _ => None,
+    }
+}
+
+fn openai_chat_url(base_url: &str) -> CoreResult<Url> {
+    Url::parse(&format!("{base_url}/chat/completions"))
+        .map_err(|_| runtime_failure("invalid OpenAI-compatible Runtime URL"))
+}
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn sha256_json(value: &Value) -> String {
+    let encoded = serde_json::to_vec(value).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+fn base_url_host(base_url: &str) -> String {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    [
+        "x-request-id",
+        "x-minimax-request-id",
+        "x-trace-id",
+        "cf-ray",
+    ]
+    .iter()
+    .find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+struct OpenAiEmptyContentDiagnosticInput<'a> {
+    body: &'a Value,
+    status_code: u16,
+    provider_request_id: Option<&'a str>,
+    provider_model: &'a str,
+    attempt: usize,
+    raw_response_sha256: &'a str,
+    latency_ms: u64,
+    base_url_host: &'a str,
+    response_format_json_requested: bool,
+    requested_tool_count: usize,
+}
+
+fn openai_empty_content_diagnostic(input: OpenAiEmptyContentDiagnosticInput<'_>) -> Value {
+    let choice_count = input
+        .body
+        .get("choices")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let first_choice = input
+        .body
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let first_message = first_choice.and_then(|choice| choice.get("message"));
+    let message_keys = first_message
+        .and_then(Value::as_object)
+        .map(|message| {
+            let mut keys = message.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys
+        })
+        .unwrap_or_default();
+    let content_value = first_message.and_then(|message| message.get("content"));
+    let content_len = content_value
+        .and_then(Value::as_str)
+        .map(|value| value.chars().count())
+        .unwrap_or(0);
+
+    json!({
+        "schema_version": "openai-compatible-provider-diagnostic-v1",
+        "error_type": "provider_empty_content",
+        "attempt": input.attempt,
+        "retryable": true,
+        "status_code": input.status_code,
+        "provider_request_id": input.provider_request_id,
+        "provider_model": input.provider_model,
+        "choice_count": choice_count,
+        "finish_reason": first_choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        "message_keys": message_keys,
+        "content_present": content_value.is_some(),
+        "content_non_empty": provider_field_has_value(content_value),
+        "content_len": content_len,
+        "reasoning_details_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("reasoning_details"))
+        ),
+        "reasoning_content_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("reasoning_content"))
+        ),
+        "refusal_present": provider_field_has_value(
+            first_message.and_then(|message| message.get("refusal"))
+        ),
+        "usage": input.body.get("usage").cloned().unwrap_or(Value::Null),
+        "raw_response_sha256": format!("sha256:{}", input.raw_response_sha256),
+        "latency_ms": input.latency_ms,
+        "base_url_host": input.base_url_host,
+        "response_format_json_requested": input.response_format_json_requested,
+        "requested_tool_count": input.requested_tool_count,
+        "raw_response_body_embedded": false,
+        "raw_content_embedded": false,
+        "secret_values_printed": false,
+    })
+}
+
+fn provider_field_has_value(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Null) | None => false,
+        Some(Value::Array(values)) => !values.is_empty(),
+        Some(Value::Object(values)) => !values.is_empty(),
+        Some(Value::Bool(_)) | Some(Value::Number(_)) => true,
+    }
+}
+
+fn openai_attempt_failure_diagnostic(
+    error_type: &str,
+    current_diagnostic: Option<Value>,
+    attempt_failures: &[Value],
+) -> Option<Value> {
+    if current_diagnostic.is_none() && attempt_failures.is_empty() {
+        return None;
+    }
+    let mut diagnostic = current_diagnostic.unwrap_or_else(|| {
+        json!({
+            "schema_version": "openai-compatible-runtime-failure-v1",
+            "error_type": error_type,
+            "secret_values_printed": false,
+        })
+    });
+    if let Value::Object(map) = &mut diagnostic {
+        map.entry("schema_version".to_string())
+            .or_insert_with(|| Value::String("openai-compatible-runtime-failure-v1".to_string()));
+        map.insert("final_error_type".to_string(), json!(error_type));
+        map.insert(
+            "attempt_failure_count".to_string(),
+            json!(attempt_failures.len()),
+        );
+        map.insert(
+            "attempt_failures".to_string(),
+            Value::Array(attempt_failures.to_vec()),
+        );
+        map.insert("secret_values_printed".to_string(), json!(false));
+        Some(diagnostic)
+    } else {
+        Some(json!({
+            "schema_version": "openai-compatible-runtime-failure-v1",
+            "error_type": error_type,
+            "current_diagnostic": diagnostic,
+            "attempt_failure_count": attempt_failures.len(),
+            "attempt_failures": attempt_failures,
+            "secret_values_printed": false,
+        }))
+    }
+}
+
+fn retry_delay(base: Duration, attempt: usize, trace_id: &str, profile_id: &str) -> Duration {
+    let digest = Sha256::digest(format!("{trace_id}:{profile_id}:{attempt}").as_bytes());
+    let jitter_ms = u64::from(digest[0] % 19);
+    base.saturating_mul(attempt as u32)
+        .saturating_add(Duration::from_millis(jitter_ms))
+}
+
+fn openai_runtime_error(error_type: &str, safe_message: &str) -> AgentCoreError {
+    let code = match error_type {
+        "auth_error" => ErrorCode::Unauthorized,
+        "rate_limited" => ErrorCode::RateLimited,
+        "provider_overloaded"
+        | "provider_unavailable"
+        | "provider_unhealthy"
+        | "deadline_exceeded"
+        | "connection_error"
+        | "tls_error"
+        | "dns_error"
+        | "provider_malformed_json"
+        | "provider_empty_content"
+        | "safety_refusal" => ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
+    };
+    AgentCoreError::coded(code, format!("{safe_message} ({error_type})"))
+}
+
+fn openai_runtime_error_with_diagnostic(
+    error_type: &str,
+    safe_message: &str,
+    diagnostic: Option<Value>,
+) -> AgentCoreError {
+    let code = match error_type {
+        "auth_error" => ErrorCode::Unauthorized,
+        "rate_limited" => ErrorCode::RateLimited,
+        "provider_overloaded"
+        | "provider_unavailable"
+        | "provider_unhealthy"
+        | "deadline_exceeded"
+        | "connection_error"
+        | "tls_error"
+        | "dns_error"
+        | "provider_malformed_json"
+        | "provider_empty_content"
+        | "safety_refusal" => ErrorCode::InternalError,
+        _ => ErrorCode::InternalError,
+    };
+    let message = format!("{safe_message} ({error_type})");
+    match diagnostic {
+        Some(diagnostic) => AgentCoreError::coded_with_diagnostic(code, message, diagnostic),
+        None => AgentCoreError::coded(code, message),
+    }
+}
+
+fn openai_error_type_from_message(message: &str) -> &'static str {
+    for error_type in [
+        "auth_error",
+        "rate_limited",
+        "provider_overloaded",
+        "provider_unavailable",
+        "provider_unhealthy",
+        "deadline_exceeded",
+        "connection_error",
+        "tls_error",
+        "dns_error",
+        "provider_malformed_json",
+        "provider_empty_content",
+        "safety_refusal",
+        "invalid_runtime_url",
+    ] {
+        if message.contains(error_type) {
+            return error_type;
+        }
+    }
+    "provider_failed"
+}
+
+#[derive(Debug)]
+struct OpenAiRuntimeAttemptError {
+    error_type: &'static str,
+    safe_message: &'static str,
+    retryable: bool,
+    mark_unhealthy: bool,
+    diagnostic: Option<Value>,
+}
+
+impl OpenAiRuntimeAttemptError {
+    fn retryable(error_type: &'static str, safe_message: &'static str) -> Self {
+        Self {
+            error_type,
+            safe_message,
+            retryable: true,
+            mark_unhealthy: matches!(
+                error_type,
+                "provider_overloaded" | "provider_unavailable" | "connection_error"
+            ),
+            diagnostic: None,
+        }
+    }
+
+    fn fatal(error_type: &'static str, safe_message: &'static str) -> Self {
+        Self {
+            error_type,
+            safe_message,
+            retryable: false,
+            mark_unhealthy: matches!(
+                error_type,
+                "provider_overloaded" | "provider_unavailable" | "deadline_exceeded"
+            ),
+            diagnostic: None,
+        }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: Value) -> Self {
+        self.diagnostic = Some(diagnostic);
+        self
+    }
+
+    fn with_provider_request(mut self, provider_request: Value) -> Self {
+        let provider_request_sha256 = format!("sha256:{}", sha256_json(&provider_request));
+        let mut diagnostic = self.diagnostic.take().unwrap_or_else(|| {
+            json!({
+                "schema_version": "openai-compatible-runtime-failure-v1",
+                "error_type": self.error_type,
+                "secret_values_printed": false,
+            })
+        });
+        if let Value::Object(map) = &mut diagnostic {
+            map.insert("provider_request".to_string(), provider_request);
+            map.insert(
+                "provider_request_sha256".to_string(),
+                Value::String(provider_request_sha256),
+            );
+            map.insert("provider_request_embedded".to_string(), Value::Bool(true));
+            map.insert(
+                "authorization_header_embedded".to_string(),
+                Value::Bool(false),
+            );
+            map.insert("api_key_embedded".to_string(), Value::Bool(false));
+            map.insert("secret_values_printed".to_string(), Value::Bool(false));
+        }
+        self.diagnostic = Some(diagnostic);
+        self
+    }
+}
+
+fn classify_openai_reqwest_error(error: reqwest::Error) -> OpenAiRuntimeAttemptError {
+    if error.is_timeout() {
+        metrics::counter!(
+            metric_names::RUNTIME_TIMEOUT_TOTAL,
+            "runtime" => "openai_compatible_network"
+        )
+        .increment(1);
+        return OpenAiRuntimeAttemptError::retryable(
+            "deadline_exceeded",
+            "OpenAI-compatible Runtime deadline exceeded",
+        );
+    }
+    if error.is_connect() {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("dns") {
+            return OpenAiRuntimeAttemptError::fatal(
+                "dns_error",
+                "OpenAI-compatible Runtime DNS lookup failed",
+            );
+        }
+        if message.contains("tls") || message.contains("certificate") {
+            return OpenAiRuntimeAttemptError::fatal(
+                "tls_error",
+                "OpenAI-compatible Runtime TLS handshake failed",
+            );
+        }
+        return OpenAiRuntimeAttemptError::retryable(
+            "connection_error",
+            "OpenAI-compatible Runtime connection failed",
+        );
+    }
+    OpenAiRuntimeAttemptError::retryable(
+        "connection_error",
+        "OpenAI-compatible Runtime request failed",
+    )
+}
+
+fn openai_retry_instruction_for_error(error_type: &'static str) -> Option<&'static str> {
+    match error_type {
+        "provider_empty_content" => Some(
+            "The previous provider response had no assistant content. Retry now and return exactly one non-empty JSON object matching the earlier result_summary_contract. Do not return an empty assistant message. Do not use markdown.",
+        ),
+        "deadline_exceeded" => Some(
+            "The previous provider attempt exceeded the time budget. Retry with a compact response: return exactly one non-empty JSON object matching the earlier result_summary_contract. Do not include prose outside JSON.",
+        ),
+        _ => None,
+    }
+}
+
+fn classify_openai_http_error(
+    status: ReqwestStatusCode,
+    body_text: &str,
+) -> OpenAiRuntimeAttemptError {
+    let lower = body_text.to_ascii_lowercase();
+    match status.as_u16() {
+        401 | 403 => OpenAiRuntimeAttemptError::fatal(
+            "auth_error",
+            "OpenAI-compatible Runtime authentication failed",
+        ),
+        429 => OpenAiRuntimeAttemptError::retryable(
+            "rate_limited",
+            "OpenAI-compatible Runtime rate limited request",
+        ),
+        529 => OpenAiRuntimeAttemptError::retryable(
+            "provider_overloaded",
+            "OpenAI-compatible Runtime provider overloaded",
+        ),
+        500..=599 if lower.contains("overloaded") => OpenAiRuntimeAttemptError::retryable(
+            "provider_overloaded",
+            "OpenAI-compatible Runtime provider overloaded",
+        ),
+        500..=599 => OpenAiRuntimeAttemptError::retryable(
+            "provider_unavailable",
+            "OpenAI-compatible Runtime provider unavailable",
+        ),
+        _ if lower.contains("refusal") || lower.contains("safety") => {
+            OpenAiRuntimeAttemptError::fatal(
+                "safety_refusal",
+                "OpenAI-compatible Runtime returned a safety refusal",
+            )
+        }
+        _ => OpenAiRuntimeAttemptError::fatal(
+            "provider_unavailable",
+            "OpenAI-compatible Runtime provider unavailable",
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCompatibleChatCompletionRequest {
+    model: String,
+    messages: Vec<OpenAiCompatibleChatMessage>,
+    stream: bool,
+    temperature: f32,
+    max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    response_format: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_split: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiCompatibleChatMessage {
+    role: String,
+    content: String,
+}
+
+struct OpenAiProviderRequestSnapshotInput<'a> {
+    request: &'a OpenAiCompatibleChatCompletionRequest,
+    trace_id: &'a str,
+    profile_id: &'a str,
+    attempt: usize,
+    base_url: &'a str,
+    requested_tools: &'a [String],
+    retry_instruction_applied: bool,
+}
+
+fn openai_provider_request_snapshot(input: OpenAiProviderRequestSnapshotInput<'_>) -> Value {
+    json!({
+        "schema_version": "openai-compatible-provider-request-v1",
+        "runtime_adapter": "openai-compatible-network",
+        "provider_kind": "openai_compatible",
+        "method": "POST",
+        "endpoint": "/chat/completions",
+        "base_url_host": base_url_host(input.base_url),
+        "trace_id": input.trace_id,
+        "profile_id": input.profile_id,
+        "attempt": input.attempt,
+        "model": &input.request.model,
+        "messages": &input.request.messages,
+        "message_count": input.request.messages.len(),
+        "stream": input.request.stream,
+        "temperature": input.request.temperature,
+        "max_tokens": input.request.max_tokens,
+        "response_format": input.request.response_format.clone().unwrap_or(Value::Null),
+        "response_format_json_requested": input.request.response_format.is_some(),
+        "reasoning_split": input.request.reasoning_split,
+        "requested_tools": input.requested_tools,
+        "requested_tool_count": input.requested_tools.len(),
+        "retry_instruction_applied": input.retry_instruction_applied,
+        "authorization_header_embedded": false,
+        "api_key_embedded": false,
+        "secret_values_printed": false,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleChatCompletionResponse {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    choices: Vec<OpenAiCompatibleChoice>,
+    #[serde(default)]
+    usage: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleChoice {
+    message: OpenAiCompatibleAssistantMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiCompatibleAssistantMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    refusal: Option<String>,
+    #[serde(default)]
+    reasoning_details: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAiProviderOutputEnvelope {
+    raw_content: String,
+    reasoning_details: Option<Value>,
+    content_without_think_blocks: String,
+    content_contains_think_blocks: bool,
+    response_format_json_requested: bool,
+    business_json_candidate: Option<String>,
+    business_json_candidate_source: &'static str,
+    validator_content: String,
+}
+
+impl OpenAiProviderOutputEnvelope {
+    fn to_metadata(&self) -> Value {
+        let content_sha256 = non_empty_sha256(&self.raw_content);
+        let content_without_think_sha256 = non_empty_sha256(&self.content_without_think_blocks);
+        let reasoning_details_sha256 = self
+            .reasoning_details
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok())
+            .map(|value| format!("sha256:{}", sha256_hex(&value)));
+        let business_json_candidate_sha256 = self
+            .business_json_candidate
+            .as_deref()
+            .and_then(non_empty_sha256);
+        let validator_content_sha256 = non_empty_sha256(&self.validator_content);
+        json!({
+            "schema_version": "openai-compatible-provider-output-v1",
+            "response_format_json_requested": self.response_format_json_requested,
+            "content_present": !self.raw_content.trim().is_empty(),
+            "content_sha256": content_sha256,
+            "content_contains_think_blocks": self.content_contains_think_blocks,
+            "content_without_think_sha256": content_without_think_sha256,
+            "reasoning_details_present": self.reasoning_details.is_some(),
+            "reasoning_details_sha256": reasoning_details_sha256,
+            "business_json_candidate_present": self.business_json_candidate.is_some(),
+            "business_json_candidate_sha256": business_json_candidate_sha256,
+            "business_json_candidate_source": self.business_json_candidate_source,
+            "business_json_candidate": self.business_json_candidate,
+            "validator_content_sha256": validator_content_sha256,
+            "raw_provider_fields_embedded": true,
+            "raw_fields_embedded_in_validator_audit": false,
+            "preserved_raw_fields": {
+                "content": self.raw_content,
+                "reasoning_details": self.reasoning_details.clone().unwrap_or(Value::Null),
+            },
+        })
+    }
+}
+
+fn openai_provider_output_envelope(
+    raw_content: &str,
+    reasoning_details: Option<&Value>,
+    response_format_json_requested: bool,
+) -> OpenAiProviderOutputEnvelope {
+    let raw_content = raw_content.to_string();
+    let (content_without_think_blocks, content_contains_think_blocks) =
+        remove_think_blocks_for_business_json(&raw_content);
+    let (business_json_candidate, business_json_candidate_source) =
+        if response_format_json_requested {
+            extract_business_json_candidate(&content_without_think_blocks)
+                .unwrap_or((None, "business_json_not_found"))
+        } else {
+            (None, "not_requested")
+        };
+    let validator_content = business_json_candidate.clone().unwrap_or_else(|| {
+        if response_format_json_requested {
+            content_without_think_blocks.trim().to_string()
+        } else {
+            raw_content.trim().to_string()
+        }
+    });
+    OpenAiProviderOutputEnvelope {
+        raw_content,
+        reasoning_details: reasoning_details.cloned(),
+        content_without_think_blocks,
+        content_contains_think_blocks,
+        response_format_json_requested,
+        business_json_candidate,
+        business_json_candidate_source,
+        validator_content,
+    }
+}
+
+fn extract_business_json_candidate(text: &str) -> Option<(Option<String>, &'static str)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if serde_json::from_str::<Value>(trimmed).is_ok_and(|value| value.is_object()) {
+        return Some((Some(trimmed.to_string()), "direct_json_content"));
+    }
+    let unfenced = trimmed
+        .strip_prefix("```json")
+        .and_then(|value| value.strip_suffix("```"))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("```")
+                .and_then(|value| value.strip_suffix("```"))
+        })
+        .map(str::trim);
+    if let Some(unfenced) = unfenced
+        && serde_json::from_str::<Value>(unfenced).is_ok_and(|value| value.is_object())
+    {
+        return Some((Some(unfenced.to_string()), "fenced_json_content"));
+    }
+    first_balanced_json_object_candidate(trimmed)
+        .map(|candidate| (Some(candidate), "embedded_json_object"))
+}
+
+fn remove_think_blocks_for_business_json(text: &str) -> (String, bool) {
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut removed = false;
+    while cursor < text.len() {
+        let Some(start) = find_think_start_tag(text, cursor) else {
+            output.push_str(&text[cursor..]);
+            break;
+        };
+        output.push_str(&text[cursor..start]);
+        removed = true;
+        let Some(start_tag_end_relative) = text[start..].find('>') else {
+            break;
+        };
+        let content_start = start + start_tag_end_relative + 1;
+        let Some(end_relative) = find_ascii_case_insensitive(&text[content_start..], "</think>")
+        else {
+            break;
+        };
+        cursor = content_start + end_relative + "</think>".len();
+    }
+    (output, removed)
+}
+
+fn find_think_start_tag(text: &str, mut cursor: usize) -> Option<usize> {
+    while cursor < text.len() {
+        let relative = find_ascii_case_insensitive(&text[cursor..], "<think")?;
+        let start = cursor + relative;
+        let after = start + "<think".len();
+        let next = text[after..].chars().next();
+        if matches!(next, Some('>' | ' ' | '\t' | '\n' | '\r')) {
+            return Some(start);
+        }
+        cursor = after;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
+fn first_balanced_json_object_candidate(text: &str) -> Option<String> {
+    for (start, ch) in text.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let mut depth = 0_u32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (relative, candidate_ch) in text[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if candidate_ch == '\\' {
+                    escaped = true;
+                } else if candidate_ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match candidate_ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let end = start + relative + candidate_ch.len_utf8();
+                        let candidate = &text[start..end];
+                        if serde_json::from_str::<Value>(candidate)
+                            .is_ok_and(|value| value.is_object())
+                        {
+                            return Some(candidate.to_string());
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn non_empty_sha256(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| format!("sha256:{}", sha256_hex(value)))
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HermesChatCompletionRequest {
+    model: String,
+    messages: Vec<HermesChatMessage>,
+    stream: bool,
+    metadata: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<HermesToolDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesChatMessage {
+    role: String,
+    content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<HermesToolCall>,
+}
+
+impl HermesChatMessage {
+    fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    fn assistant_tool_calls(tool_calls: Vec<HermesToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls,
+        }
+    }
+
+    fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            tool_call_id: Some(call_id.into()),
+            tool_calls: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct HermesChatCompletionResponse {
+    #[serde(default)]
+    choices: Vec<HermesChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HermesChoice {
+    message: HermesMessage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesMessage {
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<HermesToolCall>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesToolCall {
+    id: String,
+    #[serde(default, rename = "type")]
+    kind: String,
+    function: HermesToolFunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HermesToolFunctionCall {
+    name: String,
+    #[serde(default)]
+    arguments: String,
+}
+
+#[derive(Debug, Clone)]
+struct HermesStreamToolCall {
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HermesToolDefinition {
+    #[serde(rename = "type")]
+    kind: String,
+    function: HermesToolFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HermesToolFunctionDefinition {
+    name: String,
+    description: String,
+    parameters: Value,
+}
+
+fn tool_choice_for_tools(tools: &[HermesToolDefinition]) -> Option<Value> {
+    match tools {
+        [] => None,
+        [tool] => Some(json!({
+            "type": "function",
+            "function": {
+                "name": &tool.function.name,
+            },
+        })),
+        _ => Some(json!("required")),
+    }
+}
+
+fn run_messages(input: &RuntimeRunInput, runtime_profile: &str) -> Vec<HermesChatMessage> {
+    let mut messages = vec![HermesChatMessage::new(
+        "system",
+        format!(
+            "You are executing an Tonglingyu runtime read-only run. Runtime profile: {runtime_profile}. Never perform external writes or request write credentials."
+        ),
+    )];
+    if let Some(context) = &input.context {
+        if let Some(summary) = &context.context_summary {
+            messages.push(HermesChatMessage::new(
+                "system",
+                format!("Session context summary: {summary}"),
+            ));
+        }
+        for message in &context.recent_messages {
+            messages.push(HermesChatMessage::new(
+                message.role.to_string(),
+                message.content_summary.clone(),
+            ));
+        }
+    }
+    if let Some(snapshot) = &input.snapshot {
+        messages.push(HermesChatMessage::new(
+            "system",
+            format!(
+                "Read-only connector snapshot summary: {}",
+                summarize_json(snapshot)
+            ),
+        ));
+    }
+    messages.push(HermesChatMessage::new(
+        "user",
+        format!(
+            "Run {} trigger={} target_resource={} risk={} external_action_mode={}. Provide a concise read-only result.",
+            input.run.id,
+            input.run.trigger_type,
+            input.run.target_resource,
+            input.run.risk_level,
+            input.run.external_action_mode
+        ),
+    ));
+    messages
+}
+
+fn session_messages(input: &RuntimeSessionInput, runtime_profile: &str) -> Vec<HermesChatMessage> {
+    let mut messages = vec![HermesChatMessage::new(
+        "system",
+        format!(
+            "You are in an Tonglingyu runtime read-only session. Runtime profile: {runtime_profile}. Do not request or use write credentials."
+        ),
+    )];
+    if let Some(summary) = &input.context.context_summary {
+        messages.push(HermesChatMessage::new(
+            "system",
+            format!("Session context summary: {summary}"),
+        ));
+    }
+    if let Some(snapshot) = &input.snapshot {
+        messages.push(HermesChatMessage::new(
+            "system",
+            format!(
+                "Read-only connector snapshot summary: {}",
+                summarize_json(snapshot)
+            ),
+        ));
+    }
+    for message in &input.context.recent_messages {
+        if message.role == input.message.role
+            && Some(message.content_summary.as_str()) == input.message.content_summary.as_deref()
+            && message.external_message_id == input.message.external_message_id
+        {
+            continue;
+        }
+        messages.push(HermesChatMessage::new(
+            message.role.to_string(),
+            message.content_summary.clone(),
+        ));
+    }
+    messages.push(HermesChatMessage::new(
+        input.message.role.to_string(),
+        input.message.content_summary.clone().unwrap_or_default(),
+    ));
+    messages
+}
+
+pub fn runtime_error(error: impl std::fmt::Display) -> agent_core::AgentCoreError {
+    runtime_failure(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::{
+        AgentInstance, AgentRun, CredentialLeaseStatus, ExternalActionPlan, ProfileContract,
+        RiskLevel, RuntimeProfileInput, RuntimeProfileMessage, RuntimeStep,
+        RuntimeStepFailurePolicy, RuntimeStepPlan, RuntimeStepPlanInput, RuntimeStepPlanOwner,
+        RuntimeToolCapability, RuntimeToolPolicy, RuntimeToolSpec, SessionContext, TriggerType,
+        new_trace_id,
+    };
+    use axum::{
+        Json, Router,
+        extract::{Query, State},
+        http::{HeaderMap, StatusCode},
+        routing::{get, post},
+    };
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+    use tokio::net::TcpListener;
+
+    type SeenWriteConnectorInput = (Arc<Mutex<Option<String>>>, Arc<Mutex<Option<Value>>>);
+    type SeenOpenAiRequest = (Arc<Mutex<Option<Value>>>, Arc<Mutex<Option<String>>>);
+    type SeenOpenAiRetryRequests = (Arc<Mutex<usize>>, Arc<Mutex<Vec<Value>>>);
+
+    #[test]
+    fn summarize_json_omits_values_and_object_keys() {
+        assert_eq!(
+            summarize_json(&json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"})),
+            "object_keys_len:1"
+        );
+        assert_eq!(
+            summarize_json(&json!("SECRET_TOOL_OUTPUT")),
+            "string_len:18"
+        );
+        assert_eq!(summarize_json(&json!(42)), "number");
+        assert_eq!(summarize_json(&json!(true)), "bool");
+    }
+
+    #[test]
+    fn optional_true_bool_value_only_enables_truthy_values() {
+        assert_eq!(optional_true_bool_value("true"), Some(true));
+        assert_eq!(optional_true_bool_value("on"), Some(true));
+        assert_eq!(optional_true_bool_value("false"), None);
+        assert_eq!(optional_true_bool_value("0"), None);
+        assert_eq!(optional_true_bool_value(""), None);
+    }
+
+    #[derive(Debug, Default)]
+    struct RawProfileRuntimeClient;
+
+    #[async_trait]
+    impl RuntimeClient for RawProfileRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "raw profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "raw profile runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Ok(RuntimeOutput {
+                result_summary: format!("raw profile step {}", input.profile_id),
+                result_ref: Some(format!("result://raw/{}", input.profile_id)),
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MissingStepOutputRefRuntimeClient;
+
+    #[async_trait]
+    impl RuntimeClient for MissingStepOutputRefRuntimeClient {
+        async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "missing-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn send_session_message(
+            &self,
+            _input: RuntimeSessionInput,
+        ) -> CoreResult<RuntimeOutput> {
+            Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                "missing-ref runtime only supports profile steps",
+            ))
+        }
+
+        async fn execute_profile_step(
+            &self,
+            input: RuntimeProfileInput,
+        ) -> CoreResult<RuntimeOutput> {
+            let result_ref = (input.profile_id != "missing-ref-profile")
+                .then(|| format!("result://raw/{}", input.profile_id));
+            Ok(RuntimeOutput {
+                result_summary: format!("raw profile step {}", input.profile_id),
+                result_ref,
+                messages: Vec::new(),
+                metadata: json!({
+                    "runtime_profile": input.profile_id,
+                    "trace_id": input.trace_id,
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct LeakyMetadataToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for LeakyMetadataToolExecutor {
+        async fn execute_tool(
+            &self,
+            call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Ok(RuntimeToolResult {
+                call_id: "spoofed-call".to_string(),
+                profile_id: "spoofed-profile".to_string(),
+                tool_name: "spoofed-tool".to_string(),
+                output_ref: Some("runtime://tool-results/leaky".to_string()),
+                output: json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"}),
+                metadata: json!({
+                    "trace_id": call.trace_id,
+                    "secret": "SECRET_TOOL_METADATA",
+                    "payload": {"raw": "SECRET_TOOL_PAYLOAD"}
+                }),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MissingOutputRefToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for MissingOutputRefToolExecutor {
+        async fn execute_tool(
+            &self,
+            call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Ok(RuntimeToolResult {
+                call_id: call.call_id,
+                profile_id: call.profile_id,
+                tool_name: call.tool_name,
+                output_ref: None,
+                output: json!({"ok": true}),
+                metadata: json!({"trace_id": call.trace_id}),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingRuntimeToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for FailingRuntimeToolExecutor {
+        async fn execute_tool(
+            &self,
+            _call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            Err(AgentCoreError::coded(
+                ErrorCode::InternalError,
+                "SECRET_EXECUTOR_FAILURE_PAYLOAD",
+            ))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct UnexpectedRuntimeToolExecutor;
+
+    #[async_trait]
+    impl RuntimeToolExecutor for UnexpectedRuntimeToolExecutor {
+        async fn execute_tool(
+            &self,
+            _call: RuntimeToolCall,
+            _spec: RuntimeToolSpec,
+        ) -> CoreResult<RuntimeToolResult> {
+            panic!("tool executor should not run after input schema failure")
+        }
+    }
+
+    fn hermes_run_input(trace_id: String) -> RuntimeRunInput {
+        RuntimeRunInput {
+            trace_id: trace_id.clone(),
+            run: AgentRun::new(
+                "agent-1",
+                None,
+                TriggerType::Manual,
+                "resource:team/project-alpha",
+                trace_id,
+            ),
+            agent: None,
+            context: None,
+            snapshot: None,
+            profile_contract: None,
+            runtime_step: None,
+            requested_tools: Vec::new(),
+        }
+    }
+
+    fn hermes_session_input(trace_id: String, content: impl Into<String>) -> RuntimeSessionInput {
+        let session_id = "session-1".to_string();
+        RuntimeSessionInput {
+            session_id: session_id.clone(),
+            agent_id: "agent-1".to_string(),
+            agent: None,
+            message: AgentSessionMessage::new(
+                session_id.clone(),
+                1,
+                MessageRole::User,
+                Some(content.into()),
+                None,
+                trace_id.clone(),
+            ),
+            context: SessionContext {
+                session_id,
+                agent_id: "agent-1".to_string(),
+                context_summary: None,
+                recent_messages: Vec::new(),
+                resource_scope: json!({"resource": "resource:team/project-alpha"}),
+                trace_id: trace_id.clone(),
+            },
+            snapshot: None,
+            profile_contract: None,
+            runtime_step: None,
+            requested_tools: Vec::new(),
+            trace_id,
+        }
+    }
+
+    async fn spawn_server(app: Router) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn openai_test_runtime_config(
+        base_url: String,
+        max_attempts: usize,
+    ) -> OpenAiCompatibleNetworkRuntimeConfig {
+        OpenAiCompatibleNetworkRuntimeConfig {
+            base_url,
+            api_key: Some("test-key".to_string()),
+            model: "direct-test-model".to_string(),
+            profile_models: BTreeMap::new(),
+            connect_timeout: Duration::from_millis(100),
+            read_timeout: Duration::from_millis(100),
+            total_deadline: Duration::from_millis(500),
+            max_tokens: 128,
+            temperature: 0.0,
+            max_attempts,
+            retry_base_delay: Duration::from_millis(1),
+            unhealthy_window: Duration::from_millis(10),
+            max_concurrency: 1,
+            response_format_json: false,
+            reasoning_split: None,
+        }
+    }
+
+    fn openai_test_profile_input() -> RuntimeProfileInput {
+        RuntimeProfileInput {
+            profile_id: "direct-test-profile".to_string(),
+            messages: vec![RuntimeProfileMessage::new(
+                "user",
+                "{\"normalized_question\":\"secret prompt should not leak\"}",
+            )],
+            metadata: json!({
+                "input_digest": "sha256:test-input",
+                "projection_digest": "sha256:test-projection"
+            }),
+            profile_contract: None,
+            runtime_step: None,
+            requested_tools: Vec::new(),
+            trace_id: new_trace_id(),
+        }
+    }
+
+    fn map_env(entries: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let values = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<BTreeMap<_, _>>();
+        move |name: &str| values.get(name).cloned()
+    }
+
+    #[test]
+    fn openai_compatible_config_applies_profile_prefix_tuning() {
+        let env = map_env(&[
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_CONNECT_TIMEOUT_MS",
+                "700",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_READ_TIMEOUT_MS",
+                "6500",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TOTAL_DEADLINE_MS",
+                "9000",
+            ),
+            ("TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MAX_TOKENS", "384"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TEMPERATURE",
+                "0.2",
+            ),
+            ("TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MAX_ATTEMPTS", "1"),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_RETRY_BASE_DELAY_MS",
+                "20",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_UNHEALTHY_WINDOW_MS",
+                "0",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MAX_CONCURRENCY",
+                "3",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_RESPONSE_FORMAT_JSON",
+                "false",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_REASONING_SPLIT",
+                "true",
+            ),
+        ]);
+        let mut config =
+            OpenAiCompatibleNetworkRuntimeConfig::new("http://provider.local/v1", "model");
+
+        config
+            .apply_tuning_from_prefix("TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE", &env)
+            .expect("profile tuning applies");
+
+        assert_eq!(config.connect_timeout, Duration::from_millis(700));
+        assert_eq!(config.read_timeout, Duration::from_millis(6500));
+        assert_eq!(config.total_deadline, Duration::from_millis(9000));
+        assert_eq!(config.max_tokens, 384);
+        assert_eq!(config.temperature, 0.2);
+        assert_eq!(config.max_attempts, 1);
+        assert_eq!(config.retry_base_delay, Duration::from_millis(20));
+        assert_eq!(config.unhealthy_window, Duration::from_millis(0));
+        assert_eq!(config.max_concurrency, 3);
+        assert!(!config.response_format_json);
+        assert_eq!(config.reasoning_split, Some(true));
+    }
+
+    #[test]
+    fn openai_compatible_config_rejects_invalid_profile_prefix_tuning() {
+        let env = map_env(&[(
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TOTAL_DEADLINE_MS",
+            "slow",
+        )]);
+        let mut config =
+            OpenAiCompatibleNetworkRuntimeConfig::new("http://provider.local/v1", "model");
+
+        let error = config
+            .apply_tuning_from_prefix("TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE", &env)
+            .expect_err("invalid profile tuning must fail closed");
+
+        assert!(error.to_string().contains(
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TOTAL_DEADLINE_MS must be an unsigned integer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_refuses_authorized_external_actions() {
+        let runtime = MinimalRuntimeClient::default();
+        let mut run = AgentRun::new(
+            "agent-1",
+            None,
+            TriggerType::Manual,
+            "resource:team/project-alpha",
+            new_trace_id(),
+        );
+        run.external_action_mode = ExternalActionMode::Authorized;
+        let result = runtime
+            .execute_run(RuntimeRunInput {
+                trace_id: run.trace_id.clone(),
+                run,
+                agent: None,
+                context: None,
+                snapshot: None,
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_profile_step_validates_contract_and_streams_final_event() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.input_schema = json!({
+            "type": "object",
+            "required": ["kind", "profile_id", "messages"],
+            "properties": {
+                "kind": {"type": "string"},
+                "profile_id": {"type": "string"},
+                "messages": {"type": "array", "minItems": 1}
+            }
+        });
+        contract.output_schema = json!({
+            "type": "object",
+            "required": ["result_summary", "metadata"],
+            "properties": {
+                "result_summary": {"type": "string"},
+                "metadata": {
+                    "type": "object",
+                    "required": ["profile_id", "schema_version", "effective_tool_set"],
+                    "properties": {
+                        "profile_id": {"type": "string"},
+                        "schema_version": {"type": "string"},
+                        "effective_tool_set": {"type": "array"}
+                    }
+                }
+            }
+        });
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = MinimalRuntimeClient::default();
+        let input = RuntimeProfileInput {
+            profile_id: "test-profile".to_string(),
+            messages: vec![RuntimeProfileMessage::new("user", "hello")],
+            metadata: json!({}),
+            profile_contract: Some(contract),
+            runtime_step: None,
+            requested_tools: vec!["tool.read".to_string()],
+            trace_id: new_trace_id(),
+        };
+
+        let output = runtime.execute_profile_step(input.clone()).await.unwrap();
+        assert_eq!(output.metadata["profile_id"], "test-profile");
+        assert_eq!(output.metadata["schema_version"], "v1");
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.read");
+
+        let events = runtime.stream_profile_step(input).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "final");
+        assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
+        assert!(events[0].output.is_some());
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_stream_registry_contract_error_preserves_schema_version() {
+        let mut contract = ProfileContract::new("registry-profile", "registry-v1");
+        contract.max_context_messages = Some(0);
+        let runtime = MinimalRuntimeClient::default()
+            .with_profile_registry(RuntimeProfileRegistry::new([contract]));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "registry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "SECRET_REGISTRY_INPUT")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].schema_version.as_deref(), Some("registry-v1"));
+        let encoded = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded.contains("SECRET_REGISTRY_INPUT"));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_denied_profile_tool() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["direct_external_write".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_unallowed_profile_tool() {
+        let contract = ProfileContract::new("test-profile", "v1");
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_invalid_profile_input_schema() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.input_schema = json!({
+            "type": "object",
+            "required": ["missing_required_field"]
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_context_over_budget() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.max_context_messages = Some(1);
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "contract"),
+                    RuntimeProfileMessage::new("user", "hello"),
+                ],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_denied_role() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "deny_message_roles": ["system"]
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "do not allow this role"),
+                    RuntimeProfileMessage::new("user", "hello"),
+                ],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_oversized_message() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "max_message_bytes": 4
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_profile_safety_unknown_field() {
+        let mut contract = ProfileContract::new("test-profile", "v1");
+        contract.safety_policy = json!({
+            "SECRET_FUTURE_POLICY": "SECRET_POLICY_VALUE"
+        });
+        let runtime = MinimalRuntimeClient::default();
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hello")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let encoded = error.to_string();
+        assert!(!encoded.contains("SECRET_FUTURE_POLICY"));
+        assert!(!encoded.contains("SECRET_POLICY_VALUE"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_success_passes_trace_id_and_metadata() {
+        let seen_trace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(seen_trace): State<Arc<Mutex<Option<String>>>>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        *seen_trace.lock().unwrap() = headers
+                            .get("x-agent-trace-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        assert_eq!(body["model"], "hermes-agent");
+                        Json(json!({
+                            "choices": [
+                                {"message": {"role": "assistant", "content": "runtime ok"}}
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen_trace.clone());
+        let base_url = spawn_server(app).await;
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url,
+            api_key: Some("test-key".to_string()),
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let trace_id = new_trace_id();
+        let output = runtime
+            .execute_run(hermes_run_input(trace_id.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "runtime ok");
+        assert_eq!(output.metadata["runtime"], "hermes");
+        assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_executes_profile_step_with_profile_model() {
+        let seen: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let seen_trace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State((seen, seen_trace)): State<SeenOpenAiRequest>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        *seen.lock().unwrap() = Some(body.clone());
+                        *seen_trace.lock().unwrap() = headers
+                            .get("x-agent-trace-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        assert!(headers.get("authorization").is_some());
+                        Json(json!({
+                            "id": "provider-request-1",
+                            "model": "direct-profile-model",
+                            "choices": [
+                                {
+                                    "finish_reason": "stop",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "{\"schema_version\":\"v1\",\"ok\":true}"
+                                    }
+                                }
+                            ],
+                            "usage": {"prompt_tokens": 11, "completion_tokens": 7}
+                        }))
+                    },
+                ),
+            )
+            .with_state((seen.clone(), seen_trace.clone()));
+        let mut profile_models = BTreeMap::new();
+        profile_models.insert(
+            "test-direct-profile".to_string(),
+            "direct-profile-model".to_string(),
+        );
+        let runtime =
+            OpenAiCompatibleNetworkRuntimeClient::new(OpenAiCompatibleNetworkRuntimeConfig {
+                base_url: spawn_server(app).await,
+                api_key: Some("test-key".to_string()),
+                model: "fallback-model".to_string(),
+                profile_models,
+                connect_timeout: Duration::from_millis(500),
+                read_timeout: Duration::from_millis(500),
+                total_deadline: Duration::from_secs(2),
+                max_tokens: 128,
+                temperature: 0.0,
+                max_attempts: 1,
+                retry_base_delay: Duration::from_millis(1),
+                unhealthy_window: Duration::from_millis(0),
+                max_concurrency: 1,
+                response_format_json: true,
+                reasoning_split: Some(true),
+            })
+            .unwrap();
+        let trace_id = new_trace_id();
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "test-direct-profile".to_string(),
+                messages: vec![
+                    RuntimeProfileMessage::new("system", "return json"),
+                    RuntimeProfileMessage::new("user", "{\"input\":true}"),
+                ],
+                metadata: json!({
+                    "input_digest": "sha256:test-input",
+                    "projection_digest": "sha256:test-projection"
+                }),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: trace_id.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(output.metadata["runtime"], "openai-compatible-network");
+        assert_eq!(
+            output.metadata["runtime_adapter"],
+            "openai-compatible-network"
+        );
+        assert_eq!(output.metadata["provider_model"], "direct-profile-model");
+        assert_eq!(output.metadata["input_digest"], json!("sha256:test-input"));
+        assert_eq!(
+            output.metadata["projection_digest"],
+            json!("sha256:test-projection")
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(1));
+        assert_eq!(output.metadata["secret_values_printed"], json!(false));
+        assert_eq!(output.metadata["tool_calling_supported"], json!(false));
+        assert_eq!(output.metadata["provider_request_embedded"], json!(true));
+        assert_eq!(
+            output.metadata["provider_request"]["schema_version"],
+            json!("openai-compatible-provider-request-v1")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["messages"][0]["content"],
+            json!("return json")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["messages"][1]["content"],
+            json!("{\"input\":true}")
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["authorization_header_embedded"],
+            json!(false)
+        );
+        assert_eq!(
+            output.metadata["provider_request"]["api_key_embedded"],
+            json!(false)
+        );
+        let metadata_text = output.metadata.to_string();
+        assert!(!metadata_text.contains("test-key"));
+        assert_eq!(
+            output.metadata["requested_tools_exposed_as_text"],
+            json!(true)
+        );
+        assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+        let seen_body = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen_body["model"], json!("direct-profile-model"));
+        assert_eq!(seen_body["stream"], json!(false));
+        assert_eq!(seen_body["response_format"]["type"], json!("json_object"));
+        assert_eq!(seen_body["reasoning_split"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_extracts_json_after_think_blocks() {
+        let provider_content = "<think>{\"schema_version\":\"reasoning-only\"}</think>\n{\"schema_version\":\"v1\",\"ok\":true}";
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let provider_content = provider_content.to_string();
+                async move {
+                    Json(json!({
+                        "model": "minimax-style-model",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": provider_content
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["content_contains_think_blocks"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_present"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["preserved_raw_fields"]["content"],
+            json!(provider_content)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["raw_fields_embedded_in_validator_audit"],
+            json!(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_preserves_reasoning_details_separately() {
+        let reasoning_details = json!([
+            {"type": "text", "text": "reasoning must remain separate"}
+        ]);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let reasoning_details = reasoning_details.clone();
+                async move {
+                    Json(json!({
+                        "model": "reasoning-split-model",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "{\"schema_version\":\"v1\",\"ok\":true}",
+                                    "reasoning_details": reasoning_details
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        config.reasoning_split = Some(true);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"ok\":true}"
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["reasoning_details_present"],
+            json!(true)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["preserved_raw_fields"]["reasoning_details"],
+            json!([{"type": "text", "text": "reasoning must remain separate"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_marks_reasoning_only_without_business_json() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "model": "reasoning-only-model",
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": "<think>{\"not\":\"business-json\"}</think>",
+                                "reasoning_details": {"format": "interleaved", "items": []}
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.response_format_json = true;
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "");
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_present"],
+            json!(false)
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["business_json_candidate_source"],
+            json!("business_json_not_found")
+        );
+        assert_eq!(
+            output.metadata["provider_output"]["reasoning_details_present"],
+            json!(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_529_overloaded() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>| async move {
+                        let call = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        if call == 1 {
+                            (
+                                StatusCode::from_u16(529).unwrap(),
+                                Json(json!({
+                                    "error": {
+                                        "type": "overloaded_error",
+                                        "message": "provider overloaded"
+                                    }
+                                })),
+                            )
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(json!({
+                                    "model": "retry-model",
+                                    "choices": [
+                                        {
+                                            "finish_reason": "stop",
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                            }
+                                        }
+                                    ]
+                                })),
+                            )
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let runtime =
+            OpenAiCompatibleNetworkRuntimeClient::new(OpenAiCompatibleNetworkRuntimeConfig {
+                base_url: spawn_server(app).await,
+                api_key: Some("test-key".to_string()),
+                model: "retry-model".to_string(),
+                profile_models: BTreeMap::new(),
+                connect_timeout: Duration::from_millis(500),
+                read_timeout: Duration::from_millis(500),
+                total_deadline: Duration::from_secs(2),
+                max_tokens: 128,
+                temperature: 0.0,
+                max_attempts: 2,
+                retry_base_delay: Duration::from_millis(1),
+                unhealthy_window: Duration::from_millis(100),
+                max_concurrency: 1,
+                response_format_json: false,
+                reasoning_split: None,
+            })
+            .unwrap();
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "retry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "{}")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"retried\":true}"
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(2));
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_429_and_5xx_without_raw_error_body() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let calls = Arc::new(Mutex::new(0usize));
+            let app = Router::new()
+                .route(
+                    "/chat/completions",
+                    post(
+                        |State((calls, status)): State<(Arc<Mutex<usize>>, StatusCode)>| async move {
+                            let call = {
+                                let mut calls = calls.lock().unwrap();
+                                *calls += 1;
+                                *calls
+                            };
+                            if call == 1 {
+                                (
+                                    status,
+                                    Json(json!({
+                                        "error": {
+                                            "message": "raw upstream body must not leak"
+                                        }
+                                    })),
+                                )
+                            } else {
+                                (
+                                    StatusCode::OK,
+                                    Json(json!({
+                                        "model": "direct-test-model",
+                                        "choices": [
+                                            {
+                                                "finish_reason": "stop",
+                                                "message": {
+                                                    "role": "assistant",
+                                                    "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                                }
+                                            }
+                                        ]
+                                    })),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .with_state((calls.clone(), status));
+            let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+                spawn_server(app).await,
+                2,
+            ))
+            .unwrap();
+
+            let output = runtime
+                .execute_profile_step(openai_test_profile_input())
+                .await
+                .unwrap();
+
+            assert_eq!(
+                output.result_summary,
+                "{\"schema_version\":\"v1\",\"retried\":true}"
+            );
+            assert_eq!(output.metadata["attempt_count"], json!(2));
+            assert_eq!(*calls.lock().unwrap(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_retries_empty_content_with_diagnostic() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State((calls, requests)): State<SeenOpenAiRetryRequests>,
+                     Json(request): Json<Value>| async move {
+                        requests.lock().unwrap().push(request);
+                        let call = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        if call == 1 {
+                            Json(json!({
+                                "id": "empty-1",
+                                "model": "direct-test-model",
+                                "metadata_secret": "SECRET_PROVIDER_EMPTY_BODY",
+                                "choices": [
+                                    {
+                                        "finish_reason": "stop",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": ""
+                                        }
+                                    }
+                                ],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 4}
+                            }))
+                        } else {
+                            Json(json!({
+                                "id": "ok-2",
+                                "model": "direct-test-model",
+                                "choices": [
+                                    {
+                                        "finish_reason": "stop",
+                                        "message": {
+                                            "role": "assistant",
+                                            "content": "{\"schema_version\":\"v1\",\"retried\":true}"
+                                        }
+                                    }
+                                ],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 31}
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state((calls.clone(), requests.clone()));
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            2,
+        ))
+        .unwrap();
+
+        let output = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.result_summary,
+            "{\"schema_version\":\"v1\",\"retried\":true}"
+        );
+        assert_eq!(output.metadata["attempt_count"], json!(2));
+        assert_eq!(output.metadata["retry_instruction_applied"], json!(true));
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let first_messages = captured[0]["messages"].as_array().unwrap();
+        let retry_messages = captured[1]["messages"].as_array().unwrap();
+        assert_eq!(retry_messages.len(), first_messages.len() + 1);
+        assert!(
+            retry_messages
+                .last()
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|content| content.contains("no assistant content"))
+        );
+        drop(captured);
+        let failure = &output.metadata["previous_attempt_failures"][0];
+        assert_eq!(
+            failure["schema_version"],
+            json!("openai-compatible-provider-diagnostic-v1")
+        );
+        assert_eq!(failure["error_type"], json!("provider_empty_content"));
+        assert_eq!(failure["attempt"], json!(1));
+        assert_eq!(failure["retryable"], json!(true));
+        assert_eq!(failure["status_code"], json!(200));
+        assert_eq!(failure["provider_request_id"], json!("empty-1"));
+        assert_eq!(failure["provider_model"], json!("direct-test-model"));
+        assert_eq!(failure["choice_count"], json!(1));
+        assert_eq!(failure["finish_reason"], json!("stop"));
+        assert_eq!(failure["message_keys"], json!(["content", "role"]));
+        assert_eq!(failure["content_present"], json!(true));
+        assert_eq!(failure["content_non_empty"], json!(false));
+        assert_eq!(failure["content_len"], json!(0));
+        assert_eq!(failure["raw_response_body_embedded"], json!(false));
+        assert_eq!(failure["raw_content_embedded"], json!(false));
+        assert_eq!(failure["provider_request_embedded"], json!(true));
+        assert_eq!(
+            failure["provider_request"]["messages"][0]["content"],
+            json!("{\"normalized_question\":\"secret prompt should not leak\"}")
+        );
+        assert_eq!(failure["secret_values_printed"], json!(false));
+        let encoded = serde_json::to_string(&output.metadata).unwrap();
+        assert!(!encoded.contains("SECRET_PROVIDER_EMPTY_BODY"));
+        assert!(encoded.contains("secret prompt should not leak"));
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_reports_empty_content_diagnostic_after_retries() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
+                    let call = {
+                        let mut calls = calls.lock().unwrap();
+                        *calls += 1;
+                        *calls
+                    };
+                    Json(json!({
+                        "id": format!("empty-{call}"),
+                        "model": "direct-test-model",
+                        "metadata_secret": "SECRET_REPEATED_EMPTY_BODY",
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": ""
+                                }
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 5, "completion_tokens": 4}
+                    }))
+                }),
+            )
+            .with_state(calls.clone());
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            2,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("provider_empty_content"));
+        let diagnostic = error.diagnostic().expect("empty-content diagnostic");
+        assert_eq!(
+            diagnostic["schema_version"],
+            json!("openai-compatible-provider-diagnostic-v1")
+        );
+        assert_eq!(diagnostic["error_type"], json!("provider_empty_content"));
+        assert_eq!(
+            diagnostic["final_error_type"],
+            json!("provider_empty_content")
+        );
+        assert_eq!(diagnostic["attempt"], json!(2));
+        assert_eq!(diagnostic["attempt_failure_count"], json!(2));
+        assert_eq!(diagnostic["attempt_failures"].as_array().unwrap().len(), 2);
+        assert_eq!(diagnostic["attempt_failures"][0]["attempt"], json!(1));
+        assert_eq!(diagnostic["attempt_failures"][1]["attempt"], json!(2));
+        assert_eq!(diagnostic["raw_response_body_embedded"], json!(false));
+        assert_eq!(diagnostic["raw_content_embedded"], json!(false));
+        assert_eq!(diagnostic["provider_request_embedded"], json!(true));
+        assert_eq!(
+            diagnostic["provider_request"]["messages"][0]["content"],
+            json!("{\"normalized_question\":\"secret prompt should not leak\"}")
+        );
+        assert_eq!(
+            diagnostic["provider_request"]["authorization_header_embedded"],
+            json!(false)
+        );
+        assert_eq!(diagnostic["secret_values_printed"], json!(false));
+        let encoded = serde_json::to_string(diagnostic).unwrap();
+        assert!(!encoded.contains("SECRET_REPEATED_EMPTY_BODY"));
+        assert!(encoded.contains("secret prompt should not leak"));
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_auth_error_is_not_retried_or_leaked() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(calls): State<Arc<Mutex<usize>>>| async move {
+                    *calls.lock().unwrap() += 1;
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "raw-provider-secret-body should stay out of errors",
+                    )
+                }),
+            )
+            .with_state(calls.clone());
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            3,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::Unauthorized);
+        assert!(error.to_string().contains("auth_error"));
+        assert!(!error.to_string().contains("raw-provider-secret-body"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_rejects_malformed_json_without_leaking_body() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (StatusCode::OK, "raw malformed provider response") }),
+        );
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            spawn_server(app).await,
+            1,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("provider_malformed_json"));
+        assert!(
+            !error
+                .to_string()
+                .contains("raw malformed provider response")
+        );
+        assert!(!error.to_string().contains("secret prompt should not leak"));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_maps_timeout_without_leaking_prompt() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "too late"}}
+                    ]
+                }))
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.read_timeout = Duration::from_millis(5);
+        config.total_deadline = Duration::from_millis(20);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("deadline_exceeded"));
+        assert!(!error.to_string().contains("secret prompt should not leak"));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_enforces_profile_budget_before_network_deadline() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(2_500)).await;
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "too late"}}
+                    ]
+                }))
+            }),
+        );
+        let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
+        config.read_timeout = Duration::from_secs(3);
+        config.total_deadline = Duration::from_secs(5);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
+        let mut input = openai_test_profile_input();
+        let mut contract = ProfileContract::new("direct-test-profile", "v1");
+        contract.max_runtime_seconds = Some(1);
+        input.profile_contract = Some(contract);
+
+        let started = Instant::now();
+        let error = runtime.execute_profile_step(input).await.unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("deadline_exceeded"));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "profile budget should cap the request before the network deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_runtime_maps_connection_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let runtime = OpenAiCompatibleNetworkRuntimeClient::new(openai_test_runtime_config(
+            format!("http://{addr}"),
+            1,
+        ))
+        .unwrap();
+
+        let error = runtime
+            .execute_profile_step(openai_test_profile_input())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        assert!(error.to_string().contains("connection_error"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_delta_and_final_output() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["stream"], true);
+                (
+                    StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream; charset=utf-8",
+                    )],
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "honglou-main".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "question")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].content_delta.as_deref(), Some("hello"));
+        assert_eq!(events[2].content_delta.as_deref(), Some(" world"));
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        let output = events[4].output.as_ref().unwrap();
+        assert_eq!(output.result_summary, "hello world");
+        assert_eq!(output.metadata["streaming"], true);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_sets_run_id_on_events() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["stream"], true);
+                (
+                    StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream; charset=utf-8",
+                    )],
+                    concat!(
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"run\"}}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\" ok\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+            }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let input = hermes_run_input(new_trace_id());
+        let run_id = input.run.id.clone();
+
+        let events = runtime.stream_run(input).await.unwrap();
+
+        assert!(
+            events
+                .iter()
+                .all(|event| event.run_id.as_deref() == Some(run_id.as_str()))
+        );
+        assert!(events.iter().all(|event| event.session_id.is_none()));
+        assert_eq!(events.last().unwrap().event_type.as_str(), "final");
+        assert_eq!(
+            events
+                .last()
+                .unwrap()
+                .output
+                .as_ref()
+                .unwrap()
+                .result_summary,
+            "run ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_safe_error_event() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream"}))) }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "error-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "SECRET_PROMPT")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("internal_error"));
+        assert!(events[0].output.is_none());
+        let encoded = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded.contains("SECRET_PROMPT"));
+        assert!(!encoded.contains("upstream"));
+    }
+
+    #[tokio::test]
+    async fn runtime_executes_multi_step_plan_with_output_refs() {
+        let runtime = MinimalRuntimeClient::default();
+        let contract_a = ProfileContract::new("profile-a", "v1");
+        let contract_b = ProfileContract::new("profile-b", "v1");
+        let step_a = RuntimeStep::new("profile-a", "v1", json!({"name": "first"}));
+        let mut step_b = RuntimeStep::new("profile-b", "v1", json!({"name": "second"}));
+        step_b.depends_on = vec![step_a.step_id.clone()];
+        let trace_id = new_trace_id();
+        let plan = RuntimeStepPlan::new(trace_id.clone(), vec![step_a.clone(), step_b]);
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan,
+                messages: vec![RuntimeProfileMessage::new("user", "initial input")],
+                metadata: json!({"purpose": "test"}),
+                profile_contracts: vec![contract_a, contract_b],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert!(output.result_summary.contains("runtime_step_input_ref"));
+        assert!(output.result_summary.contains(&step_a.step_id));
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "completed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            output.metadata["runtime_step_outputs"][0]["output_ref"]
+                .as_str()
+                .unwrap()
+                .starts_with("result://runtime-profiles/profile-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_helper_materializes_step_contracts() {
+        let runtime = MinimalRuntimeClient::default();
+        let mut contract = ProfileContract::new("profile-a", "v1");
+        contract.output_schema = json!({
+            "type": "object",
+            "required": ["result_summary"]
+        });
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+        let trace_id = new_trace_id();
+        let mut plan = RuntimeStepPlan::for_profile_contracts(
+            trace_id.clone(),
+            RuntimeStepPlanOwner::Manager,
+            vec![contract.clone()],
+            json!({"source": "manager"}),
+        );
+        plan.steps[0].tool_policy = RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string()]);
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan,
+                messages: vec![RuntimeProfileMessage::new("user", "step scoped")],
+                metadata: json!({}),
+                profile_contracts: vec![contract],
+                requested_tools_by_profile: BTreeMap::from([(
+                    "profile-a".to_string(),
+                    vec!["tool.alpha".to_string(), "tool.beta".to_string()],
+                )]),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.alpha");
+        assert_eq!(
+            output.metadata["runtime_step_plan"]["steps"][0]["tool_policy"]["allowed_tools"][0],
+            "tool.alpha"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_plan"]["steps"][0]["output_contract"]["required"][0],
+            "result_summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_requires_explicit_requested_tool_scope() {
+        let runtime = MinimalRuntimeClient::default();
+        let mut contract = ProfileContract::new("profile-a", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string()]);
+        let trace_id = new_trace_id();
+        let plan = RuntimeStepPlan::for_profile_contracts(
+            trace_id.clone(),
+            RuntimeStepPlanOwner::Manager,
+            vec![contract.clone()],
+            json!({}),
+        );
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan,
+                messages: vec![RuntimeProfileMessage::new("user", "no tool scope")],
+                metadata: json!({}),
+                profile_contracts: vec![contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            output.metadata["requested_tools"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            output.metadata["effective_tool_set"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_validates_step_output_contract() {
+        let runtime = MinimalRuntimeClient::default();
+        let contract = ProfileContract::new("profile-a", "v1");
+        let mut step = RuntimeStep::new("profile-a", "v1", json!({}));
+        step.output_contract = json!({
+            "type": "object",
+            "required": ["metadata"],
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "required": ["missing_field"]
+                }
+            }
+        });
+        let trace_id = new_trace_id();
+        let result = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![step]),
+                messages: vec![RuntimeProfileMessage::new("user", "bad output")],
+                metadata: json!({}),
+                profile_contracts: vec![contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_executor_output_contract_failure() {
+        let runtime = RawProfileRuntimeClient;
+        let bad_contract = ProfileContract::new("bad-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut bad_step = RuntimeStep::new("bad-profile", "v1", json!({}));
+        bad_step.output_contract = json!({
+            "type": "object",
+            "required": ["metadata"],
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "required": ["missing_field"]
+                }
+            }
+        });
+        bad_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![bad_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![bad_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "step_output_invalid"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_missing_output_ref() {
+        let runtime = MissingStepOutputRefRuntimeClient;
+        let missing_ref_contract = ProfileContract::new("missing-ref-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut missing_ref_step = RuntimeStep::new("missing-ref-profile", "v1", json!({}));
+        missing_ref_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![missing_ref_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![missing_ref_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "step_missing_output_ref"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_applies_fallback_to_missing_dependency() {
+        let runtime = RawProfileRuntimeClient;
+        let blocked_contract = ProfileContract::new("blocked-profile", "v1");
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut blocked_step = RuntimeStep::new("blocked-profile", "v1", json!({}));
+        blocked_step.depends_on = vec!["never-completed-step".to_string()];
+        blocked_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan: RuntimeStepPlan::new(trace_id.clone(), vec![blocked_step, good_step]),
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![blocked_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["error_code"],
+            "dependency_not_completed"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_step_plan_continues_optional_failed_step() {
+        let runtime = MinimalRuntimeClient::default();
+        let mut bad_contract = ProfileContract::new("bad-profile", "v1");
+        bad_contract.output_schema = json!({
+            "type": "object",
+            "required": ["metadata"],
+            "properties": {
+                "metadata": {
+                    "type": "object",
+                    "required": ["never_present"]
+                }
+            }
+        });
+        let good_contract = ProfileContract::new("good-profile", "v1");
+        let mut bad_step = RuntimeStep::new("bad-profile", "v1", json!({}));
+        bad_step.fallback_policy = RuntimeStepFailurePolicy::Continue;
+        let good_step = RuntimeStep::new("good-profile", "v1", json!({}));
+        let trace_id = new_trace_id();
+        let plan = RuntimeStepPlan::new(trace_id.clone(), vec![bad_step, good_step]);
+
+        let output = runtime
+            .execute_profile_step_plan(RuntimeStepPlanInput {
+                plan,
+                messages: vec![RuntimeProfileMessage::new("user", "continue")],
+                metadata: json!({}),
+                profile_contracts: vec![bad_contract, good_contract],
+                requested_tools_by_profile: BTreeMap::new(),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.metadata["runtime_step_plan"]["status"], "failed");
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][0]["status"],
+            "failed"
+        );
+        assert_eq!(
+            output.metadata["runtime_step_outputs"][1]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_routes_model_by_agent_profile() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["model"], "profile-model");
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "profile routed"}}
+                    ]
+                }))
+            }),
+        );
+        let mut profile_models = BTreeMap::new();
+        profile_models.insert(
+            "background_worker:analysis".to_string(),
+            "profile-model".to_string(),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "default-model".to_string(),
+            profile_models,
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let trace_id = new_trace_id();
+        let mut input = hermes_run_input(trace_id);
+        let mut agent = AgentInstance::new(
+            "user-1",
+            "background_worker",
+            "resource:team/project-alpha",
+            "hash",
+            json!({"hermes_profile": "background_worker:analysis"}),
+            new_trace_id(),
+        );
+        agent.id = input.run.agent_id.clone();
+        input.agent = Some(agent);
+
+        let output = runtime.execute_run(input).await.unwrap();
+
+        assert_eq!(output.result_summary, "profile routed");
+        assert_eq!(output.metadata["hermes_model"], "profile-model");
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_executes_authorized_profile_tool_call() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>,
+                     Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        if round == 1 {
+                            assert_eq!(
+                                body["tools"][0]["function"]["name"],
+                                "tonglingyu.text.search"
+                            );
+                            assert_eq!(body["tool_choice"]["type"], "function");
+                            assert_eq!(
+                                body["tool_choice"]["function"]["name"],
+                                "tonglingyu.text.search"
+                            );
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-1",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tonglingyu.text.search",
+                                                        "arguments": "{\"query\":\"通灵玉\"}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(body["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|message| message["role"] == "tool"
+                                    && message["tool_call_id"] == "call-1"));
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "tool grounded answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("honglou-text", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tonglingyu.text.search".to_string()]);
+        let output_schema = json!({
+            "type": "object",
+            "required": ["cards"],
+            "properties": {"cards": {"type": "array"}}
+        });
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
+            name: "tonglingyu.text.search".to_string(),
+            description: "Search Tonglingyu source text".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {"query": {"type": "string"}}
+            }),
+            output_schema: output_schema.clone(),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }];
+        let executor = StaticRuntimeToolExecutor::new([(
+            "tonglingyu.text.search".to_string(),
+            json!({"cards": [{"evidence_id": "ev-1", "text": "通灵玉"}]}),
+        )]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(executor));
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "honglou-text".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "通灵玉是什么？")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tonglingyu.text.search".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "tool grounded answer");
+        assert_eq!(output.metadata["tool_rounds"], 1);
+        assert_eq!(
+            output.metadata["tool_results"][0]["tool_name"],
+            "tonglingyu.text.search"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_schema"],
+            output_schema
+        );
+        assert!(output.metadata["tool_results"][0].get("output").is_none());
+        assert_eq!(
+            output.metadata["tool_audit_events"][0]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(
+            output.metadata["tool_audit_events"][0]["tool_name"],
+            "tonglingyu.text.search"
+        );
+        assert_eq!(
+            output.metadata["tool_audit_events"][0]["tool_name_status"],
+            "validated"
+        );
+        assert_eq!(
+            output.metadata["tool_audit_events"][1]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_execute_run_exposes_requested_profile_tools() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            let tools = body["tools"].as_array().unwrap();
+                            assert_eq!(tools.len(), 1);
+                            assert_eq!(tools[0]["function"]["name"], "tool.read");
+                            assert_eq!(body["tool_choice"]["type"], "function");
+                            assert_eq!(body["tool_choice"]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-run",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(
+                                body["messages"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .any(|message| message["role"] == "tool"
+                                        && message["tool_call_id"] == "call-run")
+                            );
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "run tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("run-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let mut input = hermes_run_input(new_trace_id());
+        input.profile_contract = Some(contract);
+        input.requested_tools = vec!["tool.read".to_string()];
+
+        let output = runtime.execute_run(input).await.unwrap();
+
+        assert_eq!(output.result_summary, "run tool answer");
+        assert_eq!(output.metadata["tool_rounds"], 1);
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.read");
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_tool_progress_and_schema_partial_events() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(_body): Json<Value>| async move {
+                        let mut calls_guard = calls.lock().unwrap();
+                        *calls_guard += 1;
+                        if *calls_guard == 1 {
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-stream",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "done"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls);
+        let mut contract = ProfileContract::new("tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "tool-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "stream tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[1].metadata["tool_event"]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(events[2].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[2].metadata["tool_event"]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.schema_version.as_deref() == Some("v1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_session_with_tools_emits_tool_progress_events() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            assert_eq!(body["tools"][0]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-session",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(body["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|message| message["role"] == "tool"
+                                    && message["tool_call_id"] == "call-session"));
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "session tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("session-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let trace_id = new_trace_id();
+        let session_id = "session-tool-1".to_string();
+        let input = RuntimeSessionInput {
+            session_id: session_id.clone(),
+            agent_id: "agent-1".to_string(),
+            agent: None,
+            message: AgentSessionMessage::new(
+                session_id.clone(),
+                1,
+                MessageRole::User,
+                Some("use a read tool".to_string()),
+                None,
+                trace_id.clone(),
+            ),
+            context: SessionContext {
+                session_id: session_id.clone(),
+                agent_id: "agent-1".to_string(),
+                context_summary: None,
+                recent_messages: Vec::new(),
+                resource_scope: json!({"resource": "resource:team/project-alpha"}),
+                trace_id: trace_id.clone(),
+            },
+            snapshot: None,
+            profile_contract: Some(contract),
+            runtime_step: None,
+            requested_tools: vec!["tool.read".to_string()],
+            trace_id,
+        };
+
+        let events = runtime.stream_session_message(input).await.unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[1].metadata["tool_event"]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(events[2].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[2].metadata["tool_event"]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(events.iter().all(|event| {
+            event.session_id.as_deref() == Some(session_id.as_str())
+                && event.run_id.is_none()
+                && event.schema_version.as_deref() == Some("v1")
+        }));
+        let output = events[4].output.as_ref().unwrap();
+        assert_eq!(output.result_summary, "session tool answer");
+        assert_eq!(
+            output.messages[0].content_summary.as_deref(),
+            Some("session tool answer")
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_with_tools_emits_tool_progress_events() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        let round = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            *calls
+                        };
+                        assert_eq!(body["stream"], false);
+                        if round == 1 {
+                            assert_eq!(body["tools"][0]["function"]["name"], "tool.read");
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-run-stream",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            assert!(body["messages"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|message| message["role"] == "tool"
+                                    && message["tool_call_id"] == "call-run-stream"));
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "run stream tool answer"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut contract = ProfileContract::new("run-stream-tool-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])));
+        let mut input = hermes_run_input(new_trace_id());
+        let run_id = input.run.id.clone();
+        input.profile_contract = Some(contract);
+        input.requested_tools = vec!["tool.read".to_string()];
+
+        let events = runtime.stream_run(input).await.unwrap();
+
+        assert_eq!(events[0].event_type.as_str(), "started");
+        assert_eq!(events[1].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[1].metadata["tool_event"]["event"],
+            "runtime_tool_call"
+        );
+        assert_eq!(events[2].event_type.as_str(), "tool_progress");
+        assert_eq!(
+            events[2].metadata["tool_event"]["event"],
+            "runtime_tool_result"
+        );
+        assert_eq!(events[3].event_type.as_str(), "schema_partial");
+        assert_eq!(events[4].event_type.as_str(), "final");
+        assert!(events.iter().all(|event| {
+            event.run_id.as_deref() == Some(run_id.as_str())
+                && event.session_id.is_none()
+                && event.schema_version.as_deref() == Some("v1")
+        }));
+        assert_eq!(
+            events[4].output.as_ref().unwrap().result_summary,
+            "run stream tool answer"
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_writes_tool_events_to_jsonl_audit_sink() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(_body): Json<Value>| async move {
+                        let mut calls_guard = calls.lock().unwrap();
+                        *calls_guard += 1;
+                        if *calls_guard == 1 {
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-audit",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.read",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        } else {
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "audited"}}
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(calls);
+        let mut contract = ProfileContract::new("audit-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let existing_event = r#"{"event":"existing_runtime_event"}"#;
+        tokio::fs::write(&audit_path, format!("{existing_event}\n"))
+            .await
+            .unwrap();
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "audit-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "audit")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.first().copied(), Some(existing_event));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 1);
+        assert!(log.contains("\"output_schema\""));
+        assert!(!log.contains("\"output\":"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_from_env_uses_audit_log_env() {
+        let child_flag = "AGENT_RUNTIME_FROM_ENV_AUDIT_CHILD";
+        if std::env::var_os(child_flag).is_some() {
+            let runtime = HermesRuntimeClient::from_env().unwrap();
+            let result = runtime
+                .execute_profile_step(RuntimeProfileInput {
+                    profile_id: "from-env-audit-profile".to_string(),
+                    messages: vec![RuntimeProfileMessage::new("user", "audit from env")],
+                    metadata: json!({}),
+                    profile_contract: None,
+                    runtime_step: None,
+                    requested_tools: Vec::new(),
+                    trace_id: new_trace_id(),
+                })
+                .await;
+            assert_eq!(result.unwrap_err().code(), ErrorCode::Forbidden);
+            return;
+        }
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert!(body.get("tools").is_none());
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_FROM_ENV_AUDIT_CALL",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_FROM_ENV_AUDIT_TOOL",
+                                            "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .arg("tests::hermes_runtime_from_env_uses_audit_log_env")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(child_flag, "1")
+            .env("AGENT_RUNTIME_HERMES_BASE_URL", spawn_server(app).await)
+            .env("AGENT_RUNTIME_HERMES_MODEL", "hermes-agent")
+            .env("AGENT_RUNTIME_AUDIT_LOG", &audit_path)
+            .output()
+            .await
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child stdout:\n{}\nchild stderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("\"call_id\":null"));
+        assert!(log.contains("\"tool_name\":null"));
+        assert!(!log.contains("SECRET_FROM_ENV_AUDIT_CALL"));
+        assert!(!log.contains("SECRET_FROM_ENV_AUDIT_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_invalid_tool_input_schema_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-input",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.input_schema",
+                                            "arguments": "{\"SECRET_ARGUMENT_FIELD\":\"SECRET_ARGUMENT_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-input-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.input_schema".to_string()]);
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
+            name: "tool.input_schema".to_string(),
+            description: "Validate runtime tool input".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {"query": {"type": "string"}},
+                "additionalProperties": false
+            }),
+            output_schema: json!({"type": "object"}),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }];
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-input-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use input tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.input_schema".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        let encoded_error = error.to_string();
+        assert!(!encoded_error.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!encoded_error.contains("SECRET_ARGUMENT_VALUE"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-input"));
+        assert!(log.contains("tool.input_schema"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!log.contains("SECRET_ARGUMENT_VALUE"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_safe_error_for_malformed_tool_arguments() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-args",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.malformed_args",
+                                            "arguments": "{\"SECRET_ARGUMENT_FIELD\":"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-args-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.malformed_args".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "tool-args-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "use malformed args tool",
+                )],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.malformed_args".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
+        assert!(events[0].output.is_none());
+        let encoded_event = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded_event.contains("SECRET_ARGUMENT_FIELD"));
+        assert!(!encoded_event.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-args"));
+        assert!(log.contains("tool.malformed_args"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("SECRET_ARGUMENT_FIELD"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_sanitizes_tool_executor_failure_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-executor-fails",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.executor_fails",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-executor-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.executor_fails".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(FailingRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-executor-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use failing tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.executor_fails".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::InternalError);
+        let encoded_error = error.to_string();
+        assert!(encoded_error.contains("runtime tool executor failed"));
+        assert!(!encoded_error.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-executor-fails"));
+        assert!(log.contains("tool.executor_fails"));
+        assert!(log.contains("\"error_code\":\"internal_error\""));
+        assert!(!log.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_safe_error_for_tool_executor_failure() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-stream-executor-fails",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.executor_fails",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("run-executor-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.executor_fails".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(FailingRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+        let mut input = hermes_run_input(new_trace_id());
+        let run_id = input.run.id.clone();
+        input.profile_contract = Some(contract);
+        input.requested_tools = vec!["tool.executor_fails".to_string()];
+
+        let events = runtime.stream_run(input).await.unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("internal_error"));
+        assert_eq!(events[0].schema_version.as_deref(), Some("v1"));
+        assert_eq!(events[0].run_id.as_deref(), Some(run_id.as_str()));
+        assert!(events[0].output.is_none());
+        let encoded_event = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded_event.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!encoded_event.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-stream-executor-fails"));
+        assert!(log.contains("tool.executor_fails"));
+        assert!(log.contains("\"error_code\":\"internal_error\""));
+        assert!(!log.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_session_and_profile_safe_error_for_tool_executor_failure() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        assert_eq!(body["stream"], false);
+                        assert_eq!(body["tools"][0]["function"]["name"], "tool.executor_fails");
+                        let call_id = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            format!("call-stream-wrapper-executor-fails-{}", *calls)
+                        };
+                        Json(json!({
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "tool.executor_fails",
+                                                    "arguments": "{}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let mut session_contract = ProfileContract::new("session-executor-profile", "v1");
+        session_contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.executor_fails".to_string()]);
+        let mut profile_contract = ProfileContract::new("profile-executor-profile", "v1");
+        profile_contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.executor_fails".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(FailingRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let mut session_input =
+            hermes_session_input(new_trace_id(), "stream session executor failure");
+        let session_id = session_input.session_id.clone();
+        session_input.profile_contract = Some(session_contract);
+        session_input.requested_tools = vec!["tool.executor_fails".to_string()];
+        let session_events = runtime.stream_session_message(session_input).await.unwrap();
+
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            session_events[0].error_code.as_deref(),
+            Some("internal_error")
+        );
+        assert_eq!(session_events[0].schema_version.as_deref(), Some("v1"));
+        assert_eq!(
+            session_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert!(session_events[0].run_id.is_none());
+        assert!(session_events[0].output.is_none());
+
+        let profile_events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "profile-executor-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "stream profile executor failure",
+                )],
+                metadata: json!({}),
+                profile_contract: Some(profile_contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.executor_fails".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(profile_events.len(), 1);
+        assert_eq!(profile_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            profile_events[0].error_code.as_deref(),
+            Some("internal_error")
+        );
+        assert_eq!(profile_events[0].schema_version.as_deref(), Some("v1"));
+        assert_eq!(profile_events[0].profile_id, "profile-executor-profile");
+        assert!(profile_events[0].run_id.is_none());
+        assert!(profile_events[0].session_id.is_none());
+        assert!(profile_events[0].output.is_none());
+
+        let encoded_events =
+            serde_json::to_string(&json!([session_events, profile_events])).unwrap();
+        assert!(!encoded_events.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!encoded_events.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), 2);
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_error").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-stream-wrapper-executor-fails-1"));
+        assert!(log.contains("call-stream-wrapper-executor-fails-2"));
+        assert!(log.contains("tool.executor_fails"));
+        assert!(log.contains("\"error_code\":\"internal_error\""));
+        assert!(!log.contains("SECRET_EXECUTOR_FAILURE_PAYLOAD"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_invalid_tool_output_schema_with_safe_audit() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-bad-output",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.output_schema",
+                                            "arguments": "{\"query\":\"ok\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("tool-output-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.output_schema".to_string()]);
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec {
+            name: "tool.output_schema".to_string(),
+            description: "Validate runtime tool output".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {"query": {"type": "string"}}
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}}
+            }),
+            output_ref_required: true,
+            capability: RuntimeToolCapability::ReadOnly,
+        }];
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.output_schema".to_string(),
+            json!({"SECRET_TOOL_OUTPUT": "SECRET_TOOL_VALUE"}),
+        )])))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "tool-output-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use output tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.output_schema".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Conflict);
+        let encoded_error = error.to_string();
+        assert!(!encoded_error.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!encoded_error.contains("SECRET_TOOL_VALUE"));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("call-bad-output"));
+        assert!(log.contains("tool.output_schema"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("\"output\""));
+        assert!(!log.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!log.contains("SECRET_TOOL_VALUE"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_exposes_only_requested_profile_tools() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let tools = body["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0]["function"]["name"], "tool.alpha");
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "scoped tools"}}
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("scoped-profile", "v1");
+        contract.tool_policy =
+            RuntimeToolPolicy::read_only(vec!["tool.alpha".to_string(), "tool.beta".to_string()]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "scoped-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "scoped")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.alpha".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "scoped tools");
+        assert_eq!(output.metadata["effective_tool_set"][0], "tool.alpha");
+        assert_eq!(
+            output.metadata["effective_tool_set"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_write_capability_tool_scope() {
+        let mut contract = ProfileContract::new("write-profile", "v1");
+        contract.tool_policy.allowed_tools = vec!["tool.write".to_string()];
+        contract.tool_policy.tool_specs = vec![RuntimeToolSpec::write("tool.write")];
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "write-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "write")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.write".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_omits_large_tool_payload_from_model_and_metadata() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                let has_tool_result = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|message| message["role"] == "tool")
+                    .cloned();
+                if let Some(message) = has_tool_result {
+                    let content: Value =
+                        serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(content["output_omitted"], true);
+                    assert!(content.get("output").is_none());
+                    Json(json!({
+                        "choices": [
+                            {"message": {"role": "assistant", "content": "large result summarized"}}
+                        ]
+                    }))
+                } else {
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "call-large",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "tool.large",
+                                                "arguments": "{}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let mut contract = ProfileContract::new("large-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.large".to_string()]);
+        let executor = StaticRuntimeToolExecutor::new([(
+            "tool.large".to_string(),
+            json!({"text": "x".repeat(128)}),
+        )]);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(executor));
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "large-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use large tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.large".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.result_summary, "large result summarized");
+        assert!(output.metadata["tool_results"][0].get("output").is_none());
+        assert!(
+            output.metadata["tool_results"][0]["output_ref"]
+                .as_str()
+                .unwrap()
+                .starts_with("runtime://tool-results/")
+        );
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_omits_tool_metadata_payload_from_metadata_and_audit() {
+        let seen_tool_content = Arc::new(Mutex::new(None::<String>));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(seen_tool_content): State<Arc<Mutex<Option<String>>>>,
+                     Json(body): Json<Value>| async move {
+                        let tool_result = body["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|message| message["role"] == "tool")
+                            .cloned();
+                        if let Some(message) = tool_result {
+                            *seen_tool_content.lock().unwrap() =
+                                message["content"].as_str().map(ToString::to_string);
+                            Json(json!({
+                                "choices": [
+                                    {"message": {"role": "assistant", "content": "metadata summarized"}}
+                                ]
+                            }))
+                        } else {
+                            Json(json!({
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "role": "assistant",
+                                            "tool_calls": [
+                                                {
+                                                    "id": "call-metadata",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": "tool.metadata",
+                                                        "arguments": "{}"
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .with_state(seen_tool_content.clone());
+        let mut contract = ProfileContract::new("metadata-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.metadata".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(LeakyMetadataToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let output = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "metadata-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use metadata tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.metadata".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        let encoded_metadata = serde_json::to_string(&output.metadata).unwrap();
+        assert!(!encoded_metadata.contains("SECRET_TOOL_METADATA"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_PAYLOAD"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!encoded_metadata.contains("SECRET_TOOL_VALUE"));
+        let tool_content = seen_tool_content.lock().unwrap().clone().unwrap();
+        let tool_content_json: Value = serde_json::from_str(&tool_content).unwrap();
+        assert_eq!(tool_content_json["output_omitted"], true);
+        assert_eq!(tool_content_json["output_summary"], "object_keys_len:1");
+        assert!(tool_content_json.get("output").is_none());
+        assert!(!tool_content.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!tool_content.contains("SECRET_TOOL_VALUE"));
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_ref"],
+            "runtime://tool-results/leaky"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_summary"],
+            "object_keys_len:1"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["output_schema"],
+            json!({"type": "object"})
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["call_id"],
+            "call-metadata"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["profile_id"],
+            "metadata-profile"
+        );
+        assert_eq!(
+            output.metadata["tool_results"][0]["tool_name"],
+            "tool.metadata"
+        );
+        assert!(output.metadata["tool_results"][0]["trace_id"].is_string());
+        assert!(output.metadata["tool_results"][0].get("metadata").is_none());
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_result").count(), 1);
+        assert!(!log.contains("spoofed-call"));
+        assert!(!log.contains("spoofed-profile"));
+        assert!(!log.contains("spoofed-tool"));
+        assert!(!log.contains("SECRET_TOOL_METADATA"));
+        assert!(!log.contains("SECRET_TOOL_PAYLOAD"));
+        assert!(!log.contains("SECRET_TOOL_OUTPUT"));
+        assert!(!log.contains("SECRET_TOOL_VALUE"));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_required_tool_output_ref_missing() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|_body: Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-missing-ref",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.missing_ref",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("missing-ref-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.missing_ref".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(MissingOutputRefToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "missing-ref-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "use missing ref tool")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.missing_ref".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("call-missing-ref"));
+        assert!(!log.contains("\"arguments\""));
+        assert!(!log.contains("\"ok\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_excessive_tool_rounds() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "call-loop",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "tool.read",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("loop-profile", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::new([(
+            "tool.read".to_string(),
+            json!({"ok": true}),
+        )])))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)))
+        .with_max_tool_rounds(1);
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "loop-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "loop")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: vec!["tool.read".to_string()],
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("call-loop"));
+        assert!(log.contains("tool.read"));
+        assert!(log.contains("\"error_code\":\"conflict\""));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_expired_profile_budget() {
+        let mut contract = ProfileContract::new("budget-profile", "v1");
+        contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "budget-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "budget")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_run_and_session_reject_expired_contract_budget() {
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let mut run_contract = ProfileContract::new("budget-run-profile", "v1");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.profile_contract = Some(run_contract);
+
+        let run_error = runtime.execute_run(run_input).await.unwrap_err();
+
+        assert!(matches!(
+            run_error,
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+
+        let mut session_contract = ProfileContract::new("budget-session-profile", "v1");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut session_input = hermes_session_input(new_trace_id(), "session budget");
+        session_input.profile_contract = Some(session_contract);
+
+        let session_error = runtime
+            .send_session_message(session_input)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            session_error,
+            AgentCoreError::Coded {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_streams_safe_error_for_expired_profile_budget() {
+        let mut contract = ProfileContract::new("budget-profile", "v1");
+        contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "budget-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "SECRET_BUDGET")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("conflict"));
+        assert!(events[0].output.is_none());
+        let encoded = serde_json::to_string(&events[0]).unwrap();
+        assert!(!encoded.contains("SECRET_BUDGET"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_run_and_session_safe_error_for_expired_contract_budget() {
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let mut run_contract = ProfileContract::new("budget-run-stream-profile", "v1");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.run.target_resource = "resource:team/SECRET_RUN_BUDGET".to_string();
+        let run_id = run_input.run.id.clone();
+        run_input.profile_contract = Some(run_contract);
+
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+
+        assert_eq!(run_events.len(), 1);
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(run_events[0].run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(run_events[0].schema_version.as_deref(), Some("v1"));
+        let encoded_run = serde_json::to_string(&run_events[0]).unwrap();
+        assert!(!encoded_run.contains("SECRET_RUN_BUDGET"));
+
+        let mut session_contract = ProfileContract::new("budget-session-stream-profile", "v1");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut session_input = hermes_session_input(new_trace_id(), "SECRET_SESSION_BUDGET");
+        let session_id = session_input.session_id.clone();
+        session_input.profile_contract = Some(session_contract);
+
+        let session_events = runtime.stream_session_message(session_input).await.unwrap();
+
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(session_events[0].error_code.as_deref(), Some("conflict"));
+        assert_eq!(
+            session_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(session_events[0].schema_version.as_deref(), Some("v1"));
+        let encoded_session = serde_json::to_string(&session_events[0]).unwrap();
+        assert!(!encoded_session.contains("SECRET_SESSION_BUDGET"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_registry_contract_errors_preserve_schema_version() {
+        let mut run_contract = ProfileContract::new("tonglingyu-hermes", "registry-v2");
+        run_contract.max_runtime_seconds = Some(0);
+        let mut session_contract = ProfileContract::new("agent-1", "registry-v2");
+        session_contract.max_runtime_seconds = Some(0);
+        let mut profile_contract = ProfileContract::new("registry-profile", "registry-v2");
+        profile_contract.max_runtime_seconds = Some(0);
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_profile_registry(RuntimeProfileRegistry::new([
+            run_contract,
+            session_contract,
+            profile_contract,
+        ]));
+
+        let mut run_input = hermes_run_input(new_trace_id());
+        run_input.run.target_resource = "resource:team/SECRET_REGISTRY_RUN".to_string();
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].schema_version.as_deref(), Some("registry-v2"));
+        let encoded_run = serde_json::to_string(&run_events[0]).unwrap();
+        assert!(!encoded_run.contains("SECRET_REGISTRY_RUN"));
+
+        let session_events = runtime
+            .stream_session_message(hermes_session_input(
+                new_trace_id(),
+                "SECRET_REGISTRY_SESSION",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            session_events[0].schema_version.as_deref(),
+            Some("registry-v2")
+        );
+        let encoded_session = serde_json::to_string(&session_events[0]).unwrap();
+        assert!(!encoded_session.contains("SECRET_REGISTRY_SESSION"));
+
+        let profile_events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "registry-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "SECRET_REGISTRY_PROFILE",
+                )],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(profile_events[0].event_type.as_str(), "error");
+        assert_eq!(
+            profile_events[0].schema_version.as_deref(),
+            Some("registry-v2")
+        );
+        let encoded_profile = serde_json::to_string(&profile_events[0]).unwrap();
+        assert!(!encoded_profile.contains("SECRET_REGISTRY_PROFILE"));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_unauthorized_profile_tool_call() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_UNAUTHORIZED_CALL_ID",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_UNAUTHORIZED_TOOL",
+                                            "arguments": "{}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let mut contract = ProfileContract::new("honglou-main", "v1");
+        contract.tool_policy = RuntimeToolPolicy::read_only(vec!["tool.read".to_string()]);
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(StaticRuntimeToolExecutor::default()))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "honglou-main".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "write externally")],
+                metadata: json!({}),
+                profile_contract: Some(contract),
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::Forbidden,
+                ..
+            }
+        ));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert!(log.contains("\"call_id\":null"));
+        assert!(log.contains("\"call_id_status\":\"redacted\""));
+        assert!(log.contains("\"tool_name\":null"));
+        assert!(log.contains("\"tool_name_status\":\"redacted\""));
+        assert!(!log.contains("SECRET_UNAUTHORIZED_CALL_ID"));
+        assert!(!log.contains("SECRET_UNAUTHORIZED_TOOL"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_tool_call_without_profile_contract() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert!(body.get("tools").is_none());
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_NO_CONTRACT_CALL_ID",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_NO_CONTRACT_TOOL",
+                                            "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let result = runtime
+            .execute_profile_step(RuntimeProfileInput {
+                profile_id: "no-contract-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new("user", "hallucinate a tool")],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Forbidden);
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert!(log.contains("\"call_id\":null"));
+        assert!(log.contains("\"call_id_status\":\"redacted\""));
+        assert!(log.contains("\"tool_name\":null"));
+        assert!(log.contains("\"tool_name_status\":\"redacted\""));
+        assert!(!log.contains("SECRET_NO_CONTRACT_CALL_ID"));
+        assert!(!log.contains("SECRET_NO_CONTRACT_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_unrequested_run_and_session_tool_calls_with_safe_audit() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        assert!(body.get("tools").is_none());
+                        let call_id = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            format!("SECRET_NO_TOOL_SCOPE_CALL_{}", *calls)
+                        };
+                        Json(json!({
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "SECRET_NO_TOOL_SCOPE_TOOL",
+                                                    "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }))
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let run_result = runtime.execute_run(hermes_run_input(new_trace_id())).await;
+        assert_eq!(run_result.unwrap_err().code(), ErrorCode::Forbidden);
+
+        let session_result = runtime
+            .send_session_message(hermes_session_input(new_trace_id(), "hallucinate a tool"))
+            .await;
+        assert_eq!(session_result.unwrap_err().code(), ErrorCode::Forbidden);
+        assert_eq!(*calls.lock().unwrap(), 2);
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_error").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 4);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 4);
+        assert!(!log.contains("SECRET_NO_TOOL_SCOPE_CALL"));
+        assert!(!log.contains("SECRET_NO_TOOL_SCOPE_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_rejects_unrequested_run_and_session_tool_calls() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(calls): State<Arc<Mutex<usize>>>, Json(body): Json<Value>| async move {
+                        assert_eq!(body["stream"], true);
+                        assert!(body.get("tools").is_none());
+                        let call_id = {
+                            let mut calls = calls.lock().unwrap();
+                            *calls += 1;
+                            format!("SECRET_STREAM_NO_TOOL_CALL_{}", *calls)
+                        };
+                        let event = json!({
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "id": call_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "SECRET_STREAM_NO_TOOL",
+                                                    "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        });
+                        (
+                            StatusCode::OK,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/event-stream; charset=utf-8",
+                            )],
+                            format!("data: {event}\n\ndata: [DONE]\n\n"),
+                        )
+                    },
+                ),
+            )
+            .with_state(calls.clone());
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let run_input = hermes_run_input(new_trace_id());
+        let run_id = run_input.run.id.clone();
+        let run_events = runtime.stream_run(run_input).await.unwrap();
+        assert_eq!(run_events.len(), 1);
+        assert_eq!(run_events[0].event_type.as_str(), "error");
+        assert_eq!(run_events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(run_events[0].run_id.as_deref(), Some(run_id.as_str()));
+
+        let session_input = hermes_session_input(new_trace_id(), "hallucinate a stream tool");
+        let session_id = session_input.session_id.clone();
+        let session_events = runtime.stream_session_message(session_input).await.unwrap();
+        assert_eq!(session_events.len(), 1);
+        assert_eq!(session_events[0].event_type.as_str(), "error");
+        assert_eq!(session_events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(
+            session_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(*calls.lock().unwrap(), 2);
+        let encoded_events = serde_json::to_string(&json!([run_events, session_events])).unwrap();
+        assert!(!encoded_events.contains("SECRET_STREAM_NO_TOOL"));
+        assert!(!encoded_events.contains("SECRET_ARGUMENT"));
+        assert!(!encoded_events.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 2);
+        assert_eq!(log.matches("runtime_tool_error").count(), 2);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 4);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 4);
+        assert!(!log.contains("SECRET_STREAM_NO_TOOL_CALL"));
+        assert!(!log.contains("SECRET_STREAM_NO_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_stream_profile_rejects_unrequested_tool_call() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["stream"], true);
+                assert!(body.get("tools").is_none());
+                let event = json!({
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "id": "SECRET_STREAM_PROFILE_CALL_ID",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "SECRET_STREAM_PROFILE_TOOL",
+                                            "arguments": "{\"SECRET_ARGUMENT\":\"SECRET_VALUE\"}"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                });
+                (
+                    StatusCode::OK,
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/event-stream; charset=utf-8",
+                    )],
+                    format!("data: {event}\n\ndata: [DONE]\n\n"),
+                )
+            }),
+        );
+        let audit_path = std::env::temp_dir().join(format!("{}.jsonl", new_id("rtaudit")));
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap()
+        .with_tool_executor(Arc::new(UnexpectedRuntimeToolExecutor))
+        .with_audit_sink(Arc::new(JsonlRuntimeAuditSink::new(&audit_path)));
+
+        let events = runtime
+            .stream_profile_step(RuntimeProfileInput {
+                profile_id: "stream-no-contract-profile".to_string(),
+                messages: vec![RuntimeProfileMessage::new(
+                    "user",
+                    "hallucinate a stream tool",
+                )],
+                metadata: json!({}),
+                profile_contract: None,
+                runtime_step: None,
+                requested_tools: Vec::new(),
+                trace_id: new_trace_id(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "error");
+        assert_eq!(events[0].error_code.as_deref(), Some("forbidden"));
+        assert_eq!(events[0].profile_id, "stream-no-contract-profile");
+        assert!(events[0].output.is_none());
+        let encoded_events = serde_json::to_string(&events).unwrap();
+        assert!(!encoded_events.contains("SECRET_STREAM_PROFILE_CALL_ID"));
+        assert!(!encoded_events.contains("SECRET_STREAM_PROFILE_TOOL"));
+        assert!(!encoded_events.contains("SECRET_ARGUMENT"));
+        assert!(!encoded_events.contains("\"arguments\""));
+
+        let log = tokio::fs::read_to_string(&audit_path).await.unwrap();
+        assert_eq!(log.matches("runtime_tool_call").count(), 1);
+        assert_eq!(log.matches("runtime_tool_error").count(), 1);
+        assert_eq!(log.matches("runtime_tool_result").count(), 0);
+        assert_eq!(log.matches("\"call_id\":null").count(), 2);
+        assert_eq!(log.matches("\"tool_name\":null").count(), 2);
+        assert!(!log.contains("SECRET_STREAM_PROFILE_CALL_ID"));
+        assert!(!log.contains("SECRET_STREAM_PROFILE_TOOL"));
+        assert!(!log.contains("SECRET_ARGUMENT"));
+        assert!(!log.contains("SECRET_VALUE"));
+        assert!(!log.contains("\"arguments\""));
+        let _ = tokio::fs::remove_file(audit_path).await;
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_maps_5xx_to_safe_internal_error() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream"}))) }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let result = runtime.execute_run(hermes_run_input(new_trace_id())).await;
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::InternalError,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_rejects_malformed_response() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { Json(json!({"choices": []})) }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let result = runtime.execute_run(hermes_run_input(new_trace_id())).await;
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentCoreError::Coded {
+                code: ErrorCode::InternalError,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hermes_runtime_maps_timeout_without_leaking_prompt() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Json(json!({
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "too late"}}
+                    ]
+                }))
+            }),
+        );
+        let runtime = HermesRuntimeClient::new(HermesRuntimeConfig {
+            base_url: spawn_server(app).await,
+            api_key: None,
+            model: "hermes-agent".to_string(),
+            profile_models: BTreeMap::new(),
+            timeout: Duration::from_millis(10),
+        })
+        .unwrap();
+        let result = runtime.execute_run(hermes_run_input(new_trace_id())).await;
+        let error = result.unwrap_err();
+        assert!(matches!(
+            error,
+            AgentCoreError::Coded {
+                code: ErrorCode::InternalError,
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains("resource:team/project-alpha"));
+    }
+
+    #[tokio::test]
+    async fn http_read_only_connector_passes_trace_and_parses_snapshot() {
+        let seen_trace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/snapshots",
+                get(
+                    |State(seen_trace): State<Arc<Mutex<Option<String>>>>,
+                     headers: HeaderMap,
+                     Query(query): Query<BTreeMap<String, String>>| async move {
+                        *seen_trace.lock().unwrap() = headers
+                            .get("x-agent-trace-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        Json(ConnectorSnapshot {
+                            connector: query.get("connector").cloned().unwrap_or_default(),
+                            resource: query.get("resource").cloned().unwrap_or_default(),
+                            payload_ref: "snapshot://http/test".to_string(),
+                            summary: json!({"mode": "read_only", "source": "http"}),
+                        })
+                    },
+                ),
+            )
+            .with_state(seen_trace.clone());
+        let trace_id = new_trace_id();
+        let connector = HttpReadOnlyConnector::new(HttpReadOnlyConnectorConfig {
+            base_url: spawn_server(app).await,
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let snapshot = connector
+            .read_only_snapshot("github", "resource:team/project-alpha", &trace_id)
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.connector, "github");
+        assert_eq!(snapshot.summary["mode"], "read_only");
+        assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+    }
+
+    #[tokio::test]
+    async fn http_read_only_connector_error_does_not_leak_secret_or_resource() {
+        let app = Router::new().route(
+            "/snapshots",
+            get(|| async {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": "secret-token"})),
+                )
+            }),
+        );
+        let connector = HttpReadOnlyConnector::new(HttpReadOnlyConnectorConfig {
+            base_url: spawn_server(app).await,
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+
+        let error = connector
+            .read_only_snapshot("github", "resource:team/project-alpha", &new_trace_id())
+            .await
+            .unwrap_err();
+
+        assert!(!error.to_string().contains("secret-token"));
+        assert!(!error.to_string().contains("project-alpha"));
+    }
+
+    #[tokio::test]
+    async fn http_credential_provider_returns_active_opaque_lease() {
+        let seen_trace: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/credential-leases",
+                post(
+                    |State(seen_trace): State<Arc<Mutex<Option<String>>>>,
+                     headers: HeaderMap,
+                     Json(request): Json<CredentialLeaseRequest>| async move {
+                        *seen_trace.lock().unwrap() = headers
+                            .get("x-agent-trace-id")
+                            .and_then(|value| value.to_str().ok())
+                            .map(ToString::to_string);
+                        Json(json!({
+                            "provider_ref": format!("vault://leases/{}", request.external_action_plan_id),
+                            "expires_in_seconds": 60
+                        }))
+                    },
+                ),
+            )
+            .with_state(seen_trace.clone());
+        let trace_id = new_trace_id();
+        let provider = HttpCredentialProvider::new(HttpCredentialProviderConfig {
+            base_url: spawn_server(app).await,
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+            lease_ttl_seconds: 300,
+        })
+        .unwrap();
+
+        let lease = provider
+            .active_lease(CredentialLeaseRequest {
+                external_action_plan_id: "eaplan-1".to_string(),
+                credential_scope: "github:issues:write".to_string(),
+                trace_id: trace_id.clone(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(lease.status, CredentialLeaseStatus::Active);
+        assert_eq!(
+            lease.provider_ref.as_deref(),
+            Some("vault://leases/eaplan-1")
+        );
+        assert!(lease.expires_at.is_some());
+        assert_eq!(*seen_trace.lock().unwrap(), Some(trace_id));
+    }
+
+    #[tokio::test]
+    async fn http_write_connector_executes_with_provider_ref_and_payload() {
+        let seen_provider_ref: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_payload: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let app = Router::new()
+            .route(
+                "/action-executions/execute",
+                post(
+                    |State((seen_provider_ref, seen_payload)): State<SeenWriteConnectorInput>,
+                     Json(input): Json<WriteConnectorExecuteInput>| async move {
+                        *seen_provider_ref.lock().unwrap() = input.credential_provider_ref.clone();
+                        *seen_payload.lock().unwrap() = Some(input.payload.clone());
+                        Json(WriteConnectorExecuteOutput {
+                            accepted: true,
+                            status: "applied".to_string(),
+                            result_ref: Some(format!("write://result/{}", input.plan.id)),
+                            compensation_ref: Some(format!(
+                                "compensate://result/{}",
+                                input.plan.id
+                            )),
+                            error_code: None,
+                            metadata: json!({"connector": input.plan.connector}),
+                        })
+                    },
+                ),
+            )
+            .with_state((seen_provider_ref.clone(), seen_payload.clone()));
+        let trace_id = new_trace_id();
+        let connector = HttpWriteConnector::new(HttpWriteConnectorConfig {
+            base_url: spawn_server(app).await,
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let plan = ExternalActionPlan::new(
+            "run-1",
+            "github",
+            "issue.comment",
+            "resource:team/project-alpha",
+            RiskLevel::Low,
+            ExternalActionMode::Authorized,
+            trace_id.clone(),
+        );
+
+        let output = connector
+            .execute(WriteConnectorExecuteInput {
+                plan: plan.clone(),
+                idempotency_key: plan.id.clone(),
+                credential_provider_ref: Some("vault://leases/eaplan-1".to_string()),
+                payload: json!({"body": "approved comment"}),
+                trace_id,
+            })
+            .await
+            .unwrap();
+
+        assert!(output.accepted);
+        assert_eq!(
+            output.result_ref,
+            Some(format!("write://result/{}", plan.id))
+        );
+        assert_eq!(
+            *seen_provider_ref.lock().unwrap(),
+            Some("vault://leases/eaplan-1".to_string())
+        );
+        assert_eq!(
+            seen_payload.lock().unwrap().as_ref().unwrap()["body"],
+            "approved comment"
+        );
+    }
+
+    #[tokio::test]
+    async fn action_gateway_executes_idempotently_and_compensates() {
+        let target_log = std::env::temp_dir().join(format!(
+            "tonglingyu-action-gateway-{}.jsonl",
+            new_trace_id()
+        ));
+        let app = action_gateway_router(ActionGatewayConfig {
+            target_log_path: target_log.clone(),
+            api_key: Some("secret-token".to_string()),
+            lease_ttl_seconds: 60,
+            connector: "action-journal".to_string(),
+            allowed_credential_scopes: vec!["tonglingyu:action-gateway-smoke".to_string()],
+        })
+        .unwrap();
+        let base_url = spawn_server(app).await;
+        let trace_id = new_trace_id();
+        let provider = HttpCredentialProvider::new(HttpCredentialProviderConfig {
+            base_url: base_url.clone(),
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+            lease_ttl_seconds: 300,
+        })
+        .unwrap();
+        let connector = HttpWriteConnector::new(HttpWriteConnectorConfig {
+            base_url: base_url.clone(),
+            api_key: Some("secret-token".to_string()),
+            timeout: Duration::from_secs(2),
+        })
+        .unwrap();
+        let plan = ExternalActionPlan::new(
+            "run-1",
+            "action-journal",
+            "target.write",
+            "resource:team/action-gateway-smoke",
+            RiskLevel::Low,
+            ExternalActionMode::Authorized,
+            trace_id.clone(),
+        );
+        let lease = provider
+            .active_lease(CredentialLeaseRequest {
+                external_action_plan_id: plan.id.clone(),
+                credential_scope: "tonglingyu:action-gateway-smoke".to_string(),
+                trace_id: trace_id.clone(),
+            })
+            .await
+            .unwrap();
+        let input = WriteConnectorExecuteInput {
+            plan: plan.clone(),
+            idempotency_key: plan.id.clone(),
+            credential_provider_ref: lease.provider_ref.clone(),
+            payload: json!({"message": "external action smoke"}),
+            trace_id: trace_id.clone(),
+        };
+
+        let first = connector.execute(input.clone()).await.unwrap();
+        let second = connector.execute(input).await.unwrap();
+
+        assert!(first.accepted);
+        assert_eq!(first.status, "applied");
+        assert_eq!(first.result_ref, second.result_ref);
+        assert_eq!(first.compensation_ref, second.compensation_ref);
+        let compensation_ref = first.compensation_ref.clone().unwrap();
+        let client = reqwest::Client::new();
+        let invalid_compensation = client
+            .post(format!("{base_url}/action-executions/compensate"))
+            .bearer_auth("secret-token")
+            .json(&WriteConnectorCompensateInput {
+                plan: plan.clone(),
+                compensation_ref: "action-journal-compensation://unknown".to_string(),
+                reason: Some("test compensation".to_string()),
+                payload: json!({}),
+                trace_id: trace_id.clone(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_compensation.status().as_u16(), 409);
+
+        let compensation = client
+            .post(format!("{base_url}/action-executions/compensate"))
+            .bearer_auth("secret-token")
+            .json(&WriteConnectorCompensateInput {
+                plan,
+                compensation_ref,
+                reason: Some("test compensation".to_string()),
+                payload: json!({}),
+                trace_id,
+            })
+            .send()
+            .await
+            .unwrap()
+            .json::<WriteConnectorCompensateOutput>()
+            .await
+            .unwrap();
+
+        assert_eq!(compensation.status, "compensated");
+        let log = std::fs::read_to_string(&target_log).unwrap();
+        assert_eq!(
+            log.matches("\"event_type\":\"credential_lease_issued\"")
+                .count(),
+            1
+        );
+        assert_eq!(log.matches("\"event_type\":\"action_executed\"").count(), 1);
+        assert_eq!(
+            log.matches("\"event_type\":\"action_compensated\"").count(),
+            1
+        );
+        let _ = std::fs::remove_file(target_log);
+    }
+}

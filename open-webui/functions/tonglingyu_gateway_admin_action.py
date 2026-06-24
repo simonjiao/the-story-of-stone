@@ -1,0 +1,769 @@
+"""
+title: Tonglingyu Gateway Admin
+author: Hermes Home
+version: 1.0.0
+required_open_webui_version: 0.6.0
+"""
+
+import asyncio
+import json
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Optional
+
+try:
+    from pydantic import BaseModel, Field
+except ModuleNotFoundError:
+    class BaseModel:
+        def __init__(self, **kwargs: Any) -> None:
+            annotations = getattr(self, "__annotations__", {})
+            for name in annotations:
+                setattr(self, name, kwargs.get(name, getattr(self.__class__, name, None)))
+
+    def Field(default: Any = None, **_: Any) -> Any:
+        return default
+
+
+class GatewayAdminError(Exception):
+    pass
+
+
+class Action:
+    actions = [
+        {"id": "metrics", "name": "Gateway metrics"},
+        {"id": "trace", "name": "Gateway trace"},
+        {"id": "package", "name": "Evidence package audit"},
+        {"id": "session", "name": "Gateway session"},
+        {"id": "retrieval_failures", "name": "RQA retrieval failures"},
+        {"id": "retrieval_failure", "name": "RQA retrieval failure"},
+        {"id": "retrieval_failure_update", "name": "Update RQA failure status"},
+        {"id": "retrieval_failure_cluster", "name": "Cluster RQA failures"},
+        {"id": "governance_tasks", "name": "RQA governance tasks"},
+        {"id": "governance_task", "name": "RQA governance task"},
+        {"id": "governance_task_create", "name": "Create governance task"},
+        {"id": "governance_task_from_failure", "name": "Create governance task"},
+        {"id": "governance_task_update", "name": "Update governance task"},
+        {"id": "knowledge_items", "name": "Knowledge items"},
+        {"id": "knowledge_item", "name": "Knowledge item"},
+        {"id": "knowledge_item_review", "name": "Review knowledge item"},
+        {"id": "knowledge_patch_proposal", "name": "Create knowledge proposal"},
+    ]
+
+    class Valves(BaseModel):
+        GATEWAY_BASE_URL: str = Field(default="http://tonglingyu-gateway:8090")
+        GATEWAY_ADMIN_API_KEY: str = Field(default="")
+        TARGET_MODEL: str = Field(default="tonglingyu")
+        TARGET_MODELS: str = Field(default="tonglingyu")
+        REQUEST_TIMEOUT_SECONDS: int = Field(default=15)
+        RESPONSE_MAX_CHARS: int = Field(default=6000)
+        priority: int = Field(default=20)
+
+    def __init__(self) -> None:
+        self.valves = self.Valves()
+
+    async def action(
+        self,
+        body: dict,
+        __user__: Optional[Any] = None,
+        __event_call__: Optional[Any] = None,
+        __event_emitter__: Optional[Any] = None,
+        __id__: Optional[str] = None,
+        __model__: Optional[Any] = None,
+    ) -> dict:
+        action_id = (__id__ or "metrics").strip() or "metrics"
+        subject = _user_subject(__user__)
+        model = _request_model(body, __model__)
+        admin_key = str(self.valves.GATEWAY_ADMIN_API_KEY or "").strip()
+        if _user_role(__user__) != "admin":
+            audit_error = await self._report_access_denial(
+                admin_key,
+                subject,
+                action_id,
+                model,
+                __event_emitter__,
+            )
+            message = "Tonglingyu Gateway admin access requires Open WebUI admin role."
+            if audit_error:
+                message = f"{message} Access denial audit failed."
+            return _message(message)
+
+        target_models = _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL)
+        if model and model not in target_models:
+            return _message(f"Tonglingyu Gateway admin action is not enabled for model {model!r}.")
+
+        if not admin_key:
+            return _message("Tonglingyu Gateway admin key is not configured.")
+
+        try:
+            if action_id == "metrics":
+                result = await _gateway_get(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/metrics",
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message("Gateway metrics", result, self.valves.RESPONSE_MAX_CHARS)
+            if action_id == "trace":
+                trace_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "trace_id",
+                    "Trace ID",
+                    r"\btrace[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "Gateway trace",
+                    f"/v1/admin/traces/{urllib.parse.quote(trace_id, safe='')}",
+                    subject,
+                )
+            if action_id == "package":
+                package_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "package_id",
+                    "Package ID",
+                    r"\bpackage[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "Evidence package audit",
+                    f"/v1/admin/packages/{urllib.parse.quote(package_id, safe='')}",
+                    subject,
+                )
+            if action_id == "session":
+                session_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "session_id",
+                    "Session ID",
+                    r"\bsession[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "Gateway session",
+                    f"/v1/admin/sessions/{urllib.parse.quote(session_id, safe='')}",
+                    subject,
+                )
+            if action_id == "retrieval_failures":
+                return await self._lookup_json(
+                    "RQA retrieval failures",
+                    f"/v1/admin/retrieval-failures{_retrieval_failure_query(body)}",
+                    subject,
+                )
+            if action_id == "retrieval_failure":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "RQA retrieval failure",
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}",
+                    subject,
+                )
+            if action_id == "retrieval_failure_update":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                status = str(
+                    _deep_get(body, "human_review_status")
+                    or _deep_get(body, "status")
+                    or ""
+                ).strip()
+                if not status:
+                    raise GatewayAdminError("Human review status is required.")
+                result = await _gateway_patch_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}",
+                    {
+                        "human_review_status": status,
+                        "reviewer": _deep_get(body, "reviewer"),
+                        "review_note": _deep_get(body, "review_note"),
+                        "if_match_updated_at": _deep_get(body, "if_match_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA retrieval failure update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "retrieval_failure_cluster":
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/retrieval-failures/cluster",
+                    {
+                        "human_review_status": _deep_get(body, "human_review_status")
+                        or _deep_get(body, "status"),
+                        "failure_type": _deep_get(body, "failure_type"),
+                        "min_cluster_size": _deep_get(body, "min_cluster_size"),
+                        "limit": _deep_get(body, "limit"),
+                        "create_tasks": _deep_get(body, "create_tasks"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA retrieval failure cluster",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_tasks":
+                return await self._lookup_json(
+                    "RQA governance tasks",
+                    f"/v1/admin/governance/tasks{_governance_task_query(body)}",
+                    subject,
+                )
+            if action_id == "governance_task":
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "RQA governance task",
+                    f"/v1/admin/governance/tasks/{urllib.parse.quote(task_id, safe='')}",
+                    subject,
+                )
+            if action_id == "governance_task_from_failure":
+                failure_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "failure_id",
+                    "Failure ID",
+                    r"\bfailure[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/retrieval-failures/{urllib.parse.quote(failure_id, safe='')}/governance-task",
+                    {
+                        "task_type": _deep_get(body, "task_type"),
+                        "priority": _deep_get(body, "priority"),
+                        "proposed_fix": _deep_get(body, "proposed_fix"),
+                        "agent_cluster_key": _deep_get(body, "agent_cluster_key"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task create",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_task_create":
+                source_entity_type = str(_deep_get(body, "source_entity_type") or "").strip()
+                source_entity_id = str(_deep_get(body, "source_entity_id") or "").strip()
+                if not source_entity_type or not source_entity_id:
+                    raise GatewayAdminError("Governance task source entity is required.")
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/governance/tasks",
+                    {
+                        "source_entity_type": source_entity_type,
+                        "source_entity_id": source_entity_id,
+                        "task_type": _deep_get(body, "task_type"),
+                        "priority": _deep_get(body, "priority"),
+                        "proposed_fix": _deep_get(body, "proposed_fix"),
+                        "agent_cluster_key": _deep_get(body, "agent_cluster_key"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task create",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "governance_task_update":
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                status = str(_deep_get(body, "status") or "").strip()
+                if not status:
+                    raise GatewayAdminError("Governance task status is required.")
+                result = await _gateway_patch_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/governance/tasks/{urllib.parse.quote(task_id, safe='')}",
+                    {
+                        "status": status,
+                        "reviewer": _deep_get(body, "reviewer"),
+                        "review_note": _deep_get(body, "review_note"),
+                        "evidence_ref": _deep_get(body, "evidence_ref"),
+                        "if_match_updated_at": _deep_get(body, "if_match_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA governance task update",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "knowledge_patch_proposal":
+                proposal_type = str(_deep_get(body, "proposal_type") or "").strip()
+                payload = _deep_get(body, "payload") or _deep_get(body, "proposal_payload")
+                if not proposal_type:
+                    raise GatewayAdminError("Knowledge proposal type is required.")
+                if not isinstance(payload, dict):
+                    raise GatewayAdminError("Knowledge proposal payload must be a JSON object.")
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    "/v1/admin/governance/proposals",
+                    {
+                        "proposal_type": proposal_type,
+                        "trace_id": _deep_get(body, "trace_id"),
+                        "package_id": _deep_get(body, "package_id"),
+                        "source_ref": _deep_get(body, "source_ref"),
+                        "payload": payload,
+                        "priority": _deep_get(body, "priority"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "RQA knowledge patch proposal",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+            if action_id == "knowledge_items":
+                return await self._lookup_json(
+                    "Knowledge items",
+                    f"/v1/admin/knowledge/items{_knowledge_item_query(body)}",
+                    subject,
+                )
+            if action_id == "knowledge_item":
+                item_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "item_id",
+                    "Knowledge Item ID",
+                    r"\bitem[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                return await self._lookup_json(
+                    "Knowledge item",
+                    f"/v1/admin/knowledge/items/{urllib.parse.quote(item_id, safe='')}",
+                    subject,
+                )
+            if action_id == "knowledge_item_review":
+                item_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "item_id",
+                    "Knowledge Item ID",
+                    r"\bitem[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                task_id = await _resolve_identifier(
+                    body,
+                    __event_call__,
+                    "task_id",
+                    "Governance Task ID",
+                    r"\btask[_ -]?id\b\s*[:=]\s*([A-Za-z0-9_.:-]+)",
+                )
+                decision = str(_deep_get(body, "decision") or "").strip()
+                trace_id = str(_deep_get(body, "trace_id") or "").strip()
+                reviewer = str(_deep_get(body, "reviewer") or "").strip()
+                review_note = str(_deep_get(body, "review_note") or "").strip()
+                evidence_ref = str(_deep_get(body, "evidence_ref") or "").strip()
+                state_version = _deep_get(body, "if_match_state_version")
+                if not decision:
+                    raise GatewayAdminError("Knowledge item review decision is required.")
+                if not trace_id:
+                    raise GatewayAdminError("Knowledge item review trace_id is required.")
+                if not reviewer or not review_note or not evidence_ref:
+                    raise GatewayAdminError(
+                        "Knowledge item review requires reviewer, review_note, and evidence_ref."
+                    )
+                if state_version is None or str(state_version).strip() == "":
+                    raise GatewayAdminError(
+                        "Knowledge item review if_match_state_version is required."
+                    )
+                result = await _gateway_post_json(
+                    self.valves.GATEWAY_BASE_URL,
+                    admin_key,
+                    f"/v1/admin/knowledge/items/{urllib.parse.quote(item_id, safe='')}/review",
+                    {
+                        "task_id": task_id,
+                        "decision": decision,
+                        "trace_id": trace_id,
+                        "reviewer": reviewer,
+                        "review_note": review_note,
+                        "evidence_ref": evidence_ref,
+                        "if_match_state_version": state_version,
+                        "if_match_task_updated_at": _deep_get(body, "if_match_task_updated_at"),
+                    },
+                    self.valves.REQUEST_TIMEOUT_SECONDS,
+                    subject,
+                )
+                return _json_message(
+                    "Knowledge item review",
+                    result,
+                    self.valves.RESPONSE_MAX_CHARS,
+                )
+        except GatewayAdminError as error:
+            await _emit_status(__event_emitter__, "error", str(error))
+            return _message(str(error))
+
+        return _message(f"Unsupported Tonglingyu Gateway admin action: {action_id}")
+
+    async def _lookup_json(self, title: str, path: str, subject: str) -> dict:
+        result = await _gateway_get(
+            self.valves.GATEWAY_BASE_URL,
+            str(self.valves.GATEWAY_ADMIN_API_KEY or "").strip(),
+            path,
+            self.valves.REQUEST_TIMEOUT_SECONDS,
+            subject,
+        )
+        return _json_message(title, result, self.valves.RESPONSE_MAX_CHARS)
+
+    async def _report_access_denial(
+        self,
+        admin_key: str,
+        subject: str,
+        action_id: str,
+        model: str,
+        event_emitter: Optional[Any],
+    ) -> bool:
+        if not admin_key:
+            return False
+        try:
+            await _gateway_post_json(
+                self.valves.GATEWAY_BASE_URL,
+                admin_key,
+                "/v1/admin/access-denials",
+                {
+                    "action": action_id,
+                    "denial": "role_denied",
+                    "model": model,
+                },
+                self.valves.REQUEST_TIMEOUT_SECONDS,
+                subject,
+            )
+            return False
+        except GatewayAdminError:
+            await _emit_status(
+                event_emitter,
+                "error",
+                "Tonglingyu Gateway admin access denial audit failed.",
+            )
+            return True
+
+
+def _message(content: str) -> dict:
+    return {"content": content}
+
+
+def _json_message(title: str, payload: Any, max_chars: int) -> dict:
+    content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    if len(content) > max_chars:
+        content = (
+            content[: max(0, max_chars - 80)]
+            + "\n... truncated by Open WebUI action ..."
+        )
+    return {"content": f"### {title}\n\n```json\n{content}\n```"}
+
+
+async def _gateway_get(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return await asyncio.to_thread(
+        _gateway_get_blocking,
+        base_url,
+        admin_key,
+        path,
+        timeout_seconds,
+        subject,
+    )
+
+
+async def _gateway_patch_json(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    payload: dict,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return await asyncio.to_thread(
+        _gateway_json_blocking,
+        base_url,
+        admin_key,
+        path,
+        "PATCH",
+        payload,
+        timeout_seconds,
+        subject,
+    )
+
+
+async def _gateway_post_json(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    payload: dict,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return await asyncio.to_thread(
+        _gateway_json_blocking,
+        base_url,
+        admin_key,
+        path,
+        "POST",
+        payload,
+        timeout_seconds,
+        subject,
+    )
+
+
+def _gateway_get_blocking(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    return _gateway_json_blocking(
+        base_url,
+        admin_key,
+        path,
+        "GET",
+        None,
+        timeout_seconds,
+        subject,
+    )
+
+
+def _gateway_json_blocking(
+    base_url: str,
+    admin_key: str,
+    path: str,
+    method: str,
+    payload: Optional[dict],
+    timeout_seconds: int,
+    subject: str,
+) -> Any:
+    if not str(base_url or "").strip():
+        raise GatewayAdminError("Tonglingyu Gateway base URL is not configured.")
+    url = f"{str(base_url).rstrip('/')}{path}"
+    data = None
+    headers = {"Authorization": f"Bearer {admin_key}"}
+    if subject:
+        headers["X-Tonglingyu-Subject"] = subject
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=max(1, int(timeout_seconds))) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw:
+                return {"status": response.status}
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"status": response.status, "raw": raw}
+    except urllib.error.HTTPError as error:
+        raise GatewayAdminError(
+            f"Tonglingyu Gateway admin request failed: HTTP {error.code}"
+        ) from None
+    except (TimeoutError, OSError, urllib.error.URLError):
+        raise GatewayAdminError("Tonglingyu Gateway admin request failed: network error") from None
+
+
+def _retrieval_failure_query(body: dict) -> str:
+    params = {}
+    for key in ("human_review_status", "status", "failure_type", "limit", "offset"):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
+
+
+def _governance_task_query(body: dict) -> str:
+    params = {}
+    for key in (
+        "status",
+        "task_type",
+        "priority",
+        "source_failure_id",
+        "source_entity_type",
+        "source_entity_id",
+        "limit",
+        "offset",
+    ):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
+
+
+def _knowledge_item_query(body: dict) -> str:
+    params = {}
+    for key in ("kind", "state", "limit", "offset"):
+        value = _deep_get(body, key)
+        if value is not None and str(value).strip():
+            params[key] = str(value).strip()
+    if not params:
+        return ""
+    return "?" + urllib.parse.urlencode(params)
+
+
+async def _resolve_identifier(
+    body: dict,
+    event_call: Optional[Any],
+    key: str,
+    title: str,
+    pattern: str,
+) -> str:
+    value = _extract_identifier(body, key, pattern)
+    if not value and event_call:
+        value = await _prompt_identifier(event_call, title)
+    value = str(value or "").strip()
+    if not value:
+        raise GatewayAdminError(f"{title} is required.")
+    return value
+
+
+async def _prompt_identifier(event_call: Any, title: str) -> str:
+    prompt = {
+        "type": "input",
+        "data": {
+            "title": title,
+            "message": f"Enter {title}",
+            "placeholder": title,
+        },
+    }
+    value = event_call(prompt)
+    if hasattr(value, "__await__"):
+        value = await value
+    if isinstance(value, dict):
+        value = value.get("value") or value.get("content") or value.get("text") or ""
+    return str(value or "").strip()
+
+
+def _extract_identifier(body: dict, key: str, pattern: str) -> str:
+    direct = _deep_get(body, key)
+    if direct:
+        return str(direct).strip()
+    content = "\n".join(_message_texts(body))
+    match = re.search(pattern, content, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _deep_get(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        if value.get(key):
+            return value.get(key)
+        for child in value.values():
+            found = _deep_get(child, key)
+            if found:
+                return found
+    if isinstance(value, list):
+        for child in value:
+            found = _deep_get(child, key)
+            if found:
+                return found
+    return None
+
+
+def _message_texts(body: Any) -> list[str]:
+    texts: list[str] = []
+    if isinstance(body, dict):
+        for key in ("content", "text", "message"):
+            value = body.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+        for value in body.values():
+            texts.extend(_message_texts(value))
+    elif isinstance(body, list):
+        for item in body:
+            texts.extend(_message_texts(item))
+    return texts
+
+
+async def _emit_status(event_emitter: Optional[Any], status: str, description: str) -> None:
+    if not event_emitter:
+        return
+    event = {
+        "type": "status",
+        "data": {"status": status, "description": description, "done": True},
+    }
+    result = event_emitter(event)
+    if hasattr(result, "__await__"):
+        await result
+
+
+def _request_model(body: dict, model: Optional[Any]) -> str:
+    return str(
+        _get(body, "model")
+        or _get(_get(body, "metadata"), "model")
+        or _get(model, "id")
+        or ""
+    ).strip()
+
+
+def _user_role(user: Optional[Any]) -> str:
+    return str(_get(user, "role") or "user").strip().lower() or "user"
+
+
+def _user_subject(user: Optional[Any]) -> str:
+    subject = str(
+        _get(user, "id")
+        or _get(user, "email")
+        or _get(user, "name")
+        or "open-webui"
+    ).strip()
+    return subject[:128] or "open-webui"
+
+
+def _get(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _target_models(target_models: str, target_model: str) -> set[str]:
+    models: set[str] = set()
+    for value in (target_models, target_model):
+        for item in str(value or "").split(","):
+            item = item.strip()
+            if item:
+                models.add(item)
+    return models

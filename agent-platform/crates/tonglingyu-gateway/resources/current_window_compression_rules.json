@@ -1,0 +1,17 @@
+{
+  "schema_version": "tonglingyu.current_window_compression_rules.v1",
+  "catalog_version": "2026-05-24.1",
+  "policy_id": "current_window.llm_compression.v1",
+  "max_raw_messages": 12,
+  "max_raw_chars": 24000,
+  "max_compressor_input_chars": 16000,
+  "must_preserve_user_turns": 3,
+  "compressor_profile": "tonglingyu-current-window-compressor",
+  "digest_schema": "tonglingyu.current_window_digest.v1",
+  "timeout_ms": 1500,
+  "coverage_statuses": ["complete_for_intent_resolution", "partial"],
+  "reject_on_new_entities": true,
+  "reject_on_missing_source_refs": true,
+  "reject_on_schema_invalid": true,
+  "allow_rejected_digest_on_main_path": false
+}

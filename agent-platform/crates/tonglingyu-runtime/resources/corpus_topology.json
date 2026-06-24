@@ -1,0 +1,139 @@
+{
+  "schema_version": "tonglingyu.corpus_topology.v1",
+  "catalog_version": "2026-06-01.1",
+  "corpora": [
+    {
+      "id": "cheng_120_base_text",
+      "label": "程本/120回正文资料",
+      "default_answer_scope": "前八十回正文默认可用；第八十一回及以后须用户明确指定。",
+      "default_allowed": true,
+      "layers": [
+        {
+          "id": "base_text_pre_80",
+          "evidence_types": ["base_text"],
+          "default_allowed": true,
+          "answer_rank": 0
+        },
+        {
+          "id": "base_text_later_40",
+          "evidence_types": ["base_text"],
+          "default_allowed": false,
+          "answer_rank": 3
+        },
+        {
+          "id": "version_note",
+          "evidence_types": ["version_note"],
+          "default_allowed": true,
+          "answer_rank": 2
+        }
+      ]
+    },
+    {
+      "id": "zhi_pre80_base_text_commentary",
+      "label": "脂批/前八十回正文与批语资料",
+      "default_answer_scope": "前八十回正文和脂批/批语默认同属可用证据。",
+      "default_allowed": true,
+      "layers": [
+        {
+          "id": "base_text_pre_80",
+          "evidence_types": ["base_text"],
+          "default_allowed": true,
+          "answer_rank": 0
+        },
+        {
+          "id": "commentary",
+          "evidence_types": ["commentary"],
+          "default_allowed": true,
+          "answer_rank": 1
+        },
+        {
+          "id": "version_note",
+          "evidence_types": ["version_note"],
+          "default_allowed": true,
+          "answer_rank": 2
+        }
+      ]
+    },
+    {
+      "id": "unknown_corpus",
+      "label": "未归类资料",
+      "default_answer_scope": "只能作为待治理候选，不进入默认结论边界。",
+      "default_allowed": false,
+      "layers": [
+        {
+          "id": "base_text_pre_80",
+          "evidence_types": ["base_text"],
+          "default_allowed": false,
+          "answer_rank": 9
+        },
+        {
+          "id": "commentary",
+          "evidence_types": ["commentary"],
+          "default_allowed": false,
+          "answer_rank": 9
+        },
+        {
+          "id": "version_note",
+          "evidence_types": ["version_note"],
+          "default_allowed": false,
+          "answer_rank": 9
+        }
+      ]
+    }
+  ],
+  "source_mappings": [
+    {
+      "id": "wikisource_120_base_text",
+      "corpus_id": "cheng_120_base_text",
+      "source_id_terms": ["hongloumeng-wikisource-120"],
+      "source_title_terms": ["红楼梦", "紅樓夢"],
+      "default_layer": "base_text_pre_80"
+    },
+    {
+      "id": "wikisource_chengjia_base_text",
+      "corpus_id": "cheng_120_base_text",
+      "source_id_terms": ["hongloumeng-wikisource-chengjia"],
+      "source_title_terms": ["程甲"],
+      "default_layer": "base_text_pre_80"
+    },
+    {
+      "id": "wikisource_chengyi_base_text",
+      "corpus_id": "cheng_120_base_text",
+      "source_id_terms": ["hongloumeng-wikisource-chengyi"],
+      "source_title_terms": ["程乙"],
+      "default_layer": "base_text_pre_80"
+    },
+    {
+      "id": "wikisource_zhiyanzhai_commentary",
+      "corpus_id": "zhi_pre80_base_text_commentary",
+      "source_id_terms": ["shitouji-wikisource-zhiyanzhai"],
+      "source_title_terms": ["脂硯齋", "脂砚斋", "脂批"],
+      "default_layer": "commentary"
+    },
+    {
+      "id": "wikisource_jiaxu_commentary",
+      "corpus_id": "zhi_pre80_base_text_commentary",
+      "source_id_terms": ["shitouji-wikisource-jiaxu"],
+      "source_title_terms": ["甲戌", "脂硯齋", "脂砚斋"],
+      "default_layer": "commentary"
+    },
+    {
+      "id": "default",
+      "corpus_id": "unknown_corpus",
+      "source_id_terms": ["unknown"],
+      "source_title_terms": [],
+      "default_layer": "base_text_pre_80"
+    }
+  ],
+  "search_defaults": {
+    "default_corpus_ids": ["cheng_120_base_text", "zhi_pre80_base_text_commentary"],
+    "default_layers": ["base_text_pre_80", "commentary", "version_note"],
+    "explicit_later_forty_corpus_ids": ["cheng_120_base_text"],
+    "explicit_later_forty_layers": ["base_text_later_40", "version_note"],
+    "default_chapter_start": 1,
+    "default_chapter_end": 80,
+    "explicit_later_forty_chapter_start": 81,
+    "explicit_later_forty_chapter_end": 120,
+    "max_terms_per_request": 16
+  }
+}

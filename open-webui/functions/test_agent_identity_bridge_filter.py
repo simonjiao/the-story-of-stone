@@ -1,0 +1,134 @@
+import asyncio
+import pathlib
+import sys
+import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+from agent_identity_bridge_filter import Filter, _signature
+
+
+class AgentIdentityBridgeFilterTest(unittest.TestCase):
+    def test_signature_is_stable_for_canonical_payload(self) -> None:
+        context = {
+            "version": 1,
+            "issuer": "open-webui",
+            "subject": "openwebui:user-1",
+            "user_role": "user",
+            "chat_id": "chat-1",
+            "session_id": "session-1",
+            "message_id": "message-1",
+            "model": "tonglingyu",
+            "issued_at": 1778220000,
+            "nonce": "nonce-1",
+        }
+        self.assertEqual(
+            _signature("bridge-secret", context),
+            "c2b5b51c2e432b504341b9098fc8e5103710e445ec6ff099871b5cabdcb15e03",
+        )
+
+    def test_inlet_injects_signed_context_for_target_model(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "message-1",
+                },
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["subject"], "openwebui:user-1")
+        self.assertEqual(context["chat_id"], "chat-1")
+        self.assertTrue(context["signature"])
+
+    def test_inlet_accepts_target_models_list(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "legacy-agent"
+        filt.valves.TARGET_MODELS = "hermes-agent,tonglingyu"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "message-1",
+                },
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["model"], "tonglingyu")
+        self.assertEqual(context["subject"], "openwebui:user-1")
+
+    def test_inlet_skips_non_target_model(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        filt.valves.TARGET_MODEL = "legacy-agent"
+        filt.valves.TARGET_MODELS = "legacy-agent"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={"chat_id": "chat-1"},
+            )
+        )
+
+        self.assertNotIn("agent_bridge_context", result)
+
+    def test_inlet_prefers_user_message_id_for_dedupe(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {"model": "tonglingyu", "messages": []}
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "user"},
+                __metadata__={
+                    "chat_id": "chat-1",
+                    "session_id": "session-1",
+                    "message_id": "assistant-placeholder-1",
+                    "user_message_id": "user-message-1",
+                },
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["message_id"], "user-message-1")
+
+    def test_inlet_accepts_body_level_metadata_fallbacks(self) -> None:
+        filt = Filter()
+        filt.valves.AGENT_BRIDGE_SECRET = "bridge-secret"
+        body = {
+            "model": "tonglingyu",
+            "messages": [],
+            "chat_id": "chat-from-body",
+            "session_id": "session-from-body",
+            "user_message_id": "message-from-body",
+        }
+        result = asyncio.run(
+            filt.inlet(
+                body,
+                __user__={"id": "user-1", "role": "admin"},
+            )
+        )
+
+        context = result["agent_bridge_context"]
+        self.assertEqual(context["chat_id"], "chat-from-body")
+        self.assertEqual(context["session_id"], "session-from-body")
+        self.assertEqual(context["message_id"], "message-from-body")
+        self.assertEqual(context["user_role"], "admin")
+
+
+if __name__ == "__main__":
+    unittest.main()

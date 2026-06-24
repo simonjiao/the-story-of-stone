@@ -1,0 +1,73 @@
+{
+  "schema_version": "tonglingyu.question_frame_rules.v1",
+  "catalog_version": "2026-06-02.2",
+  "default_source_scope": "pre_80_base_text_and_commentary",
+  "source_scope_phrases": [
+    {
+      "scope": "pre_80_base_text_and_commentary",
+      "phrases": ["前八十回", "前80回", "正文", "原文", "脂批", "批语", "批語", "评语", "評語", "原文和脂批", "正文和脂批"]
+    },
+    {
+      "scope": "later_40_base_text",
+      "phrases": ["后四十回", "後四十回", "八十一回以后", "八十一回以後", "第八十一回以后", "第八十一回以後", "八十一回之后", "八十一回之後"]
+    }
+  ],
+  "evidence_followup": {
+    "terms": ["证据", "證據", "材料", "依据", "依據", "根据", "根據", "出处", "出處", "原文", "脂批中的证据", "脂批中的證據", "批语中的证据", "批語中的證據", "评语中的证据", "評語中的證據"],
+    "required_evidence_types": ["base_text", "commentary"]
+  },
+  "count_question": {
+    "terms": ["几次", "幾次", "多少次", "几回", "幾回", "多少回"],
+    "required_evidence_types": ["base_text", "commentary"]
+  },
+  "character_fate_question": {
+    "terms": ["结局", "結局", "下场", "下場", "命运", "命運", "后来如何", "後來如何", "最后如何", "最後如何", "最后怎么样", "最後怎麼樣", "判词", "判詞", "曲文", "红楼梦曲", "紅樓夢曲"],
+    "required_evidence_types": ["base_text", "commentary"],
+    "later_forty_required_evidence_types": ["base_text"],
+    "clarification_template": "请明确你问的是哪位人物的结局或命运。"
+  },
+  "chapter_location_question": {
+    "question_terms": ["哪一回", "那一回", "哪回", "那回", "第几回", "第幾回", "第几囬", "第幾囬", "第多少回", "第多少囬", "回目", "哪一章", "那一章", "第几章", "第幾章"],
+    "location_verbs": ["在", "是在", "发生在", "發生在", "出现在", "出現於", "出现于", "寫在", "写在", "见于", "見於", "属于", "屬於"],
+    "removable_terms": ["是在", "发生在", "發生在", "出现在", "出現於", "出现于", "写在", "寫在", "见于", "見於", "属于", "屬於", "哪一回", "那一回", "哪回", "那回", "第几回", "第幾回", "第几囬", "第幾囬", "第多少回", "第多少囬", "回目", "哪一章", "那一章", "第几章", "第幾章", "是", "在", "的", "了", "吗", "嗎", "呢"],
+    "required_evidence_types": ["base_text", "commentary"],
+    "clarification_template": "请说明要定位的是哪个具体情节、诗文或文本线索；当前问题只问回目但缺少可定位对象。"
+  },
+  "attribute_question": {
+    "event_markers": ["时", "時", "时候", "時候", "的时候", "的時候", "之时", "之時", "进", "進", "入", "来", "來", "上京"],
+    "comparison_markers": ["相比", "比起", "相较", "相較", "比较", "比較", "比"],
+    "comparison_target_prefix_terms": ["和", "与", "與", "同", "跟"],
+    "comparison_question_terms": ["谁", "誰", "哪个", "哪個", "哪一位"],
+    "attributes": [
+      {
+        "id": "age",
+        "label": "年龄",
+        "aliases": ["年龄", "年齡", "年纪", "年紀", "年岁", "年歲", "年齿", "年齒", "几岁", "幾歲", "多大", "岁", "歲"],
+        "comparison_terms": ["年龄大", "年齡大", "年纪大", "年紀大", "年长", "年長", "谁大", "誰大", "更大"],
+        "evidence_terms": ["岁", "歲", "年纪", "年紀", "年岁", "年歲", "年齿", "年齒", "大", "小"],
+        "required_evidence_types": ["base_text", "commentary"]
+      }
+    ]
+  },
+  "relation_question": {
+    "object_placeholder_terms": ["谁", "誰", "哪一个人", "哪個人", "哪几个人", "哪幾個人", "哪些人", "什么人", "什麼人"],
+    "yes_no_terms": ["吗", "嗎", "是否", "有没有", "有沒有"],
+    "followup_prefix_terms": ["那", "那么", "那麼", "这个", "這個", "这位", "這位", "那位"],
+    "open_object_followup_marker_terms": ["算", "也算", "算吗", "算嗎", "也算吗", "也算嗎", "算不算", "可以", "也可以", "可以吗", "可以嗎", "可不可以", "行", "也行", "行吗", "行嗎", "行不行", "是吗", "是嗎", "也是吗", "也是嗎", "是不是", "是否", "对吗", "對嗎"],
+    "open_object_followup_suffix_terms": ["呢", "吗", "嗎"],
+    "open_object_followup_connector_terms": ["也", "还", "還", "又", "再", "的话", "的話", "这个人", "這個人"],
+    "standalone_entity_query_terms": ["是谁", "是誰", "介绍", "介紹", "结局", "下场", "下場", "性格", "什么样", "什麼樣", "最后", "最後", "后来", "後來", "命运", "命運", "判词", "判詞", "身份", "来历", "來歷"],
+    "unknown_predicate_markers": ["过", "過", "曾", "曾经", "曾經", "关系", "關係", "属于", "屬於", "算作", "算是"],
+    "unknown_predicate_candidate_block_terms": ["什么", "什麼", "哪", "如何", "怎样", "怎樣"],
+    "unknown_predicate_clarification_template": "请说明要确认 {subject} 和 {object} 之间的哪一种关系；当前还不能仅凭这个说法判断关系类型。"
+  },
+  "predicates": [
+    {
+      "id": "serve",
+      "label": "服侍",
+      "aliases": ["服侍", "伏侍", "侍候", "伺候", "服事", "伏事", "陪侍"],
+      "evidence_terms": ["丫鬟", "丫头", "丫頭", "贴身", "貼身", "跟着", "跟著", "房里", "房裏"],
+      "required_evidence_types": ["base_text", "commentary"]
+    }
+  ]
+}

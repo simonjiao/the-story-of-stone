@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent-core",
+    "crates/agent-runtime",
+    "crates/tonglingyu-gateway",
+    "crates/tonglingyu-runtime",
+]
+
+[workspace.package]
+version = "0.40.0"
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.95"
+
+[workspace.dependencies]
+agent-core = { path = "crates/agent-core" }
+agent-runtime = { path = "crates/agent-runtime" }
+tonglingyu-runtime = { path = "crates/tonglingyu-runtime" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+futures-util = "0.3"
+ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion"] }
+metrics = "0.24"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "process"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "sensitive-headers", "limit", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7", "serde"] }

@@ -1,0 +1,79 @@
+{
+  "schema_version": "tonglingyu.runtime_prompt_catalog.v1",
+  "catalog_version": "2026-06-02.runtime-prompt-catalog.v1",
+  "draft_answer": {
+    "result_summary_contract_parts": [
+      "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}.",
+      "retrieval_repair.queries use full_text_search_request_v1 fields: query_text, search_terms, corpus_ids, source_layers, chapter_range, required_evidence_types, reason; no later-forty requests when later_forty_allowed=false.",
+      "Copy step_output_json.source_scope_policy exactly. Use only step_output_json evidence_brief, answer_requirements, question_frame_answer_requirements, entity_intro_answer_policy, and evidence_slot_count_policy; evidence_refs must come from step_output_json.evidence_ids.",
+      "Evidence with answer_use=supplemental_only may only be mentioned as supplementary clues and must not be the sole evidence_ref for a claim.",
+      "If answer_requirements.requested_evidence_type_anchors is non-empty, draft_answer and claim_statements must satisfy each anchor.required_cue_kind: source_or_text may use acceptable_anchor_cues, text must use text_anchor_cues. Generic source-layer labels or source titles alone are not enough when required_cue_kind=text.",
+      "If question_frame_answer_requirements.relation_open_object.must_mention_objects is non-empty, mention every listed object by acceptable_cues and include its source_cues or text_cue evidence.",
+      "If question_frame_answer_requirements.chapter_location is present, answer the chapter number first. If chapter_title is present, include the chapter title or a distinctive title cue. Do not cite commentary unless the quoted commentary itself explains the chapter/title/location relation; prefer base-text or title evidence for plain chapter-location questions.",
+      "If entity_intro_answer_policy.applies=true, introduce the named entity from multiple readable in-package evidence cards when available; do not use a single short speech shell as the whole answer, and do not write package-external biography.",
+      "Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers.",
+      "For count questions, if evidence_slot_count_policy.direct_count is present, use that number exactly; direct_slots are counted evidence, related_slots are separate clues that must not change direct_count. Every named direct_slots or related_slots item must carry one source_cues or source_title cue in the same sentence.",
+      "For fate, ending, or interpretive questions, coverage_assessment.status=passed when the answer is bounded to source_scope_policy and states the evidence boundary; excluded later-forty is out_of_scope, not missing_in_scope. Use partial only when missing in-scope evidence prevents a bounded answer.",
+      "The visible draft_answer must name public event/source labels from evidence_slot_rules.label or count policy slot labels and embed a short source or phrase cue; do not expose internal terms such as evidence slot, slot id, package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'.",
+      "Local reviewer remains authoritative. Do not add nested result_summary."
+    ],
+    "compact_result_summary_contract_parts": [
+      "Return one upstream bundle JSON object with schema_version=\"tonglingyu-upstream-bundle-v1\", package_id, source_scope_policy, draft_candidate{draft_answer,package_id,claim_statements{text,evidence_refs}}, coverage_assessment, evidence_hints, retrieval_repair, out_of_scope_hints.",
+      "retrieval_repair.queries use full_text_search_request_v1 fields: query_text, search_terms, corpus_ids, source_layers, chapter_range, required_evidence_types, reason; no later-forty requests when later_forty_allowed=false.",
+      "Copy source_scope_policy from step_output_json. Use only evidence_refs from step_output_json.evidence_ids. Evidence with answer_use=supplemental_only can only be supplementary and cannot be the sole evidence_ref for a claim.",
+      "Obey answer_requirements, question_frame_answer_requirements, entity_intro_answer_policy, evidence_slot_count_policy, and source_scope_policy.",
+      "For chapter-location questions, lead with the chapter number. Include a chapter title when available, and keep evidence short and readable. Commentary is optional and must explain what it supports.",
+      "For entity_intro_answer_policy.applies=true, use multiple readable in-package evidence cards, avoid short speech shells and excluded public quote terms, and do not write package-external biography.",
+      "Commentary is first-class; ignore later-forty when disallowed. Use insufficient coverage only when constraints cannot be met. Do not expose package_id, trace_id, context ids, claim_statements, result_summary, or internal rule terms in draft_answer."
+    ],
+    "repair_context": {
+      "object": "tonglingyu.draft_repair_context",
+      "required_action": "return a full replacement upstream bundle that satisfies the same result_summary_contract",
+      "full_rules": [
+        "keep the same package_id and source_scope_policy",
+        "do not introduce new evidence_refs",
+        "fix only the rejected draft boundary",
+        "if repair cannot satisfy the contract, set coverage_assessment.status to insufficient"
+      ],
+      "compact_rules": [
+        "return replacement bundle with schema_version=tonglingyu-upstream-bundle-v1",
+        "use only package/evidence/source refs from step_output_json",
+        "for count questions use direct_count; keep related_slots separate",
+        "for relation_open_object mention every must_mention object with source cue",
+        "if constraints cannot be met, return coverage status insufficient"
+      ]
+    },
+    "repair_instruction": "Fix the rejected draft without changing the evidence package boundary. Return only the replacement JSON object."
+  },
+  "review_answer": {
+    "result_summary_contract_parts": [
+      "Return exactly one non-empty JSON object with this shape: {\"review_observation\":{\"review_status\":\"passed|needs_revision\",\"severity\":\"...\",\"issues\":[],\"required_revisions\":[]}}.",
+      "This is observation only; local reviewer enforcement remains authoritative. Do not add another result_summary key."
+    ]
+  },
+  "step_contracts": {
+    "text_evidence_search": {
+      "result_summary_contract_parts": [
+        "Return exactly one non-empty JSON object with this shape: {\"evidence_observation\":{\"evidence_refs\":[],\"evidence_analysis\":\"short observation\",\"unsupported_scope\":\"none|short boundary\"}}.",
+        "step_output_json does not expose runtime evidence ids; keep evidence_refs empty. Do not write a final answer. Do not add another result_summary key."
+      ]
+    },
+    "commentary_evidence_search": {
+      "result_summary_contract_parts": [
+        "Return exactly one non-empty JSON object with this shape: {\"evidence_observation\":{\"commentary_refs\":[],\"commentary_analysis\":\"short observation\",\"scope_notes\":\"short boundary\"}}.",
+        "step_output_json does not expose runtime evidence ids; keep commentary_refs empty. Commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope. Do not add another result_summary key."
+      ]
+    },
+    "evidence_package_create": {
+      "result_summary_contract_parts": [
+        "Return exactly one non-empty JSON object with this shape: {\"package_observation\":{\"package_id\":\"...\",\"summary\":\"short observation\"}}.",
+        "package_id must come from step_output_json; do not invent package ids. Do not add another result_summary key."
+      ]
+    }
+  },
+  "default_step_contract": {
+    "result_summary_contract_parts": [
+      "Return result_summary as a concise step observation that preserves the step output boundary."
+    ]
+  }
+}

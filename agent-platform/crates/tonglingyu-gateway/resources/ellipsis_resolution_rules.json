@@ -1,0 +1,15 @@
+{
+  "schema_version": "tonglingyu.ellipsis_resolution_rules.v1",
+  "catalog_version": "2026-06-01.2",
+  "continuation_questions": ["继续", "繼續", "继续回答", "繼續回答", "接着", "接著", "接着说", "接著說"],
+  "contextual_continuation": {
+    "context_terms": ["前文", "前面", "上文", "上一条", "上一條", "上一轮", "上一輪", "刚才", "剛才", "刚刚", "剛剛", "以上", "你的", "你刚才", "你剛才"],
+    "action_terms": ["分析", "推算", "继续", "繼續", "展开", "展開", "梳理", "说明", "說明", "解释", "解釋", "推理", "逻辑", "邏輯", "推理逻辑", "推理邏輯", "理由", "为什么", "為什麼"],
+    "rewrite_template": "关于{anchor}，{question}"
+  },
+  "followup_questions": ["证据呢", "證據呢", "脂批中的证据呢", "脂批中的證據呢", "出处呢", "出處呢", "原文呢", "这个呢", "這個呢", "继续这个", "繼續這個"],
+  "followup_suffix_terms": ["证据呢", "證據呢", "出处呢", "出處呢", "原文呢"],
+  "trigger": "elliptical_followup",
+  "contextual_followup_template": "关于{anchor}，{question}",
+  "clarification_template": "你问“{question}”，是继续问上一条“{anchor}”吗？"
+}

@@ -1,0 +1,161 @@
+{
+  "schema_version": "tonglingyu.evidence_slot_rules.v1",
+  "catalog_version": "2026-06-02.1",
+  "count_bases": [
+    {
+      "id": "direct_loss",
+      "label": "明确失玉/被盗",
+      "question_terms": ["丢", "丟", "失", "不见", "不見", "遗失", "遺失"],
+      "count_question_terms": [
+        "几次",
+        "幾次",
+        "多少次",
+        "几处",
+        "幾處",
+        "多少处",
+        "多少處",
+        "几条",
+        "幾條",
+        "多少条",
+        "多少條"
+      ],
+      "total_count_units": ["次", "处", "處"],
+      "total_count_prefixes": [
+        "共",
+        "共有",
+        "计",
+        "計",
+        "可计",
+        "可計",
+        "可计入",
+        "可計入",
+        "计入",
+        "計入",
+        "计作",
+        "計作",
+        "计为",
+        "計為",
+        "明确",
+        "明確",
+        "主要有",
+        "直接",
+        "算作",
+        "可概括为",
+        "可概括為",
+        "丢了",
+        "丟了",
+        "丢失",
+        "失玉",
+        "被盗",
+        "被盜"
+      ],
+      "direct_slot_negation_terms": [
+        "不计入",
+        "不計入",
+        "不能计入",
+        "不能計入",
+        "不直接计入",
+        "不直接計入",
+        "不算",
+        "不能算",
+        "不作为",
+        "不作為",
+        "不是直接",
+        "不属于直接",
+        "不屬於直接"
+      ],
+      "answer_unit": "处",
+      "answer_noun": "明确失玉证据"
+    }
+  ],
+  "slots": [
+    {
+      "id": "lianger_stole_jade",
+      "label": "良儿偷玉",
+      "role": "direct_loss_or_theft",
+      "public_role_label": "直接丢失或被盗",
+      "counts_as": ["direct_loss"],
+      "display_group": "direct_evidence"
+    },
+    {
+      "id": "zhen_baoyu_delivers_jade",
+      "label": "甄宝玉送玉",
+      "role": "suspected_transfer_related_to_loss",
+      "public_role_label": "送玉/流转疑似线索",
+      "counts_as": ["related_loss_clue"],
+      "display_group": "related_clue"
+    },
+    {
+      "id": "fengjie_snow_pickup_jade",
+      "label": "凤姐扫雪拾玉",
+      "role": "recovery_or_lost_and_found_clue",
+      "public_role_label": "拾玉/失而复见线索",
+      "counts_as": ["direct_loss", "recovery_clue"],
+      "display_group": "direct_evidence",
+      "count_note": "按“拾玉/失而复得”计入明确失玉；它能证明曾经失玉，但不补出丢失经过"
+    },
+    {
+      "id": "later_forty_lost_jade",
+      "label": "后四十回失玉",
+      "role": "later_forty_direct_loss",
+      "public_role_label": "后四十回直接失玉",
+      "counts_as": ["direct_loss"],
+      "display_group": "direct_evidence"
+    },
+    {
+      "id": "lin_daiyu_judgment_commentary_attribution",
+      "label": "林黛玉判词脂批归属",
+      "role": "character_fate_commentary_attribution",
+      "public_role_label": "脂批归属线索",
+      "counts_as": [],
+      "display_group": "character_fate_attribution",
+      "supports_subjects": ["林黛玉"],
+      "support_modality": "character_fate_commentary_attribution",
+      "evidence_strength": "interpretive"
+    },
+    {
+      "id": "lin_daiyu_judgment_poem",
+      "label": "林黛玉判词",
+      "role": "character_fate_judgment_poem",
+      "public_role_label": "判词命运线索",
+      "counts_as": [],
+      "display_group": "character_fate_prophecy",
+      "supports_subjects": ["林黛玉"],
+      "support_modality": "character_fate_prophecy",
+      "evidence_strength": "prophetic"
+    },
+    {
+      "id": "lin_daiyu_wangningmei_song",
+      "label": "枉凝眉曲文",
+      "role": "character_fate_dream_song",
+      "public_role_label": "曲文命运线索",
+      "counts_as": [],
+      "display_group": "character_fate_prophecy",
+      "supports_subjects": ["林黛玉"],
+      "support_modality": "character_fate_prophecy",
+      "evidence_strength": "prophetic"
+    },
+    {
+      "id": "shi_xiangyun_judgment_poem",
+      "label": "史湘云判词",
+      "role": "character_fate_judgment_poem",
+      "public_role_label": "判词命运线索",
+      "counts_as": [],
+      "display_group": "character_fate_prophecy",
+      "supports_subjects": ["史湘云"],
+      "support_modality": "character_fate_prophecy",
+      "evidence_strength": "prophetic"
+    },
+    {
+      "id": "shi_xiangyun_lezongbei_song",
+      "label": "乐中悲曲文",
+      "role": "character_fate_dream_song",
+      "public_role_label": "曲文命运线索",
+      "counts_as": [],
+      "display_group": "character_fate_prophecy",
+      "supports_subjects": ["史湘云"],
+      "support_modality": "character_fate_prophecy",
+      "evidence_strength": "prophetic"
+    }
+  ]
+}
