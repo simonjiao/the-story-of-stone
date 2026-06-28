@@ -134,8 +134,6 @@
   },
   "claims": {
     "empty_evidence": "当前知识库未找到可追溯证据，不能给出确定结论。",
-    "slot_count_rule": "涉及事件归纳或次数统计的问题必须按 evidence slot rules 的 role/counts_as 解释，不能按命中卡片数或槽位总数直接计数。",
-    "inactive_count_basis": "未计入当前 active count basis 的证据槽位只能作为相关线索展示，不能改变直接次数。",
     "later_forty_boundary": "命中的第八十一回及以后材料必须显式标注为后四十回内容；未标注时不能作为证据或参考。",
     "commentary_scope": "命中的脂批材料可作为默认回答证据，证据来源层记录为脂批。",
     "base_text_scope": "命中的正文材料可支持相应版本和位置中的直接文本事实。",

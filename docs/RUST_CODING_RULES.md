@@ -45,7 +45,7 @@ are implementation constraints, not general style preferences.
 
 - External rule catalogs may hold variable language and domain vocabulary:
   entity aliases, predicate aliases, source-scope terms, query expansion terms,
-  evidence slot labels, and public answer boundary phrases.
+  and public answer boundary phrases.
 - External rule catalogs must not own workflow invariants, fail-open behavior,
   role boundaries, source-scope gates, reviewer authority, package binding,
   current-window semantics, or question-frame propagation. Those decisions must
@@ -53,7 +53,7 @@ are implementation constraints, not general style preferences.
 - Do not fix a single eval miss by adding a question-specific catalog entry that
   encodes the answer. Catalog changes must represent reusable language, source,
   ontology, or evidence semantics across more than one phrasing or case.
-- Query expansion, ontology, evidence slot rules, answer rules, and review rules
+- Query expansion, ontology, answer rules, and review rules
   must remain separate responsibilities. A query expansion term can help retrieve
   material, but it cannot prove what the material supports or decide how the
   answer is phrased.

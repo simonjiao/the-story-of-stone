@@ -1,7 +1,7 @@
 use crate::{
-    ANSWER_RULES_PATH_ENV, EVIDENCE_SLOT_RULES_PATH_ENV, ONTOLOGY_ALIASES_PATH_ENV,
-    QUERY_EXPANSIONS_PATH_ENV, answer_rules, evidence_slot_rules, normalize_for_search,
-    ontology_aliases, rule_catalog::configured_path, validate_query_expansion_catalog_source,
+    ANSWER_RULES_PATH_ENV, ONTOLOGY_ALIASES_PATH_ENV, QUERY_EXPANSIONS_PATH_ENV, answer_rules,
+    normalize_for_search, ontology_aliases, rule_catalog::configured_path,
+    validate_query_expansion_catalog_source,
 };
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
@@ -11,32 +11,23 @@ use std::{fs, path::PathBuf};
 pub const RUNTIME_RULE_CANDIDATE_TYPES: &[&str] = &[
     QUERY_EXPANSION_TERM,
     QUERY_EXPANSION_EXACT_TERM,
-    QUERY_EXPANSION_EVIDENCE_SLOT_TERM,
     ANSWER_EVIDENCE_REQUEST_TERM,
     RUNTIME_PERSON_ALIAS,
-    EVIDENCE_COUNT_BASIS_QUESTION_TERM,
-    EVIDENCE_COUNT_BASIS_COUNT_TERM,
 ];
 
 pub const QUERY_EXPANSION_TERM: &str = "query_expansion_term";
 pub const QUERY_EXPANSION_EXACT_TERM: &str = "query_expansion_exact_term";
-pub const QUERY_EXPANSION_EVIDENCE_SLOT_TERM: &str = "query_expansion_evidence_slot_term";
 pub const ANSWER_EVIDENCE_REQUEST_TERM: &str = "answer_evidence_request_term";
 pub const RUNTIME_PERSON_ALIAS: &str = "runtime_person_alias";
-pub const EVIDENCE_COUNT_BASIS_QUESTION_TERM: &str = "evidence_count_basis_question_term";
-pub const EVIDENCE_COUNT_BASIS_COUNT_TERM: &str = "evidence_count_basis_count_term";
 
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
 const DEFAULT_ANSWER_RULES_JSON: &str = include_str!("../resources/answer_rules.json");
-const DEFAULT_EVIDENCE_SLOT_RULES_JSON: &str =
-    include_str!("../resources/evidence_slot_rules.json");
 const DEFAULT_ONTOLOGY_ALIASES_JSON: &str = include_str!("../resources/ontology_aliases.json");
 
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeRuleCandidatePromotionPaths {
     pub query_expansions_path: Option<PathBuf>,
     pub answer_rules_path: Option<PathBuf>,
-    pub evidence_slot_rules_path: Option<PathBuf>,
     pub ontology_aliases_path: Option<PathBuf>,
 }
 
@@ -45,7 +36,6 @@ impl RuntimeRuleCandidatePromotionPaths {
         Self {
             query_expansions_path: configured_path(QUERY_EXPANSIONS_PATH_ENV),
             answer_rules_path: configured_path(ANSWER_RULES_PATH_ENV),
-            evidence_slot_rules_path: configured_path(EVIDENCE_SLOT_RULES_PATH_ENV),
             ontology_aliases_path: configured_path(ONTOLOGY_ALIASES_PATH_ENV),
         }
     }
@@ -92,11 +82,6 @@ pub fn runtime_rule_candidate_target_requirement(candidate_type: &str) -> Option
             "target_ref_pattern": "query_expansion:<entry_id>",
             "target_field": "entries[].exact_terms",
         }),
-        QUERY_EXPANSION_EVIDENCE_SLOT_TERM => json!({
-            "catalog_name": "query_expansions",
-            "target_ref_pattern": "query_expansion:<entry_id>:evidence_slot:<slot_id>",
-            "target_field": "entries[].evidence_slots[].terms",
-        }),
         ANSWER_EVIDENCE_REQUEST_TERM => json!({
             "catalog_name": "answer_rules",
             "target_ref_pattern": "answer_rules:answer_requirements.evidence_request_terms",
@@ -106,16 +91,6 @@ pub fn runtime_rule_candidate_target_requirement(candidate_type: &str) -> Option
             "catalog_name": "ontology_aliases",
             "target_ref_pattern": "person_alias:<person_id>",
             "target_field": "people[].aliases",
-        }),
-        EVIDENCE_COUNT_BASIS_QUESTION_TERM => json!({
-            "catalog_name": "evidence_slot_rules",
-            "target_ref_pattern": "evidence_count_basis:<basis_id>:question_terms",
-            "target_field": "count_bases[].question_terms",
-        }),
-        EVIDENCE_COUNT_BASIS_COUNT_TERM => json!({
-            "catalog_name": "evidence_slot_rules",
-            "target_ref_pattern": "evidence_count_basis:<basis_id>:count_question_terms",
-            "target_field": "count_bases[].count_question_terms",
         }),
         _ => return None,
     };
@@ -169,31 +144,6 @@ pub fn active_runtime_rule_candidate_matches(
                 )?;
             }
         }
-        QUERY_EXPANSION_EVIDENCE_SLOT_TERM => {
-            let catalog = active_catalog_json(
-                "query_expansions",
-                paths.query_expansions_path.as_ref(),
-                DEFAULT_QUERY_EXPANSIONS_JSON,
-            )?;
-            for entry in array_at(&catalog, &["entries"])? {
-                let entry_id = required_str(entry, &["id"])?;
-                if let Some(slots) = optional_array_at(entry, &["evidence_slots"])? {
-                    for slot in slots {
-                        let slot_id = required_str(slot, &["id"])?;
-                        push_array_matches(
-                            &mut matches,
-                            candidate_type,
-                            &term_key,
-                            slot,
-                            &["terms"],
-                            &format!(
-                                "query_expansions.entry:{entry_id}.evidence_slot:{slot_id}.terms"
-                            ),
-                        )?;
-                    }
-                }
-            }
-        }
         ANSWER_EVIDENCE_REQUEST_TERM => {
             let catalog = active_catalog_json(
                 "answer_rules",
@@ -234,42 +184,6 @@ pub fn active_runtime_rule_candidate_matches(
                 )?;
             }
         }
-        EVIDENCE_COUNT_BASIS_QUESTION_TERM => {
-            let catalog = active_catalog_json(
-                "evidence_slot_rules",
-                paths.evidence_slot_rules_path.as_ref(),
-                DEFAULT_EVIDENCE_SLOT_RULES_JSON,
-            )?;
-            for basis in array_at(&catalog, &["count_bases"])? {
-                let basis_id = required_str(basis, &["id"])?;
-                push_array_matches(
-                    &mut matches,
-                    candidate_type,
-                    &term_key,
-                    basis,
-                    &["question_terms"],
-                    &format!("evidence_slot_rules.count_basis:{basis_id}.question_terms"),
-                )?;
-            }
-        }
-        EVIDENCE_COUNT_BASIS_COUNT_TERM => {
-            let catalog = active_catalog_json(
-                "evidence_slot_rules",
-                paths.evidence_slot_rules_path.as_ref(),
-                DEFAULT_EVIDENCE_SLOT_RULES_JSON,
-            )?;
-            for basis in array_at(&catalog, &["count_bases"])? {
-                let basis_id = required_str(basis, &["id"])?;
-                push_array_matches(
-                    &mut matches,
-                    candidate_type,
-                    &term_key,
-                    basis,
-                    &["count_question_terms"],
-                    &format!("evidence_slot_rules.count_basis:{basis_id}.count_question_terms"),
-                )?;
-            }
-        }
         _ => {}
     }
     Ok(matches)
@@ -281,15 +195,8 @@ pub fn promote_runtime_rule_candidate_to_catalog(
     match input.candidate_type {
         QUERY_EXPANSION_TERM => patch_query_expansion_array(input, "terms"),
         QUERY_EXPANSION_EXACT_TERM => patch_query_expansion_array(input, "exact_terms"),
-        QUERY_EXPANSION_EVIDENCE_SLOT_TERM => patch_query_expansion_evidence_slot(input),
         ANSWER_EVIDENCE_REQUEST_TERM => patch_answer_evidence_request_term(input),
         RUNTIME_PERSON_ALIAS => patch_runtime_person_alias(input),
-        EVIDENCE_COUNT_BASIS_QUESTION_TERM => {
-            patch_evidence_count_basis_term(input, "question_terms")
-        }
-        EVIDENCE_COUNT_BASIS_COUNT_TERM => {
-            patch_evidence_count_basis_term(input, "count_question_terms")
-        }
         other => Err(anyhow!(
             "unsupported runtime rule candidate type for promotion: {other}"
         )),
@@ -300,9 +207,6 @@ pub fn validate_runtime_rule_catalog_source(catalog_name: &str, source: &str) ->
     match catalog_name {
         "query_expansions" => validate_query_expansion_catalog_source(source),
         "answer_rules" => answer_rules::validate_answer_rule_catalog_source(source),
-        "evidence_slot_rules" => {
-            evidence_slot_rules::validate_evidence_slot_rule_catalog_source(source)
-        }
         "ontology_aliases" => ontology_aliases::validate_ontology_alias_catalog_source(source),
         other => Err(anyhow!("unsupported runtime rule catalog: {other}")),
     }
@@ -326,50 +230,6 @@ fn patch_query_expansion_array(
         |catalog| {
             let entry = query_expansion_entry_mut(catalog, entry_id)?;
             push_unique_string(ensure_array_field(entry, field)?, input.primary_term)
-        },
-    )
-}
-
-fn patch_query_expansion_evidence_slot(
-    input: RuntimeRuleCandidatePromotionInput<'_>,
-) -> Result<RuntimeRuleCandidatePromotionPatch> {
-    let path =
-        input.paths.query_expansions_path.as_ref().ok_or_else(|| {
-            anyhow!("{QUERY_EXPANSIONS_PATH_ENV} is required for runtime promotion")
-        })?;
-    let target_ref = required_target_ref(input.target_ref, "query_expansion:")?;
-    let rest = target_ref.trim_start_matches("query_expansion:");
-    let (entry_id, slot_id) = rest.split_once(":evidence_slot:").ok_or_else(|| {
-        anyhow!("target_ref must match query_expansion:<entry_id>:evidence_slot:<slot_id>")
-    })?;
-    if entry_id.trim().is_empty() || slot_id.trim().is_empty() {
-        return Err(anyhow!(
-            "query expansion evidence slot target_ref is incomplete"
-        ));
-    }
-    patch_catalog_file(
-        "query_expansions",
-        path,
-        &target_ref,
-        input.catalog_version,
-        |catalog| {
-            let entry = query_expansion_entry_mut(catalog, entry_id)?;
-            let slots = ensure_array_field(entry, "evidence_slots")?;
-            let slot_index = slots
-                .iter()
-                .position(|slot| slot.get("id").and_then(Value::as_str) == Some(slot_id));
-            let slot = match slot_index {
-                Some(index) => slots
-                    .get_mut(index)
-                    .ok_or_else(|| anyhow!("query expansion evidence slot index vanished"))?,
-                None => {
-                    slots.push(json!({"id": slot_id, "terms": []}));
-                    slots
-                        .last_mut()
-                        .ok_or_else(|| anyhow!("query expansion evidence slot insert failed"))?
-                }
-            };
-            push_unique_string(ensure_array_field(slot, "terms")?, input.primary_term)
         },
     )
 }
@@ -419,43 +279,6 @@ fn patch_runtime_person_alias(
                 .find(|person| person.get("person_id").and_then(Value::as_str) == Some(person_id))
                 .ok_or_else(|| anyhow!("ontology alias target not found: {target_ref}"))?;
             push_unique_string(ensure_array_field(person, "aliases")?, input.primary_term)
-        },
-    )
-}
-
-fn patch_evidence_count_basis_term(
-    input: RuntimeRuleCandidatePromotionInput<'_>,
-    field: &str,
-) -> Result<RuntimeRuleCandidatePromotionPatch> {
-    let path = input
-        .paths
-        .evidence_slot_rules_path
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow!("{EVIDENCE_SLOT_RULES_PATH_ENV} is required for runtime promotion")
-        })?;
-    let target_ref = required_target_ref(input.target_ref, "evidence_count_basis:")?;
-    let rest = target_ref.trim_start_matches("evidence_count_basis:");
-    let (basis_id, target_field) = rest
-        .split_once(':')
-        .ok_or_else(|| anyhow!("target_ref must match evidence_count_basis:<basis_id>:{field}"))?;
-    if target_field != field || basis_id.trim().is_empty() {
-        return Err(anyhow!(
-            "target_ref must match evidence_count_basis:<basis_id>:{field}"
-        ));
-    }
-    patch_catalog_file(
-        "evidence_slot_rules",
-        path,
-        &target_ref,
-        input.catalog_version,
-        |catalog| {
-            let bases = array_mut_at(catalog, &["count_bases"])?;
-            let basis = bases
-                .iter_mut()
-                .find(|basis| basis.get("id").and_then(Value::as_str) == Some(basis_id))
-                .ok_or_else(|| anyhow!("evidence count basis target not found: {target_ref}"))?;
-            push_unique_string(array_mut_at(basis, &[field])?, input.primary_term)
         },
     )
 }

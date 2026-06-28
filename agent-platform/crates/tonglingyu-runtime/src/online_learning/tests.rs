@@ -54,7 +54,8 @@ fn workflow_with_rejected_draft(package: crate::EvidencePackage) -> RuntimeWorkf
         package,
         draft_answer: "本地草稿".to_string(),
         final_answer: "本地回答".to_string(),
-        answer_source: "runtime_local_profile".to_string(),
+        answer_source: "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+            .to_string(),
         agent_runtime_summary: json!({"mode": "openai_compatible"}),
         steps: vec![RuntimeWorkflowStepReport {
             step_id: "step-draft".to_string(),
@@ -71,7 +72,7 @@ fn workflow_with_rejected_draft(package: crate::EvidencePackage) -> RuntimeWorkf
             trace_id: "trace-online-learning-llm-assets".to_string(),
             output: json!({
                 "agent_runtime_draft_consumed": false,
-                "agent_runtime_draft_rejected_reason": "draft_missing_embedded_evidence_anchor",
+                "agent_runtime_draft_rejected_reason": "draft_claim_exceeds_evidence_boundary",
                 "agent_runtime_result_format": "json",
                 "agent_runtime_coverage_status": "partial",
                 "agent_runtime_retrieval_repair_recommended": true,
@@ -345,7 +346,7 @@ fn records_llm_search_advice_and_prompt_candidate_assets() {
     );
     assert_eq!(
         payload["failure_patterns"],
-        json!(["draft_rejected:draft_missing_embedded_evidence_anchor"])
+        json!(["draft_rejected:draft_claim_exceeds_evidence_boundary"])
     );
     assert_eq!(payload["retrieval_repair_search_request_count"], json!(1));
     assert!(
@@ -367,7 +368,7 @@ fn records_llm_search_advice_and_prompt_candidate_assets() {
     assert_eq!(prompt_candidates.len(), 1);
     assert_eq!(
         prompt_candidates[0]["failure_pattern"],
-        json!("draft_rejected:draft_missing_embedded_evidence_anchor")
+        json!("draft_rejected:draft_claim_exceeds_evidence_boundary")
     );
     assert_eq!(prompt_candidates[0]["status"], json!("staged"));
     let events = crate::runtime_audit_events_for_trace(&conn, "trace-online-learning-llm-assets")

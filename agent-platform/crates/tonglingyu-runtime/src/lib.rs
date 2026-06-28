@@ -31,7 +31,6 @@ mod answer_requirements;
 mod answer_rules;
 mod corpus_topology;
 mod entity_intro_answer;
-mod evidence_slot_rules;
 mod governance_rules;
 mod online_evidence_card_ingest;
 mod online_learning;
@@ -44,33 +43,28 @@ mod rule_catalog;
 mod runtime_rule_candidates;
 mod upstream_bundle;
 
-use answer_composer::{
-    EvidenceSlotMatch, compose_slot_count_answer, direct_count_for_basis, public_quote_text,
-    representative_matches, source_layer_for_card,
-};
+#[cfg(test)]
+use answer_composer::public_quote_text;
 use answer_requirements::{
     answer_requirements_for_message, draft_lacks_requested_evidence_type_anchor,
     public_source_cues_for_title,
 };
 use entity_intro_answer::entity_intro_answer_policy_value;
-use evidence_slot_rules::{
-    EvidenceSlotCountBasis, active_count_basis_for_question, evidence_slot_count_policy_value,
-    evidence_slot_rule_values_for_ids, evidence_slot_rules_for_ids, explicit_total_count_for_basis,
-    question_asks_for_count,
-};
+#[cfg(test)]
+use governance_rules::preferred_answer_evidence_types;
 use governance_rules::{
     blocked_prompt_control_issues, claim_evidence_types_for_claim, claim_rules,
     draft_has_public_forbidden_term, draft_has_unsupported_term_without_evidence,
     draft_stops_for_user_opt_in, empty_evidence_review_issue,
     later_forty_boundary_missing_from_claims, later_forty_boundary_review_issue,
-    preferred_answer_evidence_types, triggered_review_rule_issues,
+    triggered_review_rule_issues,
 };
+#[cfg(test)]
+use question_frame::question_frame_answer;
 use question_frame::{
     RelationSupportTerms, attribute_card_support, chapter_location_answer_requirement_value,
     chapter_location_draft_rejection_reason, chapter_location_evidence_ids_for_requirements,
-    character_fate_draft_rejection_reason, character_fate_review_issues,
-    character_fate_supported_evidence_ids, frame_focus_terms, frame_search_query,
-    question_frame_answer, question_frame_from_context, relation_boundary_answer,
+    frame_focus_terms, frame_search_query, question_frame_from_context,
     relation_draft_rejection_reason, relation_open_object_draft_rejection_reason,
     relation_open_object_focus_terms, relation_open_object_search_terms,
     relation_open_object_supported_objects, relation_open_object_text_candidate_names,
@@ -192,7 +186,6 @@ pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report
 pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
 pub const QUERY_EXPANSIONS_PATH_ENV: &str = "TONGLINGYU_QUERY_EXPANSIONS_PATH";
-pub const EVIDENCE_SLOT_RULES_PATH_ENV: &str = "TONGLINGYU_EVIDENCE_SLOT_RULES_PATH";
 pub const GOVERNANCE_RULES_PATH_ENV: &str = "TONGLINGYU_GOVERNANCE_RULES_PATH";
 pub const RETRIEVAL_RULES_PATH_ENV: &str = "TONGLINGYU_RETRIEVAL_RULES_PATH";
 pub const ONTOLOGY_ALIASES_PATH_ENV: &str = "TONGLINGYU_ONTOLOGY_ALIASES_PATH";
@@ -206,8 +199,6 @@ const AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES: usize = 8192;
 const AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS: usize = 2;
 const AGENT_RUNTIME_SYNC_LLM_CALL_BUDGET: usize = 1;
 const AGENT_RUNTIME_SYNC_LATENCY_BUDGET_MS: u64 = 3_000;
-const AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE: &str =
-    "local_answer_basis_unavailable";
 const UPSTREAM_EVIDENCE_BRIEF_CARD_LIMIT: usize = 5;
 const UPSTREAM_EVIDENCE_BRIEF_TEXT_CHARS: usize = 120;
 const UPSTREAM_EVIDENCE_BRIEF_SOURCE_TITLE_CHARS: usize = 80;
@@ -220,7 +211,6 @@ pub fn runtime_rule_catalog_metadata() -> Result<Value> {
     Ok(json!({
         "object": "tonglingyu.runtime_rule_catalog_metadata",
         "query_expansions": query_expansion_catalog_metadata()?,
-        "evidence_slot_rules": evidence_slot_rules::evidence_slot_rule_catalog_metadata()?,
         "governance_rules": governance_rules::governance_rule_catalog_metadata()?,
         "retrieval_rules": retrieval_rules::retrieval_rule_catalog_metadata()?,
         "ontology_aliases": ontology_aliases::ontology_alias_catalog_metadata()?,
@@ -3784,8 +3774,7 @@ pub fn execute_runtime_workflow(
         },
     )?);
     let draft_started = Instant::now();
-    let draft_answer = local_answer(&input.question, &package);
-    let count_question = question_asks_for_count(&input.question)?;
+    let draft_answer = String::new();
     let draft_plan_step = workflow_plan_step(&workflow_plan, "draft_answer")?;
     let draft_step_id = draft_plan_step.step_id.clone();
     steps.push(workflow_step_report(
@@ -3815,13 +3804,8 @@ pub fn execute_runtime_workflow(
                 &package.cards,
             )?,
             "entity_intro_answer_policy": entity_intro_answer_policy_value(question_frame.as_ref())?,
-            "evidence_slot_count_policy": evidence_slot_count_context_value(
-                &input.question,
-                &package.cards,
-                count_question,
-            )?,
             "claim_statements": &package.claims,
-            "answer_source": "runtime_local_profile",
+            "answer_source": "runtime_no_upstream_draft",
             "source_scope_policy": &source_scope_report.policy,
             "out_of_scope_hints": &source_scope_report.out_of_scope_hints,
             }),
@@ -3829,7 +3813,7 @@ pub fn execute_runtime_workflow(
         },
     )?);
     let review_started = Instant::now();
-    let final_answer = enforce_review(draft_answer.clone(), &package);
+    let final_answer = evidence_based_draft_unavailable_answer(&package);
     let review_plan_step = workflow_plan_step(&workflow_plan, "review_answer")?;
     let review_step_id = review_plan_step.step_id.clone();
     steps.push(workflow_step_report(
@@ -3847,10 +3831,10 @@ pub fn execute_runtime_workflow(
             output: json!({
             "object": "tonglingyu.review_result",
             "package_id": &package.package_id,
-            "draft_consumed": true,
+            "draft_consumed": false,
             "claim_statements": &package.claims,
             "review": &package.review,
-            "revision_applied": package.review.status != "passed",
+            "revision_applied": false,
             }),
             context: &input.context,
         },
@@ -3868,7 +3852,7 @@ pub fn execute_runtime_workflow(
         package,
         draft_answer,
         final_answer,
-        answer_source: "runtime_local_profile".to_string(),
+        answer_source: "runtime_no_upstream_draft".to_string(),
         agent_runtime_summary: deterministic_agent_runtime_summary(steps.len()),
         steps,
         stream_events,
@@ -3949,71 +3933,8 @@ fn agent_runtime_profile_step_local_governance_skip(
     workflow: &RuntimeWorkflowOutput,
     step: &RuntimeWorkflowStepReport,
 ) -> Result<Option<AgentRuntimeStepExecution>> {
-    if mode != TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork
-        || step.operation != "draft_answer"
-    {
-        return Ok(None);
-    }
-    if !local_answer_basis_evidence_ids(&workflow.package).is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(agent_runtime_profile_step_skipped_execution(
-        index,
-        mode,
-        workflow,
-        step,
-        AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE,
-    )?))
-}
-
-fn agent_runtime_profile_step_skipped_execution(
-    index: usize,
-    mode: TonglingyuAgentRuntimeMode,
-    workflow: &RuntimeWorkflowOutput,
-    step: &RuntimeWorkflowStepReport,
-    reason: &'static str,
-) -> Result<AgentRuntimeStepExecution> {
-    let result_summary_contract = agent_runtime_result_summary_contract(step)?;
-    Ok(AgentRuntimeStepExecution {
-        index,
-        agent_runtime: json!({
-            "client": mode.as_str(),
-            "status": "skipped",
-            "skip_reason": reason,
-            "content_source": agent_runtime_profile_content_source(mode, "local-evidence-gate"),
-            "executor_output_source": format!("agent-runtime-{}-local-governance", mode.as_str()),
-            "content_used_for_final_answer": false,
-            "result_summary_contract": result_summary_contract,
-            "result_ref": Value::Null,
-            "result_summary": "",
-            "tool_rounds": 0,
-            "tool_result_count": 0,
-            "tool_audit_event_count": 0,
-            "tool_results": [],
-            "tool_audit_events": [],
-            "schema_version": Value::Null,
-            "provider_request": Value::Null,
-            "provider_request_embedded": false,
-            "latency_ms": 0,
-            "attempt_count": 0,
-            "retry_error_count": 0,
-            "max_attempts": agent_runtime_profile_step_max_attempts(mode),
-            "provider_request_sha256": Value::Null,
-            "effective_tool_set": [],
-            "runtime_step": agent_runtime_step_from_workflow_step(step),
-            "content_application": {
-                "answer_source": &workflow.answer_source,
-                "local_reviewer_enforced": true,
-                "review_status": &workflow.package.review.status,
-                "result_format": "local_governance_skip",
-                "package_id": &workflow.package.package_id,
-                "draft_consumed": false,
-                "rejected_reason": reason,
-                "content_used_for_final_answer": false,
-                "provider_request_skipped": true,
-            },
-        }),
-    })
+    let _ = (index, mode, workflow, step);
+    Ok(None)
 }
 
 fn agent_runtime_sync_execution_policy(mode: TonglingyuAgentRuntimeMode) -> &'static str {
@@ -4827,20 +4748,6 @@ fn compact_draft_evidence_brief_for_message(
                 insert_existing_value(&mut compact, item, "answer_use");
                 insert_trimmed_string(&mut compact, item, "source_title", source_title_chars);
                 insert_trimmed_string(&mut compact, item, "text", text_chars);
-                compact.insert(
-                    "evidence_slots".to_string(),
-                    compact_evidence_slots_for_message(
-                        item.get("evidence_slots").unwrap_or(&Value::Null),
-                        compaction_level,
-                    ),
-                );
-                compact.insert(
-                    "evidence_slot_rules".to_string(),
-                    compact_evidence_slot_rules_for_message(
-                        item.get("evidence_slot_rules").unwrap_or(&Value::Null),
-                        compaction_level,
-                    ),
-                );
                 if term_limit > 0 {
                     compact.insert(
                         "matched_terms".to_string(),
@@ -4854,155 +4761,6 @@ fn compact_draft_evidence_brief_for_message(
                 if scope_chars > 0 {
                     insert_trimmed_string(&mut compact, item, "support_scope", scope_chars);
                     insert_trimmed_string(&mut compact, item, "unsupported_scope", scope_chars);
-                }
-                Value::Object(compact)
-            })
-            .collect(),
-    )
-}
-
-fn compact_evidence_slot_count_policy_for_message(
-    evidence_slot_count_policy: Value,
-    compaction_level: usize,
-) -> Value {
-    if compaction_level == 0 || !evidence_slot_count_policy.is_object() {
-        return evidence_slot_count_policy;
-    }
-    let active_basis = evidence_slot_count_policy
-        .get("active_count_basis")
-        .and_then(Value::as_object);
-    let mut compact_basis = Map::new();
-    if let Some(active_basis) = active_basis {
-        insert_existing_value(&mut compact_basis, active_basis, "id");
-        insert_existing_value(&mut compact_basis, active_basis, "label");
-        insert_existing_value(&mut compact_basis, active_basis, "answer_unit");
-        insert_existing_value(&mut compact_basis, active_basis, "answer_noun");
-    }
-    let rule = if compaction_level >= 2 {
-        json!({
-            "rule_id": "count_policy.direct_slots_only",
-            "summary": "use direct_count exactly; related_slots are not counted"
-        })
-    } else {
-        json!(
-            "For count questions, use direct_count exactly; direct_slots are counted, related_slots are mentioned separately and do not change direct_count"
-        )
-    };
-    json!({
-        "active_count_basis": Value::Object(compact_basis),
-        "count_question": evidence_slot_count_policy
-            .get("count_question")
-            .cloned()
-            .unwrap_or(Value::Bool(false)),
-        "direct_count": evidence_slot_count_policy
-            .get("direct_count")
-            .cloned()
-            .unwrap_or(Value::Null),
-        "direct_slots": compact_count_context_slots_for_message(
-            evidence_slot_count_policy
-                .get("direct_slots")
-                .unwrap_or(&Value::Null),
-            compaction_level,
-        ),
-        "related_slots": compact_count_context_slots_for_message(
-            evidence_slot_count_policy
-            .get("related_slots")
-                .unwrap_or(&Value::Null),
-            compaction_level,
-        ),
-        "rule": rule
-    })
-}
-
-fn compact_count_context_slots_for_message(slots: &Value, compaction_level: usize) -> Value {
-    let Some(items) = slots.as_array() else {
-        return json!([]);
-    };
-    let (limit, source_title_chars) = match compaction_level {
-        1 => (5, 64),
-        2 => (4, 48),
-        3 => (3, 32),
-        4 => (2, 24),
-        _ => (1, 20),
-    };
-    Value::Array(
-        items
-            .iter()
-            .take(limit)
-            .filter_map(Value::as_object)
-            .map(|slot| {
-                let mut compact = Map::new();
-                insert_existing_value(&mut compact, slot, "id");
-                insert_existing_value(&mut compact, slot, "label");
-                insert_existing_value(&mut compact, slot, "role");
-                insert_existing_value(&mut compact, slot, "public_role_label");
-                if compaction_level <= 2 {
-                    insert_existing_value(&mut compact, slot, "counts_as");
-                    insert_existing_value(&mut compact, slot, "display_group");
-                    insert_existing_value(&mut compact, slot, "count_note");
-                    insert_existing_value(&mut compact, slot, "supports_subjects");
-                    insert_existing_value(&mut compact, slot, "support_modality");
-                    insert_existing_value(&mut compact, slot, "evidence_strength");
-                    insert_existing_value(&mut compact, slot, "source_layer");
-                }
-                insert_existing_value(&mut compact, slot, "evidence_id");
-                compact.insert(
-                    "source_cues".to_string(),
-                    compact_source_cues_for_message(
-                        slot.get("source_cues").unwrap_or(&Value::Null),
-                        if compaction_level >= 4 { 2 } else { 3 },
-                        if compaction_level >= 4 { 16 } else { 24 },
-                    ),
-                );
-                insert_trimmed_string(&mut compact, slot, "source_title", source_title_chars);
-                Value::Object(compact)
-            })
-            .collect(),
-    )
-}
-
-fn compact_evidence_slots_for_message(slots: &Value, compaction_level: usize) -> Value {
-    let Some(items) = slots.as_array() else {
-        return json!([]);
-    };
-    let (limit, max_chars) = match compaction_level {
-        1 => (4, 48),
-        2 => (3, 40),
-        _ => (3, 36),
-    };
-    Value::Array(
-        items
-            .iter()
-            .filter_map(Value::as_str)
-            .take(limit)
-            .map(|item| Value::String(trim_text(item, max_chars)))
-            .collect(),
-    )
-}
-
-fn compact_evidence_slot_rules_for_message(rules: &Value, compaction_level: usize) -> Value {
-    let Some(items) = rules.as_array() else {
-        return json!([]);
-    };
-    Value::Array(
-        items
-            .iter()
-            .filter_map(Value::as_object)
-            .map(|rule| {
-                let mut compact = Map::new();
-                insert_existing_value(&mut compact, rule, "id");
-                insert_existing_value(&mut compact, rule, "label");
-                insert_existing_value(&mut compact, rule, "public_role_label");
-                if compaction_level <= 1 {
-                    insert_existing_value(&mut compact, rule, "role");
-                }
-                if compaction_level <= 2 {
-                    insert_existing_value(&mut compact, rule, "counts_as");
-                    insert_existing_value(&mut compact, rule, "display_group");
-                    insert_existing_value(&mut compact, rule, "count_note");
-                    insert_existing_value(&mut compact, rule, "supports_subjects");
-                    insert_existing_value(&mut compact, rule, "support_modality");
-                    insert_existing_value(&mut compact, rule, "evidence_strength");
                 }
                 Value::Object(compact)
             })
@@ -5477,16 +5235,6 @@ fn step_output_message_payload_with_compaction(
         .get("source_scope_policy")
         .cloned()
         .unwrap_or(Value::Null);
-    let evidence_slot_count_policy = step
-        .output
-        .get("evidence_slot_count_policy")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let evidence_slot_count_policy = if step.operation == "draft_answer" {
-        compact_evidence_slot_count_policy_for_message(evidence_slot_count_policy, compaction_level)
-    } else {
-        evidence_slot_count_policy
-    };
     let out_of_scope_hint_count = step
         .output
         .get("out_of_scope_hints")
@@ -5503,7 +5251,6 @@ fn step_output_message_payload_with_compaction(
             "answer_requirements": answer_requirements,
             "question_frame_answer_requirements": question_frame_answer_requirements,
             "entity_intro_answer_policy": entity_intro_answer_policy,
-            "evidence_slot_count_policy": evidence_slot_count_policy,
             "source_scope_policy": source_scope_policy,
         }),
         "review_answer" => json!({
@@ -5643,6 +5390,9 @@ fn reject_agent_runtime_draft_application(
     reason: &'static str,
     content_source_suffix: &'static str,
 ) -> AgentRuntimeContentApplication {
+    workflow.final_answer = evidence_based_draft_rejected_answer(&workflow.package);
+    workflow.answer_source =
+        agent_runtime_profile_answer_source(mode, "rejected_by_local_governance");
     if let Some(step) = workflow.steps.get_mut(draft_step_index) {
         step.output["agent_runtime_draft_consumed"] = json!(false);
         step.output["agent_runtime_result_format"] = json!(extraction.result_format);
@@ -5858,19 +5608,13 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
             | "claim_evidence_refs_empty"
             | "claim_evidence_ref_invalid"
             | "claim_evidence_ref_outside_package"
-            | AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE
-            | "draft_count_conflicts_with_evidence_events"
-            | "draft_exposes_internal_evidence_slot_id"
             | "draft_exposes_internal_public_term"
             | "draft_missing_later_forty_boundary"
-            | "draft_missing_embedded_evidence_anchor"
-            | "draft_missing_embedded_evidence_source"
             | "draft_missing_requested_evidence_type_anchor"
             | "draft_claim_exceeds_evidence_boundary"
             | "draft_claim_uses_only_supplemental_evidence"
             | "draft_missing_open_relation_object"
             | "draft_missing_open_relation_evidence_cue"
-            | "draft_negates_direct_evidence_slot_count"
             | "draft_stops_for_user_opt_in"
             | "draft_uses_unscoped_later_forty"
             | "chapter_location_chapter_number_missing"
@@ -5883,7 +5627,8 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
 }
 
 fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
-    reason == AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE
+    let _ = reason;
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6280,13 +6025,10 @@ fn agent_runtime_execution_summary(
         application.is_some_and(agent_runtime_draft_governance_decision_is_complete);
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
-    let local_answer_used_for_final_answer = agent_runtime_profile_observation_mode(mode)
-        && !content_used_for_final_answer
-        && workflow.answer_source == "runtime_local_profile";
     let draft_governance_completed = draft_governance_decided;
     let full_observation_required = agent_runtime_full_observation_required(mode);
     let evidence_governance_completed = if full_observation_required {
-        evidence_matches_local || local_answer_used_for_final_answer
+        evidence_matches_local
     } else {
         true
     };
@@ -6309,11 +6051,6 @@ fn agent_runtime_execution_summary(
         agent_runtime_profile_observation_mode(mode) && profile_observation_complete;
     let profile_execution_status = match mode {
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope_only",
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork
-            if profile_observation_complete && draft_skipped_by_local_governance =>
-        {
-            "openai_compatible_draft_skipped_by_local_governance"
-        }
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork
             if profile_observation_complete
                 && executed_profile_step_count <= AGENT_RUNTIME_SYNC_LLM_CALL_BUDGET =>
@@ -6382,7 +6119,6 @@ fn validate_agent_runtime_execution_summary(
             && matches!(
                 status,
                 "openai_compatible_draft_with_local_governance"
-                    | "openai_compatible_draft_skipped_by_local_governance"
                     | "openai_compatible_profile_observed_with_local_governance"
             )
         {
@@ -6684,95 +6420,12 @@ fn extract_agent_runtime_package_observation(
     }
 }
 
-fn skipped_agent_runtime_draft_step(
-    workflow: &RuntimeWorkflowOutput,
-) -> Option<(usize, &'static str)> {
-    workflow.steps.iter().enumerate().find_map(|(index, step)| {
-        if step.operation != "draft_answer" {
-            return None;
-        }
-        let agent_runtime = step.agent_runtime.as_ref()?;
-        if agent_runtime.get("status") != Some(&json!("skipped")) {
-            return None;
-        }
-        let reason = agent_runtime.get("skip_reason").and_then(Value::as_str)?;
-        if reason == AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE {
-            Some((
-                index,
-                AGENT_RUNTIME_DRAFT_SKIP_LOCAL_ANSWER_BASIS_UNAVAILABLE,
-            ))
-        } else {
-            None
-        }
-    })
-}
-
-fn apply_agent_runtime_draft_skip_application(
-    workflow: &mut RuntimeWorkflowOutput,
-    draft_step_index: usize,
-    mode: TonglingyuAgentRuntimeMode,
-    reason: &'static str,
-) -> AgentRuntimeContentApplication {
-    if let Some(step) = workflow.steps.get_mut(draft_step_index) {
-        step.output["agent_runtime_draft_consumed"] = json!(false);
-        step.output["agent_runtime_result_format"] = json!("local_governance_skip");
-        step.output["agent_runtime_draft_rejected_reason"] = json!(reason);
-        step.output["agent_runtime_package_id"] = json!(&workflow.package.package_id);
-        step.output["agent_runtime_package_id_rebound"] = json!(false);
-        step.output["agent_runtime_coverage_status"] = json!("not_requested");
-        step.output["agent_runtime_evidence_hint_count"] = json!(0);
-        step.output["agent_runtime_retrieval_repair_recommended"] = json!(false);
-        step.output["agent_runtime_retrieval_repair_query_count"] = json!(0);
-        step.output["agent_runtime_retrieval_repair_queries"] = json!([]);
-        step.output["agent_runtime_out_of_scope_hint_count"] = json!(0);
-        step.output["agent_runtime_provider_request_skipped"] = json!(true);
-        if let Some(agent_runtime) = step.agent_runtime.as_mut().and_then(Value::as_object_mut) {
-            agent_runtime.insert(
-                "content_source".to_string(),
-                json!(agent_runtime_profile_content_source(
-                    mode,
-                    "local-evidence-gate"
-                )),
-            );
-            agent_runtime.insert("content_used_for_final_answer".to_string(), json!(false));
-            agent_runtime.insert(
-                "content_application".to_string(),
-                json!({
-                    "answer_source": &workflow.answer_source,
-                    "local_reviewer_enforced": true,
-                    "review_status": &workflow.package.review.status,
-                    "result_format": "local_governance_skip",
-                    "package_id": &workflow.package.package_id,
-                    "draft_consumed": false,
-                    "rejected_reason": reason,
-                    "content_used_for_final_answer": false,
-                    "provider_request_skipped": true,
-                }),
-            );
-        }
-    }
-    AgentRuntimeContentApplication {
-        draft_consumed: false,
-        content_used_for_final_answer: false,
-        result_format: "local_governance_skip",
-        rejected_reason: Some(reason),
-    }
-}
-
 fn apply_agent_runtime_content_outputs(
     workflow: &mut RuntimeWorkflowOutput,
     mode: TonglingyuAgentRuntimeMode,
 ) -> Option<AgentRuntimeContentApplication> {
     if !agent_runtime_profile_observation_mode(mode) {
         return None;
-    }
-    if let Some((draft_step_index, reason)) = skipped_agent_runtime_draft_step(workflow) {
-        return Some(apply_agent_runtime_draft_skip_application(
-            workflow,
-            draft_step_index,
-            mode,
-            reason,
-        ));
     }
     let (draft_step_index, extraction) =
         workflow
@@ -6891,39 +6544,13 @@ fn apply_agent_runtime_content_outputs(
             "profile-question-frame-rejected",
         ));
     }
-    if let Some(reason) = character_fate_draft_rejection_reason(
-        parsed_question_frame.as_ref(),
-        &workflow.package.cards,
-        &draft,
-    ) {
-        return Some(reject_agent_runtime_draft_application(
-            workflow,
-            draft_step_index,
-            mode,
-            &extraction,
-            reason,
-            "profile-question-frame-rejected",
-        ));
-    }
-    if let Some(reason) = entity_fate_draft_rejection_reason(
-        &workflow.package.question,
-        parsed_question_frame.as_ref(),
-        &workflow.package.cards,
-        &draft,
-    ) {
-        return Some(reject_agent_runtime_draft_application(
-            workflow,
-            draft_step_index,
-            mode,
-            &extraction,
-            reason,
-            "profile-question-frame-rejected",
-        ));
-    }
-
     workflow.draft_answer = draft.clone();
-    workflow.final_answer = enforce_review(draft, &workflow.package);
     let content_used_for_final_answer = workflow.package.review.status == "passed";
+    workflow.final_answer = if content_used_for_final_answer {
+        draft
+    } else {
+        evidence_based_draft_rejected_answer(&workflow.package)
+    };
     workflow.answer_source = if content_used_for_final_answer {
         agent_runtime_profile_answer_source(mode, "with_local_review")
     } else {
@@ -7043,23 +6670,8 @@ fn agent_runtime_draft_evidence_boundary_rejection(
     if cards_include_later_forty(cards) && !text_mentions_later_forty_boundary(&draft_text) {
         return Some("draft_missing_later_forty_boundary");
     }
-    if draft_count_conflicts_with_evidence_slots(question, &draft_text, cards) {
-        return Some("draft_count_conflicts_with_evidence_events");
-    }
-    if draft_exposes_internal_evidence_slot_ids(question, &draft_text, cards) {
-        return Some("draft_exposes_internal_evidence_slot_id");
-    }
     if draft_has_public_forbidden_term(&draft_text).unwrap_or(true) {
         return Some("draft_exposes_internal_public_term");
-    }
-    if draft_negates_direct_evidence_slot(question, &draft_text, cards) {
-        return Some("draft_negates_direct_evidence_slot_count");
-    }
-    if draft_lacks_embedded_slot_evidence(question, &draft_text, cards) {
-        return Some("draft_missing_embedded_evidence_anchor");
-    }
-    if draft_lacks_embedded_slot_source(question, &draft_text, cards) {
-        return Some("draft_missing_embedded_evidence_source");
     }
     if draft_lacks_requested_evidence_type_anchor(question, &draft_text, cards) {
         return Some("draft_missing_requested_evidence_type_anchor");
@@ -7068,216 +6680,6 @@ fn agent_runtime_draft_evidence_boundary_rejection(
         return Some("draft_claim_exceeds_evidence_boundary");
     }
     None
-}
-
-fn draft_exposes_internal_evidence_slot_ids(
-    question: &str,
-    draft_text: &str,
-    cards: &[EvidenceCard],
-) -> bool {
-    count_slot_representatives_for_boundary(question, cards).is_some_and(|matches| {
-        matches.iter().any(|item| {
-            let slot_id = normalize_text(&item.slot_id);
-            !slot_id.is_empty() && draft_text.contains(&slot_id)
-        })
-    })
-}
-
-fn draft_lacks_embedded_slot_evidence(
-    question: &str,
-    draft_text: &str,
-    cards: &[EvidenceCard],
-) -> bool {
-    count_slot_representatives_for_boundary(question, cards)
-        .is_some_and(|matches| labels_missing_from_draft(draft_text, &matches))
-}
-
-fn labels_missing_from_draft(draft_text: &str, matches: &[EvidenceSlotMatch]) -> bool {
-    matches.iter().any(|item| {
-        let label = normalize_text(&item.label);
-        !label.is_empty() && !draft_text.contains(&label)
-    })
-}
-
-fn draft_lacks_embedded_slot_source(
-    question: &str,
-    draft_text: &str,
-    cards: &[EvidenceCard],
-) -> bool {
-    count_slot_representatives_for_boundary(question, cards).is_some_and(|matches| {
-        matches
-            .iter()
-            .any(|item| !source_cue_present_for_slot_match(draft_text, item))
-    })
-}
-
-fn source_cue_present_for_slot_match(draft_text: &str, item: &EvidenceSlotMatch) -> bool {
-    let Ok(source_cues) = public_source_cues_for_title(&item.source_title) else {
-        return false;
-    };
-    source_cues
-        .iter()
-        .map(|cue| normalize_text(cue))
-        .filter(|cue| !cue.is_empty())
-        .any(|cue| draft_text.contains(&cue))
-}
-
-fn evidence_slot_count_context_value(
-    question: &str,
-    cards: &[EvidenceCard],
-    count_question: bool,
-) -> Result<Value> {
-    let mut policy = evidence_slot_count_policy_value(question, count_question)?;
-    if !count_question {
-        return Ok(policy);
-    }
-    let Some(active_basis) = active_count_basis_for_question(question, true)? else {
-        return Ok(policy);
-    };
-    let slot_matches = evidence_slot_matches_for_cards(question, cards)?;
-    let direct = representative_matches(&slot_matches, |item| {
-        item.counts_as.iter().any(|basis| basis == &active_basis.id)
-    });
-    let related = representative_matches(&slot_matches, |item| {
-        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
-            && item.display_group != "unclassified"
-    });
-    if let Some(object) = policy.as_object_mut() {
-        object.insert("direct_count".to_string(), json!(direct.len()));
-        let direct_slots = direct
-            .iter()
-            .map(evidence_slot_match_count_context_value)
-            .collect::<Result<Vec<_>>>()?;
-        let related_slots = related
-            .iter()
-            .map(evidence_slot_match_count_context_value)
-            .collect::<Result<Vec<_>>>()?;
-        object.insert("direct_slots".to_string(), Value::Array(direct_slots));
-        object.insert("related_slots".to_string(), Value::Array(related_slots));
-    }
-    Ok(policy)
-}
-
-fn evidence_slot_match_count_context_value(item: &EvidenceSlotMatch) -> Result<Value> {
-    let source_cues = public_source_cues_for_title(&item.source_title)?;
-    Ok(json!({
-        "id": &item.slot_id,
-        "label": &item.label,
-        "role": &item.role,
-        "public_role_label": &item.public_role_label,
-        "counts_as": &item.counts_as,
-        "display_group": &item.display_group,
-        "count_note": &item.count_note,
-        "supports_subjects": &item.supports_subjects,
-        "support_modality": &item.support_modality,
-        "evidence_strength": &item.evidence_strength,
-        "evidence_id": &item.evidence_id,
-        "source_cues": source_cues,
-        "source_layer": &item.source_layer,
-        "source_title": &item.source_title,
-    }))
-}
-
-fn count_slot_representatives_for_boundary(
-    question: &str,
-    cards: &[EvidenceCard],
-) -> Option<Vec<EvidenceSlotMatch>> {
-    if !question_asks_for_count(question).unwrap_or(false) || cards_include_later_forty(cards) {
-        return None;
-    }
-    let active_basis = active_count_basis_for_question(question, true)
-        .ok()
-        .flatten()?;
-    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
-    let direct = representative_matches(&slot_matches, |item| {
-        item.counts_as.iter().any(|basis| basis == &active_basis.id)
-    });
-    if direct.is_empty() {
-        return None;
-    }
-    let related = representative_matches(&slot_matches, |item| {
-        !item.counts_as.iter().any(|basis| basis == &active_basis.id)
-            && item.display_group != "unclassified"
-    });
-    let mut matches = direct;
-    matches.extend(related);
-    Some(matches)
-}
-
-fn draft_count_conflicts_with_evidence_slots(
-    question: &str,
-    draft_text: &str,
-    cards: &[EvidenceCard],
-) -> bool {
-    if !question_asks_for_count(question).unwrap_or(false) {
-        return false;
-    }
-    let Some(active_basis) = active_count_basis_for_question(question, true)
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
-    let direct_count = direct_count_for_basis(&active_basis, &slot_matches);
-    if direct_count == 0 {
-        return false;
-    }
-    explicit_total_count_for_basis(draft_text, &active_basis)
-        .is_some_and(|count| count != direct_count)
-}
-
-fn draft_negates_direct_evidence_slot(
-    question: &str,
-    draft_text: &str,
-    cards: &[EvidenceCard],
-) -> bool {
-    if !question_asks_for_count(question).unwrap_or(false) {
-        return false;
-    }
-    let Some(active_basis) = active_count_basis_for_question(question, true)
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let slot_matches = evidence_slot_matches_for_cards(question, cards).unwrap_or_default();
-    representative_matches(&slot_matches, |item| {
-        item.counts_as.iter().any(|basis| basis == &active_basis.id)
-    })
-    .iter()
-    .any(|item| direct_slot_is_negated_after_label(draft_text, item, &active_basis))
-}
-
-fn direct_slot_is_negated_after_label(
-    draft_text: &str,
-    item: &EvidenceSlotMatch,
-    active_basis: &EvidenceSlotCountBasis,
-) -> bool {
-    let label = normalize_text(&item.label);
-    if label.is_empty() {
-        return false;
-    }
-    let negation_terms = active_basis
-        .direct_slot_negation_terms
-        .iter()
-        .map(|term| normalize_text(term))
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
-    if negation_terms.is_empty() {
-        return false;
-    }
-    draft_text.match_indices(&label).any(|(index, _)| {
-        let clause = direct_slot_clause_after_label(draft_text, index);
-        negation_terms.iter().any(|term| clause.contains(term))
-    })
-}
-
-fn direct_slot_clause_after_label(draft_text: &str, label_index: usize) -> String {
-    draft_text[label_index..]
-        .chars()
-        .take_while(|ch| !matches!(*ch, '；' | ';' | '。' | '！' | '!' | '？' | '?' | '\n'))
-        .collect()
 }
 
 fn parse_agent_runtime_summary_value(trimmed: &str) -> Option<Value> {
@@ -14008,11 +13410,6 @@ fn create_evidence_package_with_question_frame(
             review.issues.push(issue);
         }
     }
-    for issue in character_fate_review_issues(parsed_question_frame.as_ref(), &cards) {
-        if !review.issues.iter().any(|existing| existing == &issue) {
-            review.issues.push(issue);
-        }
-    }
     if !review.issues.is_empty() {
         review.status = "needs_revision".to_string();
         if review.severity == "none" {
@@ -14657,94 +14054,8 @@ fn filter_cards_for_question_frame_answer_scope(
     frame: Option<&question_frame::RuntimeQuestionFrame>,
     cards: Vec<EvidenceCard>,
 ) -> Vec<EvidenceCard> {
-    let Some(frame) = frame else {
-        return cards;
-    };
-    if frame.is_character_fate() {
-        let supported = character_fate_supported_evidence_ids(Some(frame), &cards);
-        return cards
-            .into_iter()
-            .filter(|card| supported.contains(&card.evidence_id))
-            .collect();
-    }
-    if frame.intent != "entity_query" || !question_asks_for_fate(question) {
-        return cards;
-    }
-    let Some(entity) = frame.subject.as_ref().or(frame.object.as_ref()) else {
-        return cards;
-    };
-    let Ok(ranking) = retrieval_rules::ranking_rules() else {
-        return Vec::new();
-    };
-    let identity_terms = entity
-        .identity_terms()
-        .into_iter()
-        .map(|term| normalize_text(&term))
-        .filter(|term| !term.trim().is_empty())
-        .collect::<Vec<_>>();
-    if identity_terms.is_empty() {
-        return Vec::new();
-    }
+    let _ = (question, frame);
     cards
-        .into_iter()
-        .filter(|card| entity_fate_card_is_bound(card, &identity_terms, &ranking.fate_text_terms))
-        .collect()
-}
-
-fn entity_fate_card_is_bound(
-    card: &EvidenceCard,
-    normalized_identity_terms: &[String],
-    fate_terms: &[String],
-) -> bool {
-    let combined = format!("{} {}", card.source_title, card.text);
-    let normalized = normalize_text(&combined);
-    normalized_identity_terms
-        .iter()
-        .any(|term| normalized.contains(term))
-        && matching_rule_term_count(&combined, fate_terms) > 0
-}
-
-fn entity_fate_draft_rejection_reason(
-    question: &str,
-    frame: Option<&question_frame::RuntimeQuestionFrame>,
-    cards: &[EvidenceCard],
-    draft: &str,
-) -> Option<&'static str> {
-    let frame = frame?;
-    if frame.intent != "entity_query" || !question_asks_for_fate(question) {
-        return None;
-    }
-    let entity = frame.subject.as_ref().or(frame.object.as_ref())?;
-    let Ok(ranking) = retrieval_rules::ranking_rules() else {
-        return Some("entity_fate_rules_unavailable");
-    };
-    let identity_terms = entity
-        .identity_terms()
-        .into_iter()
-        .map(|term| normalize_text(&term))
-        .filter(|term| !term.trim().is_empty())
-        .collect::<Vec<_>>();
-    if identity_terms.is_empty() {
-        return None;
-    }
-    let package_fate_terms = ranking
-        .fate_text_terms
-        .iter()
-        .filter(|term| {
-            cards.iter().any(|card| {
-                entity_fate_card_is_bound(card, &identity_terms, std::slice::from_ref(term))
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if package_fate_terms.is_empty() {
-        return None;
-    }
-    if retrieval_rules::contains_any_term(draft, &package_fate_terms) {
-        None
-    } else {
-        Some("entity_fate_draft_missing_bound_fate_cue")
-    }
 }
 
 fn question_frame_focus_search(
@@ -15615,10 +14926,6 @@ fn upstream_evidence_brief_for_cards(
                 .map(|term| trim_text(&term, UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_CHARS))
                 .take(UPSTREAM_EVIDENCE_BRIEF_MATCHED_TERM_LIMIT)
                 .collect::<Vec<_>>();
-            let evidence_slots = matched_query_expansion_evidence_slot_ids_for_card(question, card)
-                .unwrap_or_default();
-            let evidence_slot_rules =
-                evidence_slot_rule_values_for_ids(&evidence_slots).unwrap_or_default();
             json!({
                 "evidence_id": &card.evidence_id,
                 "evidence_type": &card.evidence_type,
@@ -15627,8 +14934,6 @@ fn upstream_evidence_brief_for_cards(
                 "text": text_excerpt,
                 "text_is_excerpt": true,
                 "matched_terms": matched_terms,
-                "evidence_slots": evidence_slots,
-                "evidence_slot_rules": evidence_slot_rules,
                 "answer_use": bindings_by_id
                     .get(card.evidence_id.as_str())
                     .map(|binding| binding.answer_use.as_str())
@@ -15705,7 +15010,7 @@ fn upstream_evidence_focus_terms(question: &str) -> Vec<String> {
     let normalized = normalize_query(question);
     if let Ok(catalog) = query_expansion_catalog() {
         apply_query_expansion_exact_terms(&catalog, question, &normalized, &mut terms);
-        apply_query_expansion_evidence_slot_terms(&catalog, question, &normalized, &mut terms);
+        apply_query_expansion_terms(&catalog, question, &normalized, &mut terms);
     }
     for token in cjk_tokens(question) {
         if token.chars().count() >= 2 && token.chars().count() <= 10 {
@@ -15806,15 +15111,15 @@ pub fn replay_package_json(package: &EvidencePackage) -> Value {
         "package": package_json(package),
         "answer": replay_answer(package),
         "deterministic": true,
-        "answer_source": "local_replay_no_upstream",
+        "answer_source": "runtime_no_upstream_draft",
     })
 }
 
 pub fn replay_answer(package: &EvidencePackage) -> String {
-    enforce_review(local_answer(&package.question, package), package)
+    evidence_based_draft_unavailable_answer(package)
 }
 
-pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> {
+pub fn claims_from_cards(_question: &str, cards: &[EvidenceCard]) -> Vec<String> {
     let Ok(rules) = claim_rules() else {
         return vec!["治理规则目录不可用，不能给出确定结论。".to_string()];
     };
@@ -15822,20 +15127,6 @@ pub fn claims_from_cards(question: &str, cards: &[EvidenceCard]) -> Vec<String> 
         return vec![rules.empty_evidence];
     }
     let mut claims = Vec::new();
-    if matched_query_expansion_evidence_slots(question, cards).is_ok_and(|slots| !slots.is_empty())
-    {
-        claims.push(rules.slot_count_rule.clone());
-        if active_count_basis_for_question(
-            question,
-            question_asks_for_count(question).unwrap_or(false),
-        )
-        .ok()
-        .flatten()
-        .is_some()
-        {
-            claims.push(rules.inactive_count_basis.clone());
-        }
-    }
     if cards_include_later_forty(cards) {
         claims.push(rules.later_forty_boundary.clone());
     }
@@ -16029,6 +15320,7 @@ fn evidence_binding_wording_strength_ready(binding: &TieredEvidenceBinding) -> b
             == Some(binding.evidence_tier.as_str())
 }
 
+#[cfg(test)]
 pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
         return "我暂时找不到足够的原文依据，不能可靠回答这个问题。".to_string();
@@ -16044,9 +15336,6 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     if let Some(answer) =
         question_frame_answer(parsed_question_frame.as_ref(), &basis_package.cards)
     {
-        return append_supplemental_evidence_section(answer, question, package);
-    }
-    if let Some(answer) = local_slot_count_answer(question, &basis_package) {
         return append_supplemental_evidence_section(answer, question, package);
     }
     if let Some(answer) = preferred_evidence_answer(question, &basis_package) {
@@ -16076,6 +15365,7 @@ pub fn local_answer(question: &str, package: &EvidencePackage) -> String {
     append_supplemental_evidence_section(answer, question, package)
 }
 
+#[cfg(test)]
 fn answer_basis_package(package: &EvidencePackage) -> EvidencePackage {
     let Some(answer_basis_ids) = answer_basis_evidence_ids(package) else {
         return package.clone();
@@ -16090,6 +15380,7 @@ fn answer_basis_package(package: &EvidencePackage) -> EvidencePackage {
     basis_package
 }
 
+#[cfg(test)]
 fn answer_basis_intro(package: &EvidencePackage) -> String {
     let answer_uses = package
         .tiered_evidence_bindings
@@ -16132,17 +15423,7 @@ fn answer_basis_evidence_ids(package: &EvidencePackage) -> Option<BTreeSet<Strin
     )
 }
 
-fn local_answer_basis_evidence_ids(package: &EvidencePackage) -> BTreeSet<String> {
-    if package.tiered_evidence_bindings.is_empty() {
-        return package
-            .cards
-            .iter()
-            .map(|card| card.evidence_id.clone())
-            .collect();
-    }
-    answer_basis_evidence_ids(package).unwrap_or_default()
-}
-
+#[cfg(test)]
 fn supplemental_evidence_cards(package: &EvidencePackage) -> Vec<&EvidenceCard> {
     if package.tiered_evidence_bindings.is_empty() {
         return Vec::new();
@@ -16160,6 +15441,7 @@ fn supplemental_evidence_cards(package: &EvidencePackage) -> Vec<&EvidenceCard> 
         .collect()
 }
 
+#[cfg(test)]
 fn supplemental_only_answer(question: &str, package: &EvidencePackage) -> String {
     let supplemental = supplemental_evidence_cards(package);
     if supplemental.is_empty() {
@@ -16178,6 +15460,7 @@ fn supplemental_only_answer(question: &str, package: &EvidencePackage) -> String
     answer
 }
 
+#[cfg(test)]
 fn append_supplemental_evidence_section(
     mut answer: String,
     question: &str,
@@ -16199,6 +15482,7 @@ fn append_supplemental_evidence_section(
     answer
 }
 
+#[cfg(test)]
 fn preferred_evidence_answer(question: &str, package: &EvidencePackage) -> Option<String> {
     let preferred_types = preferred_answer_evidence_types(question).ok()?;
     if preferred_types.is_empty() {
@@ -16243,21 +15527,7 @@ fn preferred_evidence_answer(question: &str, package: &EvidencePackage) -> Optio
     Some(answer)
 }
 
-fn local_slot_count_answer(question: &str, package: &EvidencePackage) -> Option<String> {
-    let source_scope_policy = source_scope_policy_for_question(question);
-    if cards_include_later_forty(&package.cards) && !source_scope_policy.later_forty_allowed {
-        return None;
-    }
-    let active_basis =
-        active_count_basis_for_question(question, question_asks_for_count(question).ok()?)
-            .ok()
-            .flatten()?;
-    let slot_matches = evidence_slot_matches_for_cards(question, &package.cards)
-        .ok()
-        .filter(|matches| !matches.is_empty())?;
-    compose_slot_count_answer(package, &active_basis, &slot_matches)
-}
-
+#[cfg(test)]
 fn answer_display_cards<'a>(
     question: &str,
     cards: &'a [EvidenceCard],
@@ -16316,6 +15586,7 @@ fn answer_display_cards<'a>(
     display_cards
 }
 
+#[cfg(test)]
 fn answer_card_rank(question: &str, card: &EvidenceCard, focus_terms: &[String]) -> i64 {
     let mut score = 0;
     let normalized = normalize_text(&card.text);
@@ -16363,6 +15634,7 @@ fn matching_rule_term_count(text: &str, terms: &[String]) -> usize {
         .count()
 }
 
+#[cfg(test)]
 fn answer_evidence_excerpt(question: &str, card: &EvidenceCard) -> String {
     let focus_terms = upstream_evidence_focus_terms(question);
     let raw_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
@@ -16370,17 +15642,20 @@ fn answer_evidence_excerpt(question: &str, card: &EvidenceCard) -> String {
     trim_text(&cleaned, 180)
 }
 
+#[cfg(test)]
 fn evidence_card_presentable_in_answer(card: &EvidenceCard) -> bool {
     !evidence_text_is_broken_shell(&card.text) && !evidence_text_is_navigation_index(&card.text)
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct AnswerEvidenceSignature {
     namespace: String,
     compact_text: String,
     shingles: BTreeSet<String>,
 }
 
+#[cfg(test)]
 impl AnswerEvidenceSignature {
     fn from_card(card: &EvidenceCard) -> Self {
         let namespace = normalize_text(card.evidence_type.trim());
@@ -16394,6 +15669,7 @@ impl AnswerEvidenceSignature {
     }
 }
 
+#[cfg(test)]
 fn answer_evidence_duplicate(
     existing: &AnswerEvidenceSignature,
     candidate: &AnswerEvidenceSignature,
@@ -16430,6 +15706,7 @@ fn answer_evidence_duplicate(
     shared * 100 >= smaller_shingle_count * required_overlap_percent
 }
 
+#[cfg(test)]
 fn compact_evidence_text(text: &str) -> String {
     normalize_text(text)
         .chars()
@@ -16437,6 +15714,7 @@ fn compact_evidence_text(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn text_shingles(text: &str, width: usize) -> BTreeSet<String> {
     let chars = text.chars().collect::<Vec<_>>();
     if width == 0 || chars.len() < width {
@@ -16448,6 +15726,7 @@ fn text_shingles(text: &str, width: usize) -> BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn evidence_text_is_broken_shell(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -16463,6 +15742,7 @@ fn evidence_text_is_broken_shell(text: &str) -> bool {
     retrieval_rules::evidence_text_is_broken_shell(trimmed, substantive_count).unwrap_or(true)
 }
 
+#[cfg(test)]
 fn evidence_text_is_navigation_index(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -16478,6 +15758,7 @@ fn evidence_text_is_navigation_index(text: &str) -> bool {
             && chapter_title_count >= 6)
 }
 
+#[cfg(test)]
 fn text_punctuation(ch: char) -> bool {
     ch.is_ascii_punctuation()
         || matches!(
@@ -16510,6 +15791,7 @@ fn cards_include_later_forty(cards: &[EvidenceCard]) -> bool {
     cards.iter().any(evidence_card_is_later_forty)
 }
 
+#[cfg(test)]
 fn evidence_card_source_label(card: &EvidenceCard) -> String {
     if evidence_card_is_later_forty(card) && !text_mentions_later_forty_boundary(&card.source_title)
     {
@@ -16519,15 +15801,18 @@ fn evidence_card_source_label(card: &EvidenceCard) -> String {
     }
 }
 
+#[cfg(test)]
 fn evidence_card_layer_label(card: &EvidenceCard) -> String {
     retrieval_rules::source_layer_label(evidence_card_source_layer(card))
         .unwrap_or_else(|_| card.evidence_level.clone())
 }
 
+#[cfg(test)]
 fn quoted_excerpt(text: &str) -> String {
     format!("「{}」", sentence_without_terminal_punctuation(text))
 }
 
+#[cfg(test)]
 fn sentence_without_terminal_punctuation(text: &str) -> String {
     text.trim()
         .trim_end_matches(['。', '；', ';', '.', '！', '!', '？', '?'])
@@ -16565,18 +15850,21 @@ pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
     if package.review.status == "passed" {
         return draft;
     }
-    let parsed_question_frame = package
-        .question_frame
-        .as_ref()
-        .and_then(question_frame::parse_runtime_question_frame);
-    if let Some(answer) = relation_boundary_answer(parsed_question_frame.as_ref(), &package.cards) {
-        return answer;
+    evidence_based_draft_rejected_answer(package)
+}
+
+fn evidence_based_draft_unavailable_answer(package: &EvidencePackage) -> String {
+    if package.cards.is_empty() {
+        return "检索未返回可追溯证据，未形成基于证据的回答。".to_string();
     }
-    format!(
-        "这个问题目前缺少足够证据支持：{}\n\n{}",
-        package.review.issues.join("；"),
-        local_answer(&package.question, package)
-    )
+    "已取得检索证据，但没有生成可用的 evidence-based draft，未形成最终回答。".to_string()
+}
+
+fn evidence_based_draft_rejected_answer(package: &EvidencePackage) -> String {
+    if package.cards.is_empty() {
+        return evidence_based_draft_unavailable_answer(package);
+    }
+    "基于检索证据的 draft 未通过本地证据边界检查，未形成最终回答。".to_string()
 }
 
 struct RuntimeKnowledgePolicyIndex {
@@ -16876,15 +16164,6 @@ struct QueryExpansionEntry {
     terms: Vec<String>,
     #[serde(default)]
     exact_terms: Vec<String>,
-    #[serde(default)]
-    evidence_slots: Vec<QueryExpansionEvidenceSlot>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryExpansionEvidenceSlot {
-    id: String,
-    terms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -16989,21 +16268,6 @@ fn parse_query_expansion_catalog(source: &str) -> Result<QueryExpansionCatalog> 
                 ));
             }
         }
-        for slot in &entry.evidence_slots {
-            if slot.id.trim().is_empty() {
-                return Err(anyhow!(
-                    "query expansion entry {} has an evidence slot without id",
-                    entry.id
-                ));
-            }
-            if slot.terms.is_empty() || slot.terms.iter().all(|term| term.trim().is_empty()) {
-                return Err(anyhow!(
-                    "query expansion entry {} evidence slot {} must define non-empty terms",
-                    entry.id,
-                    slot.id
-                ));
-            }
-        }
     }
     Ok(catalog)
 }
@@ -17025,7 +16289,6 @@ pub(crate) fn query_expansion_search_terms(question: &str) -> Result<Vec<String>
     let normalized = normalize_query(question);
     let mut terms = Vec::new();
     apply_query_expansion_exact_terms(&catalog, question, &normalized, &mut terms);
-    apply_query_expansion_evidence_slot_terms(&catalog, question, &normalized, &mut terms);
     apply_query_expansion_terms(&catalog, question, &normalized, &mut terms);
     Ok(terms)
 }
@@ -17058,109 +16321,6 @@ fn apply_query_expansion_exact_terms(
             }
         }
     }
-}
-
-fn apply_query_expansion_evidence_slot_terms(
-    catalog: &QueryExpansionCatalog,
-    question: &str,
-    normalized: &str,
-    terms: &mut Vec<String>,
-) {
-    for entry in &catalog.entries {
-        if query_expansion_entry_matches(entry, question, normalized) {
-            for slot in &entry.evidence_slots {
-                for term in &slot.terms {
-                    push_term(terms, term);
-                }
-            }
-        }
-    }
-}
-
-fn matched_query_expansion_evidence_slots(
-    question: &str,
-    cards: &[EvidenceCard],
-) -> Result<BTreeSet<String>> {
-    let catalog = query_expansion_catalog()?;
-    let normalized = normalize_query(question);
-    let mut slots = BTreeSet::new();
-    for entry in &catalog.entries {
-        if !query_expansion_entry_matches(entry, question, &normalized) {
-            continue;
-        }
-        for slot in &entry.evidence_slots {
-            if slot.terms.iter().any(|term| {
-                cards
-                    .iter()
-                    .any(|card| evidence_text_contains_focus(&card.text, term))
-            }) {
-                slots.insert(slot.id.clone());
-            }
-        }
-    }
-    Ok(slots)
-}
-
-pub(crate) fn evidence_slot_matches_for_cards(
-    question: &str,
-    cards: &[EvidenceCard],
-) -> Result<Vec<EvidenceSlotMatch>> {
-    let mut matches = Vec::new();
-    for card in cards {
-        let slot_matches = matched_query_expansion_evidence_slot_matches_for_card(question, card)?;
-        for (slot_id, matched_terms) in slot_matches {
-            let rules = evidence_slot_rules_for_ids(std::slice::from_ref(&slot_id))?;
-            for rule in rules {
-                matches.push(EvidenceSlotMatch::from_rule(
-                    &card.evidence_id,
-                    &card.source_title,
-                    &source_layer_for_card(card),
-                    &card.text,
-                    matched_terms.clone(),
-                    rule,
-                ));
-            }
-        }
-    }
-    Ok(matches)
-}
-
-fn matched_query_expansion_evidence_slot_ids_for_card(
-    question: &str,
-    card: &EvidenceCard,
-) -> Result<Vec<String>> {
-    Ok(
-        matched_query_expansion_evidence_slot_matches_for_card(question, card)?
-            .into_iter()
-            .map(|(slot_id, _)| slot_id)
-            .collect(),
-    )
-}
-
-fn matched_query_expansion_evidence_slot_matches_for_card(
-    question: &str,
-    card: &EvidenceCard,
-) -> Result<Vec<(String, Vec<String>)>> {
-    let catalog = query_expansion_catalog()?;
-    let normalized = normalize_query(question);
-    let mut slots = Vec::new();
-    for entry in &catalog.entries {
-        if !query_expansion_entry_matches(entry, question, &normalized) {
-            continue;
-        }
-        for slot in &entry.evidence_slots {
-            let matched_terms = slot
-                .terms
-                .iter()
-                .filter(|term| evidence_text_contains_focus(&card.text, term))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !matched_terms.is_empty() && !slots.iter().any(|(slot_id, _)| slot_id == &slot.id) {
-                slots.push((slot.id.clone(), matched_terms));
-            }
-        }
-    }
-    Ok(slots)
 }
 
 fn query_expansion_entry_matches(

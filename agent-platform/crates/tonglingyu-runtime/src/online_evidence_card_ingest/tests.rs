@@ -115,32 +115,6 @@ fn attribute_age_request(conn: &Connection) -> OnlineEvidenceCardUpdateRequestRe
     .expect("attribute request created")
 }
 
-fn character_fate_request(conn: &Connection) -> OnlineEvidenceCardUpdateRequestRecord {
-    create_online_evidence_card_update_request(
-        conn,
-        OnlineEvidenceCardUpdateRequestInput {
-            trace_id: "trace-online-character-fate-test".to_string(),
-            session_id: Some("session-character-fate".to_string()),
-            resolved_question: "林黛玉结局如何".to_string(),
-            question_frame: Some(json!({
-                "intent": "character_fate_query",
-                "canonical_question": "林黛玉结局如何",
-                "subject": {"canonical": "林黛玉", "aliases": ["林黛玉", "黛玉", "林姑娘"]},
-                "predicate": null,
-                "object": null,
-                "required_evidence_types": ["base_text", "commentary"]
-            })),
-            coverage_gap_reason: "coverage_partial".to_string(),
-            source_scope_policy: json!({
-                "later_forty_allowed": false,
-                "allowed_source_layers": ["base_text_pre_80", "commentary", "version_note"]
-            }),
-            recall_advice_ref: None,
-        },
-    )
-    .expect("character fate request created")
-}
-
 fn job_for_request(
     conn: &Connection,
     request: &OnlineEvidenceCardUpdateRequestRecord,
@@ -590,45 +564,6 @@ fn stages_validates_and_promotes_supported_relation_card() {
     assert_eq!(
         manifests[0]["candidate_ids"],
         json!([staged.staged_card_id])
-    );
-}
-
-#[test]
-fn stages_character_fate_card_from_bound_slot_rule() {
-    let conn = test_conn();
-    let request = character_fate_request(&conn);
-    let frame = request
-        .question_frame
-        .as_ref()
-        .and_then(question_frame::parse_runtime_question_frame)
-        .expect("frame");
-    let candidate = stage_candidate_from_frame(
-        &request,
-        Some(&frame),
-        sample_card(
-            "block-fate",
-            "堪憐咏絮才。{{~~|【甲夾：此句林。】}}\n玉帶林中掛。",
-        ),
-        "source-hash-fate".to_string(),
-    )
-    .expect("stage candidate")
-    .expect("character fate candidate");
-
-    assert_eq!(
-        candidate.source_scope,
-        "question_frame_character_fate_scope"
-    );
-    assert_eq!(
-        candidate.slot_id,
-        "lin_daiyu_judgment_commentary_attribution"
-    );
-    assert_eq!(candidate.modality, "character_fate_commentary_attribution");
-    assert_eq!(candidate.evidence_strength, "interpretive");
-    assert!(
-        candidate
-            .matched_terms
-            .iter()
-            .any(|term| term == "此句林" || term == "玉帶林中掛")
     );
 }
 

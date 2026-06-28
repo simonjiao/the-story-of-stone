@@ -21,9 +21,6 @@ struct AnswerRuleCatalog {
     answer_requirements: AnswerRequirementRules,
     entity_intro: EntityIntroRules,
     chapter_location: ChapterLocationRules,
-    character_fate: CharacterFateRules,
-    evidence_query: EvidenceQueryRules,
-    slot_count: SlotCountRules,
     attribute_age: AttributeAgeRules,
     rationale_followup: RationaleFollowupRules,
 }
@@ -72,48 +69,6 @@ struct ChapterLocationRules {
     commentary_evidence_template: String,
     no_evidence_template: String,
     ambiguous_template: String,
-    rule: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CharacterFateRules {
-    default_scope_label: String,
-    later_forty_scope_label: String,
-    missing_evidence_template: String,
-    prophecy_opening_template: String,
-    limited_opening_template: String,
-    attribution_sentence: String,
-    default_scope_boundary: String,
-    later_forty_scope_boundary: String,
-    excluded_opening_cue_terms: Vec<String>,
-    generic_opening_cue_terms: Vec<String>,
-    rule: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvidenceQueryRules {
-    matched_intro_template: String,
-    no_requested_type_template: String,
-    evidence_item_template: String,
-    boundary_sentence: String,
-    rule: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SlotCountRules {
-    default_scope_label: String,
-    later_forty_scope_label: String,
-    empty_direct_template: String,
-    direct_count_template: String,
-    default_boundary_sentence: String,
-    later_forty_boundary_sentence: String,
-    direct_note_prefix: String,
-    related_template: String,
-    evidence_heading: String,
-    evidence_item_template: String,
     rule: String,
 }
 
@@ -174,42 +129,6 @@ pub(crate) struct ChapterLocationPolicy {
     pub(crate) no_evidence_template: String,
     pub(crate) ambiguous_template: String,
     pub(crate) rule: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CharacterFatePolicy {
-    pub(crate) default_scope_label: String,
-    pub(crate) later_forty_scope_label: String,
-    pub(crate) missing_evidence_template: String,
-    pub(crate) prophecy_opening_template: String,
-    pub(crate) limited_opening_template: String,
-    pub(crate) attribution_sentence: String,
-    pub(crate) default_scope_boundary: String,
-    pub(crate) later_forty_scope_boundary: String,
-    pub(crate) excluded_opening_cue_terms: Vec<String>,
-    pub(crate) generic_opening_cue_terms: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct EvidenceQueryPolicy {
-    pub(crate) matched_intro_template: String,
-    pub(crate) no_requested_type_template: String,
-    pub(crate) evidence_item_template: String,
-    pub(crate) boundary_sentence: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SlotCountPolicy {
-    pub(crate) default_scope_label: String,
-    pub(crate) later_forty_scope_label: String,
-    pub(crate) empty_direct_template: String,
-    pub(crate) direct_count_template: String,
-    pub(crate) default_boundary_sentence: String,
-    pub(crate) later_forty_boundary_sentence: String,
-    pub(crate) direct_note_prefix: String,
-    pub(crate) related_template: String,
-    pub(crate) evidence_heading: String,
-    pub(crate) evidence_item_template: String,
 }
 
 #[derive(Debug, Clone)]
@@ -280,51 +199,6 @@ pub(crate) fn chapter_location_policy() -> Result<ChapterLocationPolicy> {
         no_evidence_template: rules.no_evidence_template,
         ambiguous_template: rules.ambiguous_template,
         rule: rules.rule,
-    })
-}
-
-pub(crate) fn character_fate_policy() -> Result<CharacterFatePolicy> {
-    let catalog = answer_rule_catalog()?;
-    let rules = catalog.character_fate;
-    Ok(CharacterFatePolicy {
-        default_scope_label: rules.default_scope_label,
-        later_forty_scope_label: rules.later_forty_scope_label,
-        missing_evidence_template: rules.missing_evidence_template,
-        prophecy_opening_template: rules.prophecy_opening_template,
-        limited_opening_template: rules.limited_opening_template,
-        attribution_sentence: rules.attribution_sentence,
-        default_scope_boundary: rules.default_scope_boundary,
-        later_forty_scope_boundary: rules.later_forty_scope_boundary,
-        excluded_opening_cue_terms: rules.excluded_opening_cue_terms,
-        generic_opening_cue_terms: rules.generic_opening_cue_terms,
-    })
-}
-
-pub(crate) fn evidence_query_policy() -> Result<EvidenceQueryPolicy> {
-    let catalog = answer_rule_catalog()?;
-    let rules = catalog.evidence_query;
-    Ok(EvidenceQueryPolicy {
-        matched_intro_template: rules.matched_intro_template,
-        no_requested_type_template: rules.no_requested_type_template,
-        evidence_item_template: rules.evidence_item_template,
-        boundary_sentence: rules.boundary_sentence,
-    })
-}
-
-pub(crate) fn slot_count_policy() -> Result<SlotCountPolicy> {
-    let catalog = answer_rule_catalog()?;
-    let rules = catalog.slot_count;
-    Ok(SlotCountPolicy {
-        default_scope_label: rules.default_scope_label,
-        later_forty_scope_label: rules.later_forty_scope_label,
-        empty_direct_template: rules.empty_direct_template,
-        direct_count_template: rules.direct_count_template,
-        default_boundary_sentence: rules.default_boundary_sentence,
-        later_forty_boundary_sentence: rules.later_forty_boundary_sentence,
-        direct_note_prefix: rules.direct_note_prefix,
-        related_template: rules.related_template,
-        evidence_heading: rules.evidence_heading,
-        evidence_item_template: rules.evidence_item_template,
     })
 }
 
@@ -622,205 +496,6 @@ fn parse_answer_rule_catalog(source: &str) -> Result<AnswerRuleCatalog> {
             ));
         }
     }
-    let character_fate = &catalog.character_fate;
-    for (name, value) in [
-        (
-            "character_fate.default_scope_label",
-            &character_fate.default_scope_label,
-        ),
-        (
-            "character_fate.later_forty_scope_label",
-            &character_fate.later_forty_scope_label,
-        ),
-        (
-            "character_fate.missing_evidence_template",
-            &character_fate.missing_evidence_template,
-        ),
-        (
-            "character_fate.prophecy_opening_template",
-            &character_fate.prophecy_opening_template,
-        ),
-        (
-            "character_fate.limited_opening_template",
-            &character_fate.limited_opening_template,
-        ),
-        (
-            "character_fate.attribution_sentence",
-            &character_fate.attribution_sentence,
-        ),
-        (
-            "character_fate.default_scope_boundary",
-            &character_fate.default_scope_boundary,
-        ),
-        (
-            "character_fate.later_forty_scope_boundary",
-            &character_fate.later_forty_scope_boundary,
-        ),
-    ] {
-        if value.trim().is_empty() {
-            return Err(anyhow!("answer rule catalog {name} is required"));
-        }
-    }
-    if character_fate
-        .excluded_opening_cue_terms
-        .iter()
-        .any(|term| term.trim().is_empty())
-    {
-        return Err(anyhow!(
-            "answer rule catalog character_fate.excluded_opening_cue_terms must not contain empty terms"
-        ));
-    }
-    if character_fate
-        .generic_opening_cue_terms
-        .iter()
-        .any(|term| term.trim().is_empty())
-    {
-        return Err(anyhow!(
-            "answer rule catalog character_fate.generic_opening_cue_terms must not contain empty terms"
-        ));
-    }
-    if character_fate.rule.trim().is_empty() {
-        return Err(anyhow!(
-            "answer rule catalog character_fate.rule is required"
-        ));
-    }
-    let evidence_query = &catalog.evidence_query;
-    for (name, value) in [
-        (
-            "evidence_query.matched_intro_template",
-            &evidence_query.matched_intro_template,
-        ),
-        (
-            "evidence_query.no_requested_type_template",
-            &evidence_query.no_requested_type_template,
-        ),
-        (
-            "evidence_query.evidence_item_template",
-            &evidence_query.evidence_item_template,
-        ),
-        (
-            "evidence_query.boundary_sentence",
-            &evidence_query.boundary_sentence,
-        ),
-        ("evidence_query.rule", &evidence_query.rule),
-    ] {
-        if value.trim().is_empty() {
-            return Err(anyhow!("answer rule catalog {name} is required"));
-        }
-    }
-    for (name, value, placeholders) in [
-        (
-            "evidence_query.matched_intro_template",
-            &evidence_query.matched_intro_template,
-            &["{evidence_label}", "{subject}"][..],
-        ),
-        (
-            "evidence_query.no_requested_type_template",
-            &evidence_query.no_requested_type_template,
-            &["{evidence_label}", "{subject}"][..],
-        ),
-        (
-            "evidence_query.evidence_item_template",
-            &evidence_query.evidence_item_template,
-            &[
-                "{index}",
-                "{label}",
-                "{source_layer}",
-                "{source_title}",
-                "{quote}",
-            ][..],
-        ),
-    ] {
-        if placeholders
-            .iter()
-            .any(|placeholder| !value.contains(placeholder))
-        {
-            return Err(anyhow!(
-                "answer rule catalog {name} is missing required placeholders"
-            ));
-        }
-    }
-    let slot_count = &catalog.slot_count;
-    for (name, value) in [
-        (
-            "slot_count.default_scope_label",
-            &slot_count.default_scope_label,
-        ),
-        (
-            "slot_count.later_forty_scope_label",
-            &slot_count.later_forty_scope_label,
-        ),
-        (
-            "slot_count.empty_direct_template",
-            &slot_count.empty_direct_template,
-        ),
-        (
-            "slot_count.direct_count_template",
-            &slot_count.direct_count_template,
-        ),
-        (
-            "slot_count.default_boundary_sentence",
-            &slot_count.default_boundary_sentence,
-        ),
-        (
-            "slot_count.later_forty_boundary_sentence",
-            &slot_count.later_forty_boundary_sentence,
-        ),
-        (
-            "slot_count.direct_note_prefix",
-            &slot_count.direct_note_prefix,
-        ),
-        ("slot_count.related_template", &slot_count.related_template),
-        ("slot_count.evidence_heading", &slot_count.evidence_heading),
-        (
-            "slot_count.evidence_item_template",
-            &slot_count.evidence_item_template,
-        ),
-        ("slot_count.rule", &slot_count.rule),
-    ] {
-        if value.trim().is_empty() {
-            return Err(anyhow!("answer rule catalog {name} is required"));
-        }
-    }
-    if !slot_count.empty_direct_template.contains("{scope}")
-        || !slot_count.empty_direct_template.contains("{basis_label}")
-    {
-        return Err(anyhow!(
-            "answer rule catalog slot_count.empty_direct_template must contain scope and basis_label placeholders"
-        ));
-    }
-    for (name, value, placeholders) in [
-        (
-            "slot_count.direct_count_template",
-            &slot_count.direct_count_template,
-            &["{scope}", "{basis_label}", "{count}", "{unit}", "{labels}"][..],
-        ),
-        (
-            "slot_count.related_template",
-            &slot_count.related_template,
-            &["{count}", "{labels}"][..],
-        ),
-        (
-            "slot_count.evidence_item_template",
-            &slot_count.evidence_item_template,
-            &[
-                "{index}",
-                "{label}",
-                "{source_layer}",
-                "{source_title}",
-                "{quote}",
-            ][..],
-        ),
-    ] {
-        if placeholders
-            .iter()
-            .any(|placeholder| !value.contains(placeholder))
-        {
-            return Err(anyhow!(
-                "answer rule catalog {name} is missing required placeholders"
-            ));
-        }
-    }
     let attribute_age = &catalog.attribute_age;
     if attribute_age.max_entity_age_distance == 0 {
         return Err(anyhow!(
@@ -918,46 +593,11 @@ mod tests {
     }
 
     #[test]
-    fn default_catalog_exposes_slot_count_policy() {
-        let policy = slot_count_policy().expect("slot count policy");
-
-        assert!(policy.default_scope_label.contains("前八十回"));
-        assert!(policy.direct_count_template.contains("{count}"));
-        assert!(policy.evidence_item_template.contains("{quote}"));
-    }
-
-    #[test]
-    fn default_catalog_exposes_evidence_query_policy() {
-        let policy = evidence_query_policy().expect("evidence query policy");
-
-        assert!(policy.matched_intro_template.contains("{subject}"));
-        assert!(policy.evidence_item_template.contains("{quote}"));
-        assert!(policy.boundary_sentence.contains("语义槽位"));
-    }
-
-    #[test]
     fn default_catalog_exposes_attribute_age_policy() {
         let policy = attribute_age_policy().expect("attribute age policy");
 
         assert!(policy.max_entity_age_distance > 0);
         assert!(policy.cue_prefix_terms.iter().any(|term| term == "年方"));
-    }
-
-    #[test]
-    fn default_catalog_exposes_character_fate_policy() {
-        let policy = character_fate_policy().expect("character fate policy");
-
-        assert!(policy.prophecy_opening_template.contains("{entity}"));
-        assert!(policy.prophecy_opening_template.contains("{cues}"));
-        assert!(!policy.excluded_opening_cue_terms.is_empty());
-        assert!(!policy.generic_opening_cue_terms.is_empty());
-        assert!(
-            answer_rule_catalog()
-                .unwrap()
-                .character_fate
-                .rule
-                .contains("opening")
-        );
     }
 
     #[test]
@@ -1016,39 +656,6 @@ mod tests {
                 "ambiguous_template": "initial ambiguous {event} {locations}",
                 "rule": "initial chapter location rule"
             },
-            "character_fate": {
-                "default_scope_label": "initial default scope",
-                "later_forty_scope_label": "initial later scope",
-                "missing_evidence_template": "initial missing {entity}",
-                "prophecy_opening_template": "initial prophecy {scope} {entity} {cues}",
-                "limited_opening_template": "initial limited {scope} {entity} {cues}",
-                "attribution_sentence": "initial attribution",
-                "default_scope_boundary": "initial default boundary",
-                "later_forty_scope_boundary": "initial later boundary",
-                "excluded_opening_cue_terms": ["initial fate excluded"],
-                "generic_opening_cue_terms": ["initial fate generic"],
-                "rule": "initial fate rule"
-            },
-            "evidence_query": {
-                "matched_intro_template": "initial evidence query {evidence_label} {subject}",
-                "no_requested_type_template": "initial no evidence query {evidence_label} {subject}",
-                "evidence_item_template": "{index} {label} {source_layer} {source_title} {quote}",
-                "boundary_sentence": "initial evidence query boundary",
-                "rule": "initial evidence query rule"
-            },
-            "slot_count": {
-                "default_scope_label": "initial slot default scope",
-                "later_forty_scope_label": "initial slot later scope",
-                "empty_direct_template": "initial empty {scope} {basis_label}",
-                "direct_count_template": "initial direct {scope} {basis_label} {count} {unit} {labels}",
-                "default_boundary_sentence": "initial default boundary",
-                "later_forty_boundary_sentence": "initial later boundary",
-                "direct_note_prefix": "initial note",
-                "related_template": "initial related {count} {labels}",
-                "evidence_heading": "initial evidence",
-                "evidence_item_template": "{index} {label} {source_layer} {source_title} {quote}",
-                "rule": "initial slot count rule"
-            },
             "attribute_age": {
                 "max_entity_age_distance": 80,
                 "cue_prefix_terms": ["initial age prefix"],
@@ -1100,39 +707,6 @@ mod tests {
                 "ambiguous_template": "updated ambiguous {event} {locations}",
                 "rule": "updated chapter location rule"
             },
-            "character_fate": {
-                "default_scope_label": "updated default scope",
-                "later_forty_scope_label": "updated later scope",
-                "missing_evidence_template": "updated missing {entity}",
-                "prophecy_opening_template": "updated prophecy {scope} {entity} {cues}",
-                "limited_opening_template": "updated limited {scope} {entity} {cues}",
-                "attribution_sentence": "updated attribution",
-                "default_scope_boundary": "updated default boundary",
-                "later_forty_scope_boundary": "updated later boundary",
-                "excluded_opening_cue_terms": ["updated fate excluded"],
-                "generic_opening_cue_terms": ["updated fate generic"],
-                "rule": "updated fate rule"
-            },
-            "evidence_query": {
-                "matched_intro_template": "updated evidence query {evidence_label} {subject}",
-                "no_requested_type_template": "updated no evidence query {evidence_label} {subject}",
-                "evidence_item_template": "{index} {label} {source_layer} {source_title} {quote}",
-                "boundary_sentence": "updated evidence query boundary",
-                "rule": "updated evidence query rule"
-            },
-            "slot_count": {
-                "default_scope_label": "updated slot default scope",
-                "later_forty_scope_label": "updated slot later scope",
-                "empty_direct_template": "updated empty {scope} {basis_label}",
-                "direct_count_template": "updated direct {scope} {basis_label} {count} {unit} {labels}",
-                "default_boundary_sentence": "updated default boundary",
-                "later_forty_boundary_sentence": "updated later boundary",
-                "direct_note_prefix": "updated note",
-                "related_template": "updated related {count} {labels}",
-                "evidence_heading": "updated evidence",
-                "evidence_item_template": "{index} {label} {source_layer} {source_title} {quote}",
-                "rule": "updated slot count rule"
-            },
             "attribute_age": {
                 "max_entity_age_distance": 120,
                 "cue_prefix_terms": ["updated age prefix"],
@@ -1160,9 +734,6 @@ mod tests {
             catalog.chapter_location.rule,
             "initial chapter location rule"
         );
-        assert_eq!(catalog.character_fate.rule, "initial fate rule");
-        assert_eq!(catalog.evidence_query.rule, "initial evidence query rule");
-        assert_eq!(catalog.slot_count.rule, "initial slot count rule");
         assert_eq!(catalog.attribute_age.rule, "initial age rule");
         assert_eq!(catalog.rationale_followup.rule, "initial rationale rule");
 
@@ -1183,31 +754,12 @@ mod tests {
             "updated chapter location rule"
         );
         assert_eq!(catalog.chapter_location.max_quote_chars, 64);
-        assert_eq!(catalog.character_fate.rule, "updated fate rule");
-        assert_eq!(
-            catalog.character_fate.default_scope_boundary,
-            "updated default boundary"
-        );
-        assert_eq!(catalog.evidence_query.rule, "updated evidence query rule");
-        assert_eq!(
-            catalog.evidence_query.boundary_sentence,
-            "updated evidence query boundary"
-        );
-        assert_eq!(catalog.slot_count.rule, "updated slot count rule");
-        assert_eq!(
-            catalog.slot_count.default_scope_label,
-            "updated slot default scope"
-        );
         assert_eq!(catalog.attribute_age.rule, "updated age rule");
         assert_eq!(catalog.rationale_followup.rule, "updated rationale rule");
         assert_eq!(catalog.attribute_age.max_entity_age_distance, 120);
         assert_eq!(
             catalog.entity_intro.excluded_public_quote_terms,
             vec!["updated excluded".to_string()]
-        );
-        assert_eq!(
-            catalog.character_fate.excluded_opening_cue_terms,
-            vec!["updated fate excluded".to_string()]
         );
         assert_eq!(
             catalog.attribute_age.cue_prefix_terms,

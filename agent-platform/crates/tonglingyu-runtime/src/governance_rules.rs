@@ -47,8 +47,6 @@ struct SourceScopeGovernanceRules {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClaimGovernanceRules {
     pub empty_evidence: String,
-    pub slot_count_rule: String,
-    pub inactive_count_basis: String,
     pub later_forty_boundary: String,
     pub commentary_scope: String,
     pub base_text_scope: String,
@@ -190,11 +188,6 @@ fn parse_governance_rule_catalog(source: &str) -> Result<GovernanceRuleCatalog> 
     )?;
     for (name, value) in [
         ("claims.empty_evidence", &catalog.claims.empty_evidence),
-        ("claims.slot_count_rule", &catalog.claims.slot_count_rule),
-        (
-            "claims.inactive_count_basis",
-            &catalog.claims.inactive_count_basis,
-        ),
         (
             "claims.later_forty_boundary",
             &catalog.claims.later_forty_boundary,

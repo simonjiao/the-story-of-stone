@@ -28,11 +28,8 @@ pub(crate) const RULE_CANDIDATE_TYPES: &[&str] = &[
     "clarification_pattern",
     "query_expansion_term",
     "query_expansion_exact_term",
-    "query_expansion_evidence_slot_term",
     "answer_evidence_request_term",
     "runtime_person_alias",
-    "evidence_count_basis_question_term",
-    "evidence_count_basis_count_term",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

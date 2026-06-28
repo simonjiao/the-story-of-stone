@@ -40,30 +40,6 @@ fn card_with_source_text(source_title: &str, text: &str) -> EvidenceCard {
     }
 }
 
-fn character_fate_frame() -> RuntimeQuestionFrame {
-    serde_json::from_value(json!({
-        "intent": "character_fate_query",
-        "canonical_question": "林黛玉结局如何",
-        "subject": {"canonical": "林黛玉", "aliases": ["林黛玉", "黛玉", "林姑娘"]},
-        "predicate": null,
-        "object": null,
-        "required_evidence_types": ["base_text", "commentary"]
-    }))
-    .expect("character fate frame")
-}
-
-fn xiangyun_fate_evidence_followup_frame() -> RuntimeQuestionFrame {
-    serde_json::from_value(json!({
-        "intent": "evidence_query",
-        "canonical_question": "关于史湘云的结局，脂批中的证据呢？",
-        "subject": {"canonical": "史湘云", "aliases": ["史湘云", "史湘雲", "湘云", "湘雲"]},
-        "predicate": null,
-        "object": null,
-        "required_evidence_types": ["base_text", "commentary"]
-    }))
-    .expect("evidence followup frame")
-}
-
 #[test]
 fn relation_search_query_binds_subject_predicate_and_object_terms() {
     let frame = relation_frame();
@@ -553,95 +529,6 @@ fn entity_intro_answer_uses_focused_evidence_card() {
     assert!(answer.contains("紫鹃"));
     assert!(answer.contains("紅樓夢/第003回"));
     assert!(answer.contains("鸚哥"));
-}
-
-#[test]
-fn character_fate_answer_uses_bound_slot_evidence() {
-    let frame = character_fate_frame();
-    let cards = vec![EvidenceCard {
-        evidence_id: "ev-fate-1".to_string(),
-        evidence_type: "commentary".to_string(),
-        source_id: "shitouji-wikisource-zhiyanzhai".to_string(),
-        source_title: "脂硯齋重評石頭記/第五回".to_string(),
-        source_url: String::new(),
-        revision_id: None,
-        block_id: "block-fate-1".to_string(),
-        text: "可嘆停機德，{{~~|【甲夾：此句薛。】}}\n堪憐咏絮才。{{~~|【甲夾：此句林。】}}\n玉帶林中掛，\n金簪雪裡埋。".to_string(),
-        support_scope: String::new(),
-        unsupported_scope: String::new(),
-        evidence_level: String::new(),
-        confidence: String::new(),
-        verification_status: String::new(),
-    }];
-
-    let answer = question_frame_answer(Some(&frame), &cards).expect("character fate answer");
-
-    assert!(answer.contains("林黛玉的结局不能直接写成完整情节结局"));
-    assert!(answer.contains("相关材料把其命运写成带有"));
-    assert!(answer.contains("林黛玉判词脂批归属"));
-    assert!(answer.contains("此句林"));
-    assert!(answer.contains("玉帶林中掛"));
-    assert!(!answer.contains("带有此句林"));
-    assert!(!answer.contains("当前可绑定的证据线索"));
-    assert!(!answer.contains("人物介绍"));
-    assert!(character_fate_review_issues(Some(&frame), &cards).is_empty());
-}
-
-#[test]
-fn character_fate_answer_rejects_ordinary_mentions_as_fate_evidence() {
-    let frame = character_fate_frame();
-    let cards = vec![card_with_source_text(
-        "紅樓夢/第三回",
-        "林黛玉自在榮府，一來賈母萬般憐愛，寢食起居，一如寶玉。",
-    )];
-
-    let answer = question_frame_answer(Some(&frame), &cards).expect("character fate boundary");
-
-    assert!(answer.contains("还没有命中"));
-    assert!(answer.contains("不能只凭普通人物提及"));
-    assert_eq!(
-        character_fate_review_issues(Some(&frame), &cards),
-        vec!["character_fate_evidence_missing"]
-    );
-}
-
-#[test]
-fn evidence_query_answer_binds_requested_commentary_to_resolved_fate_subject() {
-    let frame = xiangyun_fate_evidence_followup_frame();
-    let mut xiangyun_commentary = card_with_source_text(
-        "脂硯齋重評石頭記/第五回",
-        "<center><poem>富貴又何為？襁褓之間父母違；展眼弔斜暉，湘江水逝楚雲飛。</poem></center>",
-    );
-    xiangyun_commentary.evidence_id = "ev-xiangyun-commentary".to_string();
-    xiangyun_commentary.evidence_type = "commentary".to_string();
-    xiangyun_commentary.source_id = "shitouji-wikisource-zhiyanzhai".to_string();
-
-    let mut wrong_commentary = card_with_source_text(
-        "脂硯齋重評石頭記/第五回",
-        "<center>第三支，枉凝眉：</center> 一個是閬苑仙葩，一個是美玉無瑕。一個是水中月，一個是鏡中花。",
-    );
-    wrong_commentary.evidence_id = "ev-wrong-commentary".to_string();
-    wrong_commentary.evidence_type = "commentary".to_string();
-    wrong_commentary.source_id = "shitouji-wikisource-zhiyanzhai".to_string();
-
-    let mut base_song = card_with_source_text(
-        "紅樓夢（程甲本）/五",
-        "（樂中悲）襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。",
-    );
-    base_song.evidence_id = "ev-base-song".to_string();
-
-    let answer = question_frame_answer(
-        Some(&frame),
-        &[wrong_commentary, base_song, xiangyun_commentary],
-    )
-    .expect("slot-bound evidence query answer");
-
-    assert!(answer.starts_with("有。脂批中与史湘云这一问题绑定的证据主要是"));
-    assert!(answer.contains("史湘云判词"));
-    assert!(answer.contains("湘江水逝楚雲飛"));
-    assert!(!answer.contains("枉凝眉"));
-    assert!(!answer.contains("閬苑仙葩"));
-    assert!(!answer.contains("樂中悲"));
 }
 
 #[test]

@@ -153,12 +153,11 @@ current_question > current_window > conversation_state_summary > session_journal
 新的 `subject ontology` 解决“用户在说谁/什么”。它服务 resolver、normalizer 和
 conversation state，不直接决定证据成立。
 
-它不同于 query expansion、evidence slot、source scope、answer/review rules：
+它不同于 query expansion、source scope、answer/review rules：
 
 ```text
 subject ontology: 用户说的是谁/什么，有哪些别名，能否作为 referent candidate
 query expansion: 用哪些词把材料找出来
-evidence slot rules: 材料支持什么语义
 answer/review rules: 答案怎么说，什么不能说
 ```
 
@@ -505,7 +504,7 @@ digest schema、coverage 状态、validator 拒绝条件和超时处理。
 3. 在 trace/audit 中记录命中 rule id；
 4. 不包含答案 oracle；
 5. 不替代 evidence package 或 reviewer；
-6. 与 query expansion、evidence slot rules 分离管理。
+6. 与 query expansion、answer/review rules 分离管理。
 
 ## Validator 规则
 
@@ -570,7 +569,7 @@ own projection. They should not receive full session history, raw journal, memor
 | `tonglingyu-conversation-state-writer` | bounded `current_window` 或 accepted `current_window_digest`、已验收的 `resolved_question`、上一轮 public answer 摘要 | raw provider output、未验收 normalizer draft、rejected digest | state summary、active entities、open questions |
 | `honglou-text` | 已验收 `resolved_question`、source scope、检索参数 | raw `current_window`、journal、memory、composer draft | text evidence candidates |
 | `honglou-commentary` | 已验收 `resolved_question`、source scope、检索参数 | raw `current_window`、journal、memory、composer draft | commentary evidence candidates |
-| evidence package builder | evidence candidates、source scope、slot rules、必要的 `query_context_terms` | raw `current_window`、raw upstream draft | `package_v2` |
+| evidence package builder | evidence candidates、source scope、必要的 `query_context_terms` | raw `current_window`、raw upstream draft | `package_v2` |
 | answer composer | `resolved_question`、`package_v2`、compact current-window intent summary、conversation state | raw `current_window`、raw journal、memory 原文 | user-facing answer or clarification |
 | reviewer | `resolved_question`、answer、`package_v2`、compact intent summary、answer boundary | raw `current_window`、raw provider output、未命中证据 | accept/reject/revise reason |
 

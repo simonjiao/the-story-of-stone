@@ -61,39 +61,6 @@
     "ambiguous_template": "当前证据包把“{event}”相关线索命中到多个回目：{locations}。请明确你要问的是正面情节发生回目，还是文本中出现/追提该线索的回目。",
     "rule": "For chapter-location questions, answer the chapter number first. Prefer chapter heading/title and direct base-text evidence. Commentary may be visible only when the quote itself explains the location or title relation; do not cite isolated local comments that do not explain what they support."
   },
-  "character_fate": {
-    "default_scope_label": "默认范围（前八十回正文 + 脂批）",
-    "later_forty_scope_label": "本次明确纳入后四十回范围",
-    "missing_evidence_template": "就当前证据包看，还没有命中能绑定{entity}结局或命运的判词、曲文、脂批归属证据；不能只凭普通人物提及来概括结局。",
-    "prophecy_opening_template": "按{scope}看，{entity}的结局不能直接写成完整情节结局；较稳妥的回答是：相关材料把其命运写成带有{cues}等预示性线索。",
-    "limited_opening_template": "按{scope}看，{entity}的结局还缺少可直接概括的情节证据；当前只能说明命运相关材料中出现了{cues}等线索。",
-    "attribution_sentence": "脂批可以用于确认相关句子与人物的对应关系。",
-    "default_scope_boundary": "这些材料属于前八十回正文或脂批范围；没有后续叙事证据时，回答应保持为命运预示或可据此推断，不能说成正文已经发生的完整结局。",
-    "later_forty_scope_boundary": "这些材料属于用户已放开的后四十回范围；不能回推为默认前八十回正文加脂批范围内的确定结论。",
-    "excluded_opening_cue_terms": ["此句"],
-    "generic_opening_cue_terms": ["判词", "判詞", "曲文"],
-    "rule": "For character fate answers, the opening should summarize substantive prophecy cues from bound fate slots, not attribution-only commentary fragments or generic labels; excluded_opening_cue_terms are filtered from the public opening while still allowed in evidence quotes."
-  },
-  "evidence_query": {
-    "matched_intro_template": "有。{evidence_label}中与{subject}这一问题绑定的证据主要是：\n",
-    "no_requested_type_template": "当前证据包没有命中与{subject}这一问题绑定的{evidence_label}证据；不能用未绑定材料替代。",
-    "evidence_item_template": "{index}. {label}（{source_layer}，{source_title}）：{quote}\n",
-    "boundary_sentence": "用法上，这些材料只能说明与当前问题绑定的证据线索；未绑定到该主体或该语义槽位的材料不能作为本次回答依据。",
-    "rule": "For evidence follow-up answers, bind evidence to the resolved subject and semantic slot before applying requested source-layer preference; do not answer a commentary request with unrelated commentary just because it ranks high globally."
-  },
-  "slot_count": {
-    "default_scope_label": "默认范围（前八十回正文 + 脂批）",
-    "later_forty_scope_label": "本次明确纳入后四十回范围",
-    "empty_direct_template": "按{scope}看，严格按“{basis_label}”口径，当前证据不能直接支持具体次数。",
-    "direct_count_template": "按{scope}看，严格按“{basis_label}”口径，当前证据能直接支持{count}{unit}：{labels}。",
-    "default_boundary_sentence": "后四十回未纳入，除非用户明确要求。",
-    "later_forty_boundary_sentence": "回答仍按证据来源层标注。",
-    "direct_note_prefix": "\n\n计数说明：",
-    "related_template": "\n\n另有{count}条流转/疑似线索，不能直接计入次数：{labels}。",
-    "evidence_heading": "\n\n依据：",
-    "evidence_item_template": "\n{index}. {label}（{source_layer}，{source_title}）：{quote}",
-    "rule": "For count-style answers, compose public wording from slot semantics and source-scope policy; direct slots may be counted, related or suspicious slots remain visible but are not counted as direct events."
-  },
   "attribute_age": {
     "max_entity_age_distance": 260,
     "cue_prefix_terms": ["年方", "今年纔", "今年才", "如今長了", "如今长了", "長了", "长了"],

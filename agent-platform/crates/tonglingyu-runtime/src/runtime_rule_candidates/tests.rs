@@ -83,48 +83,6 @@ fn promotes_query_expansion_term_and_rejects_duplicate_without_rewriting() {
 }
 
 #[test]
-fn promotes_query_expansion_evidence_slot_term() {
-    let path = write_temp_catalog("query-slot", DEFAULT_QUERY_EXPANSIONS_JSON);
-    let paths = RuntimeRuleCandidatePromotionPaths {
-        query_expansions_path: Some(path.clone()),
-        ..RuntimeRuleCandidatePromotionPaths::default()
-    };
-
-    let patch = promote_runtime_rule_candidate_to_catalog(RuntimeRuleCandidatePromotionInput {
-        candidate_type: QUERY_EXPANSION_EVIDENCE_SLOT_TERM,
-        primary_term: "新证据槽词",
-        target_ref: Some("query_expansion:core:tonglingyu:evidence_slot:test_slot"),
-        catalog_version: "test.runtime.slot",
-        paths: &paths,
-    })
-    .expect("promote query evidence slot term");
-    assert!(patch.changed);
-
-    let catalog = read_json(&path);
-    let entry = catalog["entries"]
-        .as_array()
-        .expect("entries")
-        .iter()
-        .find(|entry| entry["id"] == "core:tonglingyu")
-        .expect("target entry");
-    let slot = entry["evidence_slots"]
-        .as_array()
-        .expect("evidence slots")
-        .iter()
-        .find(|slot| slot["id"] == "test_slot")
-        .expect("created slot");
-    assert!(
-        slot["terms"]
-            .as_array()
-            .expect("slot terms")
-            .iter()
-            .any(|term| term.as_str() == Some("新证据槽词"))
-    );
-
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
 fn promotes_answer_rule_evidence_request_term() {
     let path = write_temp_catalog("answer", DEFAULT_ANSWER_RULES_JSON);
     let paths = RuntimeRuleCandidatePromotionPaths {
@@ -185,56 +143,6 @@ fn promotes_runtime_person_alias() {
             .expect("aliases")
             .iter()
             .any(|alias| alias.as_str() == Some("枕霞旧友"))
-    );
-
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn promotes_evidence_count_basis_terms() {
-    let path = write_temp_catalog("evidence-slot", DEFAULT_EVIDENCE_SLOT_RULES_JSON);
-    let paths = RuntimeRuleCandidatePromotionPaths {
-        evidence_slot_rules_path: Some(path.clone()),
-        ..RuntimeRuleCandidatePromotionPaths::default()
-    };
-
-    promote_runtime_rule_candidate_to_catalog(RuntimeRuleCandidatePromotionInput {
-        candidate_type: EVIDENCE_COUNT_BASIS_QUESTION_TERM,
-        primary_term: "遗落",
-        target_ref: Some("evidence_count_basis:direct_loss:question_terms"),
-        catalog_version: "test.runtime.evidence.1",
-        paths: &paths,
-    })
-    .expect("promote question term");
-    promote_runtime_rule_candidate_to_catalog(RuntimeRuleCandidatePromotionInput {
-        candidate_type: EVIDENCE_COUNT_BASIS_COUNT_TERM,
-        primary_term: "几桩",
-        target_ref: Some("evidence_count_basis:direct_loss:count_question_terms"),
-        catalog_version: "test.runtime.evidence.2",
-        paths: &paths,
-    })
-    .expect("promote count term");
-
-    let catalog = read_json(&path);
-    let basis = catalog["count_bases"]
-        .as_array()
-        .expect("count bases")
-        .iter()
-        .find(|basis| basis["id"] == "direct_loss")
-        .expect("direct loss basis");
-    assert!(
-        basis["question_terms"]
-            .as_array()
-            .expect("question terms")
-            .iter()
-            .any(|term| term.as_str() == Some("遗落"))
-    );
-    assert!(
-        basis["count_question_terms"]
-            .as_array()
-            .expect("count terms")
-            .iter()
-            .any(|term| term.as_str() == Some("几桩"))
     );
 
     std::fs::remove_file(path).ok();

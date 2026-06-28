@@ -1628,7 +1628,8 @@ fn stage_candidate_from_frame(
     {
         return Ok(Some(candidate));
     }
-    stage_character_fate_candidate_from_frame(request, frame, card, source_hash)
+    let _ = (request, frame, card, source_hash);
+    Ok(None)
 }
 
 fn stage_relation_candidate_from_frame(
@@ -1724,50 +1725,6 @@ fn stage_attribute_candidate_from_frame(
         polarity: "supports".to_string(),
         modality: support.modality,
         evidence_strength: support.evidence_strength,
-        rules_version: ONLINE_INGEST_SCHEMA_VERSION.to_string(),
-        card,
-        matched_terms: support.matched_terms,
-    }))
-}
-
-fn stage_character_fate_candidate_from_frame(
-    request: &OnlineEvidenceCardUpdateRequestRecord,
-    frame: &question_frame::RuntimeQuestionFrame,
-    card: EvidenceCard,
-    source_hash: String,
-) -> Result<Option<StageCandidateInput>> {
-    if !frame.is_character_fate() {
-        return Ok(None);
-    }
-    let Some(subject) = frame.character_fate_entity() else {
-        return Ok(None);
-    };
-    let Some(support) =
-        question_frame::character_fate_slot_matches(Some(frame), std::slice::from_ref(&card))
-            .into_iter()
-            .next()
-    else {
-        return Ok(None);
-    };
-    let entities = canonical_json_value(&json!([
-        {"role": "subject", "canonical": subject.canonical, "aliases": subject.aliases}
-    ]));
-    let entities_key = stable_hash(&entities)?;
-    Ok(Some(StageCandidateInput {
-        update_request_id: request.update_request_id.clone(),
-        trace_id: request.trace_id.clone(),
-        source_hash,
-        source_scope: "question_frame_character_fate_scope".to_string(),
-        slot_id: support.slot_id,
-        entities,
-        entities_key,
-        polarity: "supports".to_string(),
-        modality: support
-            .support_modality
-            .unwrap_or_else(|| "character_fate_evidence".to_string()),
-        evidence_strength: support
-            .evidence_strength
-            .unwrap_or_else(|| "interpretive".to_string()),
         rules_version: ONLINE_INGEST_SCHEMA_VERSION.to_string(),
         card,
         matched_terms: support.matched_terms,

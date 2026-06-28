@@ -54,9 +54,6 @@ struct FlakyProfileRuntimeClient {
 }
 
 #[derive(Debug, Default)]
-struct DraftRepairRuntimeClient;
-
-#[derive(Debug, Default)]
 struct OpenObjectDraftRepairRuntimeClient;
 
 #[derive(Debug, Default)]
@@ -1564,72 +1561,6 @@ impl RuntimeClient for FlakyProfileRuntimeClient {
             ));
         }
         DraftRuntimeClient.execute_profile_step(input).await
-    }
-}
-
-#[async_trait]
-impl RuntimeClient for DraftRepairRuntimeClient {
-    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "draft-repair runtime only supports profile steps",
-        ))
-    }
-
-    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "draft-repair runtime only supports profile steps",
-        ))
-    }
-
-    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
-        let message = input
-            .messages
-            .first()
-            .map(|message| message.content.clone())
-            .unwrap_or_default();
-        if !message.contains("draft_repair_context_json") {
-            return Err(AgentCoreError::coded(
-                ErrorCode::Conflict,
-                "draft-repair runtime requires repair context",
-            ));
-        }
-        if !message.contains("\"direct_count\":2")
-            || !message.contains("良儿偷玉")
-            || !message.contains("凤姐扫雪拾玉")
-            || !message.contains("甄宝玉送玉")
-        {
-            return Err(AgentCoreError::coded(
-                ErrorCode::Conflict,
-                "draft-repair runtime requires structured slot count context",
-            ));
-        }
-        let package_id =
-            package_id_from_step_message(&message).unwrap_or_else(|| "pkg-missing".to_string());
-        Ok(RuntimeOutput {
-            result_summary: upstream_bundle_summary_with_policy(
-                source_scope_policy_from_step_message(&message),
-                &package_id,
-                &package_id,
-                "按当前材料的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
-                "默认范围内的正文和脂批证据支持两处明确失玉证据，并保留一条疑似流转线索。",
-                evidence_ids_from_step_message(&message),
-            ),
-            result_ref: Some(format!(
-                "result://draft-repair-runtime/{}",
-                input.profile_id
-            )),
-            messages: Vec::new(),
-            metadata: json!({
-                "runtime_profile": input.profile_id,
-                "trace_id": input.trace_id,
-                "operation": "draft_answer",
-                "tool_rounds": 0,
-                "tool_results": [],
-                "tool_audit_events": [],
-            }),
-        })
     }
 }
 
@@ -3429,7 +3360,7 @@ fn runtime_required_evidence_types_adds_commentary_for_default_fate_questions() 
 }
 
 #[test]
-fn entity_fate_scope_filter_drops_unbound_fate_cards() {
+fn question_frame_answer_scope_preserves_retrieved_fate_cards() {
     let frame: question_frame::RuntimeQuestionFrame = serde_json::from_value(json!({
         "intent": "entity_query",
         "canonical_question": "史湘云的结局",
@@ -3465,7 +3396,7 @@ fn entity_fate_scope_filter_drops_unbound_fate_cards() {
         ],
     );
 
-    assert_eq!(filtered.len(), 2);
+    assert_eq!(filtered.len(), 3);
     assert!(
         filtered
             .iter()
@@ -3477,44 +3408,9 @@ fn entity_fate_scope_filter_drops_unbound_fate_cards() {
             .any(|card| card.evidence_id == "bound-later-forty")
     );
     assert!(
-        !filtered
+        filtered
             .iter()
             .any(|card| card.evidence_id == "unbound-fate")
-    );
-}
-
-#[test]
-fn entity_fate_draft_rejects_generic_appearance_answer_without_bound_fate_cue() {
-    let frame: question_frame::RuntimeQuestionFrame = serde_json::from_value(json!({
-        "intent": "entity_query",
-        "canonical_question": "史湘云的结局，后四十回呢？",
-        "subject": {"canonical": "史湘云", "aliases": ["史湘云", "史湘雲", "湘云", "湘雲", "史姑娘"]},
-        "predicate": null,
-        "object": null,
-        "required_evidence_types": []
-    }))
-    .expect("question frame");
-    let mut card = sample_card("base_text");
-    card.source_title = "紅樓夢/第110回".to_string();
-    card.text = "且說史湘雲因他女婿病著，賈母死後只來的一次。又見他女婿的病已成癆症。".to_string();
-
-    assert_eq!(
-        entity_fate_draft_rejection_reason(
-            "史湘云的结局，后四十回呢？",
-            Some(&frame),
-            &[card.clone()],
-            "就後四十回所見，史湘雲仍有出場，但不能推出完整結局。"
-        ),
-        Some("entity_fate_draft_missing_bound_fate_cue")
-    );
-    assert_eq!(
-        entity_fate_draft_rejection_reason(
-            "史湘云的结局，后四十回呢？",
-            Some(&frame),
-            &[card],
-            "就後四十回所見，史湘雲女婿病著，且病已成癆症，這只能說明該版本中的後續遭際。"
-        ),
-        None
     );
 }
 
@@ -4080,9 +3976,7 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
         trace_id: "trace-lost-jade-answer-test".to_string(),
         question: "通灵宝玉丢了几次".to_string(),
         cards: lost_jade_test_cards(),
-        claims: vec![
-            "涉及事件归纳或次数统计的问题必须按当前证据包命中的证据槽位说明范围。".to_string(),
-        ],
+        claims: vec!["涉及事件归纳或次数统计的问题必须按当前证据包说明范围。".to_string()],
         claim_evidence_map: Vec::new(),
         question_frame: None,
         tiered_evidence_bindings: Vec::new(),
@@ -4106,42 +4000,6 @@ fn local_answer_does_not_count_tonglingyu_lost_jade_with_fixed_oracle() {
     assert!(!answer.contains("当前证据能稳妥确认的是一次"));
     assert!(!answer.contains("送回这一次失玉"));
     assert!(!answer.contains("至少两次"));
-}
-
-#[test]
-fn local_answer_uses_slot_semantics_for_lost_jade_count() {
-    let package = EvidencePackage {
-        package_id: "pkg-lost-jade-slot-answer-test".to_string(),
-        trace_id: "trace-lost-jade-slot-answer-test".to_string(),
-        question: "通灵宝玉丢了几次".to_string(),
-        cards: in_scope_lost_jade_event_cards(),
-        claims: vec![
-            "涉及事件归纳或次数统计的问题必须按 evidence slot rules 的 role/counts_as 解释。"
-                .to_string(),
-        ],
-        claim_evidence_map: Vec::new(),
-        question_frame: None,
-        tiered_evidence_bindings: Vec::new(),
-        online_learning_trace: None,
-        review: ReviewRecord {
-            status: "passed".to_string(),
-            severity: "none".to_string(),
-            issues: Vec::new(),
-            summary: "reviewer 通过。".to_string(),
-        },
-        knowledge_state_summary: KnowledgeStateSummary::default(),
-    };
-
-    let answer = local_answer("通灵宝玉丢了几次", &package);
-
-    assert!(answer.contains("直接支持两处"));
-    assert!(answer.contains("良儿偷玉"));
-    assert!(answer.contains("甄宝玉送玉"));
-    assert!(answer.contains("凤姐扫雪拾玉"));
-    assert!(answer.contains("按“拾玉/失而复得”计入明确失玉"));
-    assert!(answer.contains("不能直接计入次数"));
-    assert!(!answer.contains("目前能支持回答的主要材料如下"));
-    assert!(!answer.contains("直接支持三处"));
 }
 
 #[test]
@@ -4300,11 +4158,10 @@ fn upstream_evidence_brief_is_bounded_and_keeps_commentary_loss_marker() {
     );
     assert!(rendered.contains("鳳姐掃雪拾玉"));
     assert!(rendered.contains("凤姐扫雪拾玉"));
-    assert!(rendered.contains("lianger_stole_jade"));
-    assert!(rendered.contains("zhen_baoyu_delivers_jade"));
-    assert!(rendered.contains("fengjie_snow_pickup_jade"));
-    assert!(rendered.contains("suspected_transfer_related_to_loss"));
-    assert!(rendered.contains("recovery_or_lost_and_found_clue"));
+    assert!(!rendered.contains("evidence_slots"));
+    assert!(!rendered.contains("lianger_stole_jade"));
+    assert!(!rendered.contains("zhen_baoyu_delivers_jade"));
+    assert!(!rendered.contains("fengjie_snow_pickup_jade"));
     for item in brief {
         let text = item
             .get("text")
@@ -4586,7 +4443,7 @@ fn agent_runtime_evidence_search_message_does_not_expose_runtime_evidence_ids() 
 }
 
 #[test]
-fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
+fn agent_runtime_step_message_bounds_loss_event_evidence_payload() {
     let projection = test_runtime_projection(
         "trace-loss-event-message-budget",
         "context-pack://test/loss-event-message-budget",
@@ -4632,12 +4489,6 @@ fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
             "package_id": "pkg-loss-event-message-budget",
             "evidence_ids": evidence_ids,
             "evidence_brief": evidence_brief,
-            "evidence_slot_count_policy": evidence_slot_count_context_value(
-                "通灵宝玉丢了几次",
-                &cards,
-                true,
-            )
-            .expect("slot count policy"),
             "source_scope_policy": source_scope_policy_for_question("通灵宝玉丢了几次"),
             "answer_requirements": answer_requirements_for_message(
                 "通灵宝玉丢了几次",
@@ -4661,10 +4512,9 @@ fn agent_runtime_step_message_bounds_loss_event_evidence_slot_payload() {
         "loss event profile message should stay inside safety budget: {}",
         message.content.len()
     );
-    assert!(message.content.contains("evidence_slots"));
-    assert!(message.content.contains("lianger_stole_jade"));
-    assert!(message.content.contains("zhen_baoyu_delivers_jade"));
-    assert!(message.content.contains("fengjie_snow_pickup_jade"));
+    assert!(message.content.contains("evidence_brief"));
+    assert!(message.content.contains("source_scope_policy"));
+    assert!(!message.content.contains("evidence_slots"));
     assert!(!message.content.contains(&"前置脂批材料。".repeat(20)));
 
     let compact_step_output = step_output_message_payload_with_compaction(&step, 3);
@@ -4714,12 +4564,6 @@ fn agent_runtime_draft_repair_message_uses_minimal_payload_under_budget() {
             "package_id": "pkg-repair-message-budget",
             "evidence_ids": evidence_ids,
             "evidence_brief": evidence_brief,
-            "evidence_slot_count_policy": evidence_slot_count_context_value(
-                "通灵宝玉丢了几次",
-                &cards,
-                true,
-            )
-            .expect("slot count context"),
             "source_scope_policy": source_scope_policy_for_question("通灵宝玉丢了几次"),
         }),
         agent_runtime: None,
@@ -4730,7 +4574,7 @@ fn agent_runtime_draft_repair_message_uses_minimal_payload_under_budget() {
         &step,
         &projection,
         &agent_runtime_result_summary_contract(&step).expect("runtime prompt contract"),
-        "draft_missing_embedded_evidence_source",
+        "draft_missing_requested_evidence_type_anchor",
     )
     .expect("runtime profile repair message");
 
@@ -4740,8 +4584,8 @@ fn agent_runtime_draft_repair_message_uses_minimal_payload_under_budget() {
         message.content.len()
     );
     assert!(message.content.contains("draft_repair_context_json"));
-    assert!(message.content.contains("source_cues"));
-    assert!(message.content.contains("第18回"));
+    assert!(message.content.contains("evidence_brief"));
+    assert!(!message.content.contains("evidence_slots"));
     assert!(!message.content.contains("context_projection_ref"));
 }
 
@@ -5050,7 +4894,6 @@ fn runtime_rule_catalog_metadata_reports_all_runtime_catalogs() {
     );
     for key in [
         "query_expansions",
-        "evidence_slot_rules",
         "governance_rules",
         "retrieval_rules",
         "ontology_aliases",
@@ -8068,7 +7911,7 @@ fn replay_keeps_package_id_and_review_downgrade() {
     assert!(!answer.contains("pkg-test"));
     assert!(!answer.contains("证据包"));
     assert!(!answer.contains("reviewer"));
-    assert!(answer.contains("缺少足够证据") || answer.contains("没有检索到足够"));
+    assert!(answer.contains("检索未返回可追溯证据"));
 }
 
 #[test]
@@ -8135,12 +7978,9 @@ fn runtime_workflow_emits_profile_step_refs_and_review() {
             .iter()
             .all(|step| step.output_ref.starts_with("runtime://tonglingyu/"))
     );
-    assert!(
-        workflow
-            .steps
-            .iter()
-            .any(|step| step.operation == "review_answer" && step.output["draft_consumed"] == true)
-    );
+    assert!(workflow.steps.iter().any(|step| {
+        step.operation == "review_answer" && step.output["draft_consumed"] == false
+    }));
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "content_delta"
             && event
@@ -8249,7 +8089,12 @@ fn runtime_workflow_consumes_pre_retrieved_evidence() {
     assert!(workflow.package.cards.iter().any(|stored| {
         stored.block_id == "chunk-pre-retrieved" && stored.source_id == "knownledge-retriever"
     }));
-    assert!(workflow.final_answer.contains("黛玉葬花"));
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
+    assert!(
+        workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
 }
 
 #[test]
@@ -8318,13 +8163,13 @@ fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
             .iter()
             .any(|issue| issue == "relation_predicate_evidence_missing")
     );
-    assert!(workflow.final_answer.contains("没有直接证据"));
-    assert!(workflow.final_answer.contains("不能确认"));
     assert!(
         workflow
             .final_answer
-            .contains("紫鹃与史湘云之间存在“服侍”关系")
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
     );
+    assert!(!workflow.final_answer.contains("没有直接证据"));
+    assert!(!workflow.final_answer.contains("不能确认"));
     assert!(!workflow.final_answer.contains("紫鹃服侍过史湘云"));
     let online_requests = list_online_evidence_card_update_requests_for_trace(
         &conn,
@@ -8376,8 +8221,14 @@ fn runtime_workflow_promotes_relation_direct_support_cards() {
             .iter()
             .any(|issue| issue == "relation_predicate_evidence_missing")
     );
-    assert!(workflow.final_answer.contains("可以确认"));
-    assert!(workflow.final_answer.contains("袭人服侍过贾母"));
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
+    assert!(
+        workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
+    assert!(!workflow.final_answer.contains("可以确认"));
+    assert!(!workflow.final_answer.contains("袭人服侍过贾母"));
     assert!(
         workflow
             .steps
@@ -8429,10 +8280,13 @@ fn runtime_workflow_promotes_open_object_relation_support_cards() {
             .iter()
             .any(|card| card.block_id == "quality-block-xiren-xiangyun-open")
     );
-    assert!(workflow.final_answer.contains("袭人"));
-    assert!(workflow.final_answer.contains("贾母"));
-    assert!(workflow.final_answer.contains("史湘云"));
-    assert!(workflow.final_answer.contains("贾宝玉"));
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
+    assert!(
+        workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
+    assert!(!workflow.final_answer.contains("袭人先后服侍"));
     assert!(!workflow.final_answer.contains("尚不能"));
     assert!(
         workflow
@@ -8473,8 +8327,13 @@ fn runtime_workflow_promotes_entity_question_frame_focus_cards() {
             .iter()
             .any(|card| card.block_id == "quality-block-zijuan-focus")
     );
-    assert!(workflow.final_answer.contains("紫鹃"));
-    assert!(workflow.final_answer.contains("紅樓夢/第003回"));
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
+    assert!(
+        workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
+    assert!(!workflow.final_answer.contains("紅樓夢/第003回"));
     assert!(
         !workflow
             .final_answer
@@ -8508,7 +8367,7 @@ fn runtime_workflow_promotes_entity_question_frame_focus_cards() {
 }
 
 #[test]
-fn runtime_workflow_answers_character_fate_with_bound_slot_evidence() {
+fn runtime_workflow_keeps_character_fate_evidence_without_slot_answer() {
     let conn = Connection::open_in_memory().expect("in-memory sqlite");
     init_runtime_schema(&conn).expect("runtime schema");
     init_knowledge_base_schema(&conn).expect("kb schema");
@@ -8554,14 +8413,18 @@ fn runtime_workflow_answers_character_fate_with_bound_slot_evidence() {
             .iter()
             .any(|issue| issue == "character_fate_evidence_missing")
     );
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
     assert!(
         workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
+    assert!(
+        !workflow
             .final_answer
             .contains("林黛玉的结局不能直接写成完整情节结局")
     );
     assert!(!workflow.final_answer.contains("当前可绑定的证据线索"));
-    assert!(workflow.final_answer.contains("此句林"));
-    assert!(workflow.final_answer.contains("玉帶林中掛"));
     assert!(!workflow.final_answer.contains("賈母萬般憐愛"));
 }
 
@@ -8591,7 +8454,13 @@ fn runtime_workflow_promotes_attribute_support_cards() {
             .iter()
             .any(|card| card.block_id == "quality-block-lindaiyu-age-direct")
     );
-    assert!(workflow.final_answer.contains("年方五歲"));
+    assert_eq!(workflow.answer_source, "runtime_no_upstream_draft");
+    assert!(
+        workflow
+            .final_answer
+            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+    );
+    assert!(!workflow.final_answer.contains("年方五歲"));
     assert!(!workflow.final_answer.contains("还没有直接命中"));
     assert!(
         workflow
@@ -8726,7 +8595,7 @@ fn agent_runtime_retrieval_repair_queries_enqueue_search_requests() {
 }
 
 #[test]
-fn openai_compatible_relation_question_keeps_local_relation_answer() {
+fn openai_compatible_relation_question_rejects_contradiction_without_local_answer() {
     let mut card = sample_card("base_text");
     card.evidence_id = "ev-relation-direct".to_string();
     card.source_title = "紅樓夢/第003回".to_string();
@@ -8765,8 +8634,17 @@ fn openai_compatible_relation_question_keeps_local_relation_answer() {
         application.rejected_reason,
         Some("question_frame_relation_answer_contradicts_evidence")
     );
-    assert!(workflow.final_answer.contains("可以确认"));
-    assert!(workflow.final_answer.contains("袭人服侍过贾母"));
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+    );
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
+    assert!(!workflow.final_answer.contains("可以确认"));
+    assert!(!workflow.final_answer.contains("袭人服侍过贾母"));
     assert!(!workflow.final_answer.contains("未见有可靠证据"));
 }
 
@@ -8895,52 +8773,6 @@ fn runtime_accepts_loss_count_draft_that_matches_direct_loss_slot_semantics() {
     );
 
     assert_eq!(rejected, None);
-}
-
-#[test]
-fn runtime_count_policy_exposes_public_slot_context_for_upstream() {
-    let value = evidence_slot_count_context_value(
-        "通灵宝玉丢了几次",
-        &in_scope_lost_jade_event_cards(),
-        true,
-    )
-    .expect("count context");
-
-    assert_eq!(value["direct_count"], json!(2));
-    assert_eq!(
-        value["direct_slots"]
-            .as_array()
-            .expect("direct slots")
-            .iter()
-            .filter_map(|item| item.get("label").and_then(Value::as_str))
-            .collect::<Vec<_>>(),
-        vec!["凤姐扫雪拾玉", "良儿偷玉"]
-    );
-    assert_eq!(value["related_slots"][0]["label"], json!("甄宝玉送玉"));
-
-    let compact = compact_evidence_slot_count_policy_for_message(value, 3);
-    assert_eq!(compact["direct_count"], json!(2));
-    assert_eq!(compact["direct_slots"][0]["label"], json!("凤姐扫雪拾玉"));
-    assert_eq!(compact["related_slots"][0]["label"], json!("甄宝玉送玉"));
-    assert!(
-        compact["related_slots"][0]["source_cues"]
-            .as_array()
-            .expect("source cues")
-            .iter()
-            .any(|value| value == "第18回" || value == "第十八回")
-    );
-    assert!(compact["direct_slots"][0].get("counts_as").is_none());
-}
-
-#[test]
-fn runtime_rejects_loss_count_draft_with_internal_slot_ids() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "按“明确失玉/被盗”口径，通灵宝玉明确算作丢失 2 次：证据槽位是「lianger_stole_jade（良儿偷玉）」和「fengjie_snow_pickup_jade（凤姐扫雪拾玉）」；另有相关线索「zhen_baoyu_delivers_jade（伏甄宝玉送玉）」可作旁证，但不计入直接次数。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_exposes_internal_evidence_slot_id"));
 }
 
 #[test]
@@ -9114,61 +8946,6 @@ fn draft_message_preserves_answer_requirement_evidence_ids() {
 }
 
 #[test]
-fn runtime_rejects_loss_count_draft_without_embedded_slot_evidence() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "按所给在范围内证据，通灵宝玉“明确失玉/被盗”可确认有 2 次；另有疑似流转线索，但不计入明确失玉次数。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_missing_embedded_evidence_anchor"));
-}
-
-#[test]
-fn runtime_rejects_loss_count_draft_without_embedded_source_cues() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "通灵宝玉在前八十回正文与脂批范围内，能按明确失玉/被盗计入两处：良儿偷玉、凤姐扫雪拾玉；甄宝玉送玉只是疑似流转线索。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_missing_embedded_evidence_source"));
-}
-
-#[test]
-fn runtime_rejects_loss_count_draft_that_counts_related_slots_as_direct_loss() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "按前八十回正文与脂批可见的证据，通灵宝玉明确涉及丢失相关情节共3次：良儿偷玉、凤姐扫雪拾玉和甄宝玉送玉。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_count_conflicts_with_evidence_events"));
-}
-
-#[test]
-fn runtime_rejects_loss_count_draft_with_numeric_count_conflict() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "按现有证据，通灵宝玉明确“失玉/被盗”可计1次：第52回良儿偷玉；另有第23回脂批凤姐扫雪拾玉属于找回/拾回线索，不计入失玉次数；第18回脂批伏甄宝玉送玉也只是相关伏笔。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_count_conflicts_with_evidence_events"));
-}
-
-#[test]
-fn runtime_rejects_loss_count_draft_that_negates_direct_slot() {
-    let rejected = agent_runtime_draft_evidence_boundary_rejection(
-        "通灵宝玉丢了几次",
-        "第52回良儿偷玉、第23回脂批凤姐扫雪拾玉、第18回脂批甄宝玉送玉均有材料；但第23回脂批凤姐扫雪拾玉不计入失玉次数，甄宝玉送玉只是疑似流转线索。",
-        &in_scope_lost_jade_event_cards(),
-    );
-
-    assert_eq!(rejected, Some("draft_negates_direct_evidence_slot_count"));
-}
-
-#[test]
 fn runtime_allows_loss_count_draft_that_excludes_related_slot_after_direct_count_clause() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
@@ -9260,7 +9037,11 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
         application.rejected_reason,
         Some("draft_stops_for_user_opt_in")
     );
-    assert!(workflow.final_answer.contains("那塊玉真丟了么"));
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
     assert!(!workflow.final_answer.contains("如果你愿意"));
     assert!(!workflow.final_answer.contains("我可以继续"));
     assert_eq!(
@@ -9277,86 +9058,6 @@ fn chapter_location_draft_rejections_are_governed_decisions() {
     assert!(agent_runtime_draft_rejection_is_governed_decision(
         "chapter_location_title_cue_missing"
     ));
-}
-
-#[tokio::test]
-async fn runtime_repairs_rejected_profile_draft_with_same_package_boundary() {
-    let mut workflow = runtime_draft_workflow(
-        in_scope_lost_jade_event_cards(),
-        ReviewRecord {
-            status: "passed".to_string(),
-            severity: "none".to_string(),
-            issues: vec![],
-            summary: "reviewer passed".to_string(),
-        },
-    );
-    workflow.question = "通灵宝玉丢了几次".to_string();
-    workflow.package.question = workflow.question.clone();
-    let package_id = workflow.package.package_id.clone();
-    let count_question = question_asks_for_count(&workflow.question).expect("count intent");
-    workflow.steps[0].output = json!({
-        "object": "tonglingyu.draft_answer",
-        "package_id": &package_id,
-        "evidence_ids": evidence_ids(&workflow.package.cards),
-        "evidence_brief": upstream_evidence_brief_for_frame(&workflow.question, &workflow.package.cards, None),
-        "evidence_slot_count_policy": evidence_slot_count_context_value(
-            &workflow.question,
-            &workflow.package.cards,
-            count_question,
-        )
-        .expect("count policy"),
-        "claim_statements": &workflow.package.claims,
-        "answer_source": "runtime_local_profile",
-        "source_scope_policy": source_scope_policy_for_question(&workflow.question),
-        "out_of_scope_hints": [],
-    });
-    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-        upstream_bundle_summary(
-            &workflow.question,
-            &package_id,
-            "第52回良儿偷玉、第23回脂批凤姐扫雪拾玉、第18回脂批甄宝玉送玉均有材料；但第23回脂批凤姐扫雪拾玉不计入失玉次数，甄宝玉送玉只是疑似流转线索。",
-            "通灵宝玉只有一处明确失玉证据。",
-            evidence_ids(&workflow.package.cards),
-        )
-    );
-
-    let rejected = apply_agent_runtime_content_outputs(
-        &mut workflow,
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
-    )
-    .expect("initial draft is rejected");
-    assert!(!rejected.draft_consumed);
-    assert_eq!(
-        rejected.rejected_reason,
-        Some("draft_negates_direct_evidence_slot_count")
-    );
-
-    let profiles = RuntimeWorkflowProfiles::default();
-    let context = test_runtime_context(&workflow.trace_id, &workflow.question, &profiles);
-    repair_agent_runtime_draft(
-        &mut workflow,
-        &profiles,
-        &context,
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
-        Arc::new(DraftRepairRuntimeClient),
-        &rejected,
-    )
-    .await
-    .expect("draft repair executes");
-    let repaired = apply_agent_runtime_content_outputs(
-        &mut workflow,
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
-    )
-    .expect("repaired draft is consumed");
-
-    assert!(repaired.draft_consumed);
-    assert_eq!(repaired.rejected_reason, None);
-    assert!(workflow.final_answer.contains("两处"));
-    assert!(workflow.final_answer.contains("凤姐扫雪拾玉"));
-    assert_eq!(
-        workflow.steps[0].agent_runtime.as_ref().unwrap()["draft_repair"]["initial_rejection"]["rejected_reason"],
-        json!("draft_negates_direct_evidence_slot_count")
-    );
 }
 
 #[tokio::test]
@@ -9417,14 +9118,8 @@ async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
             &workflow.package.cards,
         )
         .expect("question frame answer requirements"),
-        "evidence_slot_count_policy": evidence_slot_count_context_value(
-            question,
-            &workflow.package.cards,
-            false,
-        )
-        .expect("count policy"),
         "claim_statements": &workflow.package.claims,
-        "answer_source": "runtime_local_profile",
+        "answer_source": "runtime_no_upstream_draft",
         "source_scope_policy": source_scope_policy_for_question(question),
         "out_of_scope_hints": [],
     });
@@ -9621,7 +9316,12 @@ fn hermes_mode_rejects_plain_text_draft_summary() {
     assert_eq!(application.result_format, "invalid");
     assert_eq!(application.rejected_reason, Some("invalid_json_draft"));
     assert_eq!(workflow.draft_answer, original_draft);
-    assert_eq!(workflow.final_answer, original_final);
+    assert_ne!(workflow.final_answer, original_final);
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
         "invalid_json_draft"
@@ -10424,7 +10124,7 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
         package,
         draft_answer: "本地草稿".to_string(),
         final_answer: "本地最终回答".to_string(),
-        answer_source: "runtime_local_profile".to_string(),
+        answer_source: "runtime_no_upstream_draft".to_string(),
         agent_runtime_summary: default_agent_runtime_summary(),
         steps: vec![
             RuntimeWorkflowStepReport {
@@ -10999,7 +10699,7 @@ async fn runtime_store_consumes_openai_compatible_profile_without_runtime_tools(
 }
 
 #[tokio::test]
-async fn openai_compatible_workflow_skips_upstream_draft_without_local_answer_basis() {
+async fn openai_compatible_workflow_fails_closed_when_provider_unavailable() {
     let db_path = std::env::temp_dir().join(format!(
         "tonglingyu-runtime-openai-compatible-no-answer-basis-{}.db",
         uuid::Uuid::now_v7().simple()
@@ -11010,7 +10710,7 @@ async fn openai_compatible_workflow_skips_upstream_draft_without_local_answer_ba
         init_knowledge_base_schema(&conn).expect("kb schema");
     }
     let trace_id = "trace-openai-compatible-no-answer-basis-test";
-    let workflow = store
+    let error = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(
                 trace_id,
@@ -11022,88 +10722,23 @@ async fn openai_compatible_workflow_skips_upstream_draft_without_local_answer_ba
             Arc::new(FailingProfileRuntimeClient),
         )
         .await
-        .expect("OpenAI-compatible workflow should skip draft when no local answer basis exists");
+        .expect_err("OpenAI-compatible workflow should fail closed when provider is unavailable");
 
-    assert!(workflow.package.cards.is_empty());
-    assert_eq!(workflow.answer_source, "runtime_local_profile");
-    assert!(workflow.final_answer.contains("找不到足够的原文依据"));
-    let draft_step = workflow
-        .steps
-        .iter()
-        .find(|step| step.operation == "draft_answer")
-        .expect("draft step");
-    let draft_agent_runtime = draft_step.agent_runtime.as_ref().expect("draft runtime");
-    assert_eq!(draft_agent_runtime["status"], json!("skipped"));
-    assert_eq!(
-        draft_agent_runtime["skip_reason"],
-        json!("local_answer_basis_unavailable")
-    );
-    assert_eq!(
-        draft_step.output["agent_runtime_provider_request_skipped"],
-        json!(true)
-    );
-    assert_eq!(
-        draft_step.output["agent_runtime_draft_rejected_reason"],
-        json!("local_answer_basis_unavailable")
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["profile_execution_status"],
-        json!("openai_compatible_draft_skipped_by_local_governance")
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["executed_profile_step_count"],
-        json!(0)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["llm_call_budget"]["sync_llm_call_count"],
-        json!(0)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["llm_call_budget"]["provider_latency_ms"],
-        json!(0)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["llm_call_budget"]["skipped_profile_step_count"],
-        json!(workflow.steps.len())
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["draft_skipped_by_local_governance"],
-        json!(true)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["draft_governance_completed"],
-        json!(true)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["profile_observation_complete"],
-        json!(true)
-    );
+    assert!(error.to_string().contains("backend unavailable"));
     let events = store
         .audit_events_for_trace(trace_id)
         .expect("audit events");
     assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_step_executed"
-            && event["payload"]["agent_runtime"]["status"] == json!("skipped")
-            && event["payload"]["agent_runtime"]["skip_reason"]
-                == json!("local_answer_basis_unavailable")
+        event["event_type"] == "agent_runtime_profile_execution_rejected"
+            && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
     }));
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_draft_rejected"
-            && event["payload"]["rejected_reason"] == json!("local_answer_basis_unavailable")
-            && event["payload"]["draft_consumed"] == json!(false)
-    }));
-    assert!(
-        !events
-            .iter()
-            .any(|event| event["event_type"] == "agent_runtime_profile_execution_rejected")
-    );
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
     let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
 }
 
 #[tokio::test]
-async fn openai_compatible_workflow_keeps_controlled_local_answer_when_draft_coverage_fails() {
+async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_coverage_fails() {
     let db_path = std::env::temp_dir().join(format!(
         "tonglingyu-runtime-openai-compatible-draft-coverage-{}.db",
         uuid::Uuid::now_v7().simple()
@@ -11132,9 +10767,17 @@ async fn openai_compatible_workflow_keeps_controlled_local_answer_when_draft_cov
             Arc::new(PartialCoverageDraftRuntimeClient),
         )
         .await
-        .expect("draft coverage rejection should produce controlled local-governed response");
+        .expect("draft coverage rejection should fail closed without local answer fallback");
 
-    assert_eq!(workflow.answer_source, "runtime_local_profile");
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+    );
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
         "openai_compatible_draft_with_local_governance"
@@ -11168,7 +10811,8 @@ async fn openai_compatible_workflow_keeps_controlled_local_answer_when_draft_cov
 }
 
 #[tokio::test]
-async fn openai_compatible_workflow_keeps_local_answer_when_draft_claim_refs_are_invalid() {
+async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_claim_refs_are_invalid()
+{
     let db_path = std::env::temp_dir().join(format!(
         "tonglingyu-runtime-openai-compatible-draft-claim-ref-{}.db",
         uuid::Uuid::now_v7().simple()
@@ -11197,9 +10841,17 @@ async fn openai_compatible_workflow_keeps_local_answer_when_draft_claim_refs_are
             Arc::new(InvalidEvidenceRefDraftRuntimeClient),
         )
         .await
-        .expect("invalid upstream claim refs should be rejected without failing local governed response");
+        .expect("invalid upstream claim refs should be rejected without local answer fallback");
 
-    assert_eq!(workflow.answer_source, "runtime_local_profile");
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+    );
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
         "openai_compatible_draft_with_local_governance"
@@ -11233,7 +10885,8 @@ async fn openai_compatible_workflow_keeps_local_answer_when_draft_claim_refs_are
 }
 
 #[tokio::test]
-async fn openai_compatible_workflow_keeps_local_answer_when_draft_exceeds_evidence_boundary() {
+async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_draft_exceeds_evidence_boundary()
+ {
     let db_path = std::env::temp_dir().join(format!(
         "tonglingyu-runtime-openai-compatible-draft-boundary-{}.db",
         uuid::Uuid::now_v7().simple()
@@ -11262,9 +10915,17 @@ async fn openai_compatible_workflow_keeps_local_answer_when_draft_exceeds_eviden
             Arc::new(EvidenceBoundaryDraftRuntimeClient),
         )
         .await
-        .expect("unsupported upstream claims should be rejected without failing local governed response");
+        .expect("unsupported upstream claims should be rejected without local answer fallback");
 
-    assert_eq!(workflow.answer_source, "runtime_local_profile");
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+    );
+    assert!(
+        workflow
+            .final_answer
+            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+    );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
         "openai_compatible_draft_with_local_governance"

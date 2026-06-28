@@ -8,16 +8,10 @@ use std::collections::BTreeSet;
 
 mod attribute_answer;
 mod chapter_location;
-mod character_fate;
-mod evidence_query;
 
 pub(crate) use chapter_location::{
     chapter_location_answer_requirement_value, chapter_location_draft_rejection_reason,
     chapter_location_evidence_ids_for_requirements,
-};
-pub(crate) use character_fate::{
-    character_fate_draft_rejection_reason, character_fate_review_issues,
-    character_fate_slot_matches, character_fate_supported_evidence_ids,
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelationSupportTerms {
@@ -294,12 +288,6 @@ pub(crate) fn question_frame_answer(
         return Some(answer);
     }
     if let Some(answer) = attribute_answer::attribute_answer(frame, cards) {
-        return Some(answer);
-    }
-    if let Some(answer) = character_fate::character_fate_answer(frame, cards) {
-        return Some(answer);
-    }
-    if let Some(answer) = evidence_query::evidence_query_answer(frame, cards) {
         return Some(answer);
     }
     compose_entity_intro_answer(frame, cards)
