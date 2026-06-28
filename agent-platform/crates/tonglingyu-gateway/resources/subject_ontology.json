@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.subject_ontology.v1",
-  "catalog_version": "2026-06-01.1",
+  "catalog_version": "2026-06-28.1",
   "subjects": [
     {
       "canonical": "贾宝玉",
@@ -103,6 +103,12 @@
       "type": "character",
       "work": "hongloumeng",
       "aliases": ["秦可卿", "可卿"]
+    },
+    {
+      "canonical": "秦钟",
+      "type": "character",
+      "work": "hongloumeng",
+      "aliases": ["秦钟", "秦鐘"]
     },
     {
       "canonical": "尤三姐",

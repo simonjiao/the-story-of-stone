@@ -30,6 +30,7 @@ pub(crate) struct QuestionFrame {
 #[serde(deny_unknown_fields)]
 pub(crate) struct QuestionFrameEntity {
     pub(crate) canonical: String,
+    #[serde(default)]
     pub(crate) aliases: Vec<String>,
     pub(crate) source: String,
 }
@@ -39,6 +40,7 @@ pub(crate) struct QuestionFrameEntity {
 pub(crate) struct QuestionFramePredicate {
     pub(crate) id: String,
     pub(crate) label: String,
+    #[serde(default)]
     pub(crate) aliases: Vec<String>,
     pub(crate) evidence_terms: Vec<String>,
 }
@@ -190,32 +192,6 @@ pub(crate) fn build_question_frame(question: &str) -> Result<QuestionFrame> {
             context_binding: None,
         });
     }
-    if let Some(location) = context_rules::parse_chapter_location_question(question)? {
-        let subject = location
-            .subject
-            .as_ref()
-            .map(|canonical| frame_entity(canonical, "current_question"))
-            .transpose()?;
-        let needs_clarification = location.event_phrase.is_none();
-        return Ok(QuestionFrame {
-            schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
-            intent: "chapter_location_query".to_string(),
-            canonical_question: question.to_string(),
-            subject,
-            predicate: None,
-            object: None,
-            source_scope,
-            required_evidence_types: context_rules::chapter_location_required_evidence_types()?,
-            confidence: if needs_clarification { 0.38 } else { 0.88 },
-            needs_clarification,
-            clarification_question: needs_clarification
-                .then(context_rules::chapter_location_clarification_question)
-                .transpose()?,
-            open_slot: needs_clarification.then(|| "event".to_string()),
-            context_binding: None,
-        });
-    }
-
     let subject = subjects
         .first()
         .map(|canonical| frame_entity(canonical, "current_question"))
@@ -223,6 +199,34 @@ pub(crate) fn build_question_frame(question: &str) -> Result<QuestionFrame> {
     let is_count_query = context_rules::question_mentions_count(question)?;
     let is_evidence_query = context_rules::question_mentions_evidence_followup(question)?;
     let is_character_fate_query = context_rules::question_mentions_character_fate(question)?;
+    if !is_character_fate_query {
+        if let Some(location) = context_rules::parse_chapter_location_question(question)? {
+            let location_subject = location
+                .subject
+                .as_ref()
+                .map(|canonical| frame_entity(canonical, "current_question"))
+                .transpose()?;
+            let needs_clarification = location.event_phrase.is_none();
+            return Ok(QuestionFrame {
+                schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
+                intent: "chapter_location_query".to_string(),
+                canonical_question: question.to_string(),
+                subject: location_subject,
+                predicate: None,
+                object: None,
+                source_scope,
+                required_evidence_types: context_rules::chapter_location_required_evidence_types()?,
+                confidence: if needs_clarification { 0.38 } else { 0.88 },
+                needs_clarification,
+                clarification_question: needs_clarification
+                    .then(context_rules::chapter_location_clarification_question)
+                    .transpose()?,
+                open_slot: needs_clarification.then(|| "event".to_string()),
+                context_binding: None,
+            });
+        }
+    }
+
     let needs_character_fate_clarification = is_character_fate_query && subject.is_none();
     let intent = if is_count_query {
         "count_query".to_string()

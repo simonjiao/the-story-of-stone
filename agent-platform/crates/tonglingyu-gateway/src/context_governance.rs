@@ -7625,7 +7625,7 @@ mod tests {
         assert_eq!(context.context_pack["resolver"]["llm_used"], json!(false));
         assert_eq!(
             context.context_pack["policy_versions"]["context_rules"]["subject_ontology"],
-            json!("2026-06-01.1")
+            json!("2026-06-28.1")
         );
         remove_file_db(&db_path);
     }

@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.question_frame_rules.v1",
-  "catalog_version": "2026-06-02.2",
+  "catalog_version": "2026-06-28.1",
   "default_source_scope": "pre_80_base_text_and_commentary",
   "source_scope_phrases": [
     {
@@ -21,7 +21,7 @@
     "required_evidence_types": ["base_text", "commentary"]
   },
   "character_fate_question": {
-    "terms": ["结局", "結局", "下场", "下場", "命运", "命運", "后来如何", "後來如何", "最后如何", "最後如何", "最后怎么样", "最後怎麼樣", "判词", "判詞", "曲文", "红楼梦曲", "紅樓夢曲"],
+    "terms": ["结局", "結局", "下场", "下場", "命运", "命運", "后来如何", "後來如何", "最后如何", "最後如何", "最后怎么样", "最後怎麼樣", "判词", "判詞", "曲文", "红楼梦曲", "紅樓夢曲", "死", "死的", "去世", "亡故", "病逝", "夭亡"],
     "required_evidence_types": ["base_text", "commentary"],
     "later_forty_required_evidence_types": ["base_text"],
     "clarification_template": "请明确你问的是哪位人物的结局或命运。"

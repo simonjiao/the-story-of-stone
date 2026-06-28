@@ -143,6 +143,28 @@ fn resolver_binds_evidence_followup_to_current_window_anchor() {
 }
 
 #[test]
+fn resolver_treats_named_death_chapter_question_as_character_fate() {
+    let messages = vec![ContextMessage {
+        role: "user".to_string(),
+        content: "秦钟是哪一回死的".to_string(),
+    }];
+
+    let resolved = resolve_question("秦钟是哪一回死的", &messages, None, None).expect("resolves");
+
+    assert_eq!(resolved.resolved_question, "秦钟是哪一回死的");
+    assert_eq!(resolved.question_frame.intent, "character_fate_query");
+    assert_eq!(
+        resolved
+            .question_frame
+            .subject
+            .as_ref()
+            .map(|entity| entity.canonical.as_str()),
+        Some("秦钟")
+    );
+    assert_eq!(resolved.question_frame.needs_clarification, false);
+}
+
+#[test]
 fn resolver_binds_scope_followup_to_current_window_anchor() {
     let messages = vec![
         ContextMessage {

@@ -78,6 +78,69 @@ fn question_validator_accepts_valid_frame_candidate_and_rule_candidates() {
 }
 
 #[test]
+fn question_validator_accepts_frame_candidate_with_missing_empty_aliases() {
+    let resolved_question = "紫鹃服侍过史湘云吗？";
+    let mut frame = question_frame::build_question_frame(resolved_question)
+        .expect("question frame")
+        .audit_json();
+    frame["subject"]
+        .as_object_mut()
+        .expect("subject object")
+        .remove("aliases");
+    frame["predicate"]
+        .as_object_mut()
+        .expect("predicate object")
+        .remove("aliases");
+    frame["object"]
+        .as_object_mut()
+        .expect("object object")
+        .remove("aliases");
+    let output = json!({
+        "schema_version": QUESTION_RESOLVER_SCHEMA_VERSION,
+        "resolved_question": resolved_question,
+        "referent_bindings": ["紫鹃", "史湘云"],
+        "used_context_refs": ["current_question"],
+        "confidence": 0.92,
+        "needs_clarification": false,
+        "clarification_question": null,
+        "unsupported_reason": null,
+        "question_frame_candidate": frame,
+        "rule_candidates": []
+    });
+
+    let decision = validate_question_normalizer_runtime_output(
+        LlmMode::Enforced,
+        "prior_subject_needed",
+        &envelope(QUESTION_NORMALIZER_PROFILE_ID),
+        &output.to_string(),
+        Some("openai-compatible-network://profiles/test"),
+        None,
+        &["紫鹃".to_string(), "史湘云".to_string()],
+    );
+
+    assert!(decision.contract_accepted(), "{:?}", decision.errors());
+    let accepted = decision
+        .accepted_resolution()
+        .and_then(|sealed| sealed.question_frame())
+        .expect("accepted question frame");
+    assert_eq!(
+        accepted.subject.as_ref().map(|entity| entity.aliases.len()),
+        Some(0)
+    );
+    assert_eq!(
+        accepted
+            .predicate
+            .as_ref()
+            .map(|predicate| predicate.aliases.len()),
+        Some(0)
+    );
+    assert_eq!(
+        accepted.object.as_ref().map(|entity| entity.aliases.len()),
+        Some(0)
+    );
+}
+
+#[test]
 fn question_validator_rejects_frame_candidate_outside_active_ontology() {
     let resolved_question = "紫鹃服侍过史湘云吗？";
     let mut frame = question_frame::build_question_frame(resolved_question)

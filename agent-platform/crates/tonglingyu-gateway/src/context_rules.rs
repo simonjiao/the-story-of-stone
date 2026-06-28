@@ -1907,14 +1907,14 @@ mod tests {
     #[test]
     fn embedded_catalogs_parse_and_expose_versions() {
         let versions = context_rule_versions().expect("versions load");
-        assert_eq!(versions["subject_ontology"], json!("2026-06-01.1"));
+        assert_eq!(versions["subject_ontology"], json!("2026-06-28.1"));
         assert_eq!(versions["referent_candidate_rules"], json!("2026-05-24.2"));
         assert_eq!(versions["ellipsis_resolution_rules"], json!("2026-06-01.2"));
-        assert_eq!(versions["question_frame_rules"], json!("2026-06-02.2"));
+        assert_eq!(versions["question_frame_rules"], json!("2026-06-28.1"));
         let metadata = context_rule_catalog_metadata().expect("metadata loads");
         assert_eq!(
             metadata["question_frame_rules"]["catalog_version"],
-            json!("2026-06-02.2")
+            json!("2026-06-28.1")
         );
         assert_eq!(
             metadata["question_frame_rules"]["source"],

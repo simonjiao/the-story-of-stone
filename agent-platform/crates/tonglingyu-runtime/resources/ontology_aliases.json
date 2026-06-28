@@ -1,6 +1,6 @@
 {
   "schema_version": "tonglingyu.ontology_aliases.v1",
-  "catalog_version": "2026-06-01.1",
+  "catalog_version": "2026-06-28.1",
   "people": [
     {
       "person_id": "person:baoyu",
@@ -115,6 +115,12 @@
       "canonical_name": "秦可卿",
       "description": "金陵十二钗之一。",
       "aliases": ["秦可卿", "可卿"]
+    },
+    {
+      "person_id": "person:qinzhong",
+      "canonical_name": "秦钟",
+      "description": "秦可卿之弟，贾宝玉友人。",
+      "aliases": ["秦钟", "秦鐘"]
     }
   ]
 }
