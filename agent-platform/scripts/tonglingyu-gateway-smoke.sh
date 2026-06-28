@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CARGO_BIN="${CARGO:-cargo}"
 SMOKE_DIR="${TMPDIR:-/tmp}/tonglingyu-gateway-smoke-$$"
 SEED_DB="${TONGLINGYU_SMOKE_DB_PATH:-}"
+SMOKE_RETRIEVER_BASE_URL="${TONGLINGYU_SMOKE_RETRIEVER_BASE_URL:-}"
 DB_PATH="${SMOKE_DIR}/tonglingyu.db"
 STDOUT_LOG="${SMOKE_DIR}/gateway.stdout.log"
 HEALTHCHECK_JSON="${SMOKE_DIR}/healthcheck.json"
@@ -21,6 +22,7 @@ RUN_JSON="${SMOKE_DIR}/run.json"
 RUN_CANCEL_JSON="${SMOKE_DIR}/run-cancel.json"
 RUN_EVENTS_TXT="${SMOKE_DIR}/run-events.txt"
 FORBIDDEN_RESPONSE_JSON="${SMOKE_DIR}/response-forbidden.json"
+RETRIEVER_CALLS_JSONL="${SMOKE_DIR}/retriever-calls.jsonl"
 SEARCH_JSON="${SMOKE_DIR}/search.json"
 CHAT_JSON="${SMOKE_DIR}/chat.json"
 SMOKE_TOKEN="smoke-gateway-token"
@@ -45,6 +47,7 @@ s.close()
 PY
 )"
 BASE_URL="http://127.0.0.1:${PORT}"
+RETRIEVER_BASE_URL="${SMOKE_RETRIEVER_BASE_URL}"
 GATEWAY_BIN="${ROOT}/target/debug/tonglingyu-gateway"
 GATEWAY_PID=""
 RETRIEVER_PID=""
@@ -113,17 +116,27 @@ fi
 
 "${GATEWAY_BIN}" runtime-schema-migrate --db "${DB_PATH}" >"${MIGRATE_JSON}"
 
-python3 - "${RETRIEVER_PORT}" <<'PY' >/dev/null 2>&1 &
+if [[ -z "${RETRIEVER_BASE_URL}" ]]; then
+  RETRIEVER_BASE_URL="http://127.0.0.1:${RETRIEVER_PORT}"
+  : >"${RETRIEVER_CALLS_JSONL}"
+  python3 - "${RETRIEVER_PORT}" "${RETRIEVER_CALLS_JSONL}" <<'PY' >/dev/null 2>&1 &
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CALLS_PATH = sys.argv[2]
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, _format, *args):
         return
 
+    def record_request(self, method):
+        with open(CALLS_PATH, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"method": method, "path": self.path}) + "\n")
+
     def do_GET(self):
+        self.record_request("GET")
         service = {
             "schema_version": "tonglingyu.agent_retriever.service.v1",
             "name": "smoke-retriever-health",
@@ -184,11 +197,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        self.record_request("POST")
+        self.send_response(501)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(
+            b'{"ok":false,"error":"smoke_retriever_stub_does_not_mock_retrieve"}'
+        )
+
 
 HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 PY
-RETRIEVER_PID="$!"
-wait_retriever
+  RETRIEVER_PID="$!"
+  wait_retriever
+fi
 
 RUST_LOG="${RUST_LOG:-warn}" \
 TONGLINGYU_GATEWAY_API_KEY="${SMOKE_TOKEN}" \
@@ -204,7 +227,7 @@ TONGLINGYU_AGENT_PROVIDER_SMOKE_PROFILE_BASE_URL=http://127.0.0.1:9/v1 \
 TONGLINGYU_AGENT_PROVIDER_SMOKE_PROFILE_MODEL=smoke-model \
 TONGLINGYU_AGENT_PROVIDER_SMOKE_PROFILE_API_KEY_ENV=TONGLINGYU_SMOKE_AGENT_API_KEY \
 TONGLINGYU_SMOKE_AGENT_API_KEY=smoke-agent-token \
-TONGLINGYU_RETRIEVER_BASE_URL="http://127.0.0.1:${RETRIEVER_PORT}" \
+TONGLINGYU_RETRIEVER_BASE_URL="${RETRIEVER_BASE_URL}" \
 TONGLINGYU_ONLINE_EVIDENCE_CARD_WORKER_ENABLED=false \
 TONGLINGYU_RESPONSE_WORKER_ENABLED=false \
 "${GATEWAY_BIN}" serve \
@@ -256,14 +279,24 @@ if [[ -n "${SEED_DB}" ]]; then
     --data-urlencode "q=通灵玉上的字是什么？" \
     --data-urlencode "limit=4" \
     "${BASE_URL}/v1/evidence/search" >"${SEARCH_JSON}"
-  curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
-    -H "x-tonglingyu-message-id: smoke-message-1" \
-    -X POST \
-    -d '{"model":"tonglingyu","messages":[{"role":"user","content":"通灵玉上的字是什么？"}]}' \
-    "${BASE_URL}/v1/chat/completions" >"${CHAT_JSON}"
+  if [[ -n "${SMOKE_RETRIEVER_BASE_URL}" ]]; then
+    curl -fsS "${auth[@]}" "${json_headers[@]}" "${owui_headers[@]}" \
+      -H "x-tonglingyu-message-id: smoke-message-1" \
+      -X POST \
+      -d '{"model":"tonglingyu","messages":[{"role":"user","content":"通灵玉上的字是什么？"}]}' \
+      "${BASE_URL}/v1/chat/completions" >"${CHAT_JSON}"
+  else
+    printf '{"skipped":true,"reason":"TONGLINGYU_SMOKE_RETRIEVER_BASE_URL not set"}\n' >"${CHAT_JSON}"
+  fi
 else
   printf '{"skipped":true,"reason":"TONGLINGYU_SMOKE_DB_PATH not set"}\n' >"${SEARCH_JSON}"
   printf '{"skipped":true,"reason":"TONGLINGYU_SMOKE_DB_PATH not set"}\n' >"${CHAT_JSON}"
+fi
+
+if [[ -z "${SMOKE_RETRIEVER_BASE_URL}" ]] && grep -q '"/retrieve"' "${RETRIEVER_CALLS_JSONL}"; then
+  echo "default smoke retriever stub received /retrieve; provide TONGLINGYU_SMOKE_RETRIEVER_BASE_URL for real RQA chat smoke" >&2
+  echo "retriever calls: ${RETRIEVER_CALLS_JSONL}" >&2
+  exit 1
 fi
 
 python3 - \
@@ -402,7 +435,10 @@ assert forbidden_response["error"]["code"] == "forbidden_control_fields", forbid
 
 if seed_db:
     assert search["object"] == "list", search
-    assert "choices" in chat, chat
+    if chat.get("skipped"):
+        assert chat["reason"] == "TONGLINGYU_SMOKE_RETRIEVER_BASE_URL not set", chat
+    else:
+        assert "choices" in chat, chat
 else:
     assert search["skipped"] is True, search
     assert chat["skipped"] is True, chat

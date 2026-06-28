@@ -320,6 +320,7 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - 空 DB 默认验证 schema migrate、retriever health/metadata contract、gateway health、
     auth、models、JSON metrics 和 Prometheus。
   - smoke 内启动最小 retriever health/metadata stub，只满足 Gateway 启动依赖。
+  - 默认 stub 记录所有请求；若收到 `/retrieve`，smoke 直接失败，避免 mock retrieval。
   - 验证 response store/job queue health 与 metrics 依赖状态。
   - 验证 `/v1/responses` 后台创建、状态查询和 `/events` replay。
   - 验证 `/v1/runs` 后台创建、取消、events replay 和 terminal `[DONE]`。
@@ -327,15 +328,21 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
 - smoke 环境显式设置 `TONGLINGYU_RESPONSE_WORKER_ENABLED=false`：
   - 避免空 DB 或无外部 provider 时误触发 Runtime/RQA。
   - 默认 gate 只证明 Gateway 协议、事件底座、鉴权/作用域和控制面。
-  - 传入 `TONGLINGYU_SMOKE_DB_PATH` 后仍额外验证 RQA search/chat smoke。
+  - 传入 `TONGLINGYU_SMOKE_DB_PATH` 后额外验证 DB search。
+  - 同时传入 `TONGLINGYU_SMOKE_RETRIEVER_BASE_URL` 后才验证真实 RQA chat。
+- Runtime warning 加固：
+  - test-only local answer renderer 不再进入生产 lib 编译面。
+  - answer/retrieval rule catalog 解析会读取并校验模板、排序和 hygiene 字段。
+  - gateway regression gate 增加 `RUSTFLAGS="-D warnings"`。
 - 已验证：
   - `bash -n agent-platform/scripts/tonglingyu-gateway-smoke.sh` 通过。
   - `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 通过。
-  - gateway cargo test (`--quiet`) 通过，243 个测试。
-  - `npx --yes markdownlint-cli2 "docs/PROGRESS.md" "docs/RUNBOOK.md"` 通过。
+  - `RUSTFLAGS="-D warnings"` gateway cargo test 通过，243 个测试。
+  - markdownlint 覆盖 `docs/PROGRESS.md`、`docs/RUNBOOK.md` 和 Gateway 架构文档，通过。
+  - `git diff --check` 通过。
 - 当前边界：
   - 默认 smoke 不替代 live Gateway、Open WebUI、Redis 和外部 runtime DB 的发布前 gate。
-  - smoke retriever stub 不提供 `/retrieve`，不能用于证明检索质量或证据包生成。
+  - smoke retriever stub 不提供 `/retrieve`，且会拒绝默认 smoke 中的检索调用。
   - Redis Streams 模式仍需要单独带 `TONGLINGYU_REDIS_URL` 的集成环境覆盖。
 
 ## 验证边界
@@ -345,6 +352,7 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
 1. Repo-local gate：版本、Python function tests、shell syntax、Rust fmt/check/test。
 2. Gateway smoke：空 runtime DB 下验证 schema、retriever contract、gateway health、
    auth、models、metrics、Response/Run 投影、事件 replay、取消和请求边界。
-3. RQA/release gate：绑定外部 runtime DB、live Gateway、Open WebUI 和 release report。
+3. RQA/release gate：绑定外部 runtime DB、真实 retriever、live Gateway、Open WebUI 和
+   release report。
 
 不能用 repo-local gate 或空 DB smoke 宣称 RQA production-ready。

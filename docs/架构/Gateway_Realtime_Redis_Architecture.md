@@ -1264,10 +1264,11 @@ Prometheus 指标名称沿用现有 metrics 风格，禁止暴露用户文本、
 交付物：
 
 1. gateway smoke 增加 Redis、Responses、WS、cancel、resume。
-2. strict live gate 增加真正 SSE 与 WS text protocol。
-3. docs/runbook 更新 Redis backup、监控和故障处理。
-4. release report 记录 Redis event store enabled、worker group、dead letter 为 0。
-5. 可选 webhook worker 仅在 P0-P4 通过后启用；默认关闭。
+2. 默认 smoke 只能使用 retriever health/metadata stub；若出现 `/retrieve` 调用必须失败。
+3. strict live gate 增加真正 retriever、SSE 与 WS text protocol。
+4. docs/runbook 更新 Redis backup、监控和故障处理。
+5. release report 记录 Redis event store enabled、worker group、dead letter 为 0。
+6. 可选 webhook worker 仅在 P0-P4 通过后启用；默认关闭。
 
 验收：
 
@@ -1277,6 +1278,7 @@ Prometheus 指标名称沿用现有 metrics 风格，禁止暴露用户文本、
 4. 断线恢复和 cancel 有自动化测试。
 5. 不接 OpenAI Realtime，不接音频。
 6. callback 只发送脱敏公开 payload，发送失败不改变 response/run 终态。
+7. Rust gate 使用 `RUSTFLAGS="-D warnings"`；新增 warning 不允许进入 release。
 
 ## 15. 测试矩阵
 
@@ -1316,6 +1318,7 @@ Prometheus 指标名称沿用现有 metrics 风格，禁止暴露用户文本、
 14. run events Last-Event-ID / after replay。
 15. requires_action -> submit action -> workflow resume。
 16. background completion -> webhook worker retry / dead letter。
+17. default smoke retriever stub receives health/metadata only and no `/retrieve`.
 
 ### 15.3 负向测试
 
@@ -1366,12 +1369,13 @@ idle
 
 1. P0/P1 只新增模块，未接生产入口，可直接关闭配置。
 2. P2 worker 可通过 `TONGLINGYU_RESPONSE_WORKER_ENABLED=false` 停止。
-3. P3 chat bridge 必须保留 legacy direct workflow 开关，仅用于紧急回滚。
+3. P3 chat bridge 回滚只能关闭 response pipeline 或 worker；不能恢复 legacy direct
+   workflow fallback 作为生产证据。
 4. P4 `/v1/responses`、`/v1/runs` 和 action submit 可由路由层关闭。
 5. P5 `/v1/realtime/ws` 可由 feature flag 关闭。
 6. webhook worker 可独立关闭，不能影响已完成 response/run 查询。
-7. Production-ready 声明必须要求 Redis required 模式通过；legacy direct workflow 不能作为
-   新架构 production-ready 证据。
+7. Production-ready 声明必须要求 Redis required 模式和真实 retriever live gate 通过；
+   legacy direct workflow 不能作为新架构 production-ready 证据。
 
 建议开关：
 

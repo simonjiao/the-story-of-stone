@@ -1,8 +1,8 @@
+#[cfg(test)]
+use crate::answer_rules::rationale_followup_policy_for_question;
 use crate::{
     EvidenceCard,
-    answer_rules::{
-        AttributeAgePolicy, attribute_age_policy, rationale_followup_policy_for_question,
-    },
+    answer_rules::{AttributeAgePolicy, attribute_age_policy},
     normalize_text,
 };
 
@@ -11,6 +11,7 @@ use super::{
     RuntimeQuestionFramePredicate, contains_any_normalized, normalized_terms, predicate_terms,
 };
 
+#[cfg(test)]
 const ATTRIBUTE_INTENTS: &[&str] = &["attribute_query", "attribute_at_event", "attribute_compare"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgeMention {
@@ -28,6 +29,7 @@ enum AgeValue {
 }
 
 impl AgeValue {
+    #[cfg(test)]
     fn lower(self) -> u8 {
         match self {
             Self::Exact(value) => value,
@@ -35,6 +37,7 @@ impl AgeValue {
         }
     }
 
+    #[cfg(test)]
     fn upper(self) -> u8 {
         match self {
             Self::Exact(value) => value,
@@ -58,6 +61,7 @@ struct AgeCue {
     cue: String,
 }
 
+#[cfg(test)]
 pub(crate) fn attribute_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -71,6 +75,7 @@ pub(crate) fn attribute_answer(
     generic_attribute_answer(frame, subject, predicate, cards)
 }
 
+#[cfg(test)]
 fn age_answer(
     frame: &RuntimeQuestionFrame,
     subject: &RuntimeQuestionFrameEntity,
@@ -159,6 +164,7 @@ pub(super) fn attribute_card_support(
     None
 }
 
+#[cfg(test)]
 fn age_compare_answer(
     frame: &RuntimeQuestionFrame,
     subject: &RuntimeQuestionFrameEntity,
@@ -248,6 +254,7 @@ fn push_unique_support_term(terms: &mut Vec<String>, term: &str) {
     }
 }
 
+#[cfg(test)]
 fn generic_attribute_answer(
     frame: &RuntimeQuestionFrame,
     subject: &RuntimeQuestionFrameEntity,
@@ -291,6 +298,7 @@ fn generic_attribute_answer(
     ))
 }
 
+#[cfg(test)]
 fn age_mentions_for_entity(
     entity: &RuntimeQuestionFrameEntity,
     cards: &[EvidenceCard],
