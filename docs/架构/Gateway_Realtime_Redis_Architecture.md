@@ -1017,7 +1017,7 @@ Gateway 不处理音频。必须明确拒绝：
 示例方向，不绑定精确版本：
 
 ```toml
-axum = { version = "0.8", features = ["macros", "json", "ws"] }
+axum = { version = "=0.8.8", features = ["macros", "json", "ws"] }
 redis = { version = "...", features = ["tokio-comp", "connection-manager"] }
 ```
 

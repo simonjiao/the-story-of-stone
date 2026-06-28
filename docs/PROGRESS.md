@@ -244,6 +244,39 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
     paused worker 的细粒度安全点在 P6 与 Runtime live sink 中继续补齐。
   - background webhook 尚未实现，仍按设计留到 P7 smoke/runbook 与后续 webhook worker。
 
+### 2026-06-29 P5 realtime WebSocket text protocol
+
+- P5 新增 `/v1/realtime/ws`：
+  - WebSocket handshake 复用 Gateway auth/rate limit。
+  - 只接受 JSON text frame；binary frame 返回 error 后关闭。
+  - `input_audio.*` 和 `output_audio.*` 明确拒绝，Gateway 不承担音频处理。
+  - client event 校验 `schema_version`、`event_id` 去重、递增 sequence、buffer 长度和
+    forbidden control fields。
+  - 支持 `session.start`、`input_text.delta`、`input_text.commit`、`response.create`、
+    `response.cancel`、`response.resume`、`response.action.submit`、`ping` 和
+    `session.close`。
+  - `input_text.delta` 只更新 session buffer 并返回 ack，不创建 RQA job。
+  - `input_text.commit + response.create` 通过 `RunApiType::RealtimeWs` 创建同一
+    Run/Response state 和 response job。
+  - WS fan-out 从同一个 `ResponseEventStore` 读取 public projection；不会重新生成
+    RQA 内容，也不会暴露 `trace_id`。
+  - `response.cancel` 写同一 control/event stream；`response.resume` 按 sequence replay。
+  - `response.action.submit` 复用 P4 的 waiting action、idempotency、expiry 和 audit 规则。
+- 依赖与配置：
+  - `axum` 固定为 `=0.8.8` 并启用 `ws` feature；原因是 `axum 0.8.9` 依赖当前 registry
+    不可用的 `tokio-tungstenite 0.29`。
+  - 新增 `TONGLINGYU_REALTIME_MAX_BUFFER_CHARS`，compose 默认 4000。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `realtime_` 通过，3 个测试。
+- 当前边界：
+  - P5 fan-out 依赖 P2 worker 产出事件；Runtime workflow 内部 step-level live emit
+    仍在 P6 补齐。
+  - WS session buffer 当前为连接内状态，断线后只通过 `response.resume` 恢复 response
+    event，不恢复未 commit 的 delta。
+
 ## 验证边界
 
 必须区分三类验证：

@@ -528,6 +528,7 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         ))),
         response_job_max_attempts: 3,
         response_sync_wait_secs: 2,
+        realtime_max_buffer_chars: 4000,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -1466,6 +1467,318 @@ async fn run_action_submit_restores_waiting_run_idempotently() {
     assert_eq!(events.matches("\"action_status\":\"submitted\"").count(), 1);
     assert!(!events.contains("trace_id"));
 
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn realtime_rejects_audio_sequence_replay_and_forbidden_fields() {
+    let mut session = RealtimeSessionState::new(8);
+    let audio_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-audio",
+        "type": "input_audio.delta",
+        "sequence": 1,
+        "payload": {}
+    }))
+    .expect("audio event");
+    let audio_error = realtime_validate_client_event(&session, &audio_event).unwrap_err();
+    assert_eq!(audio_error.code, "audio_frame_rejected");
+
+    let valid_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-1",
+        "type": "input_text.delta",
+        "sequence": 1,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("valid event");
+    realtime_validate_client_event(&session, &valid_event).expect("valid");
+    realtime_record_client_event(&mut session, &valid_event);
+
+    let replay_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-2",
+        "type": "input_text.delta",
+        "sequence": 1,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("replay event");
+    let replay_error = realtime_validate_client_event(&session, &replay_event).unwrap_err();
+    assert_eq!(replay_error.code, "sequence_regressed");
+
+    let duplicate_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-1",
+        "type": "input_text.delta",
+        "sequence": 2,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("duplicate event");
+    let duplicate_error = realtime_validate_client_event(&session, &duplicate_event).unwrap_err();
+    assert_eq!(duplicate_error.code, "duplicate_event_id");
+
+    let forbidden_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-3",
+        "type": "input_text.commit",
+        "sequence": 3,
+        "payload": {"text": "宝玉", "trace_id": "client-forged"}
+    }))
+    .expect("forbidden event");
+    let forbidden_error = realtime_validate_client_event(&session, &forbidden_event).unwrap_err();
+    assert_eq!(forbidden_error.code, "forbidden_control_fields");
+
+    let oversized_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-4",
+        "type": "input_text.commit",
+        "sequence": 4,
+        "payload": {"text": "一二三四五六七八九"}
+    }))
+    .expect("oversized event");
+    let oversized_error = realtime_validate_client_event(&session, &oversized_event).unwrap_err();
+    assert_eq!(oversized_error.code, "input_too_large");
+}
+
+#[tokio::test]
+async fn realtime_commit_create_resume_and_cancel_share_response_events() {
+    let db_path = temp_gateway_db_path("gateway-realtime-create");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("realtime-user");
+    let mut session = RealtimeSessionState::new(4000);
+    session.session_id = "session-realtime-test".to_string();
+
+    let delta_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-delta-1",
+            "type": "input_text.delta",
+            "sequence": 1,
+            "payload": {"text": "宝玉的玉"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(delta_frames.join("\n").contains("input_text.delta.ack"));
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        assert!(queue.claim_next("test-worker", 0).expect("claim").is_none());
+    }
+
+    let commit_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-commit-1",
+            "type": "input_text.commit",
+            "sequence": 2,
+            "payload": {"text": ""}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(commit_frames.join("\n").contains("input_text.committed"));
+
+    let create_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-create-1",
+            "type": "response.create",
+            "sequence": 3,
+            "payload": {"text": ""}
+        })
+        .to_string(),
+    )
+    .await;
+    let create_body = create_frames.join("\n");
+    assert!(create_body.contains("\"type\":\"response.created\""));
+    assert!(!create_body.contains("trace_id"));
+
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued realtime job")
+    };
+    let response_id = lease.job.response_id.clone();
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let fanout_frames = realtime_collect_subscription_frames(state.clone(), &mut session);
+    let fanout_body = fanout_frames.join("\n");
+    assert!(fanout_body.contains("\"type\":\"output_text.delta\""));
+    assert!(fanout_body.contains("\"type\":\"response.completed\""));
+    assert!(fanout_body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(!fanout_body.contains("trace_id"));
+
+    let resume_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-resume-1",
+            "type": "response.resume",
+            "response_id": response_id,
+            "sequence": 4,
+            "payload": {"after": 1}
+        })
+        .to_string(),
+    )
+    .await;
+    let resume_body = resume_frames.join("\n");
+    assert!(!resume_body.contains("\"type\":\"response.created\""));
+    assert!(resume_body.contains("\"type\":\"response.completed\""));
+
+    let cancel_create_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-create-2",
+            "type": "response.create",
+            "sequence": 5,
+            "payload": {"text": "宝玉的玉第一次怎么来的？"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(
+        cancel_create_frames
+            .join("\n")
+            .contains("\"type\":\"response.created\"")
+    );
+    let cancel_lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued cancel job")
+    };
+    let cancel_response_id = cancel_lease.job.response_id.clone();
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .complete(cancel_lease)
+            .expect("discard queued cancel job");
+    }
+
+    let cancel_frames = realtime_handle_text_frame(
+        state,
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-cancel-1",
+            "type": "response.cancel",
+            "response_id": cancel_response_id,
+            "sequence": 6,
+            "payload": {}
+        })
+        .to_string(),
+    )
+    .await;
+    let cancel_body = cancel_frames.join("\n");
+    assert!(cancel_body.contains("\"type\":\"response.status\""));
+    assert!(cancel_body.contains("\"type\":\"response.canceled\""));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn realtime_action_submit_restores_waiting_response() {
+    let db_path = temp_gateway_db_path("gateway-realtime-action");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("realtime-action-user");
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "等待实时审批",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .expect("start response");
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseRequiresAction,
+        json!({
+            "action_id": "approval-ws-1",
+            "action_type": "human_approval",
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        }),
+        Some(ResponseStatus::RequiresAction),
+        None,
+        None,
+        None,
+    )
+    .expect("require action");
+
+    let mut session = RealtimeSessionState::new(4000);
+    session.session_id = "session-realtime-action-test".to_string();
+    let frames = realtime_handle_text_frame(
+        state,
+        &headers,
+        "realtime-action-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-action-1",
+            "type": "response.action.submit",
+            "response_id": response_id,
+            "sequence": 1,
+            "payload": {
+                "action_id": "approval-ws-1",
+                "approved": true,
+                "idempotency_key": "approval-ws-1-once"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let body = frames.join("\n");
+    assert!(body.contains("\"type\":\"response.requires_action\""));
+    assert!(body.contains("\"action_status\":\"submitted\""));
+    assert!(!body.contains("trace_id"));
     remove_sqlite_file_set(&db_path);
 }
 

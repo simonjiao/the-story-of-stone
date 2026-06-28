@@ -21,7 +21,7 @@ tonglingyu-runtime = { path = "crates/tonglingyu-runtime" }
 
 anyhow = "1"
 async-trait = "0.1"
-axum = { version = "0.8", features = ["macros", "json"] }
+axum = { version = "=0.8.8", features = ["macros", "json", "ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 futures-util = "0.3"

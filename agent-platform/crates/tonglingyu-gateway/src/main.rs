@@ -12,13 +12,16 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    extract::{
+        DefaultBodyLimit, Path as AxumPath, Query, State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use clap::{Parser, Subcommand, ValueEnum};
-use futures_util::stream;
+use futures_util::{SinkExt, StreamExt, stream};
 use reqwest::header;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -621,6 +624,12 @@ struct ServeArgs {
     response_worker_reclaim_interval_secs: u64,
     #[arg(
         long,
+        env = "TONGLINGYU_REALTIME_MAX_BUFFER_CHARS",
+        default_value_t = 4000
+    )]
+    realtime_max_buffer_chars: usize,
+    #[arg(
+        long,
         env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
         default_value_t = true
     )]
@@ -681,6 +690,7 @@ struct AppState {
     response_jobs: Arc<Mutex<ResponseJobQueueBackend>>,
     response_job_max_attempts: u32,
     response_sync_wait_secs: u64,
+    realtime_max_buffer_chars: usize,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -756,6 +766,93 @@ struct ResponseEventSseState {
     response_id: String,
     after_sequence: u64,
     done: bool,
+}
+
+const REALTIME_CLIENT_EVENT_SCHEMA_VERSION: &str = "tonglingyu.realtime.client_event.v1";
+const REALTIME_SERVER_EVENT_SCHEMA_VERSION: &str = "tonglingyu.realtime.server_event.v1";
+
+const REALTIME_FORBIDDEN_CLIENT_KEYS: &[&str] = &[
+    "profile",
+    "profiles",
+    "agent",
+    "agents",
+    "tool",
+    "tools",
+    "tool_policy",
+    "tool_policy_digest",
+    "reviewer",
+    "skip_review",
+    "context_pack",
+    "context_projection",
+    "memory_card",
+    "memory_read_refs",
+    "runtime_adapter",
+    "trace_id",
+    "raw_prompt",
+    "raw_memory",
+    "provider_request",
+    "provider_response",
+];
+
+#[derive(Debug, Deserialize)]
+struct RealtimeClientEvent {
+    schema_version: Option<String>,
+    event_id: Option<String>,
+    #[serde(rename = "type")]
+    event_type: String,
+    session_id: Option<String>,
+    response_id: Option<String>,
+    sequence: Option<u64>,
+    payload: Option<Value>,
+}
+
+#[derive(Debug)]
+struct RealtimeSessionState {
+    session_id: String,
+    server_sequence: u64,
+    last_client_sequence: u64,
+    seen_client_event_ids: BTreeSet<String>,
+    buffer: String,
+    committed_text: Option<String>,
+    subscriptions: BTreeMap<String, u64>,
+    max_buffer_chars: usize,
+    closed: bool,
+}
+
+impl RealtimeSessionState {
+    fn new(max_buffer_chars: usize) -> Self {
+        Self {
+            session_id: format!("session_{}", uuid::Uuid::now_v7().simple()),
+            server_sequence: 0,
+            last_client_sequence: 0,
+            seen_client_event_ids: BTreeSet::new(),
+            buffer: String::new(),
+            committed_text: None,
+            subscriptions: BTreeMap::new(),
+            max_buffer_chars,
+            closed: false,
+        }
+    }
+
+    fn next_server_sequence(&mut self) -> u64 {
+        self.server_sequence += 1;
+        self.server_sequence
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RealtimeProtocolError {
+    code: &'static str,
+    message: String,
+}
+
+impl RealtimeProtocolError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2140,6 +2237,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         response_jobs: Arc::new(Mutex::new(response_jobs)),
         response_job_max_attempts: args.response_job_max_attempts,
         response_sync_wait_secs: args.response_sync_wait_secs,
+        realtime_max_buffer_chars: args.realtime_max_buffer_chars,
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -2201,6 +2299,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/responses", post(create_response_endpoint))
         .route("/v1/responses/{response_id}", get(get_response_endpoint))
+        .route("/v1/realtime/ws", get(realtime_ws_endpoint))
         .route(
             "/v1/responses/{response_id}/events",
             get(response_events_endpoint),
@@ -4407,6 +4506,759 @@ async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         }]
     }))
     .into_response()
+}
+
+async fn realtime_ws_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    ws.on_upgrade(move |socket| realtime_ws_session(state, headers, auth_subject, socket))
+}
+
+async fn realtime_ws_session(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    auth_subject: String,
+    socket: WebSocket,
+) {
+    let mut session = RealtimeSessionState::new(state.realtime_max_buffer_chars);
+    let (mut sender, mut receiver) = socket.split();
+    let session_id = session.session_id.clone();
+    let started = realtime_server_event_frame(
+        &mut session,
+        "session.started",
+        None,
+        json!({"session_id": session_id}),
+    );
+    if sender.send(WsMessage::Text(started.into())).await.is_err() {
+        return;
+    }
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            maybe_message = receiver.next() => {
+                let Some(message) = maybe_message else {
+                    break;
+                };
+                match message {
+                    Ok(WsMessage::Text(text)) => {
+                        let frames = realtime_handle_text_frame(
+                            state.clone(),
+                            &headers,
+                            &auth_subject,
+                            &mut session,
+                            text.as_str(),
+                        ).await;
+                        if realtime_send_frames(&mut sender, frames).await.is_err() {
+                            break;
+                        }
+                        if session.closed {
+                            let _ = sender.send(WsMessage::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Ok(WsMessage::Binary(_)) => {
+                        let frame = realtime_error_frame(
+                            &mut session,
+                            "binary_frame_rejected",
+                            "binary realtime frames are not supported",
+                        );
+                        let _ = sender.send(WsMessage::Text(frame.into())).await;
+                        let _ = sender.send(WsMessage::Close(None)).await;
+                        break;
+                    }
+                    Ok(WsMessage::Ping(value)) => {
+                        let _ = sender.send(WsMessage::Pong(value)).await;
+                    }
+                    Ok(WsMessage::Pong(_)) => {}
+                    Ok(WsMessage::Close(_)) => break,
+                    Err(_) => break,
+                }
+            }
+            _ = ticker.tick() => {
+                let frames = realtime_collect_subscription_frames(state.clone(), &mut session);
+                if realtime_send_frames(&mut sender, frames).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn realtime_send_frames<S>(sender: &mut S, frames: Vec<String>) -> Result<(), axum::Error>
+where
+    S: futures_util::Sink<WsMessage, Error = axum::Error> + Unpin,
+{
+    for frame in frames {
+        sender.send(WsMessage::Text(frame.into())).await?;
+    }
+    Ok(())
+}
+
+async fn realtime_handle_text_frame(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &mut RealtimeSessionState,
+    text: &str,
+) -> Vec<String> {
+    let event = match serde_json::from_str::<RealtimeClientEvent>(text) {
+        Ok(event) => event,
+        Err(_) => {
+            return vec![realtime_error_frame(
+                session,
+                "invalid_json",
+                "realtime client event must be a JSON text frame",
+            )];
+        }
+    };
+    if let Err(error) = realtime_validate_client_event(session, &event) {
+        if matches!(
+            error.code,
+            "audio_frame_rejected" | "forbidden_control_fields" | "input_too_large"
+        ) {
+            session.closed = error.code == "audio_frame_rejected";
+        }
+        return vec![realtime_error_frame(session, error.code, &error.message)];
+    }
+    realtime_record_client_event(session, &event);
+    realtime_handle_client_event(state, headers, auth_subject, session, event).await
+}
+
+async fn realtime_handle_client_event(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &mut RealtimeSessionState,
+    event: RealtimeClientEvent,
+) -> Vec<String> {
+    match event.event_type.as_str() {
+        "session.start" => {
+            if let Some(session_id) = event
+                .session_id
+                .or_else(|| payload_string(event.payload.as_ref(), "session_id"))
+                .filter(|value| !value.trim().is_empty())
+            {
+                session.session_id = session_id;
+            }
+            vec![realtime_server_event_frame(
+                session,
+                "session.started",
+                None,
+                json!({"session_id": session.session_id}),
+            )]
+        }
+        "input_text.delta" => {
+            let text = payload_string(event.payload.as_ref(), "text").unwrap_or_default();
+            session.buffer = text;
+            vec![realtime_server_event_frame(
+                session,
+                "input_text.delta.ack",
+                None,
+                json!({"char_count": session.buffer.chars().count()}),
+            )]
+        }
+        "input_text.commit" => {
+            let text = payload_string(event.payload.as_ref(), "text")
+                .unwrap_or_else(|| session.buffer.clone());
+            session.committed_text = Some(text.clone());
+            session.buffer.clear();
+            vec![realtime_server_event_frame(
+                session,
+                "input_text.committed",
+                None,
+                json!({"char_count": text.chars().count()}),
+            )]
+        }
+        "response.create" => {
+            match realtime_create_response(state.clone(), headers, auth_subject, session, &event) {
+                Ok(response_id) => {
+                    session.subscriptions.insert(response_id.clone(), 0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "response.cancel" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.cancel requires response_id",
+                )];
+            };
+            match realtime_cancel_response(state.clone(), headers, auth_subject, &response_id) {
+                Ok(()) => {
+                    session
+                        .subscriptions
+                        .entry(response_id.clone())
+                        .or_insert(0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "response.resume" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.resume requires response_id",
+                )];
+            };
+            if let Err(error) =
+                realtime_authorize_response(&state, headers, auth_subject, &response_id)
+            {
+                return vec![realtime_error_frame(session, error.code, &error.message)];
+            }
+            let after = realtime_event_after_sequence(&event);
+            session.subscriptions.insert(response_id.clone(), after);
+            realtime_collect_response_frames(state, session, &response_id)
+        }
+        "response.action.submit" | "action.submit" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.action.submit requires response_id",
+                )];
+            };
+            let payload = event.payload.clone().unwrap_or_else(|| json!({}));
+            let Some(action_id) = payload_string(Some(&payload), "action_id") else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_action_id",
+                    "response.action.submit requires payload.action_id",
+                )];
+            };
+            match realtime_submit_action(
+                state.clone(),
+                headers,
+                auth_subject,
+                &response_id,
+                &action_id,
+                payload,
+            ) {
+                Ok(()) => {
+                    session
+                        .subscriptions
+                        .entry(response_id.clone())
+                        .or_insert(0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "ping" => vec![realtime_server_event_frame(
+            session,
+            "pong",
+            None,
+            json!({"session_id": session.session_id}),
+        )],
+        "session.close" => {
+            session.closed = true;
+            vec![realtime_server_event_frame(
+                session,
+                "session.closed",
+                None,
+                json!({"session_id": session.session_id}),
+            )]
+        }
+        _ => vec![realtime_error_frame(
+            session,
+            "unsupported_event_type",
+            "realtime client event type is not supported",
+        )],
+    }
+}
+
+fn realtime_validate_client_event(
+    session: &RealtimeSessionState,
+    event: &RealtimeClientEvent,
+) -> Result<(), RealtimeProtocolError> {
+    if let Some(schema_version) = event.schema_version.as_deref() {
+        if schema_version != REALTIME_CLIENT_EVENT_SCHEMA_VERSION {
+            return Err(RealtimeProtocolError::new(
+                "invalid_schema_version",
+                "unsupported realtime client schema_version",
+            ));
+        }
+    }
+    if event.event_type.starts_with("input_audio.") || event.event_type.starts_with("output_audio.")
+    {
+        return Err(RealtimeProtocolError::new(
+            "audio_frame_rejected",
+            "audio realtime frames are not supported by gateway",
+        ));
+    }
+    if let Some(event_id) = event.event_id.as_deref() {
+        if session.seen_client_event_ids.contains(event_id) {
+            return Err(RealtimeProtocolError::new(
+                "duplicate_event_id",
+                "realtime client event_id was already processed",
+            ));
+        }
+    }
+    if let Some(sequence) = event.sequence {
+        if sequence <= session.last_client_sequence {
+            return Err(RealtimeProtocolError::new(
+                "sequence_regressed",
+                "realtime client sequence must strictly increase",
+            ));
+        }
+    }
+    if let Some(payload) = event.payload.as_ref() {
+        if realtime_contains_forbidden_client_key(payload) {
+            return Err(RealtimeProtocolError::new(
+                "forbidden_control_fields",
+                "realtime payload contains fields reserved for gateway control",
+            ));
+        }
+        if matches!(
+            event.event_type.as_str(),
+            "input_text.delta" | "input_text.commit"
+        ) {
+            let text_len = payload_string(Some(payload), "text")
+                .unwrap_or_default()
+                .chars()
+                .count();
+            if text_len > session.max_buffer_chars {
+                return Err(RealtimeProtocolError::new(
+                    "input_too_large",
+                    "realtime text input exceeds max buffer size",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn realtime_record_client_event(session: &mut RealtimeSessionState, event: &RealtimeClientEvent) {
+    if let Some(event_id) = event.event_id.as_ref() {
+        session.seen_client_event_ids.insert(event_id.clone());
+    }
+    if let Some(sequence) = event.sequence {
+        session.last_client_sequence = sequence;
+    }
+}
+
+fn realtime_create_response(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &RealtimeSessionState,
+    event: &RealtimeClientEvent,
+) -> Result<String, RealtimeProtocolError> {
+    let text = payload_string(event.payload.as_ref(), "text")
+        .or_else(|| session.committed_text.clone())
+        .ok_or_else(|| {
+            RealtimeProtocolError::new(
+                "missing_input",
+                "response.create requires committed text or payload.text",
+            )
+        })?;
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.to_string());
+    let user_id = header_value(headers, "x-tonglingyu-user-id")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .or_else(|| header_value(headers, "x-user-id"));
+    let idempotency_key = payload_string(event.payload.as_ref(), "idempotency_key")
+        .or_else(|| event.event_id.clone());
+    let request = json!({
+        "model": state.model_id,
+        "input": text,
+        "background": true,
+        "stream": false,
+        "session_id": session.session_id,
+        "metadata": {"mode": "realtime_ws"}
+    });
+    let identity = normalize_run(RunNormalizationInput {
+        api_type: RunApiType::RealtimeWs,
+        model: state.model_id.clone(),
+        session_id: Some(session.session_id.clone()),
+        auth_subject: auth_subject.to_string(),
+        tenant_id,
+        user_id,
+        idempotency_key,
+        metadata: json!({"mode": "realtime_ws"}),
+        request: request.clone(),
+        stream: false,
+        background: true,
+    })
+    .map_err(|error| RealtimeProtocolError::new(error.code(), "response.create was rejected"))?;
+    let created = create_response_state(&state, &identity).map_err(|_| {
+        RealtimeProtocolError::new(
+            "response_create_failed",
+            "response state could not be created",
+        )
+    })?;
+    if created.should_enqueue {
+        enqueue_response_job(&state, &identity, request).map_err(|_| {
+            RealtimeProtocolError::new("response_job_enqueue_failed", "response job queue failed")
+        })?;
+    }
+    Ok(created.state_record.response_id)
+}
+
+fn realtime_cancel_response(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+) -> Result<(), RealtimeProtocolError> {
+    realtime_authorize_response(&state, headers, auth_subject, response_id)?;
+    let mut store = state.response_store.lock().map_err(|_| {
+        RealtimeProtocolError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    let state_record = store
+        .state(response_id)
+        .map_err(|_| RealtimeProtocolError::new("response_not_found", "response not found"))?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    store
+        .append_control_event(
+            response_id,
+            "cancel_requested",
+            json!({"reason": "client_cancelled"}),
+        )
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel control event failed"))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
+            event_type: ResponseEventType::ResponseStatus,
+            payload: json!({"status": "canceling", "reason": "client_cancelled"}),
+            status_update: Some(ResponseStatus::Canceling),
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel status event failed"))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
+            event_type: ResponseEventType::ResponseCanceled,
+            payload: json!({"status": "canceled", "reason": "client_cancelled"}),
+            status_update: Some(ResponseStatus::Canceled),
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel terminal event failed"))?;
+    Ok(())
+}
+
+fn realtime_submit_action(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+    action_id: &str,
+    payload: Value,
+) -> Result<(), RealtimeProtocolError> {
+    let state_record = realtime_authorize_response(&state, headers, auth_subject, response_id)?;
+    if state_record.status.is_terminal() {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_rejected",
+            json!({"reason": "run_terminal", "source": "realtime_ws"}),
+            None,
+        );
+        return Err(RealtimeProtocolError::new(
+            "run_terminal",
+            "terminal run cannot accept actions",
+        ));
+    }
+    let idempotency_digest = action_idempotency_digest(headers, &payload);
+    let events = response_events_for_id(&state, response_id).map_err(|_| {
+        RealtimeProtocolError::new("response_events_unavailable", "response events unavailable")
+    })?;
+    if let Some(digest) = idempotency_digest.as_deref() {
+        if action_submission_already_recorded(&events, action_id, digest) {
+            return Ok(());
+        }
+    }
+    let waiting_action = waiting_run_action(&events, action_id);
+    if state_record.status != ResponseStatus::RequiresAction || waiting_action.is_none() {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_rejected",
+            json!({"reason": "action_not_available", "source": "realtime_ws"}),
+            None,
+        );
+        return Err(RealtimeProtocolError::new(
+            "action_not_available",
+            "action is not waiting for input",
+        ));
+    }
+    let waiting_action = waiting_action.expect("checked waiting action");
+    if waiting_action_expired(&waiting_action) {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_expired",
+            json!({"reason": "action_expired", "source": "realtime_ws"}),
+            None,
+        );
+        append_response_event_for_response_id(
+            &state,
+            response_id,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "status": "expired",
+                "error": {
+                    "code": "action_expired",
+                    "message": "waiting action expired before submission",
+                },
+                "action_id": action_id,
+            }),
+            Some(ResponseStatus::Expired),
+            None,
+            None,
+            None,
+        )
+        .map_err(|_| RealtimeProtocolError::new("action_expired", "waiting action expired"))?;
+        return Err(RealtimeProtocolError::new(
+            "action_expired",
+            "waiting action expired before submission",
+        ));
+    }
+    append_run_action_audit(
+        &state,
+        response_id,
+        action_id,
+        "action_submitted",
+        json!({
+            "payload": payload,
+            "idempotency_digest": idempotency_digest,
+            "waiting_event_sequence": waiting_action.sequence,
+            "source": "realtime_ws",
+        }),
+        None,
+    )
+    .map_err(|_| RealtimeProtocolError::new("action_submit_failed", "action audit failed"))?;
+    append_response_event_for_response_id(
+        &state,
+        response_id,
+        ResponseEventType::ResponseStatus,
+        json!({
+            "status": "in_progress",
+            "reason": "action_submitted",
+            "action_id": action_id,
+            "action_status": "submitted",
+            "idempotency_digest": idempotency_digest,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .map_err(|_| {
+        RealtimeProtocolError::new("action_submit_failed", "action status update failed")
+    })?;
+    Ok(())
+}
+
+fn realtime_authorize_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+) -> Result<ResponseStateRecord, RealtimeProtocolError> {
+    let state_record = response_state_for_id(state, response_id)
+        .map_err(|_| RealtimeProtocolError::new("response_not_found", "response not found"))?;
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return Err(RealtimeProtocolError::new(
+            "response_not_found",
+            "response not found",
+        ));
+    }
+    Ok(state_record)
+}
+
+fn realtime_collect_subscription_frames(
+    state: Arc<AppState>,
+    session: &mut RealtimeSessionState,
+) -> Vec<String> {
+    let response_ids = session.subscriptions.keys().cloned().collect::<Vec<_>>();
+    response_ids
+        .into_iter()
+        .flat_map(|response_id| {
+            realtime_collect_response_frames(state.clone(), session, &response_id)
+        })
+        .collect()
+}
+
+fn realtime_collect_response_frames(
+    state: Arc<AppState>,
+    session: &mut RealtimeSessionState,
+    response_id: &str,
+) -> Vec<String> {
+    let after = session
+        .subscriptions
+        .get(response_id)
+        .copied()
+        .unwrap_or_default();
+    let (state_record, events) = {
+        let store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return vec![realtime_error_frame(
+                    session,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                )];
+            }
+        };
+        let state_record = match store.state(response_id) {
+            Ok(state_record) => state_record,
+            Err(_) => {
+                session.subscriptions.remove(response_id);
+                return vec![realtime_error_frame(
+                    session,
+                    "response_not_found",
+                    "response not found",
+                )];
+            }
+        };
+        let events = match store.read_after(response_id, Some(after)) {
+            Ok(events) => events,
+            Err(_) => {
+                return vec![realtime_error_frame(
+                    session,
+                    "response_events_unavailable",
+                    "response events unavailable",
+                )];
+            }
+        };
+        (state_record, events)
+    };
+    let mut frames = Vec::new();
+    let mut max_sequence = after;
+    for event in events {
+        max_sequence = max_sequence.max(event.sequence);
+        if let Some(frame) = realtime_response_event_frame(&event) {
+            frames.push(frame);
+        }
+    }
+    if state_record.status.is_terminal() {
+        session.subscriptions.remove(response_id);
+    } else {
+        session
+            .subscriptions
+            .insert(response_id.to_string(), max_sequence);
+    }
+    frames
+}
+
+fn realtime_response_event_frame(event: &response_events::ResponseEvent) -> Option<String> {
+    let public = event.public_projection()?;
+    let payload = public.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let event_type = public
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    Some(
+        json!({
+            "schema_version": REALTIME_SERVER_EVENT_SCHEMA_VERSION,
+            "event_id": event.event_id,
+            "type": event_type,
+            "session_id": event.session_id,
+            "response_id": event.response_id,
+            "sequence": event.sequence,
+            "payload": payload,
+        })
+        .to_string(),
+    )
+}
+
+fn realtime_server_event_frame(
+    session: &mut RealtimeSessionState,
+    event_type: &str,
+    response_id: Option<&str>,
+    payload: Value,
+) -> String {
+    json!({
+        "schema_version": REALTIME_SERVER_EVENT_SCHEMA_VERSION,
+        "event_id": format!("rt_evt_{}", uuid::Uuid::now_v7().simple()),
+        "type": event_type,
+        "session_id": session.session_id,
+        "response_id": response_id,
+        "sequence": session.next_server_sequence(),
+        "payload": payload,
+    })
+    .to_string()
+}
+
+fn realtime_error_frame(
+    session: &mut RealtimeSessionState,
+    code: &'static str,
+    message: &str,
+) -> String {
+    realtime_server_event_frame(
+        session,
+        "error",
+        None,
+        json!({
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        }),
+    )
+}
+
+fn realtime_event_response_id(event: &RealtimeClientEvent) -> Option<String> {
+    event
+        .response_id
+        .clone()
+        .or_else(|| payload_string(event.payload.as_ref(), "response_id"))
+}
+
+fn realtime_event_after_sequence(event: &RealtimeClientEvent) -> u64 {
+    event
+        .payload
+        .as_ref()
+        .and_then(|payload| {
+            payload
+                .get("after")
+                .or_else(|| payload.get("last_event_id"))
+                .or_else(|| payload.get("sequence"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or_default()
+}
+
+fn payload_string(payload: Option<&Value>, key: &str) -> Option<String> {
+    payload?
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn realtime_contains_forbidden_client_key(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            REALTIME_FORBIDDEN_CLIENT_KEYS
+                .iter()
+                .any(|forbidden| key.eq_ignore_ascii_case(forbidden))
+                || realtime_contains_forbidden_client_key(value)
+        }),
+        Value::Array(values) => values.iter().any(realtime_contains_forbidden_client_key),
+        _ => false,
+    }
 }
 
 async fn create_response_endpoint(
