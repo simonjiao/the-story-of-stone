@@ -5614,6 +5614,7 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
             | "draft_claim_exceeds_evidence_boundary"
             | "draft_claim_uses_only_supplemental_evidence"
             | "draft_claim_ref_text_unsupported"
+            | "draft_claim_ref_focus_mismatch"
             | "draft_missing_open_relation_object"
             | "draft_missing_open_relation_evidence_cue"
             | "draft_stops_for_user_opt_in"
@@ -5628,7 +5629,21 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
 }
 
 fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
-    matches!(reason, "draft_claim_ref_text_unsupported")
+    matches!(
+        reason,
+        "coverage_assessment_not_passed"
+            | "coverage_assessment_status_missing"
+            | "claim_evidence_ref_outside_package"
+            | "claim_evidence_refs_unavailable"
+            | "draft_claim_exceeds_evidence_boundary"
+            | "draft_claim_ref_focus_mismatch"
+            | "draft_claim_ref_text_unsupported"
+            | "draft_claim_uses_only_supplemental_evidence"
+            | "draft_exposes_internal_public_term"
+            | "draft_missing_later_forty_boundary"
+            | "draft_missing_requested_evidence_type_anchor"
+            | "draft_uses_unscoped_later_forty"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6681,6 +6696,7 @@ fn agent_runtime_draft_claim_evidence_support_rejection(
         .iter()
         .map(|card| (card.evidence_id.as_str(), card))
         .collect::<BTreeMap<_, _>>();
+    let question_focus_terms = question_focus_terms_for_evidence_support(&package.question);
     for (index, claim) in extraction.claim_statements.iter().enumerate() {
         let refs = extraction
             .claim_evidence_refs
@@ -6704,8 +6720,115 @@ fn agent_runtime_draft_claim_evidence_support_rejection(
         if !draft_claim_refs_textually_support(claim, &referenced_cards) {
             return Some("draft_claim_ref_text_unsupported");
         }
+        if !draft_claim_refs_match_question_focus(claim, &referenced_cards, &question_focus_terms) {
+            return Some("draft_claim_ref_focus_mismatch");
+        }
     }
     None
+}
+
+fn draft_claim_refs_match_question_focus(
+    claim: &str,
+    cards: &[&EvidenceCard],
+    question_focus_terms: &[String],
+) -> bool {
+    if question_focus_terms.is_empty() {
+        return true;
+    }
+    let claim_text = normalize_text(claim);
+    if claim_text.contains("证据不足")
+        || claim_text.contains("未见")
+        || claim_text.contains("不能可靠")
+        || claim_text.contains("不能确定")
+    {
+        return true;
+    }
+    let evidence_text = cards
+        .iter()
+        .map(|card| format!("{}\n{}", card.source_title, card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evidence_text = normalize_text(&evidence_text);
+    question_focus_terms
+        .iter()
+        .any(|term| evidence_text.contains(term))
+}
+
+fn question_focus_terms_for_evidence_support(question: &str) -> Vec<String> {
+    let normalized = normalize_text(question);
+    let generic_terms = [
+        "关于",
+        "中的",
+        "证据",
+        "批语",
+        "脂批",
+        "正文",
+        "原文",
+        "材料",
+        "结局",
+        "命运",
+        "几次",
+        "多少",
+        "什么",
+        "怎么",
+        "如何",
+        "为何",
+        "为什么",
+        "说明",
+        "介绍",
+        "回答",
+        "是否",
+        "有没有",
+        "是不是",
+        "第几",
+        "哪一",
+        "哪回",
+    ];
+    let mut terms = Vec::new();
+    let mut run = String::new();
+    for ch in normalized.chars() {
+        if is_cjk(ch) {
+            run.push(ch);
+        } else if !run.is_empty() {
+            push_question_focus_ngrams(&mut terms, &run, &generic_terms);
+            run.clear();
+        }
+    }
+    if !run.is_empty() {
+        push_question_focus_ngrams(&mut terms, &run, &generic_terms);
+    }
+    terms.sort_by_key(|term| std::cmp::Reverse(term.chars().count()));
+    terms
+}
+
+fn push_question_focus_ngrams(terms: &mut Vec<String>, run: &str, generic_terms: &[&str]) {
+    let chars = run.chars().collect::<Vec<_>>();
+    for width in (2..=4).rev() {
+        if chars.len() < width {
+            continue;
+        }
+        for start in 0..=chars.len() - width {
+            let term = chars[start..start + width].iter().collect::<String>();
+            if question_focus_term_is_substantive(&term, generic_terms) {
+                push_term(terms, &term);
+            }
+        }
+    }
+}
+
+fn question_focus_term_is_substantive(term: &str, generic_terms: &[&str]) -> bool {
+    if generic_terms
+        .iter()
+        .any(|generic| term == normalize_text(generic))
+    {
+        return false;
+    }
+    if generic_question_term(term) {
+        return false;
+    }
+    !term
+        .chars()
+        .all(|ch| matches!(ch, '的' | '了' | '呢' | '吗' | '麼' | '么'))
 }
 
 fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> bool {

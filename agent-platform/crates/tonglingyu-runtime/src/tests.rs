@@ -2320,7 +2320,9 @@ fn upstream_draft_accepts_claim_ref_with_textual_support() {
     let mut card = sample_card("base_text");
     card.evidence_id = "ev-lianger-stole-jade-supported".to_string();
     card.source_title = "紅樓夢/第五十二回".to_string();
-    card.text = "平兒道：“那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。”".to_string();
+    card.text =
+        "平兒道：“寶玉是偏在你們身上留心用意、爭勝要強的，那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。”"
+            .to_string();
     card.verification_status = "knownledge_retriever_source_backed".to_string();
     let package = create_evidence_package(
         &conn,
@@ -2338,6 +2340,86 @@ fn upstream_draft_accepts_claim_ref_with_textual_support() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["第五十二回良儿偷玉。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        None
+    );
+}
+
+#[test]
+fn upstream_draft_rejects_claim_ref_that_misses_question_focus() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("commentary");
+    card.evidence_id = "ev-afeng-commentary-focus-mismatch".to_string();
+    card.source_title = "脂硯齋重評石頭記/第十五回".to_string();
+    card.text = "第015回｜批语\n總寫阿鳳聰明中的痴人。".to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-xiangyun-focus-mismatch",
+        "关于史湘云的结局，脂批中的证据呢？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("第十五回脂批指出“总写阿凤聪明中的痴人”。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["第十五回脂批指出“总写阿凤聪明中的痴人”。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        Some("draft_claim_ref_focus_mismatch")
+    );
+}
+
+#[test]
+fn upstream_draft_accepts_claim_ref_that_matches_question_focus() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("commentary");
+    card.evidence_id = "ev-xiangyun-judgement-focus".to_string();
+    card.source_title = "正册湘云判词".to_string();
+    card.text = "正册湘云判词写道：几缕飞云，一湾逝水。".to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-xiangyun-focus-supported",
+        "关于史湘云的结局，脂批中的证据呢？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("正册湘云判词写“几缕飞云，一湾逝水”。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["正册湘云判词写“几缕飞云，一湾逝水”。".to_string()],
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -9283,18 +9365,28 @@ fn chapter_location_draft_rejections_are_governed_decisions() {
 }
 
 #[test]
-fn unsupported_claim_ref_rejection_skips_draft_repair() {
-    let application = AgentRuntimeContentApplication {
-        draft_consumed: false,
-        content_used_for_final_answer: false,
-        result_format: "json",
-        rejected_reason: Some("draft_claim_ref_text_unsupported"),
-    };
+fn hard_evidence_rejections_skip_draft_repair() {
+    for reason in [
+        "coverage_assessment_not_passed",
+        "draft_claim_ref_focus_mismatch",
+        "draft_claim_ref_text_unsupported",
+        "draft_missing_requested_evidence_type_anchor",
+    ] {
+        let application = AgentRuntimeContentApplication {
+            draft_consumed: false,
+            content_used_for_final_answer: false,
+            result_format: "json",
+            rejected_reason: Some(reason),
+        };
 
-    assert!(!should_repair_agent_runtime_draft(
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
-        Some(&application),
-    ));
+        assert!(
+            !should_repair_agent_runtime_draft(
+                TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+                Some(&application),
+            ),
+            "{reason} must not trigger draft repair"
+        );
+    }
 }
 
 #[tokio::test]
