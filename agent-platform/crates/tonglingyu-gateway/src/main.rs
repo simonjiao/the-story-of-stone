@@ -11,12 +11,14 @@ use agent_runtime::{
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use futures_util::stream;
 use reqwest::header;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -124,7 +127,7 @@ use crate::plan::{
 #[cfg(test)]
 use crate::response::cached_runtime_stream_events;
 use crate::response::{
-    cache_completion_value, completion_value, public_completion_value,
+    cache_completion_value, completion_value, public_answer_content, public_completion_value,
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
 };
@@ -732,6 +735,17 @@ impl ResponseJobExecutionError {
             message: message.into(),
         }
     }
+}
+
+struct ChatCompletionSseState {
+    state: Arc<AppState>,
+    response_id: String,
+    completion_id: String,
+    model: String,
+    after_sequence: u64,
+    role_sent: bool,
+    emitted_text: String,
+    done: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4398,6 +4412,263 @@ async fn create_run_endpoint(
     Json(payload): Json<Value>,
 ) -> Response {
     create_run_projection(state, headers, payload, RunApiType::Run, "run").await
+}
+
+async fn chat_completions_stream_bridge(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    mut payload: Value,
+    context: GatewayRequestContext,
+) -> Response {
+    if let Value::Object(object) = &mut payload {
+        object
+            .entry("session_id".to_string())
+            .or_insert_with(|| json!(&context.chat_ref));
+        object.insert("stream".to_string(), json!(true));
+    }
+    let input = match run_normalization_input(
+        &state,
+        headers,
+        &payload,
+        context.auth_subject.clone(),
+        RunApiType::ChatCompletions,
+    ) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = match normalize_run(input) {
+        Ok(identity) => identity,
+        Err(error) => return run_normalization_error_response(error, None),
+    };
+    let created = match create_response_state(&state, &identity) {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    if created.should_enqueue {
+        if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            return response;
+        }
+    }
+    chat_completion_sse_response(
+        state,
+        created.state_record.response_id,
+        identity
+            .chat_completion_id
+            .unwrap_or_else(|| format!("chatcmpl_{}", uuid::Uuid::now_v7().simple())),
+        identity.model,
+    )
+}
+
+fn chat_completion_sse_response(
+    state: Arc<AppState>,
+    response_id: String,
+    completion_id: String,
+    model: String,
+) -> Response {
+    let sse_state = ChatCompletionSseState {
+        state,
+        response_id,
+        completion_id,
+        model,
+        after_sequence: 0,
+        role_sent: false,
+        emitted_text: String::new(),
+        done: false,
+    };
+    let body_stream = stream::unfold(sse_state, |mut sse_state| async move {
+        chat_completion_sse_next(&mut sse_state)
+            .await
+            .map(|chunk| (Ok::<Bytes, Infallible>(Bytes::from(chunk)), sse_state))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream_build_failed",
+                "failed to build stream response",
+                None,
+            )
+        })
+}
+
+async fn chat_completion_sse_next(sse_state: &mut ChatCompletionSseState) -> Option<String> {
+    if sse_state.done {
+        return None;
+    }
+    if !sse_state.role_sent {
+        sse_state.role_sent = true;
+        return Some(chat_completion_chunk_sse(
+            &sse_state.completion_id,
+            &sse_state.model,
+            json!({"role": "assistant"}),
+            Value::Null,
+            None,
+        ));
+    }
+    loop {
+        match chat_completion_collect_events(sse_state) {
+            Ok((state_record, events)) => {
+                let mut body = String::new();
+                for event in events {
+                    sse_state.after_sequence = sse_state.after_sequence.max(event.sequence);
+                    let Some(public_event) = event.public_projection() else {
+                        continue;
+                    };
+                    if event.event_type == ResponseEventType::OutputTextDelta {
+                        let piece = public_event
+                            .pointer("/payload/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if piece.is_empty() {
+                            continue;
+                        }
+                        let next_text = format!("{}{}", sse_state.emitted_text, piece);
+                        let safe_text = public_answer_content(&next_text);
+                        if safe_text != next_text {
+                            let replacement = safe_text
+                                .strip_prefix(&sse_state.emitted_text)
+                                .unwrap_or(&safe_text);
+                            if !replacement.is_empty() {
+                                body.push_str(&chat_completion_chunk_sse(
+                                    &sse_state.completion_id,
+                                    &sse_state.model,
+                                    json!({"content": replacement}),
+                                    Value::Null,
+                                    None,
+                                ));
+                            }
+                            sse_state.emitted_text = safe_text;
+                            body.push_str(&chat_completion_final_sse(
+                                &sse_state.completion_id,
+                                &sse_state.model,
+                            ));
+                            sse_state.done = true;
+                            return Some(body);
+                        }
+                        sse_state.emitted_text = next_text;
+                        body.push_str(&chat_completion_chunk_sse(
+                            &sse_state.completion_id,
+                            &sse_state.model,
+                            json!({"content": piece}),
+                            Value::Null,
+                            None,
+                        ));
+                    } else if chat_completion_should_forward_event(&event.event_type) {
+                        body.push_str(&chat_completion_chunk_sse(
+                            &sse_state.completion_id,
+                            &sse_state.model,
+                            json!({}),
+                            Value::Null,
+                            Some(public_event),
+                        ));
+                    }
+                }
+                if state_record.status.is_terminal() {
+                    body.push_str(&chat_completion_final_sse(
+                        &sse_state.completion_id,
+                        &sse_state.model,
+                    ));
+                    sse_state.done = true;
+                }
+                if !body.is_empty() {
+                    return Some(body);
+                }
+            }
+            Err(error_event) => {
+                let mut body = chat_completion_chunk_sse(
+                    &sse_state.completion_id,
+                    &sse_state.model,
+                    json!({}),
+                    Value::Null,
+                    Some(error_event),
+                );
+                body.push_str(&chat_completion_final_sse(
+                    &sse_state.completion_id,
+                    &sse_state.model,
+                ));
+                sse_state.done = true;
+                return Some(body);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn chat_completion_collect_events(
+    sse_state: &ChatCompletionSseState,
+) -> Result<(ResponseStateRecord, Vec<response_events::ResponseEvent>), Value> {
+    let store = sse_state
+        .state
+        .response_store
+        .lock()
+        .map_err(|_| chat_completion_stream_error_event("response_store_unavailable"))?;
+    let state_record = store
+        .state(&sse_state.response_id)
+        .map_err(|_| chat_completion_stream_error_event("response_not_found"))?;
+    let events = store
+        .read_after(&sse_state.response_id, Some(sse_state.after_sequence))
+        .map_err(|_| chat_completion_stream_error_event("response_events_unavailable"))?;
+    Ok((state_record, events))
+}
+
+fn chat_completion_should_forward_event(event_type: &ResponseEventType) -> bool {
+    matches!(
+        event_type,
+        ResponseEventType::ResponseCreated
+            | ResponseEventType::ResponseStatus
+            | ResponseEventType::EvidenceSearching
+            | ResponseEventType::EvidenceFound
+            | ResponseEventType::ReviewStarted
+            | ResponseEventType::ReviewCompleted
+            | ResponseEventType::ResponseCompleted
+            | ResponseEventType::ResponseFailed
+            | ResponseEventType::ResponseCanceled
+    )
+}
+
+fn chat_completion_stream_error_event(code: &str) -> Value {
+    json!({
+        "type": "response.failed",
+        "payload": {
+            "error": {
+                "code": code,
+                "message": "chat completion stream could not read response events",
+            }
+        }
+    })
+}
+
+fn chat_completion_chunk_sse(
+    completion_id: &str,
+    model: &str,
+    delta: Value,
+    finish_reason: Value,
+    tonglingyu_event: Option<Value>,
+) -> String {
+    let mut chunk = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }]
+    });
+    if let Some(event) = tonglingyu_event {
+        chunk["tonglingyu_event"] = event;
+    }
+    format!("data: {chunk}\n\n")
+}
+
+fn chat_completion_final_sse(completion_id: &str, model: &str) -> String {
+    let mut body = chat_completion_chunk_sse(completion_id, model, json!({}), json!("stop"), None);
+    body.push_str("data: [DONE]\n\n");
+    body
 }
 
 async fn get_response_endpoint(
@@ -8949,6 +9220,9 @@ async fn chat_completions(
         );
     }
     let context = request_context(&headers, &payload, auth_subject);
+    if request.stream.unwrap_or(false) {
+        return chat_completions_stream_bridge(state, &headers, payload, context).await;
+    }
     let user_session_id = match context_governance::get_or_create_user_session(
         &conn,
         &context.user_ref,

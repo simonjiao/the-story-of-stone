@@ -112,7 +112,7 @@ pub(crate) fn public_completion_value(value: &Value) -> Value {
     public
 }
 
-fn public_answer_content(content: &str) -> String {
+pub(crate) fn public_answer_content(content: &str) -> String {
     if contains_public_forbidden_knowledge_state_term(content) {
         "当前回答未通过公开输出检查，不能直接返回。请基于可追溯证据重新提问。".to_string()
     } else {

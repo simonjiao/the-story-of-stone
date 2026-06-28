@@ -191,6 +191,29 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - chat stream 仍未桥接统一 response event stream，进入 P3 处理。
   - background webhook、sync wait、requires_action 等完整 Responses/Run 语义进入 P4。
 
+### 2026-06-29 P3 chat completions stream bridge
+
+- P3 已将 `/v1/chat/completions` 的 `stream=true` 分支桥接到统一 Run/Response：
+  - chat stream 请求通过 `run_manager` 归一化为 `RunApiType::ChatCompletions`，
+    分配同一个 `run_id/response_id/chat_completion_id`。
+  - 新建 response 后入队 `ResponseJob`；幂等命中会接入既有 response stream，不重复
+    入队。
+  - SSE body 使用 `Body::from_stream` 持续读取同一 `ResponseEventStore`，直到 response
+    terminal 后发送 OpenAI-compatible stop chunk 和 `[DONE]`。
+  - `output_text.delta` 转换为 OpenAI `chat.completion.chunk` 的 `delta.content`。
+  - `response.status`、`evidence.searching`、`evidence.found`、review 和 terminal public
+    events 作为 chunk 的 `tonglingyu_event` 额外字段转发；兼容客户端仍可按 `data:`
+    JSON chunk 消费。
+  - streaming content 复用公开输出安全检查，避免把内部知识状态标签直接写入
+    `delta.content`。
+- 非 stream chat 暂未重构，继续走原同步 RQA path，保证 Open WebUI 非流式兼容行为不在
+  P3 混入额外风险。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `chat_stream_bridges_to_response_job_events` 通过。
+
 ## 验证边界
 
 必须区分三类验证：

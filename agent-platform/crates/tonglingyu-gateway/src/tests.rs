@@ -1155,6 +1155,47 @@ async fn response_worker_completes_empty_input_from_queued_job() {
 }
 
 #[tokio::test]
+async fn chat_stream_bridges_to_response_job_events() {
+    let db_path = temp_gateway_db_path("gateway-chat-stream-bridge");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("chat-stream-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": ""}
+        ]
+    });
+
+    let response = chat_completions(State(state.clone()), headers, Json(payload)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued chat job")
+    };
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let body = response_text(response).await;
+    assert!(body.contains("\"object\":\"chat.completion.chunk\""));
+    assert!(body.contains("\"delta\":{\"role\":\"assistant\"}"));
+    assert!(body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(body.contains("\"tonglingyu_event\""));
+    assert!(body.contains("\"type\":\"response.status\""));
+    assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("trace_id"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
 async fn response_owner_scope_requires_tenant_and_subject() {
     let db_path = temp_gateway_db_path("gateway-response-owner");
     let state = Arc::new(test_app_state(db_path.clone()));
