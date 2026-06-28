@@ -520,7 +520,9 @@ fn test_app_state(db_path: PathBuf) -> AppState {
     AppState {
         db: db_path.clone(),
         runtime_store: TonglingyuRuntimeStore::new(db_path),
-        response_store: Arc::new(Mutex::new(InMemoryResponseEventStore::default())),
+        response_store: Arc::new(Mutex::new(ResponseStoreBackend::InMemory(
+            InMemoryResponseEventStore::default(),
+        ))),
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,

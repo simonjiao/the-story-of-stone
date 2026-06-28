@@ -128,9 +128,11 @@ use crate::response::{
     streaming_response_from_runtime_events,
 };
 use crate::response_events::{ResponseEventType, ResponseStatus};
+#[cfg(test)]
+use crate::response_store::InMemoryResponseEventStore;
 use crate::response_store::{
-    AppendResponseEventInput, InMemoryResponseEventStore, ResponseEventStore, ResponseStateRecord,
-    ResponseStoreError,
+    AppendResponseEventInput, ResponseEventStore, ResponseStateRecord, ResponseStoreBackend,
+    ResponseStoreConfig, ResponseStoreError, ResponseStoreHealth,
 };
 use crate::retriever_http::{
     RETRIEVER_TOOL_NAME, RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest,
@@ -534,6 +536,24 @@ struct ServeArgs {
     rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
+    #[arg(long, env = "TONGLINGYU_REDIS_URL")]
+    redis_url: Option<String>,
+    #[arg(long, env = "TONGLINGYU_REDIS_REQUIRED", default_value_t = false)]
+    redis_required: bool,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_STREAM_PREFIX",
+        default_value = "tonglingyu"
+    )]
+    response_stream_prefix: String,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_EVENT_MAXLEN", default_value_t = 2000)]
+    response_event_maxlen: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_EVENT_TTL_SECS",
+        default_value_t = 86_400
+    )]
+    response_event_ttl_secs: u64,
     #[arg(
         long,
         env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
@@ -592,7 +612,7 @@ struct ServeArgs {
 struct AppState {
     db: PathBuf,
     runtime_store: TonglingyuRuntimeStore,
-    response_store: Arc<Mutex<InMemoryResponseEventStore>>,
+    response_store: Arc<Mutex<ResponseStoreBackend>>,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -1976,10 +1996,18 @@ async fn serve(args: ServeArgs) -> Result<()> {
         retriever_version = %retriever_metadata.service.version,
         "tonglingyu retriever connected"
     );
+    let response_store = ResponseStoreBackend::from_config(ResponseStoreConfig {
+        redis_url: args.redis_url.clone(),
+        redis_required: args.redis_required,
+        stream_prefix: args.response_stream_prefix.clone(),
+        event_maxlen: args.response_event_maxlen,
+        event_ttl_secs: args.response_event_ttl_secs,
+    })
+    .map_err(|error| anyhow!("response store initialization failed: {error:?}"))?;
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
-        response_store: Arc::new(Mutex::new(InMemoryResponseEventStore::default())),
+        response_store: Arc::new(Mutex::new(response_store)),
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -3251,6 +3279,11 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
     let retriever_health = state.retriever.health().await;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
     match (
         state.runtime_store.store_stats(),
         state.runtime_store.online_evidence_card_ingest_stats(),
@@ -3262,7 +3295,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             Ok(online_evidence_card_ingest),
             Ok(runtime_rule_catalogs),
             Ok(retriever_health),
-        ) if retriever_health.ready => Json(json!({
+        ) if retriever_health.ready && response_store_health.status == "ok" => Json(json!({
             "status": "ok",
             "model": state.model_id,
             "retriever": {
@@ -3286,6 +3319,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
                 "disabled": state.rate_limit_per_minute == 0,
             },
+            "response_store": response_store_health,
             "request_limits": {
                 "max_messages": state.max_messages,
                 "max_question_chars": state.max_question_chars,
@@ -3303,18 +3337,26 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             "blocks": stats.blocks
         }))
         .into_response(),
-        (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "degraded",
-                "error": "retriever_unready",
-                "retriever": {
-                    "base_url": &state.retriever_base_url,
-                    "health": retriever_health,
-                },
-            })),
-        )
-            .into_response(),
+        (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => {
+            let error = if !retriever_health.ready {
+                "retriever_unready"
+            } else {
+                "response_store_unavailable"
+            };
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "degraded",
+                    "error": error,
+                    "retriever": {
+                        "base_url": &state.retriever_base_url,
+                        "health": retriever_health,
+                    },
+                    "response_store": response_store_health,
+                })),
+            )
+                .into_response()
+        }
         (Err(error), _, _, _)
         | (_, Err(error), _, _)
         | (_, _, Err(error), _)
@@ -3324,9 +3366,22 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "status": "degraded",
                 "error": "health_check_failed",
                 "detail": safe_error_detail(&error),
+                "response_store": response_store_health,
             })),
         )
             .into_response(),
+    }
+}
+
+fn response_store_unavailable_health() -> ResponseStoreHealth {
+    ResponseStoreHealth {
+        mode: "unknown",
+        required: true,
+        prefix: "unknown".to_string(),
+        event_maxlen: 0,
+        event_ttl_secs: 0,
+        status: "unavailable",
+        error: Some("response store mutex poisoned".to_string()),
     }
 }
 
@@ -3496,6 +3551,27 @@ async fn submit_run_action_endpoint(
             Some(&trace_id),
         );
     }
+    {
+        let mut store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                    Some(&trace_id),
+                );
+            }
+        };
+        if let Err(error) = store.append_action_event(
+            &response_id,
+            &action_id,
+            "action_submit_rejected",
+            json!({"reason": "action_not_available"}),
+        ) {
+            return response_store_failure_response(error, Some(&trace_id));
+        }
+    }
     error_response(
         StatusCode::CONFLICT,
         "action_not_available",
@@ -3618,11 +3694,25 @@ fn get_response_events_projection_for_subject(
         };
         let state_record = match store.state(&response_id) {
             Ok(state_record) => state_record,
-            Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+            Err(error) => {
+                return match error {
+                    ResponseStoreError::UnknownResponseId(_) => {
+                        response_not_found_response(object_type, Some(trace_id))
+                    }
+                    other => response_store_failure_response(other, Some(trace_id)),
+                };
+            }
         };
         let events = match store.read_after(&response_id, after) {
             Ok(events) => events,
-            Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+            Err(error) => {
+                return match error {
+                    ResponseStoreError::UnknownResponseId(_) => {
+                        response_not_found_response(object_type, Some(trace_id))
+                    }
+                    other => response_store_failure_response(other, Some(trace_id)),
+                };
+            }
         };
         (state_record, events)
     };
@@ -3694,7 +3784,14 @@ fn cancel_response_projection_for_subject(
     };
     let state_record = match store.state(&response_id) {
         Ok(state_record) => state_record,
-        Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+        Err(error) => {
+            return match error {
+                ResponseStoreError::UnknownResponseId(_) => {
+                    response_not_found_response(object_type, Some(trace_id))
+                }
+                other => response_store_failure_response(other, Some(trace_id)),
+            };
+        }
     };
     if !response_owned_by_request(&state_record, headers, auth_subject) {
         return response_not_found_response(object_type, Some(trace_id));
@@ -3702,7 +3799,14 @@ fn cancel_response_projection_for_subject(
     if state_record.status.is_terminal() {
         return Json(response_state_projection(&state_record, object_type)).into_response();
     }
-    let (canceling, _) = match store.append_event(AppendResponseEventInput {
+    if let Err(error) = store.append_control_event(
+        &response_id,
+        "cancel_requested",
+        json!({"reason": "client_cancelled"}),
+    ) {
+        return response_store_failure_response(error, Some(trace_id));
+    }
+    let (_canceling, _) = match store.append_event(AppendResponseEventInput {
         response_id: response_id.clone(),
         event_type: ResponseEventType::ResponseStatus,
         payload: json!({"status": "canceling", "reason": "client_cancelled"}),
@@ -3712,14 +3816,10 @@ fn cancel_response_projection_for_subject(
         final_response_ref: None,
     }) {
         Ok(result) => result,
-        Err(_) => {
-            return error_response(
-                StatusCode::CONFLICT,
-                "invalid_cancel_transition",
-                "response cannot be canceled from its current state",
-                Some(trace_id),
-            );
+        Err(error @ ResponseStoreError::InvalidStatusTransition { .. }) => {
+            return response_store_failure_response(error, Some(trace_id));
         }
+        Err(error) => return response_store_failure_response(error, Some(trace_id)),
     };
     let (canceled, _) = match store.append_event(AppendResponseEventInput {
         response_id,
@@ -3731,7 +3831,7 @@ fn cancel_response_projection_for_subject(
         final_response_ref: None,
     }) {
         Ok(result) => result,
-        Err(_) => (canceling, unreachable_event()),
+        Err(error) => return response_store_failure_response(error, Some(trace_id)),
     };
     Json(response_state_projection(&canceled, object_type)).into_response()
 }
@@ -3816,20 +3916,21 @@ fn create_response_state(
     let created = match store.create_response(identity) {
         Ok(created) => created,
         Err(ResponseStoreError::DuplicateIdempotencyKey { response_id }) => {
-            return store.state(&response_id).map_err(|_| {
-                error_response(
-                    StatusCode::CONFLICT,
-                    "response_create_conflict",
-                    "idempotency key points to missing response state",
-                    Some(&identity.trace_id),
-                )
-            });
+            return store
+                .state(&response_id)
+                .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)));
         }
-        Err(_) => {
+        Err(ResponseStoreError::DuplicateResponseId(_) | ResponseStoreError::DuplicateRunId(_)) => {
             return Err(error_response(
                 StatusCode::CONFLICT,
                 "response_create_conflict",
                 "response identity conflicts with existing state",
+                Some(&identity.trace_id),
+            ));
+        }
+        Err(error) => {
+            return Err(response_store_failure_response(
+                error,
                 Some(&identity.trace_id),
             ));
         }
@@ -3849,14 +3950,7 @@ fn create_response_state(
             package_id: None,
             final_response_ref: None,
         })
-        .map_err(|_| {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "response_event_append_failed",
-                "failed to append response event",
-                Some(&identity.trace_id),
-            )
-        })?;
+        .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)))?;
     debug_assert_eq!(created.response_id, state_record.response_id);
     Ok(state_record)
 }
@@ -3873,14 +3967,9 @@ fn response_state_for_id(
             None,
         )
     })?;
-    store.state(response_id).map_err(|_| {
-        error_response(
-            StatusCode::NOT_FOUND,
-            "response_not_found",
-            "response not found",
-            None,
-        )
-    })
+    store
+        .state(response_id)
+        .map_err(|error| response_store_failure_response(error, None))
 }
 
 fn response_id_for_run(state: &AppState, run_id: &str) -> Result<String, Response> {
@@ -3892,14 +3981,17 @@ fn response_id_for_run(state: &AppState, run_id: &str) -> Result<String, Respons
             None,
         )
     })?;
-    store.response_id_for_run(run_id).map_err(|_| {
-        error_response(
-            StatusCode::NOT_FOUND,
-            "run_not_found",
-            "run not found",
-            None,
-        )
-    })
+    store
+        .response_id_for_run(run_id)
+        .map_err(|error| match error {
+            ResponseStoreError::UnknownRunId(_) => error_response(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "run not found",
+                None,
+            ),
+            other => response_store_failure_response(other, None),
+        })
 }
 
 fn response_owned_by_request(
@@ -3928,6 +4020,57 @@ fn response_not_found_response(object_type: &str, trace_id: Option<&str>) -> Res
             "response not found",
             trace_id,
         )
+    }
+}
+
+fn response_store_failure_response(error: ResponseStoreError, trace_id: Option<&str>) -> Response {
+    match error {
+        ResponseStoreError::UnknownResponseId(_) => error_response(
+            StatusCode::NOT_FOUND,
+            "response_not_found",
+            "response not found",
+            trace_id,
+        ),
+        ResponseStoreError::UnknownRunId(_) => error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            trace_id,
+        ),
+        ResponseStoreError::InvalidStatusTransition { .. } => error_response(
+            StatusCode::CONFLICT,
+            "invalid_response_status_transition",
+            "response cannot transition from its current state",
+            trace_id,
+        ),
+        ResponseStoreError::StateConflict { .. } => error_response(
+            StatusCode::CONFLICT,
+            "response_store_state_conflict",
+            "response state changed while appending event",
+            trace_id,
+        ),
+        ResponseStoreError::BackendUnavailable(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_store_unavailable",
+            "response store unavailable",
+            trace_id,
+        ),
+        ResponseStoreError::CorruptState(_) | ResponseStoreError::CorruptEvent(_) => {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_store_corrupt",
+                "response store contains invalid state",
+                trace_id,
+            )
+        }
+        ResponseStoreError::DuplicateResponseId(_)
+        | ResponseStoreError::DuplicateRunId(_)
+        | ResponseStoreError::DuplicateIdempotencyKey { .. } => error_response(
+            StatusCode::CONFLICT,
+            "response_create_conflict",
+            "response identity conflicts with existing state",
+            trace_id,
+        ),
     }
 }
 
@@ -3970,18 +4113,6 @@ fn run_normalization_error_response(
         RunNormalizationError::EmptyModel => "model is required",
     };
     error_response(StatusCode::BAD_REQUEST, error.code(), message, trace_id)
-}
-
-fn unreachable_event() -> response_events::ResponseEvent {
-    response_events::ResponseEvent::new(
-        "run_unreachable",
-        "resp_unreachable",
-        "session_unreachable",
-        "trace_unreachable",
-        0,
-        ResponseEventType::ResponseFailed,
-        json!({"error": "unreachable"}),
-    )
 }
 
 async fn search_endpoint(
@@ -9505,6 +9636,11 @@ fn load_metrics(state: &AppState) -> Result<Value> {
     let online_evidence_card_ingest = state.runtime_store.online_evidence_card_ingest_stats()?;
     let runtime_rule_catalogs = state.runtime_store.rule_catalog_metadata()?;
     let scoped_context_counts = context_table_counts(&conn)?;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -9520,6 +9656,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "upstream_model": &state.upstream_model,
             "upstream_api_key_configured": state.upstream_api_key.is_some(),
             "upstream_timeout_secs": state.upstream_timeout_secs,
+            "response_store": response_store_health,
             "agent_runtime": {
                 "mode": state.agent_runtime_mode.as_str(),
                 "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
@@ -9612,6 +9749,11 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let scoped_context_counts = context_table_counts(&conn)?;
     let answer_quality_observations = table_count(&conn, "answer_quality_observations")?;
     let answer_quality_actions = table_count(&conn, "answer_quality_action_items")?;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -9627,6 +9769,21 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         ),
         state.rate_limit_per_minute,
         state.max_body_bytes,
+    ));
+    lines.push(
+        "# HELP tonglingyu_response_store_up Response event store dependency status.".to_string(),
+    );
+    lines.push("# TYPE tonglingyu_response_store_up gauge".to_string());
+    lines.push(format!(
+        "tonglingyu_response_store_up{{mode=\"{}\",required=\"{}\",prefix=\"{}\"}} {}",
+        bounded_metric_label(response_store_health.mode, 32),
+        response_store_health.required,
+        bounded_metric_label(&response_store_health.prefix, 80),
+        if response_store_health.status == "ok" {
+            1
+        } else {
+            0
+        },
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -9837,6 +9994,16 @@ fn bounded_metric_enum_label(value: &str, allowed: &[&str]) -> String {
         escape_metric_label(value)
     } else {
         "other".to_string()
+    }
+}
+
+fn bounded_metric_label(value: &str, max_chars: usize) -> String {
+    let mut bounded = value.chars().take(max_chars).collect::<String>();
+    bounded.retain(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.'));
+    if bounded.is_empty() {
+        "unknown".to_string()
+    } else {
+        escape_metric_label(&bounded)
     }
 }
 

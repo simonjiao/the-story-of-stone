@@ -117,6 +117,39 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
 - 下一步：按顺序进入 P1 Redis store 与 P2 response job worker。Redis 未接入前，
   不能声明后台任务、断线长轮询、WS 或 production-ready replay 已完成。
 
+### 2026-06-29 P1 Redis event store
+
+- P1 已将 `response_store.rs` 从纯内存合同扩展为 `ResponseStoreBackend`：
+  - 未配置 Redis 且 `TONGLINGYU_REDIS_REQUIRED=false` 时，仅作为本地开发/单测内存
+    store 运行。
+  - 配置 Redis URL 或生产 `TONGLINGYU_REDIS_REQUIRED=true` 时，启动阶段会 `PING`
+    Redis；不可用直接 fail-closed。
+  - Redis store 使用 Lua 脚本完成 `create_response` 的 response/run/idempotency
+    原子登记，以及 `append_event` 的 state compare-and-set、sequence 递增、stream
+    append 和 TTL 设置。
+  - `response:{id}:control` 和 `response:{id}:actions` 已接入 cancel/action 写入；
+    Run cancel 和 action submit 不再只改公开事件。
+- Gateway 配置新增：
+  - `TONGLINGYU_REDIS_URL`
+  - `TONGLINGYU_REDIS_REQUIRED`
+  - `TONGLINGYU_RESPONSE_STREAM_PREFIX`
+  - `TONGLINGYU_RESPONSE_EVENT_MAXLEN`
+  - `TONGLINGYU_RESPONSE_EVENT_TTL_SECS`
+- `/healthz`、JSON metrics 和 Prometheus metrics 已报告 response store mode/status；
+  Redis 异常会让 health 降级为 `response_store_unavailable`。
+- `deploy/docker-compose.yml` 已新增 Redis 7 service、AOF volume、healthcheck，并让
+  Gateway depends_on Redis 且默认 `TONGLINGYU_REDIS_REQUIRED=true`。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_store` 通过，10 个测试。
+- 仍需在 P2-P7 完成：
+  - job stream/consumer group、worker lease、retry、dead letter 和 reclaim。
+  - chat stream 真正桥接 response event stream。
+  - Responses/Run 的 background/sync wait 完整语义和 action 等待态。
+  - `/v1/realtime/ws`、Runtime live event sink、smoke/runbook/release gate。
+
 ## 验证边界
 
 必须区分三类验证：
