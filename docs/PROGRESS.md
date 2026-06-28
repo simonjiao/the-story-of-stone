@@ -277,6 +277,42 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - WS session buffer 当前为连接内状态，断线后只通过 `response.resume` 恢复 response
     event，不恢复未 commit 的 delta。
 
+### 2026-06-29 P6 Runtime event sink and cancel safe points
+
+- P6 新增 `tonglingyu-runtime` 的 `RuntimeWorkflowEventSink` trait：
+  - `emit(RuntimeWorkflowStreamEvent)` 负责把 Runtime workflow event 写到外部事件底座。
+  - `cancel_requested()` 在 Runtime safe point 后检查是否应停止 workflow。
+  - 原有 `execute_workflow_with_agent_runtime_client` 保持兼容；新增带 event sink
+    的执行入口供 Gateway worker 使用。
+- Runtime workflow 现在在以下边界 emit：
+  - workflow started。
+  - agent runtime step 执行完成后的 `step_completed` 管理员事件。
+  - final answer `content_delta` 和 `final_output`。
+  - 每次 emit 后检查 cancel；sink 写失败会让 Runtime workflow 返回错误，不产生不可
+    replay 的 final answer。
+- Gateway worker 新增 `ResponseWorkflowEventSink`：
+  - 复用 `response_event_from_runtime_stream_event` 做唯一映射。
+  - 将 Runtime public/admin 可见性写入同一个 `ResponseEventStore`。
+  - sink 写失败会让 response job 走失败/retry；如果失败同时检测到 cancel，则写
+    `response.canceled` 并正常 ack。
+  - worker 不再在 Runtime workflow 完成后批量重写 `workflow.stream_events`，避免重复
+    stream 事件。
+- review 事件顺序调整：
+  - `review.started` 在进入 Runtime workflow 前写入。
+  - `review.completed` 在 review journal 落库后写入。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_workflow_event_sink_maps_runtime_events_and_cancel_signal`
+    通过。
+- 当前边界：
+  - 当前 `RuntimeClient` 接口仍是非 streaming provider API；P6 通过 event sink 输出
+    workflow step 和 final answer chunks。若后续 provider 暴露 token streaming，需要在
+    `RuntimeClient` 增加 streaming 方法后接入同一 sink。
+  - cancel safe point 覆盖 workflow event 边界和 Gateway worker 既有阶段边界；长时间
+    provider call 内部的硬中断仍依赖后续 provider client 支持。
+
 ## 验证边界
 
 必须区分三类验证：

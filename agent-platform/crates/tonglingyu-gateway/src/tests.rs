@@ -1157,6 +1157,111 @@ async fn response_worker_completes_empty_input_from_queued_job() {
 }
 
 #[tokio::test]
+async fn response_workflow_event_sink_maps_runtime_events_and_cancel_signal() {
+    let db_path = temp_gateway_db_path("gateway-response-workflow-event-sink");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("workflow-sink-user");
+    let created = create_response_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued job")
+    };
+    let job = lease.job.clone();
+    let sink = ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: job.clone(),
+    };
+    let started_event = RuntimeWorkflowStreamEvent {
+        sequence: 0,
+        event_type: "started".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: None,
+        output_ref: None,
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({"context_pack_id": "ctx-secret"}),
+    };
+    sink.emit(started_event.clone())
+        .await
+        .expect("started emit");
+    sink.emit(RuntimeWorkflowStreamEvent {
+        sequence: 1,
+        event_type: "content_delta".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: Some("公开增量".to_string()),
+        output_ref: None,
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({"trace_id": "trace-forged"}),
+    })
+    .await
+    .expect("delta emit");
+    sink.emit(RuntimeWorkflowStreamEvent {
+        sequence: 2,
+        event_type: "final_output".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: None,
+        output_ref: Some("output-secret".to_string()),
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({}),
+    })
+    .await
+    .expect("final emit");
+
+    let events = response_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(job.response_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.status"));
+    assert!(events.contains("event: output_text.delta"));
+    assert!(events.contains("公开增量"));
+    assert!(!events.contains("ctx-secret"));
+    assert!(!events.contains("trace-forged"));
+    assert!(!events.contains(&job.trace_id));
+
+    let canceled = cancel_response_endpoint(
+        State(state.clone()),
+        headers,
+        AxumPath(job.response_id.clone()),
+    )
+    .await;
+    assert_eq!(canceled.status(), StatusCode::OK);
+    assert!(sink.cancel_requested().await.expect("cancel check"));
+
+    let mut missing_job = job.clone();
+    missing_job.response_id = "resp_missing_for_sink".to_string();
+    let missing_sink = ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: missing_job,
+    };
+    assert!(missing_sink.emit(started_event).await.is_err());
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
 async fn responses_stream_true_reads_same_response_events() {
     let db_path = temp_gateway_db_path("gateway-response-stream-bridge");
     let state = Arc::new(test_app_state(db_path.clone()));

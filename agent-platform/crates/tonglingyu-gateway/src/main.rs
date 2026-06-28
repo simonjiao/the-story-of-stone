@@ -37,6 +37,8 @@ use std::{
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
+#[cfg(test)]
+use tonglingyu_runtime::OnlineEvidenceCardUpdateRequestInput;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
@@ -53,13 +55,12 @@ use tonglingyu_runtime::{
     RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
     RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
-    RuntimeWorkflowInput, RuntimeWorkflowProfiles, RuntimeWorkflowRetrievedEvidence,
-    TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
-    agent_runtime_profile_contracts, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
-    execute_agent_runtime_plan_gate, package_json,
+    RuntimeWorkflowEventSink, RuntimeWorkflowInput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowRetrievedEvidence, RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER,
+    TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore, agent_runtime_profile_contracts,
+    append_rqa_lifecycle_tombstone, append_runtime_audit_event, execute_agent_runtime_plan_gate,
+    package_json,
 };
-#[cfg(test)]
-use tonglingyu_runtime::{OnlineEvidenceCardUpdateRequestInput, RuntimeWorkflowStreamEvent};
 use tower_http::trace::TraceLayer;
 
 mod answer_quality;
@@ -747,6 +748,29 @@ impl ResponseJobExecutionError {
             code,
             message: message.into(),
         }
+    }
+}
+
+#[derive(Clone)]
+struct ResponseWorkflowEventSink {
+    state: Arc<AppState>,
+    job: ResponseJob,
+}
+
+#[async_trait::async_trait]
+impl RuntimeWorkflowEventSink for ResponseWorkflowEventSink {
+    async fn emit(&self, event: RuntimeWorkflowStreamEvent) -> Result<()> {
+        append_runtime_workflow_event_for_job(&self.state, &self.job, &event)
+            .map(|_| ())
+            .map_err(|error| anyhow!("response event sink append failed: {}", error.message))
+    }
+
+    async fn cancel_requested(&self) -> Result<bool> {
+        let state_record =
+            response_state_record_for_job(&self.state, &self.job).map_err(|error| {
+                anyhow!("response event sink cancel check failed: {}", error.message)
+            })?;
+        Ok(state_record.cancel_requested || state_record.status == ResponseStatus::Canceling)
     }
 }
 
@@ -3038,9 +3062,24 @@ async fn execute_response_job(
         return Ok(());
     }
 
-    let workflow = state
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ReviewStarted,
+        json!({"source": "runtime_workflow"}),
+        Some(ResponseStatus::Reviewing),
+        None,
+        None,
+        None,
+    )?;
+
+    let event_sink = Arc::new(ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: job.clone(),
+    });
+    let workflow = match state
         .runtime_store
-        .execute_workflow_with_agent_runtime_client(
+        .execute_workflow_with_agent_runtime_client_and_event_sink(
             RuntimeWorkflowInput {
                 trace_id: job.trace_id.clone(),
                 question: scoped_context.resolved_question.clone(),
@@ -3058,11 +3097,21 @@ async fn execute_response_job(
             },
             state.agent_runtime_mode,
             state.agent_runtime.clone(),
+            event_sink,
         )
         .await
-        .map_err(|error| {
-            ResponseJobExecutionError::new("runtime_workflow_failed", error.to_string())
-        })?;
+    {
+        Ok(workflow) => workflow,
+        Err(error) => {
+            if check_response_job_cancel(&state, &job)? {
+                return Ok(());
+            }
+            return Err(ResponseJobExecutionError::new(
+                "runtime_workflow_failed",
+                error.to_string(),
+            ));
+        }
+    };
 
     let agent_runtime_summary = workflow.agent_runtime_summary.clone();
     let package = workflow.package.clone();
@@ -3143,16 +3192,6 @@ async fn execute_response_job(
     append_response_event_for_job(
         &state,
         &job,
-        ResponseEventType::ReviewStarted,
-        json!({"package_id": &package_id}),
-        Some(ResponseStatus::Reviewing),
-        None,
-        Some(package_id.clone()),
-        None,
-    )?;
-    append_response_event_for_job(
-        &state,
-        &job,
         ResponseEventType::ReviewCompleted,
         json!({
             "status": &package.review.status,
@@ -3163,29 +3202,6 @@ async fn execute_response_job(
         Some(package_id.clone()),
         None,
     )?;
-
-    for runtime_event in &workflow.stream_events {
-        let mapped = response_event_from_runtime_stream_event(
-            &job.run_id,
-            &job.response_id,
-            &job.session_id,
-            runtime_event,
-        );
-        let status_update = match mapped.event_type {
-            ResponseEventType::ResponseStatus => Some(ResponseStatus::InProgress),
-            _ => None,
-        };
-        append_response_event_for_job(
-            &state,
-            &job,
-            mapped.event_type,
-            mapped.payload,
-            status_update,
-            Some(mapped.visibility),
-            runtime_event.package_id.clone(),
-            None,
-        )?;
-    }
 
     append_response_event_for_job(
         &state,
@@ -6561,6 +6577,33 @@ fn append_response_event_for_job(
                 format!("append response event failed: {error:?}"),
             )
         })
+}
+
+fn append_runtime_workflow_event_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+    runtime_event: &RuntimeWorkflowStreamEvent,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let mapped = response_event_from_runtime_stream_event(
+        &job.run_id,
+        &job.response_id,
+        &job.session_id,
+        runtime_event,
+    );
+    let status_update = match mapped.event_type {
+        ResponseEventType::ResponseStatus => Some(ResponseStatus::InProgress),
+        _ => None,
+    };
+    append_response_event_for_job(
+        state,
+        job,
+        mapped.event_type,
+        mapped.payload,
+        status_update,
+        Some(mapped.visibility),
+        runtime_event.package_id.clone(),
+        None,
+    )
 }
 
 fn response_state_for_id(
