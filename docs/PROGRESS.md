@@ -45,8 +45,9 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
   --model-name 通灵玉
 ```
 
-Gateway smoke 默认验证 schema、health、auth、models 和 metrics。RQA 查询/聊天 smoke
-需要通过 `TONGLINGYU_SMOKE_DB_PATH` 提供外部发布的 runtime DB。
+Gateway smoke 默认验证 schema、retriever health/metadata contract、gateway health、
+auth、models、metrics、Response/Run 创建、事件 replay、取消和保留控制字段拒绝。RQA
+查询/聊天 smoke 需要通过 `TONGLINGYU_SMOKE_DB_PATH` 提供外部发布的 runtime DB。
 
 ```bash
 agent-platform/scripts/tonglingyu-gateway-smoke.sh
@@ -313,12 +314,37 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - cancel safe point 覆盖 workflow event 边界和 Gateway worker 既有阶段边界；长时间
     provider call 内部的硬中断仍依赖后续 provider client 支持。
 
+### 2026-06-29 P7 smoke/runbook/release regression gates
+
+- Gateway smoke 从基础健康检查扩展为 Run/Response regression gate：
+  - 空 DB 默认验证 schema migrate、retriever health/metadata contract、gateway health、
+    auth、models、JSON metrics 和 Prometheus。
+  - smoke 内启动最小 retriever health/metadata stub，只满足 Gateway 启动依赖。
+  - 验证 response store/job queue health 与 metrics 依赖状态。
+  - 验证 `/v1/responses` 后台创建、状态查询和 `/events` replay。
+  - 验证 `/v1/runs` 后台创建、取消、events replay 和 terminal `[DONE]`。
+  - 验证保留控制字段 `profile` 被拒绝为 `forbidden_control_fields`。
+- smoke 环境显式设置 `TONGLINGYU_RESPONSE_WORKER_ENABLED=false`：
+  - 避免空 DB 或无外部 provider 时误触发 Runtime/RQA。
+  - 默认 gate 只证明 Gateway 协议、事件底座、鉴权/作用域和控制面。
+  - 传入 `TONGLINGYU_SMOKE_DB_PATH` 后仍额外验证 RQA search/chat smoke。
+- 已验证：
+  - `bash -n agent-platform/scripts/tonglingyu-gateway-smoke.sh` 通过。
+  - `agent-platform/scripts/tonglingyu-gateway-smoke.sh` 通过。
+  - gateway cargo test (`--quiet`) 通过，243 个测试。
+  - `npx --yes markdownlint-cli2 "docs/PROGRESS.md" "docs/RUNBOOK.md"` 通过。
+- 当前边界：
+  - 默认 smoke 不替代 live Gateway、Open WebUI、Redis 和外部 runtime DB 的发布前 gate。
+  - smoke retriever stub 不提供 `/retrieve`，不能用于证明检索质量或证据包生成。
+  - Redis Streams 模式仍需要单独带 `TONGLINGYU_REDIS_URL` 的集成环境覆盖。
+
 ## 验证边界
 
 必须区分三类验证：
 
 1. Repo-local gate：版本、Python function tests、shell syntax、Rust fmt/check/test。
-2. Gateway smoke：空 runtime DB 下验证 schema、health、auth、models 和 metrics。
+2. Gateway smoke：空 runtime DB 下验证 schema、retriever contract、gateway health、
+   auth、models、metrics、Response/Run 投影、事件 replay、取消和请求边界。
 3. RQA/release gate：绑定外部 runtime DB、live Gateway、Open WebUI 和 release report。
 
 不能用 repo-local gate 或空 DB smoke 宣称 RQA production-ready。
