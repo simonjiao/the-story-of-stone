@@ -107,7 +107,7 @@ fn workflow_agent_runtime_mode_accepts_openai_compatible_provider_backend() {
 }
 
 #[test]
-fn openai_compatible_provider_profile_omits_reasoning_split_by_default() {
+fn openai_compatible_provider_profile_defaults_to_deepseek_chat_family() {
     let env = test_env(&[
         (
             "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
@@ -135,7 +135,8 @@ fn openai_compatible_provider_profile_omits_reasoning_split_by_default() {
     )
     .expect("provider profile config parses");
 
-    assert_eq!(config.reasoning_split, None);
+    assert_eq!(config.api_family.as_str(), "deepseek-chat");
+    assert_eq!(config.thinking_type, None);
     assert_eq!(
         config
             .profile_models
@@ -192,8 +193,12 @@ fn openai_compatible_provider_profile_applies_profile_tuning() {
             "3",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_REASONING_SPLIT",
-            "true",
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_FAMILY",
+            "deepseek-chat",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_THINKING_TYPE",
+            "disabled",
         ),
     ]);
 
@@ -212,11 +217,15 @@ fn openai_compatible_provider_profile_applies_profile_tuning() {
     assert_eq!(config.retry_base_delay.as_millis(), 25);
     assert_eq!(config.unhealthy_window.as_millis(), 0);
     assert_eq!(config.max_concurrency, 3);
-    assert_eq!(config.reasoning_split, Some(true));
+    assert_eq!(config.api_family.as_str(), "deepseek-chat");
+    assert_eq!(
+        config.thinking_type.map(|value| value.as_str()),
+        Some("disabled")
+    );
 }
 
 #[test]
-fn openai_compatible_provider_profile_only_sends_reasoning_split_when_enabled() {
+fn openai_compatible_provider_profile_supports_openai_responses_family() {
     let env = test_env(&[
         (
             "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BACKEND",
@@ -235,7 +244,23 @@ fn openai_compatible_provider_profile_only_sends_reasoning_split_when_enabled() 
             "OPENAI_COMPATIBLE_API_KEY",
         ),
         ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
-        ("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", "true"),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_FAMILY",
+            "openai-responses",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_REASONING_EFFORT",
+            "medium",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_REASONING_SUMMARY",
+            "auto",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TEXT_VERBOSITY",
+            "low",
+        ),
+        ("TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_STORE", "false"),
     ]);
 
     let config = openai_compatible_config_from_provider_profile_source(
@@ -245,9 +270,13 @@ fn openai_compatible_provider_profile_only_sends_reasoning_split_when_enabled() 
     )
     .expect("provider profile config parses");
 
-    assert_eq!(config.reasoning_split, Some(true));
+    assert_eq!(config.api_family.as_str(), "openai-responses");
+    assert_eq!(config.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(config.reasoning_summary.as_deref(), Some("auto"));
+    assert_eq!(config.text_verbosity.as_deref(), Some("low"));
+    assert_eq!(config.store, Some(false));
 
-    let disabled_env = test_env(&[
+    let invalid_env = test_env(&[
         (
             "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
             "http://provider.local/v1",
@@ -261,17 +290,59 @@ fn openai_compatible_provider_profile_only_sends_reasoning_split_when_enabled() 
             "OPENAI_COMPATIBLE_API_KEY",
         ),
         ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
-        ("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", "false"),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_FAMILY",
+            "openai-responses",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_THINKING_TYPE",
+            "disabled",
+        ),
     ]);
 
-    let disabled_config = openai_compatible_config_from_provider_profile_source(
+    let error = openai_compatible_config_from_provider_profile_source(
         "openai_profile",
         &["honglou-text"],
-        &disabled_env,
+        &invalid_env,
     )
-    .expect("provider profile config parses");
+    .expect_err("OpenAI Responses must reject DeepSeek thinking fields")
+    .to_string();
 
-    assert_eq!(disabled_config.reasoning_split, None);
+    assert!(error.contains("THINKING_TYPE"));
+
+    let invalid_verbosity_env = test_env(&[
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL",
+            "http://provider.local/v1",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL",
+            "provider-model",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_KEY_ENV",
+            "OPENAI_COMPATIBLE_API_KEY",
+        ),
+        ("OPENAI_COMPATIBLE_API_KEY", "provider-key"),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_FAMILY",
+            "openai-responses",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_TEXT_VERBOSITY",
+            "verbose",
+        ),
+    ]);
+
+    let error = openai_compatible_config_from_provider_profile_source(
+        "openai_profile",
+        &["honglou-text"],
+        &invalid_verbosity_env,
+    )
+    .expect_err("OpenAI Responses must reject invalid text verbosity")
+    .to_string();
+
+    assert!(error.contains("TEXT_VERBOSITY"));
 }
 
 #[test]
@@ -290,15 +361,15 @@ fn workflow_agent_runtime_mode_rejects_mixed_provider_profiles() {
     let env = test_env(&[
         ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "hermes_tooling"),
         ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "hermes_tooling"),
-        ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "minimax_context"),
+        ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "deepseek_flash"),
         ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "hermes_tooling"),
         (
             "TONGLINGYU_AGENT_PROVIDER_HERMES_TOOLING_BACKEND",
             "hermes-agent",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BACKEND",
-            "minimax",
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BACKEND",
+            "openai-compatible-network",
         ),
     ]);
 
@@ -310,24 +381,24 @@ fn workflow_agent_runtime_mode_rejects_mixed_provider_profiles() {
 }
 
 #[test]
-fn workflow_agent_runtime_mode_rejects_minimax_provider_backend() {
+fn workflow_agent_runtime_mode_rejects_unsupported_provider_backend() {
     let env = test_env(&[
-        ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "minimax_workflow"),
-        ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "minimax_workflow"),
-        ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "minimax_workflow"),
-        ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "minimax_workflow"),
+        ("TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER", "legacy_workflow"),
+        ("TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER", "legacy_workflow"),
+        ("TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER", "legacy_workflow"),
+        ("TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER", "legacy_workflow"),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_BACKEND",
-            "minimax",
+            "TONGLINGYU_AGENT_PROVIDER_LEGACY_WORKFLOW_BACKEND",
+            "legacy-provider",
         ),
     ]);
 
     let error = workflow_agent_runtime_mode_from_role_provider_source(&env)
-        .expect_err("workflow role provider backend must reject MiniMax")
+        .expect_err("workflow role provider backend must reject unsupported provider")
         .to_string();
 
     assert!(error.contains("openai-compatible-network"));
-    assert!(error.contains("minimax"));
+    assert!(error.contains("legacy-provider"));
 }
 
 #[derive(Debug)]

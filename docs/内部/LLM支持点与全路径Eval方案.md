@@ -1112,7 +1112,7 @@ Provider adapter 测试要求：
 
 1. 连接建立必须有独立 connect timeout；读响应必须有独立 read timeout；整体执行必须受
    total deadline 控制。
-2. `429`、MiniMax `529` / `overloaded_error`、`5xx`、连接重置、DNS/TLS 失败、JSON body
+2. `429`、provider overloaded / unavailable、`5xx`、连接重置、DNS/TLS 失败、JSON body
    非法和 provider refusal 必须分开归类。
 3. retry 只能针对 `rate_limited`、`provider_overloaded`、`provider_unavailable` 和
    `connection_error`，且必须有 bounded attempt、jitter 和总 deadline；schema invalid
@@ -1131,17 +1131,19 @@ Provider adapter 测试要求：
 ```env
 TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network
 TONGLINGYU_LLM_AGENT_RUNTIME_MODE=openai-compatible-network
-AGENT_RUNTIME_OPENAI_BASE_URL=https://api.minimaxi.com/v1
+AGENT_RUNTIME_OPENAI_BASE_URL=https://api.deepseek.com
 AGENT_RUNTIME_OPENAI_API_KEY=<secret>
-AGENT_RUNTIME_OPENAI_MODEL=MiniMax-M2.7
-AGENT_RUNTIME_OPENAI_PROFILE_MODELS=tonglingyu-question-normalizer=MiniMax-M2.7,tonglingyu-conversation-state-writer=MiniMax-M2.7
+AGENT_RUNTIME_OPENAI_MODEL=deepseek-v4-flash
+AGENT_RUNTIME_OPENAI_API_FAMILY=deepseek-chat
+AGENT_RUNTIME_OPENAI_THINKING_TYPE=disabled
+AGENT_RUNTIME_OPENAI_REASONING_EFFORT=
+AGENT_RUNTIME_OPENAI_PROFILE_MODELS=tonglingyu-question-normalizer=deepseek-v4-flash,tonglingyu-conversation-state-writer=deepseek-v4-flash
 AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS=1500
 AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS=60000
 AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS=90000
 AGENT_RUNTIME_OPENAI_MAX_TOKENS=768
 AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY=2
 AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON=true
-AGENT_RUNTIME_OPENAI_REASONING_SPLIT=true
 TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS=90
 ```
 
@@ -1185,10 +1187,10 @@ Provider error 枚举：
 15. `provider_unhealthy`
 16. `deadline_exceeded`
 
-MiniMax `529 overloaded_error` 必须归类为 `provider_overloaded`，不是 schema error、
-validator rejection 或业务回答失败。`provider_overloaded` 可以触发 bounded retry；
-重试耗尽后只能产生明确的 upstream unavailable / candidate unavailable 结果，不能把
-失败包装成 accepted Agent decision。
+provider overloaded / unavailable 必须归类为 `provider_overloaded` 或
+`provider_unavailable`，不是 schema error、validator rejection 或业务回答失败。
+`provider_overloaded` 可以触发 bounded retry；重试耗尽后只能产生明确的 upstream
+unavailable / candidate unavailable 结果，不能把失败包装成 accepted Agent decision。
 
 降级矩阵：
 

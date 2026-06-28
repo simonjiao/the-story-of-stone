@@ -4657,19 +4657,7 @@ fn openai_compatible_config_from_provider_profile_source(
         .map(|runtime_profile| ((*runtime_profile).to_string(), model.clone()))
         .collect();
     config.apply_tuning_from_prefix(&agent_provider_env_prefix(profile)?, get_env)?;
-    if let Some(reasoning_split) =
-        optional_true_env_from("AGENT_RUNTIME_OPENAI_REASONING_SPLIT", get_env)
-    {
-        config.reasoning_split = reasoning_split.then_some(true);
-    }
     Ok(config)
-}
-
-fn optional_true_env_from(name: &str, get_env: &dyn Fn(&str) -> Option<String>) -> Option<bool> {
-    match get_env(name)?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        _ => None,
-    }
 }
 
 fn agent_runtime_profile_step_message(

@@ -797,7 +797,6 @@ fn build_workflow_runtime_client_for_agent_provider(
         .map(|runtime_profile| (runtime_profile.clone(), profile.model.clone()))
         .collect();
     config.apply_tuning_from_prefix(&agent_provider_env_prefix(&profile.name)?, &env_nonempty)?;
-    config.reasoning_split = Some(true);
     Ok(Arc::new(
         OpenAiCompatibleNetworkRuntimeClient::new(config)?.with_profile_registry(registry),
     ))
@@ -888,9 +887,9 @@ fn build_runtime_client_for_agent_provider(
     registry: RuntimeProfileRegistry,
 ) -> Result<Arc<dyn RuntimeClient>> {
     let backend = normalized_agent_provider_backend(&profile.backend);
-    if backend != "openai-compatible-network" && backend != "minimax" {
+    if backend != "openai-compatible-network" {
         return Err(anyhow!(
-            "agent provider {} must use backend openai-compatible-network or minimax; got {backend}",
+            "agent provider {} must use backend openai-compatible-network; got {backend}",
             profile.name
         ));
     }
@@ -902,7 +901,6 @@ fn build_runtime_client_for_agent_provider(
         .map(|runtime_profile| (runtime_profile.clone(), profile.model.clone()))
         .collect();
     config.apply_tuning_from_prefix(&agent_provider_env_prefix(&profile.name)?, &env_nonempty)?;
-    config.reasoning_split = Some(true);
     Ok(Arc::new(
         OpenAiCompatibleNetworkRuntimeClient::new(config)?.with_profile_registry(registry),
     ))
@@ -1022,7 +1020,6 @@ fn normalized_agent_provider_backend(value: &str) -> String {
             "openai-compatible-network".to_string()
         }
         "openai_compatible" | "openai-compatible" => "openai-compatible-network".to_string(),
-        "minimax" => "minimax".to_string(),
         other => other.to_string(),
     }
 }

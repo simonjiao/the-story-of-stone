@@ -117,7 +117,9 @@ adapter；启用它必须是显式配置和显式验证结果。`HermesRuntimeCl
 `honglou-text`、`honglou-main`/package、`honglou-main`/draft 和
 `honglou-reviewer` profile step，以及 question normalizer / conversation state
 writer，均应通过 role provider profile 绑定到对应的 OpenAI-compatible backend。
-MiniMax 只是其中一个 provider；设计必须同时适用于其他 OpenAI-compatible provider。
+当前第一版只接入 DeepSeek chat-compatible provider 和 OpenAI Responses provider；
+后续 provider 应通过新的 provider family / adapter 扩展，而不是把 provider 专名作为
+runtime backend。
 
 该 adapter 只能提供“受控 JSON 候选生成/观察”能力，不能等价替代 Hermes 的工具执行、
 skill 调用、browser workflow、profile tool loop 或 Hermes transcript。当前 workflow
@@ -134,8 +136,10 @@ Runtime tool audit，必须显式启用 tool-capable adapter，不能从当前
 2. 输出必须是 schema-bound JSON candidate，只能进入业务 validator，不能直接进入
    `ContextPackBuilder`、scope、tool policy、memory、evidence package 或 reviewer。
    direct provider 必须启用 JSON response format；HTTP 200 但内容不是可解析 JSON 不能
-   视为 Agent 接入成功。对 MiniMax M2.7 这类会输出 reasoning 内容的 provider，还必须
-   启用 provider-specific reasoning split，避免 reasoning 文本污染 JSON candidate。
+   视为 Agent 接入成功。DeepSeek provider 通过 `thinking.type` /
+   `reasoning_effort` 控制推理行为；OpenAI provider 通过 Responses API 的
+   `reasoning` 字段控制推理行为。当前 DeepSeek/OpenAI 第一版不再使用
+   `reasoning_split`。
 3. 网络请求必须是一等对象：connect timeout、read timeout、total deadline、
    request cancellation、bounded retry、jitter、429/529/5xx 分类、provider request id、
    latency、usage 和 redacted audit 必须进入 adapter contract。

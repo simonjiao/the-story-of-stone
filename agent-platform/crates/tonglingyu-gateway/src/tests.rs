@@ -100,11 +100,8 @@ fn latest_agent_runtime_summary_uses_last_summary_event() {
 #[test]
 fn llm_agent_runtime_requires_role_provider_config_over_legacy_envs() {
     let env = test_env(&[
-        (
-            "AGENT_RUNTIME_OPENAI_BASE_URL",
-            "https://api.minimaxi.com/v1",
-        ),
-        ("AGENT_RUNTIME_OPENAI_MODEL", "MiniMax-M2.7"),
+        ("AGENT_RUNTIME_OPENAI_BASE_URL", "https://api.deepseek.com"),
+        ("AGENT_RUNTIME_OPENAI_MODEL", "deepseek-v4-flash"),
         ("AGENT_RUNTIME_OPENAI_API_KEY", "sk-test"),
         ("OPENAI_BASE_URL", "https://legacy.invalid/v1"),
     ]);
@@ -118,37 +115,48 @@ fn llm_agent_runtime_requires_role_provider_config_over_legacy_envs() {
 }
 
 #[test]
-fn llm_agent_runtime_builds_minimax_provider_profile_without_secret_summary() {
+fn llm_agent_runtime_builds_deepseek_provider_profile_without_secret_summary() {
     let env = test_env(&[
-        (QUESTION_NORMALIZER_PROVIDER_ENV, "minimax_context"),
+        (QUESTION_NORMALIZER_PROVIDER_ENV, "deepseek_flash"),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BACKEND",
-            "minimax",
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BACKEND",
+            "openai-compatible-network",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BASE_URL",
-            "https://api.minimaxi.com/v1",
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BASE_URL",
+            "https://api.deepseek.com",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_MODEL",
-            "MiniMax-M2.7",
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_MODEL",
+            "deepseek-v4-flash",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_API_KEY_ENV",
-            "MINIMAX_API_KEY",
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_API_KEY_ENV",
+            "DEEPSEEK_API_KEY",
         ),
-        ("MINIMAX_API_KEY", "sk-test-secret"),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_API_FAMILY",
+            "deepseek-chat",
+        ),
+        (
+            "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_THINKING_TYPE",
+            "disabled",
+        ),
+        ("DEEPSEEK_API_KEY", "sk-test-secret"),
     ]);
 
     let (_client, mode, config) =
-        build_llm_agent_runtime_from_source(&env).expect("minimax provider config builds");
+        build_llm_agent_runtime_from_source(&env).expect("deepseek provider config builds");
     let serialized = serde_json::to_string(&config).expect("provider config serializes");
 
     assert_eq!(mode, "provider-profile");
-    assert_eq!(config["provider_profiles"][0]["backend"], json!("minimax"));
+    assert_eq!(
+        config["provider_profiles"][0]["backend"],
+        json!("openai-compatible-network")
+    );
     assert_eq!(
         config["provider_profiles"][0]["base_url_host"],
-        json!("api.minimaxi.com")
+        json!("api.deepseek.com")
     );
     assert!(!serialized.contains("sk-test-secret"));
     assert_eq!(config["secret_values_printed"], json!(false));
@@ -201,29 +209,29 @@ fn workflow_agent_runtime_config_rejects_hermes_provider_backend() {
 }
 
 #[test]
-fn workflow_agent_runtime_config_rejects_minimax_provider_backend() {
+fn workflow_agent_runtime_config_rejects_unsupported_provider_backend() {
     let env = test_env(&[
-        (TEXT_PROVIDER_ENV, "minimax_workflow"),
-        (PACKAGE_PROVIDER_ENV, "minimax_workflow"),
-        (DRAFT_PROVIDER_ENV, "minimax_workflow"),
-        (REVIEW_PROVIDER_ENV, "minimax_workflow"),
+        (TEXT_PROVIDER_ENV, "legacy_workflow"),
+        (PACKAGE_PROVIDER_ENV, "legacy_workflow"),
+        (DRAFT_PROVIDER_ENV, "legacy_workflow"),
+        (REVIEW_PROVIDER_ENV, "legacy_workflow"),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_BACKEND",
-            "minimax",
+            "TONGLINGYU_AGENT_PROVIDER_LEGACY_WORKFLOW_BACKEND",
+            "legacy-provider",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_BASE_URL",
-            "https://api.minimaxi.com/v1",
+            "TONGLINGYU_AGENT_PROVIDER_LEGACY_WORKFLOW_BASE_URL",
+            "https://provider.invalid/v1",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_MODEL",
-            "MiniMax-M2.7",
+            "TONGLINGYU_AGENT_PROVIDER_LEGACY_WORKFLOW_MODEL",
+            "legacy-model",
         ),
         (
-            "TONGLINGYU_AGENT_PROVIDER_MINIMAX_WORKFLOW_API_KEY_ENV",
-            "MINIMAX_API_KEY",
+            "TONGLINGYU_AGENT_PROVIDER_LEGACY_WORKFLOW_API_KEY_ENV",
+            "LEGACY_PROVIDER_API_KEY",
         ),
-        ("MINIMAX_API_KEY", "minimax-test-secret"),
+        ("LEGACY_PROVIDER_API_KEY", "legacy-test-secret"),
     ]);
 
     let error = build_workflow_agent_runtime_config_from_source(&test_internal_profiles(), &env)
@@ -231,8 +239,8 @@ fn workflow_agent_runtime_config_rejects_minimax_provider_backend() {
         .to_string();
 
     assert!(error.contains("openai-compatible-network"));
-    assert!(error.contains("minimax"));
-    assert!(!error.contains("minimax-test-secret"));
+    assert!(error.contains("legacy-provider"));
+    assert!(!error.contains("legacy-test-secret"));
 }
 
 #[test]

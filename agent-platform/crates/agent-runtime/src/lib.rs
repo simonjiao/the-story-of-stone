@@ -1106,6 +1106,7 @@ pub struct OpenAiCompatibleNetworkRuntimeConfig {
     pub api_key: Option<String>,
     pub model: String,
     pub profile_models: BTreeMap<String, String>,
+    pub api_family: ProviderApiFamily,
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
     pub total_deadline: Duration,
@@ -1116,7 +1117,85 @@ pub struct OpenAiCompatibleNetworkRuntimeConfig {
     pub unhealthy_window: Duration,
     pub max_concurrency: usize,
     pub response_format_json: bool,
-    pub reasoning_split: Option<bool>,
+    pub thinking_type: Option<DeepSeekThinkingType>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_summary: Option<String>,
+    pub text_verbosity: Option<String>,
+    pub store: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApiFamily {
+    DeepSeekChat,
+    OpenAiResponses,
+}
+
+impl ProviderApiFamily {
+    fn from_config_value(name: &str, value: &str) -> CoreResult<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deepseek-chat" | "deepseek_chat" | "deepseek" => Ok(Self::DeepSeekChat),
+            "openai-responses" | "openai_responses" | "responses" | "openai" => {
+                Ok(Self::OpenAiResponses)
+            }
+            _ => Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                format!("{name} must be deepseek-chat or openai-responses"),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeepSeekChat => "deepseek-chat",
+            Self::OpenAiResponses => "openai-responses",
+        }
+    }
+
+    fn provider_kind(self) -> &'static str {
+        match self {
+            Self::DeepSeekChat => "deepseek",
+            Self::OpenAiResponses => "openai",
+        }
+    }
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::DeepSeekChat => "/chat/completions",
+            Self::OpenAiResponses => "/responses",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DeepSeekThinkingType {
+    #[serde(rename = "enabled")]
+    Enabled,
+    #[serde(rename = "disabled")]
+    Disabled,
+}
+
+impl DeepSeekThinkingType {
+    fn from_config_value(name: &str, value: &str) -> CoreResult<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "enabled" | "enable" | "true" | "1" | "on" => Ok(Self::Enabled),
+            "disabled" | "disable" | "false" | "0" | "off" => Ok(Self::Disabled),
+            _ => Err(AgentCoreError::coded(
+                ErrorCode::Conflict,
+                format!("{name} must be enabled or disabled"),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
 }
 
 impl OpenAiCompatibleNetworkRuntimeConfig {
@@ -1126,6 +1205,7 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             api_key: None,
             model: model.into(),
             profile_models: BTreeMap::new(),
+            api_family: ProviderApiFamily::DeepSeekChat,
             connect_timeout: Duration::from_millis(1500),
             read_timeout: Duration::from_millis(45000),
             total_deadline: Duration::from_millis(120000),
@@ -1136,7 +1216,11 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             unhealthy_window: Duration::from_secs(5),
             max_concurrency: 2,
             response_format_json: true,
-            reasoning_split: None,
+            thinking_type: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            text_verbosity: None,
+            store: None,
         }
     }
 
@@ -1166,6 +1250,10 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
         config.profile_models = env_nonempty("AGENT_RUNTIME_OPENAI_PROFILE_MODELS")
             .map(|value| parse_profile_models(&value))
             .unwrap_or_default();
+        if let Some(value) = env_nonempty("AGENT_RUNTIME_OPENAI_API_FAMILY") {
+            config.api_family =
+                ProviderApiFamily::from_config_value("AGENT_RUNTIME_OPENAI_API_FAMILY", &value)?;
+        }
         config.connect_timeout = Duration::from_millis(env_u64(
             "AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS",
             config.connect_timeout.as_millis() as u64,
@@ -1200,13 +1288,23 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             "AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON",
             config.response_format_json,
         );
-        config.reasoning_split = env_optional_bool("AGENT_RUNTIME_OPENAI_REASONING_SPLIT");
+        if let Some(value) = env_nonempty("AGENT_RUNTIME_OPENAI_THINKING_TYPE") {
+            config.thinking_type = Some(DeepSeekThinkingType::from_config_value(
+                "AGENT_RUNTIME_OPENAI_THINKING_TYPE",
+                &value,
+            )?);
+        }
+        config.reasoning_effort = env_nonempty("AGENT_RUNTIME_OPENAI_REASONING_EFFORT");
+        config.reasoning_summary = env_nonempty("AGENT_RUNTIME_OPENAI_REASONING_SUMMARY");
+        config.text_verbosity = env_nonempty("AGENT_RUNTIME_OPENAI_TEXT_VERBOSITY");
+        config.store = env_optional_bool_value("AGENT_RUNTIME_OPENAI_STORE")?;
         if config.api_key.as_deref().unwrap_or_default().is_empty() {
             return Err(AgentCoreError::coded(
                 ErrorCode::Unauthorized,
                 "AGENT_RUNTIME_OPENAI_API_KEY must be configured",
             ));
         }
+        config.validate_provider_family()?;
         Ok(config)
     }
 
@@ -1258,9 +1356,25 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             self.response_format_json,
             get_env,
         )?;
-        if let Some(value) = prefixed_env_optional_bool(prefix, "REASONING_SPLIT", get_env)? {
-            self.reasoning_split = value.then_some(true);
+        if let Some(value) = prefixed_env_optional_string(prefix, "API_FAMILY", get_env) {
+            self.api_family = ProviderApiFamily::from_config_value(
+                &prefixed_env_name(prefix, "API_FAMILY"),
+                &value,
+            )?;
         }
+        if let Some(value) = prefixed_env_optional_string(prefix, "THINKING_TYPE", get_env) {
+            self.thinking_type = Some(DeepSeekThinkingType::from_config_value(
+                &prefixed_env_name(prefix, "THINKING_TYPE"),
+                &value,
+            )?);
+        }
+        self.reasoning_effort = prefixed_env_optional_string(prefix, "REASONING_EFFORT", get_env);
+        self.reasoning_summary = prefixed_env_optional_string(prefix, "REASONING_SUMMARY", get_env);
+        self.text_verbosity = prefixed_env_optional_string(prefix, "TEXT_VERBOSITY", get_env);
+        if let Some(value) = prefixed_env_optional_bool(prefix, "STORE", get_env)? {
+            self.store = Some(value);
+        }
+        self.validate_provider_family()?;
         Ok(())
     }
 
@@ -1274,6 +1388,90 @@ impl OpenAiCompatibleNetworkRuntimeConfig {
             })
             .cloned()
             .unwrap_or_else(|| self.model.clone())
+    }
+
+    fn validate_provider_family(&self) -> CoreResult<()> {
+        match self.api_family {
+            ProviderApiFamily::DeepSeekChat => {
+                if self.reasoning_summary.is_some() {
+                    return Err(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "DeepSeek provider profiles must not configure REASONING_SUMMARY",
+                    ));
+                }
+                if self.text_verbosity.is_some() {
+                    return Err(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "DeepSeek provider profiles must not configure TEXT_VERBOSITY",
+                    ));
+                }
+                if self.store.is_some() {
+                    return Err(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "DeepSeek provider profiles must not configure STORE",
+                    ));
+                }
+                if let Some(effort) = self.reasoning_effort.as_deref() {
+                    if self.thinking_type != Some(DeepSeekThinkingType::Enabled) {
+                        return Err(AgentCoreError::coded(
+                            ErrorCode::Conflict,
+                            "DeepSeek REASONING_EFFORT requires THINKING_TYPE=enabled",
+                        ));
+                    }
+                    match effort {
+                        "high" | "max" => {}
+                        _ => {
+                            return Err(AgentCoreError::coded(
+                                ErrorCode::Conflict,
+                                "DeepSeek REASONING_EFFORT must be high or max",
+                            ));
+                        }
+                    }
+                }
+            }
+            ProviderApiFamily::OpenAiResponses => {
+                if self.thinking_type.is_some() {
+                    return Err(AgentCoreError::coded(
+                        ErrorCode::Conflict,
+                        "OpenAI Responses provider profiles must not configure THINKING_TYPE",
+                    ));
+                }
+                if let Some(effort) = self.reasoning_effort.as_deref() {
+                    match effort {
+                        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => {}
+                        _ => {
+                            return Err(AgentCoreError::coded(
+                                ErrorCode::Conflict,
+                                "OpenAI REASONING_EFFORT must be none, minimal, low, medium, high, or xhigh",
+                            ));
+                        }
+                    }
+                }
+                if let Some(summary) = self.reasoning_summary.as_deref() {
+                    match summary {
+                        "auto" | "concise" | "detailed" => {}
+                        _ => {
+                            return Err(AgentCoreError::coded(
+                                ErrorCode::Conflict,
+                                "OpenAI REASONING_SUMMARY must be auto, concise, or detailed",
+                            ));
+                        }
+                    }
+                }
+                if let Some(verbosity) = self.text_verbosity.as_deref() {
+                    match verbosity {
+                        "low" | "medium" | "high" => {}
+                        _ => {
+                            return Err(AgentCoreError::coded(
+                                ErrorCode::Conflict,
+                                "OpenAI TEXT_VERBOSITY must be low, medium, or high",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1431,7 +1629,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 ));
             }
             match self
-                .send_chat_completion(
+                .send_provider_request(
                     input,
                     model,
                     requested_tools,
@@ -1509,7 +1707,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn send_chat_completion(
+    async fn send_provider_request(
         &self,
         input: &RuntimeProfileInput,
         model: &str,
@@ -1533,27 +1731,23 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 content: instruction.to_string(),
             });
         }
-        let request = OpenAiCompatibleChatCompletionRequest {
-            model: model.to_string(),
-            messages,
-            stream: false,
-            temperature: self.config.temperature,
-            max_tokens: self.config.max_tokens,
-            response_format: self
-                .config
-                .response_format_json
-                .then(|| json!({"type": "json_object"})),
-            reasoning_split: self.config.reasoning_split,
-        };
-        let url = openai_chat_url(&self.config.base_url).map_err(|_| {
+        let request_value = self.provider_request_value(model, messages).map_err(|_| {
             OpenAiRuntimeAttemptError::fatal(
-                "invalid_runtime_url",
-                "OpenAI-compatible Runtime URL was invalid",
+                "invalid_runtime_request",
+                "OpenAI-compatible Runtime request was invalid",
             )
         })?;
+        let url =
+            openai_provider_url(&self.config.base_url, self.config.api_family).map_err(|_| {
+                OpenAiRuntimeAttemptError::fatal(
+                    "invalid_runtime_url",
+                    "OpenAI-compatible Runtime URL was invalid",
+                )
+            })?;
         let provider_request =
             openai_provider_request_snapshot(OpenAiProviderRequestSnapshotInput {
-                request: &request,
+                request: &request_value,
+                api_family: self.config.api_family,
                 trace_id: &input.trace_id,
                 profile_id: &input.profile_id,
                 attempt,
@@ -1567,7 +1761,7 @@ impl OpenAiCompatibleNetworkRuntimeClient {
             .post(url)
             .timeout(request_timeout)
             .header("x-agent-trace-id", &input.trace_id)
-            .json(&request);
+            .json(&request_value);
         if let Some(api_key) = &self.config.api_key {
             builder = builder.bearer_auth(api_key);
         }
@@ -1591,45 +1785,27 @@ impl OpenAiCompatibleNetworkRuntimeClient {
             )
             .with_provider_request(provider_request.clone())
         })?;
-        let body =
-            serde_json::from_value::<OpenAiCompatibleChatCompletionResponse>(body_value.clone())
-                .map_err(|_| {
-                    OpenAiRuntimeAttemptError::fatal(
-                        "provider_malformed_json",
-                        "OpenAI-compatible Runtime response was malformed",
-                    )
-                    .with_provider_request(provider_request.clone())
-                })?;
-        let provider_request_id = response_provider_request_id.or_else(|| body.id.clone());
-        let provider_model = body.model.clone().unwrap_or_else(|| model.to_string());
-        let provider_usage = body.usage.clone().unwrap_or_else(|| json!({}));
-        let choice = body.choices.first().ok_or_else(|| {
-            OpenAiRuntimeAttemptError::fatal(
-                "provider_malformed_json",
-                "OpenAI-compatible Runtime response did not include a choice",
-            )
-            .with_provider_request(provider_request.clone())
-        })?;
-        if choice
-            .message
-            .refusal
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
+        let parsed_output = self.parse_provider_response(
+            &body_value,
+            response_provider_request_id,
+            model,
+            &provider_request,
+        )?;
+        if parsed_output.refusal_present {
             return Err(OpenAiRuntimeAttemptError::fatal(
                 "safety_refusal",
                 "OpenAI-compatible Runtime returned a safety refusal",
             )
             .with_provider_request(provider_request.clone()));
         }
-        let raw_content = choice.message.content.as_deref().unwrap_or_default();
-        let reasoning_details = choice.message.reasoning_details.clone();
+        let raw_content = parsed_output.raw_content.as_str();
+        let reasoning_details = parsed_output.reasoning_details.clone();
         if raw_content.trim().is_empty() && reasoning_details.is_none() {
             let diagnostic = openai_empty_content_diagnostic(OpenAiEmptyContentDiagnosticInput {
                 body: &body_value,
                 status_code: status.as_u16(),
-                provider_request_id: provider_request_id.as_deref(),
-                provider_model: &provider_model,
+                provider_request_id: parsed_output.provider_request_id.as_deref(),
+                provider_model: &parsed_output.provider_model,
                 attempt,
                 raw_response_sha256: &raw_response_sha256,
                 latency_ms: started.elapsed().as_millis() as u64,
@@ -1682,15 +1858,16 @@ impl OpenAiCompatibleNetworkRuntimeClient {
             json!({
                 "runtime": "openai-compatible-network",
                 "runtime_adapter": "openai-compatible-network",
+                "api_family": self.config.api_family.as_str(),
                 "runtime_profile": &input.profile_id,
-                "provider_kind": "openai_compatible",
+                "provider_kind": self.config.api_family.provider_kind(),
                 "input_digest": input_digest,
                 "projection_digest": projection_digest,
                 "base_url_host": base_url_host(&self.config.base_url),
-                "provider_request_id": provider_request_id,
-                "provider_model": provider_model,
-                "finish_reason": choice.finish_reason.clone().unwrap_or_else(|| "unknown".to_string()),
-                "usage": provider_usage,
+                "provider_request_id": parsed_output.provider_request_id,
+                "provider_model": parsed_output.provider_model,
+                "finish_reason": parsed_output.finish_reason,
+                "usage": parsed_output.provider_usage,
                 "latency_ms": latency_ms,
                 "attempt_count": attempt,
                 "retry_instruction_applied": retry_instruction.is_some(),
@@ -1708,6 +1885,77 @@ impl OpenAiCompatibleNetworkRuntimeClient {
                 "secret_values_printed": false,
             }),
         ))
+    }
+
+    fn provider_request_value(
+        &self,
+        model: &str,
+        messages: Vec<OpenAiCompatibleChatMessage>,
+    ) -> CoreResult<Value> {
+        match self.config.api_family {
+            ProviderApiFamily::DeepSeekChat => {
+                let thinking_type = self.config.thinking_type;
+                let request = DeepSeekChatCompletionRequest {
+                    model: model.to_string(),
+                    messages,
+                    stream: false,
+                    temperature: thinking_type
+                        .filter(|value| value.is_enabled())
+                        .is_none()
+                        .then_some(self.config.temperature),
+                    max_tokens: self.config.max_tokens,
+                    response_format: self
+                        .config
+                        .response_format_json
+                        .then(|| json!({"type": "json_object"})),
+                    thinking: thinking_type.map(|value| DeepSeekThinking {
+                        thinking_type: value,
+                    }),
+                    reasoning_effort: self.config.reasoning_effort.clone(),
+                };
+                serde_json::to_value(request).map_err(runtime_error)
+            }
+            ProviderApiFamily::OpenAiResponses => {
+                let request = OpenAiResponsesRequest {
+                    model: model.to_string(),
+                    input: messages,
+                    reasoning: openai_responses_reasoning(
+                        self.config.reasoning_effort.as_deref(),
+                        self.config.reasoning_summary.as_deref(),
+                    ),
+                    text: openai_responses_text(
+                        self.config.response_format_json,
+                        self.config.text_verbosity.as_deref(),
+                    ),
+                    max_output_tokens: self.config.max_tokens,
+                    store: self.config.store,
+                };
+                serde_json::to_value(request).map_err(runtime_error)
+            }
+        }
+    }
+
+    fn parse_provider_response(
+        &self,
+        body_value: &Value,
+        response_provider_request_id: Option<String>,
+        model: &str,
+        provider_request: &Value,
+    ) -> Result<ParsedProviderOutput, OpenAiRuntimeAttemptError> {
+        match self.config.api_family {
+            ProviderApiFamily::DeepSeekChat => parse_deepseek_chat_response(
+                body_value,
+                response_provider_request_id,
+                model,
+                provider_request,
+            ),
+            ProviderApiFamily::OpenAiResponses => parse_openai_responses_response(
+                body_value,
+                response_provider_request_id,
+                model,
+                provider_request,
+            ),
+        }
     }
 
     async fn ensure_provider_healthy(&self) -> CoreResult<()> {
@@ -3995,6 +4243,17 @@ fn prefixed_env_optional_bool(
     parse_bool_value(&env_name, &raw).map(Some)
 }
 
+fn prefixed_env_optional_string(
+    prefix: &str,
+    field: &str,
+    get_env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let env_name = prefixed_env_name(prefix, field);
+    get_env(&env_name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn parse_bool_value(name: &str, raw: &str) -> CoreResult<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
@@ -4076,21 +4335,15 @@ fn env_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-fn env_optional_bool(name: &str) -> Option<bool> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| optional_true_bool_value(&value))
+fn env_optional_bool_value(name: &str) -> CoreResult<Option<bool>> {
+    let Some(raw) = env_nonempty(name) else {
+        return Ok(None);
+    };
+    parse_bool_value(name, &raw).map(Some)
 }
 
-fn optional_true_bool_value(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        _ => None,
-    }
-}
-
-fn openai_chat_url(base_url: &str) -> CoreResult<Url> {
-    Url::parse(&format!("{base_url}/chat/completions"))
+fn openai_provider_url(base_url: &str, api_family: ProviderApiFamily) -> CoreResult<Url> {
+    Url::parse(&format!("{}{}", base_url, api_family.endpoint()))
         .map_err(|_| runtime_failure("invalid OpenAI-compatible Runtime URL"))
 }
 
@@ -4113,7 +4366,7 @@ fn base_url_host(base_url: &str) -> String {
 fn provider_request_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
     [
         "x-request-id",
-        "x-minimax-request-id",
+        "x-openai-request-id",
         "x-trace-id",
         "cf-ray",
     ]
@@ -4491,16 +4744,38 @@ fn classify_openai_http_error(
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct OpenAiCompatibleChatCompletionRequest {
+struct DeepSeekChatCompletionRequest {
     model: String,
     messages: Vec<OpenAiCompatibleChatMessage>,
     stream: bool,
-    temperature: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     max_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     response_format: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    reasoning_split: Option<bool>,
+    thinking: Option<DeepSeekThinking>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeepSeekThinking {
+    #[serde(rename = "type")]
+    thinking_type: DeepSeekThinkingType,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OpenAiResponsesRequest {
+    model: String,
+    input: Vec<OpenAiCompatibleChatMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<Value>,
+    max_output_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4510,7 +4785,8 @@ struct OpenAiCompatibleChatMessage {
 }
 
 struct OpenAiProviderRequestSnapshotInput<'a> {
-    request: &'a OpenAiCompatibleChatCompletionRequest,
+    request: &'a Value,
+    api_family: ProviderApiFamily,
     trace_id: &'a str,
     profile_id: &'a str,
     attempt: usize,
@@ -4523,22 +4799,51 @@ fn openai_provider_request_snapshot(input: OpenAiProviderRequestSnapshotInput<'_
     json!({
         "schema_version": "openai-compatible-provider-request-v1",
         "runtime_adapter": "openai-compatible-network",
-        "provider_kind": "openai_compatible",
+        "api_family": input.api_family.as_str(),
+        "provider_kind": input.api_family.provider_kind(),
         "method": "POST",
-        "endpoint": "/chat/completions",
+        "endpoint": input.api_family.endpoint(),
         "base_url_host": base_url_host(input.base_url),
         "trace_id": input.trace_id,
         "profile_id": input.profile_id,
         "attempt": input.attempt,
-        "model": &input.request.model,
-        "messages": &input.request.messages,
-        "message_count": input.request.messages.len(),
-        "stream": input.request.stream,
-        "temperature": input.request.temperature,
-        "max_tokens": input.request.max_tokens,
-        "response_format": input.request.response_format.clone().unwrap_or(Value::Null),
-        "response_format_json_requested": input.request.response_format.is_some(),
-        "reasoning_split": input.request.reasoning_split,
+        "model": input.request.get("model").cloned().unwrap_or(Value::Null),
+        "messages": input
+            .request
+            .get("messages")
+            .or_else(|| input.request.get("input"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "message_count": input
+            .request
+            .get("messages")
+            .or_else(|| input.request.get("input"))
+            .and_then(Value::as_array)
+            .map(|values| values.len())
+            .unwrap_or(0),
+        "stream": input.request.get("stream").cloned().unwrap_or(Value::Null),
+        "temperature": input.request.get("temperature").cloned().unwrap_or(Value::Null),
+        "max_tokens": input
+            .request
+            .get("max_tokens")
+            .or_else(|| input.request.get("max_output_tokens"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "response_format": input
+            .request
+            .get("response_format")
+            .or_else(|| input.request.pointer("/text/format"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "response_format_json_requested": input.request.get("response_format").is_some()
+            || input.request.pointer("/text/format").is_some(),
+        "thinking": input.request.get("thinking").cloned().unwrap_or(Value::Null),
+        "reasoning_effort": input
+            .request
+            .get("reasoning_effort")
+            .or_else(|| input.request.pointer("/reasoning/effort"))
+            .cloned()
+            .unwrap_or(Value::Null),
         "requested_tools": input.requested_tools,
         "requested_tool_count": input.requested_tools.len(),
         "retry_instruction_applied": input.retry_instruction_applied,
@@ -4575,6 +4880,172 @@ struct OpenAiCompatibleAssistantMessage {
     refusal: Option<String>,
     #[serde(default)]
     reasoning_details: Option<Value>,
+    #[serde(default)]
+    reasoning_content: Option<Value>,
+}
+
+#[derive(Debug)]
+struct ParsedProviderOutput {
+    provider_request_id: Option<String>,
+    provider_model: String,
+    provider_usage: Value,
+    finish_reason: String,
+    raw_content: String,
+    reasoning_details: Option<Value>,
+    refusal_present: bool,
+}
+
+fn parse_deepseek_chat_response(
+    body_value: &Value,
+    response_provider_request_id: Option<String>,
+    model: &str,
+    provider_request: &Value,
+) -> Result<ParsedProviderOutput, OpenAiRuntimeAttemptError> {
+    let body = serde_json::from_value::<OpenAiCompatibleChatCompletionResponse>(body_value.clone())
+        .map_err(|_| {
+            OpenAiRuntimeAttemptError::fatal(
+                "provider_malformed_json",
+                "OpenAI-compatible Runtime response was malformed",
+            )
+            .with_provider_request(provider_request.clone())
+        })?;
+    let choice = body.choices.first().ok_or_else(|| {
+        OpenAiRuntimeAttemptError::fatal(
+            "provider_malformed_json",
+            "OpenAI-compatible Runtime response did not include a choice",
+        )
+        .with_provider_request(provider_request.clone())
+    })?;
+    let reasoning_details = choice
+        .message
+        .reasoning_details
+        .clone()
+        .or_else(|| choice.message.reasoning_content.clone());
+    Ok(ParsedProviderOutput {
+        provider_request_id: response_provider_request_id.or_else(|| body.id.clone()),
+        provider_model: body.model.clone().unwrap_or_else(|| model.to_string()),
+        provider_usage: body.usage.clone().unwrap_or_else(|| json!({})),
+        finish_reason: choice
+            .finish_reason
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        raw_content: choice.message.content.clone().unwrap_or_default(),
+        reasoning_details,
+        refusal_present: choice
+            .message
+            .refusal
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+    })
+}
+
+fn parse_openai_responses_response(
+    body_value: &Value,
+    response_provider_request_id: Option<String>,
+    model: &str,
+    _provider_request: &Value,
+) -> Result<ParsedProviderOutput, OpenAiRuntimeAttemptError> {
+    let raw_content = openai_responses_output_text(body_value);
+    let refusal_present = openai_responses_refusal_present(body_value);
+    Ok(ParsedProviderOutput {
+        provider_request_id: response_provider_request_id.or_else(|| {
+            body_value
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        }),
+        provider_model: body_value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(model)
+            .to_string(),
+        provider_usage: body_value
+            .get("usage")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        finish_reason: body_value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        raw_content,
+        reasoning_details: body_value.get("reasoning").cloned(),
+        refusal_present,
+    })
+}
+
+fn openai_responses_reasoning(effort: Option<&str>, summary: Option<&str>) -> Option<Value> {
+    if effort.is_none() && summary.is_none() {
+        return None;
+    }
+    let mut value = serde_json::Map::new();
+    if let Some(effort) = effort {
+        value.insert("effort".to_string(), json!(effort));
+    }
+    if let Some(summary) = summary {
+        value.insert("summary".to_string(), json!(summary));
+    }
+    Some(Value::Object(value))
+}
+
+fn openai_responses_text(response_format_json: bool, verbosity: Option<&str>) -> Option<Value> {
+    if !response_format_json && verbosity.is_none() {
+        return None;
+    }
+    let mut value = serde_json::Map::new();
+    if response_format_json {
+        value.insert("format".to_string(), json!({"type": "json_object"}));
+    }
+    if let Some(verbosity) = verbosity {
+        value.insert("verbosity".to_string(), json!(verbosity));
+    }
+    Some(Value::Object(value))
+}
+
+fn openai_responses_output_text(body_value: &Value) -> String {
+    if let Some(text) = body_value.get("output_text").and_then(Value::as_str) {
+        return text.trim().to_string();
+    }
+    let mut parts = Vec::new();
+    if let Some(output_items) = body_value.get("output").and_then(Value::as_array) {
+        for output_item in output_items {
+            let Some(content_items) = output_item.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for content_item in content_items {
+                if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                    parts.push(text);
+                }
+            }
+        }
+    }
+    parts.join("").trim().to_string()
+}
+
+fn openai_responses_refusal_present(body_value: &Value) -> bool {
+    if provider_field_has_value(body_value.get("refusal")) {
+        return true;
+    }
+    if let Some(output_items) = body_value.get("output").and_then(Value::as_array) {
+        for output_item in output_items {
+            let Some(content_items) = output_item.get("content").and_then(Value::as_array) else {
+                continue;
+            };
+            for content_item in content_items {
+                if provider_field_has_value(content_item.get("refusal")) {
+                    return true;
+                }
+                if content_item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value == "refusal")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone)]
@@ -5023,15 +5494,6 @@ mod tests {
         assert_eq!(summarize_json(&json!(true)), "bool");
     }
 
-    #[test]
-    fn optional_true_bool_value_only_enables_truthy_values() {
-        assert_eq!(optional_true_bool_value("true"), Some(true));
-        assert_eq!(optional_true_bool_value("on"), Some(true));
-        assert_eq!(optional_true_bool_value("false"), None);
-        assert_eq!(optional_true_bool_value("0"), None);
-        assert_eq!(optional_true_bool_value(""), None);
-    }
-
     #[derive(Debug, Default)]
     struct RawProfileRuntimeClient;
 
@@ -5254,6 +5716,7 @@ mod tests {
             api_key: Some("test-key".to_string()),
             model: "direct-test-model".to_string(),
             profile_models: BTreeMap::new(),
+            api_family: ProviderApiFamily::DeepSeekChat,
             connect_timeout: Duration::from_millis(100),
             read_timeout: Duration::from_millis(100),
             total_deadline: Duration::from_millis(500),
@@ -5264,7 +5727,11 @@ mod tests {
             unhealthy_window: Duration::from_millis(10),
             max_concurrency: 1,
             response_format_json: false,
-            reasoning_split: None,
+            thinking_type: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            text_verbosity: None,
+            store: None,
         }
     }
 
@@ -5332,8 +5799,12 @@ mod tests {
                 "false",
             ),
             (
-                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_REASONING_SPLIT",
-                "true",
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_API_FAMILY",
+                "deepseek-chat",
+            ),
+            (
+                "TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_THINKING_TYPE",
+                "disabled",
             ),
         ]);
         let mut config =
@@ -5353,7 +5824,8 @@ mod tests {
         assert_eq!(config.unhealthy_window, Duration::from_millis(0));
         assert_eq!(config.max_concurrency, 3);
         assert!(!config.response_format_json);
-        assert_eq!(config.reasoning_split, Some(true));
+        assert_eq!(config.api_family, ProviderApiFamily::DeepSeekChat);
+        assert_eq!(config.thinking_type, Some(DeepSeekThinkingType::Disabled));
     }
 
     #[test]
@@ -5769,6 +6241,7 @@ mod tests {
                 api_key: Some("test-key".to_string()),
                 model: "fallback-model".to_string(),
                 profile_models,
+                api_family: ProviderApiFamily::DeepSeekChat,
                 connect_timeout: Duration::from_millis(500),
                 read_timeout: Duration::from_millis(500),
                 total_deadline: Duration::from_secs(2),
@@ -5779,7 +6252,11 @@ mod tests {
                 unhealthy_window: Duration::from_millis(0),
                 max_concurrency: 1,
                 response_format_json: true,
-                reasoning_split: Some(true),
+                thinking_type: Some(DeepSeekThinkingType::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                text_verbosity: None,
+                store: None,
             })
             .unwrap();
         let trace_id = new_trace_id();
@@ -5852,7 +6329,8 @@ mod tests {
         assert_eq!(seen_body["model"], json!("direct-profile-model"));
         assert_eq!(seen_body["stream"], json!(false));
         assert_eq!(seen_body["response_format"]["type"], json!("json_object"));
-        assert_eq!(seen_body["reasoning_split"], json!(true));
+        assert_eq!(seen_body["thinking"]["type"], json!("disabled"));
+        assert_eq!(seen_body.get("reasoning_split"), None);
     }
 
     #[tokio::test]
@@ -5864,7 +6342,7 @@ mod tests {
                 let provider_content = provider_content.to_string();
                 async move {
                     Json(json!({
-                        "model": "minimax-style-model",
+                        "model": "reasoning-style-model",
                         "choices": [
                             {
                                 "finish_reason": "stop",
@@ -5937,7 +6415,6 @@ mod tests {
         );
         let mut config = openai_test_runtime_config(spawn_server(app).await, 1);
         config.response_format_json = true;
-        config.reasoning_split = Some(true);
         let runtime = OpenAiCompatibleNetworkRuntimeClient::new(config).unwrap();
 
         let output = runtime
@@ -6053,6 +6530,7 @@ mod tests {
                 api_key: Some("test-key".to_string()),
                 model: "retry-model".to_string(),
                 profile_models: BTreeMap::new(),
+                api_family: ProviderApiFamily::DeepSeekChat,
                 connect_timeout: Duration::from_millis(500),
                 read_timeout: Duration::from_millis(500),
                 total_deadline: Duration::from_secs(2),
@@ -6063,7 +6541,11 @@ mod tests {
                 unhealthy_window: Duration::from_millis(100),
                 max_concurrency: 1,
                 response_format_json: false,
-                reasoning_split: None,
+                thinking_type: None,
+                reasoning_effort: None,
+                reasoning_summary: None,
+                text_verbosity: None,
+                store: None,
             })
             .unwrap();
 
