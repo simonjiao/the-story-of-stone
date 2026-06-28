@@ -278,6 +278,7 @@ mod tests {
 
         assert!(draft.contains(UPSTREAM_BUNDLE_SCHEMA_VERSION));
         assert!(draft.contains("answer_use=supplemental_only"));
+        assert!(draft.contains("copy that exact chapter_title"));
         assert!(review.contains("review_observation"));
         assert_eq!(repair["object"], json!("tonglingyu.draft_repair_context"));
     }

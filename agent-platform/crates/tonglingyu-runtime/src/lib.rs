@@ -5873,6 +5873,8 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
             | "draft_negates_direct_evidence_slot_count"
             | "draft_stops_for_user_opt_in"
             | "draft_uses_unscoped_later_forty"
+            | "chapter_location_chapter_number_missing"
+            | "chapter_location_title_cue_missing"
             | "question_frame_relation_answer_contradicts_evidence"
             | "question_frame_relation_answer_enforced"
             | "question_frame_relation_answer_missing"

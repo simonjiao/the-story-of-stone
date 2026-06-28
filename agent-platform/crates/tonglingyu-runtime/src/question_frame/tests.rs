@@ -273,6 +273,40 @@ fn chapter_location_draft_requires_known_title_cue() {
 }
 
 #[test]
+fn chapter_location_accepts_quoted_title_cue_from_commentary_anchor() {
+    let frame: RuntimeQuestionFrame = serde_json::from_value(json!({
+        "intent": "chapter_location_query",
+        "canonical_question": "林黛玉进贾府在第几回",
+        "subject": {"canonical": "林黛玉", "aliases": ["林黛玉", "黛玉", "林姑娘", "顰兒"]},
+        "predicate": null,
+        "object": null,
+        "required_evidence_types": ["base_text", "commentary"]
+    }))
+    .expect("chapter location frame");
+    let cards = vec![card_with_source_text(
+        "脂硯齋重評石頭記/第三回",
+        "第003回｜批语锚点\n甲侧批“二字”位于脂批 source 的第三回 header 中，评回目“榮國府收養林黛玉”里的“收養”二字。\nion = 第三回 金陵城起復賈雨村 榮國府收養",
+    )];
+
+    assert_eq!(
+        chapter_location_draft_rejection_reason(
+            Some(&frame),
+            &cards,
+            "林黛玉进贾府在《红楼梦》第三回，回目为“荣国府收养林黛玉”。"
+        ),
+        None
+    );
+    assert_eq!(
+        chapter_location_draft_rejection_reason(
+            Some(&frame),
+            &cards,
+            "林黛玉进贾府在《红楼梦》第三回。"
+        ),
+        Some("chapter_location_title_cue_missing")
+    );
+}
+
+#[test]
 fn entity_query_misclassification_for_chapter_location_only_clarifies() {
     let frame: RuntimeQuestionFrame = serde_json::from_value(json!({
         "intent": "entity_query",

@@ -9269,6 +9269,16 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
     );
 }
 
+#[test]
+fn chapter_location_draft_rejections_are_governed_decisions() {
+    assert!(agent_runtime_draft_rejection_is_governed_decision(
+        "chapter_location_chapter_number_missing"
+    ));
+    assert!(agent_runtime_draft_rejection_is_governed_decision(
+        "chapter_location_title_cue_missing"
+    ));
+}
+
 #[tokio::test]
 async fn runtime_repairs_rejected_profile_draft_with_same_package_boundary() {
     let mut workflow = runtime_draft_workflow(

@@ -527,6 +527,9 @@ fn chapter_location_title_from_line(
     if extract_chapter_no(&clean) != Some(chapter_no) {
         return None;
     }
+    if let Some(title) = quoted_chapter_title_from_line(&clean, terms, policy) {
+        return Some(title);
+    }
     let after_marker = clean
         .split_once('回')
         .map(|(_, right)| right)
@@ -543,6 +546,42 @@ fn chapter_location_title_from_line(
         return None;
     }
     Some(format!("《{}》", title))
+}
+
+fn quoted_chapter_title_from_line(
+    line: &str,
+    terms: &[String],
+    policy: &ChapterLocationPolicy,
+) -> Option<String> {
+    if !line.contains("回目") && !line.contains("題目") && !line.contains("题目") {
+        return None;
+    }
+    let marker_index = ["回目", "題目", "题目"]
+        .iter()
+        .filter_map(|marker| line.find(marker).map(|index| index + marker.len()))
+        .min()?;
+    let tail = &line[marker_index..];
+    for (open, close) in [('“', '”'), ('「', '」'), ('『', '』'), ('《', '》')] {
+        let Some(start) = tail.find(open) else {
+            continue;
+        };
+        let body = &tail[start + open.len_utf8()..];
+        let Some(end) = body.find(close) else {
+            continue;
+        };
+        let title = trim_chars(&clean_title_text(&body[..end]), policy.max_title_chars);
+        if chapter_title_matches_terms(&title, terms) {
+            return Some(format!("《{}》", title));
+        }
+    }
+    None
+}
+
+fn chapter_title_matches_terms(title: &str, terms: &[String]) -> bool {
+    let normalized_title = normalize_text(title);
+    terms
+        .iter()
+        .any(|term| normalized_title.contains(&normalize_text(term)))
 }
 
 fn clean_chapter_title_line(line: &str) -> String {
@@ -623,10 +662,10 @@ fn chapter_no_to_chinese(chapter_no: i64) -> String {
 }
 
 fn chapter_title_cues(title: &str) -> Vec<String> {
-    normalize_text(title)
+    title
         .split(['《', '》', ' ', '　', '/', '\\'])
+        .map(normalize_text)
         .filter(|part| part.chars().count() >= 3)
-        .map(ToOwned::to_owned)
         .collect()
 }
 
