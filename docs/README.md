@@ -53,11 +53,12 @@
 2. `架构/四个Agent设计.md`
 3. `架构/现有架构差距与实施方向.md`
 4. `架构/Runtime接入设计与实施计划.md`
-5. `子模块/Scoped_Context与受控Memory.md`
-6. `内部/LLM支持点与全路径Eval方案.md`
-7. `子模块/Query_Expansion_Management.md`
-8. `子模块/Current_Window_Context_Path_Design.md`
-9. `子模块/Question_Frame_Relation.md`
+5. `架构/Runtime_Embedding_Query_Vector_Retrieval.md`
+6. `子模块/Scoped_Context与受控Memory.md`
+7. `内部/LLM支持点与全路径Eval方案.md`
+8. `子模块/Query_Expansion_Management.md`
+9. `子模块/Current_Window_Context_Path_Design.md`
+10. `子模块/Question_Frame_Relation.md`
 
 ## 验收条目处理原则
 
