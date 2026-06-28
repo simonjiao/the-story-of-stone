@@ -4,20 +4,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::conversation_state::{
+    ConversationStateSummary, ConversationStateValidationContext,
+    validate_conversation_state_summary,
+};
+#[cfg(test)]
+use crate::llm_agent_contracts::CONVERSATION_STATE_WRITER_PROFILE_ID;
+#[cfg(test)]
+use crate::llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION;
 use crate::{
-    conversation_state::{
-        ConversationStateSummary, ConversationStateValidationContext,
-        validate_conversation_state_summary,
-    },
     llm_agent_contracts::{
-        CONVERSATION_STATE_WRITER_PROFILE_ID, LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
-        LlmAgentRequestEnvelope, QUESTION_NORMALIZER_PROFILE_ID, QuestionNormalizerAgentOutput,
-        RULE_CANDIDATE_TYPES, RuleCandidateSuggestion,
+        LLM_AGENT_VALIDATOR_SCHEMA_VERSION, LlmAgentRequestEnvelope,
+        QUESTION_NORMALIZER_PROFILE_ID, QuestionNormalizerAgentOutput, RULE_CANDIDATE_TYPES,
+        RuleCandidateSuggestion,
     },
     llm_contracts::{
-        CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_CONTEXT_REFS,
-        LLM_RESOLVER_ALLOWED_TRIGGERS, LLM_RESOLVER_FORBIDDEN_FIELDS,
-        QUESTION_RESOLVER_SCHEMA_VERSION,
+        LLM_RESOLVER_ALLOWED_CONTEXT_REFS, LLM_RESOLVER_ALLOWED_TRIGGERS,
+        LLM_RESOLVER_FORBIDDEN_FIELDS, QUESTION_RESOLVER_SCHEMA_VERSION,
     },
     llm_modes::LlmMode,
     question_frame::{QuestionFrame, validate_agent_question_frame_candidate},
@@ -118,23 +122,20 @@ impl QuestionNormalizerValidationDecision {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct SealedConversationStateSummary {
-    summary: ConversationStateSummary,
-}
-
-impl SealedConversationStateSummary {
-    pub(crate) fn summary(&self) -> &ConversationStateSummary {
-        &self.summary
-    }
+    _summary: ConversationStateSummary,
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct ConversationStateValidationDecision {
     accepted: Option<SealedConversationStateSummary>,
     audit: Value,
     errors: Vec<String>,
 }
 
+#[cfg(test)]
 impl ConversationStateValidationDecision {
     pub(crate) fn accepted_summary(&self) -> Option<&SealedConversationStateSummary> {
         self.accepted.as_ref()
@@ -153,24 +154,6 @@ impl ConversationStateValidationDecision {
 
     pub(crate) fn audit_json(&self) -> Value {
         self.audit.clone()
-    }
-
-    pub(crate) fn with_repair_metadata(
-        mut self,
-        repair_attempted: bool,
-        first_error_digest: Option<String>,
-    ) -> Self {
-        if let Some(object) = self.audit.as_object_mut() {
-            object.insert(
-                "schema_repair_attempted".to_string(),
-                json!(repair_attempted),
-            );
-            object.insert(
-                "pre_repair_error_digest".to_string(),
-                first_error_digest.map(Value::String).unwrap_or(Value::Null),
-            );
-        }
-        self
     }
 }
 
@@ -199,6 +182,7 @@ impl ProviderAuditSnapshot {
     }
 }
 
+#[cfg(test)]
 struct RejectedConversationStateDecisionInput<'a> {
     mode: LlmMode,
     envelope: &'a LlmAgentRequestEnvelope,
@@ -420,6 +404,7 @@ fn validate_rule_candidates(candidates: &[RuleCandidateSuggestion], errors: &mut
     }
 }
 
+#[cfg(test)]
 pub(crate) fn validate_conversation_state_runtime_output(
     mode: LlmMode,
     envelope: &LlmAgentRequestEnvelope,
@@ -482,7 +467,8 @@ pub(crate) fn validate_conversation_state_runtime_output(
     };
     let accepted_for_projection =
         mode == LlmMode::Enforced && decision == AgentValidationDecision::Accepted;
-    let accepted = accepted_for_projection.then_some(SealedConversationStateSummary { summary });
+    let accepted =
+        accepted_for_projection.then_some(SealedConversationStateSummary { _summary: summary });
     ConversationStateValidationDecision {
         audit: conversation_state_audit(
             mode,
@@ -499,23 +485,6 @@ pub(crate) fn validate_conversation_state_runtime_output(
         accepted,
         errors,
     }
-}
-
-pub(crate) fn conversation_state_runtime_error_decision(
-    mode: LlmMode,
-    envelope: &LlmAgentRequestEnvelope,
-    error: impl Into<String>,
-) -> ConversationStateValidationDecision {
-    rejected_conversation_state_decision(RejectedConversationStateDecisionInput {
-        mode,
-        envelope,
-        output_ref: None,
-        raw_output_sha256: hash_text("runtime_error_without_output"),
-        errors: vec![format!("runtime_error: {}", error.into())],
-        contract_accepted: false,
-        schema_repaired_locally: false,
-        provider_audit: &ProviderAuditSnapshot::empty(),
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,6 +523,7 @@ fn rejected_question_decision(
     }
 }
 
+#[cfg(test)]
 fn rejected_conversation_state_decision(
     input: RejectedConversationStateDecisionInput<'_>,
 ) -> ConversationStateValidationDecision {
@@ -631,6 +601,7 @@ fn question_audit(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn conversation_state_audit(
     mode: LlmMode,
     envelope: &LlmAgentRequestEnvelope,
@@ -973,6 +944,7 @@ fn reject_forbidden_fields(path: &str, value: &Value, errors: &mut Vec<String>) 
     }
 }
 
+#[cfg(test)]
 fn reject_unknown_conversation_state_fields(value: &Value, errors: &mut Vec<String>) {
     let Some(map) = value.as_object() else {
         errors.push("conversation_state_output_not_object".to_string());

@@ -1,13 +1,10 @@
 use super::*;
+use crate::context_governance::RESOLVER_SCHEMA_VERSION;
 use crate::eval_command::{
     EVAL_NOT_APPLICABLE_COVERAGE_SMOKE, EXPECTED_TLY_INSCRIPTION_BLOCKS, EvalCase,
     EvalQualityAccumulator, eval_allows_non_production_quality_issue, eval_expected_block_ids,
     eval_expected_evidence_not_applicable_reason, eval_failure_quality_report,
     eval_quality_summary, expected_refs_hit_at,
-};
-use crate::{
-    context_governance::RESOLVER_SCHEMA_VERSION,
-    llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
 };
 use agent_core::{
     AgentCoreError, CoreResult, ErrorCode, RuntimeOutput, RuntimeProfileInput, RuntimeRunInput,
@@ -30,7 +27,6 @@ fn test_internal_profiles() -> InternalProfiles {
     InternalProfiles {
         main: "honglou-main".to_string(),
         text: "honglou-text".to_string(),
-        commentary: "honglou-commentary".to_string(),
         reviewer: "honglou-reviewer".to_string(),
     }
 }
@@ -125,7 +121,6 @@ fn llm_agent_runtime_requires_role_provider_config_over_legacy_envs() {
 fn llm_agent_runtime_builds_minimax_provider_profile_without_secret_summary() {
     let env = test_env(&[
         (QUESTION_NORMALIZER_PROVIDER_ENV, "minimax_context"),
-        (CONVERSATION_STATE_PROVIDER_ENV, "minimax_context"),
         (
             "TONGLINGYU_AGENT_PROVIDER_MINIMAX_CONTEXT_BACKEND",
             "minimax",
@@ -422,7 +417,6 @@ impl RuntimeClient for TestLlmAgentRuntime {
             .unwrap_or_else(|| json!({}));
         let result = match input.profile_id.as_str() {
             QUESTION_NORMALIZER_PROFILE_ID => test_question_normalizer_output(&payload),
-            CONVERSATION_STATE_WRITER_PROFILE_ID => test_conversation_state_output(&payload),
             _ => json!({}),
         };
         Ok(RuntimeOutput {
@@ -487,60 +481,6 @@ fn infer_test_subject(text: &str) -> Option<String> {
         .flatten()
 }
 
-fn test_conversation_state_output(payload: &Value) -> Value {
-    let input_context = &payload["input_context"];
-    let current_question = input_context["current_question_for_state"]
-        .as_str()
-        .unwrap_or_default();
-    let active_entities = json_string_array(&input_context["must_include_active_entities"], 4, 80);
-    let topic = active_entities
-        .first()
-        .map(|entity| format!("{entity}相关问题"))
-        .unwrap_or_else(|| bounded_test_text(current_question, 80));
-    json!({
-        "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
-        "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
-        "current_topic": topic,
-        "active_entities": active_entities,
-        "open_questions": if current_question.trim().is_empty() {
-            Vec::<String>::new()
-        } else {
-            vec![bounded_test_text(current_question, 120)]
-        },
-        "last_answer_boundaries": json_string_array(
-            &input_context["must_preserve_last_answer_boundaries"],
-            4,
-            160
-        ),
-        "evidence_package_refs": json_string_array(
-            &input_context["allowed_evidence_package_refs"],
-            4,
-            160
-        )
-        .into_iter()
-        .filter(|item| item.starts_with("package:"))
-        .collect::<Vec<_>>(),
-        "reviewer_warnings": json_string_array(&input_context["reviewer_warnings"], 4, 120),
-        "memory_allowed_as_evidence": false,
-        "summary_confidence": if active_entities.is_empty() { 0.74 } else { 0.9 }
-    })
-}
-
-fn json_string_array(value: &Value, max_items: usize, max_chars: usize) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|item| bounded_test_text(item, max_chars))
-        .take(max_items)
-        .collect()
-}
-
-fn bounded_test_text(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 #[test]
 fn runtime_schema_migrate_command_applies_additive_migrations() {
     let db_path = temp_gateway_db_path("tonglingyu-runtime-schema-migrate");
@@ -600,7 +540,6 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         profiles: InternalProfiles {
             main: "honglou-main".to_string(),
             text: "honglou-text".to_string(),
-            commentary: "honglou-commentary".to_string(),
             reviewer: "honglou-reviewer".to_string(),
         },
         agent_runtime: Arc::new(MinimalRuntimeClient::default()),
@@ -4063,10 +4002,7 @@ async fn forbidden_control_fields_audit_llm_provider_not_called() {
     assert_eq!(payload["provider_called"], json!(false));
     assert_eq!(
         payload["profiles_not_called"],
-        json!([
-            QUESTION_NORMALIZER_PROFILE_ID,
-            CONVERSATION_STATE_WRITER_PROFILE_ID
-        ])
+        json!([QUESTION_NORMALIZER_PROFILE_ID])
     );
     assert_eq!(payload["raw_agent_output_embedded"], json!(false));
     assert!(payload["forbidden_fields_sha256"].as_str().is_some());

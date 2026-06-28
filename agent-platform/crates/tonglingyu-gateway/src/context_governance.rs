@@ -19,18 +19,15 @@ use crate::{
         write_conversation_state_summary,
     },
     llm_agent_contracts::{
-        AgentContextMessage, CONVERSATION_STATE_WRITER_AGENT_TYPE,
-        CONVERSATION_STATE_WRITER_PROFILE_ID, CONVERSATION_STATE_WRITER_TIMEOUT_MS,
-        LlmAgentRequestEnvelope, QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
+        CONVERSATION_STATE_WRITER_PROFILE_ID, LlmAgentRequestEnvelope,
+        QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
         QUESTION_NORMALIZER_TIMEOUT_MS, QuestionNormalizerAgentInput, RuleCandidateSuggestion,
-        conversation_state_writer_profile_contract, question_normalizer_profile_contract,
+        question_normalizer_profile_contract,
     },
     llm_agent_prompt::build_llm_agent_provider_prompt,
     llm_agent_validator::{
-        ConversationStateValidationDecision, QuestionNormalizerValidationDecision,
-        conversation_state_runtime_error_decision, error_digest,
-        question_normalizer_runtime_error_decision, validate_conversation_state_runtime_output,
-        validate_question_normalizer_runtime_output,
+        QuestionNormalizerValidationDecision, error_digest,
+        question_normalizer_runtime_error_decision, validate_question_normalizer_runtime_output,
     },
     llm_contracts::{CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_TRIGGERS},
     llm_modes::LlmMode,
@@ -788,46 +785,31 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         };
     }
 
-    let deterministic_summary = deterministic_conversation_state_summary(
+    let conversation_state_summary = deterministic_conversation_state_summary(
         &input,
         &prepared.session_summary,
         &prepared.last_public_answer,
         conversation_state_mode,
     );
-    let mut conversation_state_summary = deterministic_summary;
-    let mut conversation_state_source = "deterministic_builder";
-    let mut conversation_state_agent_audit = None;
+    let conversation_state_source = "deterministic_builder";
     let conversation_state_trigger = conversation_state_agent_trigger(&input, &prepared, &resolver);
-    if conversation_state_mode != LlmMode::Disabled
-        && let Some(trigger) = conversation_state_trigger
-    {
-        let decision = run_conversation_state_agent(
-            runtime_client,
-            conversation_state_mode,
-            &input,
-            &prepared,
-            &resolver,
-        )
-        .await;
-        let mut audit = decision.audit_json();
-        if let Some(object) = audit.as_object_mut() {
-            object.insert("trigger".to_string(), json!(trigger));
-        }
-        conversation_state_agent_audit = Some(audit);
-        if let Some(sealed) = decision.accepted_summary() {
-            conversation_state_summary = Some(sealed.summary().clone());
-            conversation_state_source = "llm_agent_validated";
-        } else if conversation_state_mode == LlmMode::Enforced {
-            conversation_state_summary = None;
-            conversation_state_source = "llm_agent_rejected_no_projection";
-        }
-    } else if conversation_state_mode != LlmMode::Disabled {
-        conversation_state_agent_audit = Some(conversation_state_agent_skipped_audit(
+    let conversation_state_agent_audit = if conversation_state_mode == LlmMode::Disabled {
+        None
+    } else if conversation_state_trigger.is_some() {
+        Some(conversation_state_agent_deferred_audit(
             conversation_state_mode,
             input.trace_id,
             conversation_state_trigger,
-        ));
-    }
+        ))
+    } else if conversation_state_mode != LlmMode::Disabled {
+        Some(conversation_state_agent_skipped_audit(
+            conversation_state_mode,
+            input.trace_id,
+            conversation_state_trigger,
+        ))
+    } else {
+        None
+    };
 
     let conn = Connection::open(db_path).context("open context governance db")?;
     create_context_pack_from_validated_parts(
@@ -1002,6 +984,30 @@ fn conversation_state_agent_skipped_audit(
         "skip_reason": "conversation_state_writer_not_required_for_current_window",
         "schema_repair_attempted": false,
         "active_path_visible": false,
+    })
+}
+
+fn conversation_state_agent_deferred_audit(
+    mode: LlmMode,
+    trace_id: &str,
+    trigger: Option<&str>,
+) -> Value {
+    json!({
+        "schema_version": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
+        "validator": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
+        "profile_id": CONVERSATION_STATE_WRITER_PROFILE_ID,
+        "mode": mode.as_str(),
+        "decision": "deferred_current_context_not_blocked",
+        "provider_called": false,
+        "llm_called": false,
+        "contract_accepted": false,
+        "accepted_for_projection": false,
+        "trace_id": trace_id,
+        "trigger": trigger,
+        "skip_reason": "conversation_state_writer_deferred_until_after_context_pack",
+        "schema_repair_attempted": false,
+        "active_path_visible": false,
+        "current_context_waited_for_writer": false,
     })
 }
 
@@ -1182,7 +1188,7 @@ fn create_context_pack_from_validated_parts(
         "session_summary": &session_summary,
         "active_scopes": &active_scopes,
         "candidate_scopes": &candidate_scopes,
-        "allowed_tools": ["tonglingyu.text.search", "tonglingyu.commentary.search"],
+        "allowed_tools": ["tonglingyu.text.search", RETRIEVER_TOOL_NAME],
         "forbidden_tools": [],
         "memory_read_refs": &memory_read_refs,
         "memory_read_ref_digest": &memory_read_ref_digest,
@@ -1252,10 +1258,7 @@ fn create_context_pack_from_validated_parts(
             &session_summary,
             serde_json::to_string(&active_scopes)?,
             serde_json::to_string(&candidate_scopes)?,
-            serde_json::to_string(&json!([
-                "tonglingyu.text.search",
-                "tonglingyu.commentary.search"
-            ]))?,
+            serde_json::to_string(&json!(["tonglingyu.text.search", RETRIEVER_TOOL_NAME]))?,
             serde_json::to_string(&json!([]))?,
             serde_json::to_string(&memory_read_refs)?,
             serde_json::to_string(&json!([
@@ -1705,149 +1708,13 @@ async fn run_question_normalizer_agent(
     }
 }
 
-async fn run_conversation_state_agent(
-    runtime_client: &dyn RuntimeClient,
-    mode: LlmMode,
-    input: &ContextRequestInput<'_>,
-    prepared: &PreparedContext,
-    resolver: &ResolverOutput,
-) -> ConversationStateValidationDecision {
-    let recent_state_messages = input
-        .messages
-        .iter()
-        .map(|message| ConversationStateMessage {
-            role: message.role.as_str(),
-            content: message.content.as_str(),
-        })
-        .collect::<Vec<_>>();
-    let evidence_package_ref_views = prepared
-        .last_public_answer
-        .evidence_package_refs
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let required_boundaries = prepared
-        .last_public_answer
-        .boundary
-        .as_deref()
-        .into_iter()
-        .map(|boundary| bounded_summary(boundary, CONVERSATION_STATE_BOUNDARY_MAX_CHARS))
-        .collect::<Vec<_>>();
-    let required_boundary_refs = required_boundaries
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let required_entities = resolver
-        .referent_bindings
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let conversation_state_input = ConversationStateInput {
-        current_question: input.question,
-        recent_messages: &recent_state_messages,
-        session_summary: &prepared.session_summary,
-        last_public_answer_boundary: prepared.last_public_answer.boundary.as_deref(),
-        evidence_package_refs: &evidence_package_ref_views,
-        reviewer_warnings: &[],
-    };
-    let validation_context = conversation_state_validation_context(
-        &conversation_state_input,
-        &required_entities,
-        &required_boundary_refs,
-    );
-    let agent_messages = input
-        .messages
-        .iter()
-        .rev()
-        .take(8)
-        .map(|message| AgentContextMessage {
-            role: message.role.clone(),
-            content: bounded_summary(&message.content, 360),
-        })
-        .collect::<Vec<_>>();
-    let agent_input = crate::llm_agent_contracts::ConversationStateWriterAgentInput::new(
-        input.question,
-        agent_messages,
-        prepared.session_summary.clone(),
-        prepared.last_public_answer.boundary.clone(),
-        prepared.last_public_answer.evidence_package_refs.clone(),
-        Vec::new(),
-        resolver.referent_bindings.clone(),
-        required_boundaries.clone(),
-    );
-    let structured_payload = json!(agent_input);
-    let input_digest = format!("sha256:{}", digest_json(&structured_payload));
-    let envelope = LlmAgentRequestEnvelope::new(
-        new_id("req"),
-        CONVERSATION_STATE_WRITER_AGENT_TYPE,
-        CONVERSATION_STATE_WRITER_PROFILE_ID,
-        mode.as_str(),
-        input.trace_id,
-        prepared.user_session_id.clone(),
-        prepared.interaction_context_id.clone(),
-        llm_agent_projection_ref(
-            input.trace_id,
-            CONVERSATION_STATE_WRITER_PROFILE_ID,
-            &input_digest,
-        ),
-        input_digest,
-        CONVERSATION_STATE_WRITER_TIMEOUT_MS,
-        structured_payload,
-    );
-    let output = execute_llm_agent_profile(
-        runtime_client,
-        CONVERSATION_STATE_WRITER_PROFILE_ID,
-        &envelope,
-        None,
-    )
-    .await;
-    let decision = match output {
-        Ok(output) => validate_conversation_state_runtime_output(
-            mode,
-            &envelope,
-            &output.result_summary,
-            output.result_ref.as_deref(),
-            Some(&output.metadata),
-            &validation_context,
-        ),
-        Err(error) => conversation_state_runtime_error_decision(mode, &envelope, error.to_string()),
-    };
-    if decision.contract_accepted() {
-        return decision;
-    }
-    let first_error_digest = error_digest(decision.errors());
-    let repaired = execute_llm_agent_profile(
-        runtime_client,
-        CONVERSATION_STATE_WRITER_PROFILE_ID,
-        &envelope,
-        Some(decision.errors()),
-    )
-    .await;
-    match repaired {
-        Ok(output) => validate_conversation_state_runtime_output(
-            mode,
-            &envelope,
-            &output.result_summary,
-            output.result_ref.as_deref(),
-            Some(&output.metadata),
-            &validation_context,
-        )
-        .with_repair_metadata(true, Some(first_error_digest)),
-        Err(_) => decision.with_repair_metadata(true, Some(first_error_digest)),
-    }
-}
-
 async fn execute_llm_agent_profile(
     runtime_client: &dyn RuntimeClient,
     profile_id: &str,
     envelope: &LlmAgentRequestEnvelope,
     repair_errors: Option<&[String]>,
 ) -> Result<RuntimeOutput> {
-    let contract = if profile_id == QUESTION_NORMALIZER_PROFILE_ID {
-        question_normalizer_profile_contract()
-    } else {
-        conversation_state_writer_profile_contract()
-    };
+    let contract = question_normalizer_profile_contract();
     let runtime_step = RuntimeStep::from_profile_contract(
         &contract,
         json!({
@@ -5197,11 +5064,9 @@ fn rfc3339_after_days(days: i64) -> String {
 fn allowed_memory_consumers(scope_type: &str, candidate_type: &str) -> Vec<String> {
     match (scope_type, candidate_type) {
         ("user_private", _) => vec!["honglou-main".to_string()],
-        (_, "retrieval_preference") | (_, "source_collection_usage_preference") => vec![
-            "honglou-main".to_string(),
-            "honglou-text".to_string(),
-            "honglou-commentary".to_string(),
-        ],
+        (_, "retrieval_preference") | (_, "source_collection_usage_preference") => {
+            vec!["honglou-main".to_string(), "honglou-text".to_string()]
+        }
         (_, _) => vec!["honglou-main".to_string()],
     }
 }
@@ -6211,11 +6076,9 @@ fn profile_views(
     let main_reads =
         memory_reads_for_consumer(memory_reads, "honglou-main", MEMORY_READ_BUDGET_TOTAL);
     let text_reads = tool_profile_memory_reads(memory_reads, "honglou-text");
-    let commentary_reads = tool_profile_memory_reads(memory_reads, "honglou-commentary");
     let reviewer_usage = reviewer_memory_usage_summary(memory_reads);
     let main_read_refs = memory_read_refs_for_reads(&main_reads);
     let text_read_refs = memory_read_refs_for_reads(&text_reads);
-    let commentary_read_refs = memory_read_refs_for_reads(&commentary_reads);
     let reviewer_read_refs = Vec::<String>::new();
     let question_frame = resolver.question_frame.audit_json();
     vec![
@@ -6260,26 +6123,6 @@ fn profile_views(
             memory_summaries: text_reads.iter().map(memory_read_summary_payload).collect(),
             memory_policy_digest: memory_read_policy_digest(&text_reads),
             memory_usage_summary: memory_usage_summary(&text_reads, 0),
-        },
-        ContextPackProfileView {
-            profile_name: "honglou-commentary".to_string(),
-            visible_question: resolver.resolved_question.to_string(),
-            question_frame: question_frame.clone(),
-            session_summary: None,
-            allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
-            forbidden_context: vec![
-                "complete_user_history".to_string(),
-                "full_base_text_corpus".to_string(),
-                "unreviewed_memory_candidate".to_string(),
-            ],
-            memory_read_ref_digest: memory_read_ref_digest(&commentary_read_refs),
-            memory_read_refs: commentary_read_refs,
-            memory_summaries: commentary_reads
-                .iter()
-                .map(memory_read_summary_payload)
-                .collect(),
-            memory_policy_digest: memory_read_policy_digest(&commentary_reads),
-            memory_usage_summary: memory_usage_summary(&commentary_reads, 0),
         },
         ContextPackProfileView {
             profile_name: "honglou-reviewer".to_string(),
@@ -6406,7 +6249,7 @@ fn build_context_projection(
 
 fn projection_output_contract(consumer_name: &str) -> Value {
     match consumer_name {
-        "honglou-text" | "honglou-commentary" => json!({
+        "honglou-text" => json!({
             "object": "tonglingyu.evidence_analysis",
             "must_not_write_final_answer": true,
             "must_return_output_ref": true,
@@ -6985,10 +6828,6 @@ mod tests {
         fn profile_inputs(&self) -> Vec<RuntimeProfileInput> {
             self.inputs.lock().expect("fake runtime inputs").clone()
         }
-    }
-
-    fn provider_output_metadata(provider_output: Value) -> Value {
-        json!({ "provider_output": provider_output })
     }
 
     #[async_trait]
@@ -7711,22 +7550,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enforced_conversation_state_agent_projects_only_validated_summary() {
+    async fn conversation_state_writer_trigger_is_deferred_without_blocking_context() {
         let db_path = temp_context_db_path("conversation-state-agent");
         let conn = file_conn(&db_path);
         drop(conn);
-        let runtime = FakeRuntimeClient::new(vec![json!({
-            "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
-            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
-            "current_topic": "晴雯相关问题",
-            "active_entities": ["晴雯"],
-            "open_questions": ["晴雯后来怎么样？"],
-            "last_answer_boundaries": [],
-            "evidence_package_refs": [],
-            "reviewer_warnings": [],
-            "memory_allowed_as_evidence": false,
-            "summary_confidence": 0.9
-        })]);
+        let runtime = FakeRuntimeClient::new(Vec::new());
         let messages = vec![ContextMessage {
             role: "user".to_string(),
             content: "晴雯后来怎么样？".to_string(),
@@ -7754,23 +7582,40 @@ mod tests {
 
         assert_eq!(
             context.context_pack["llm_agent_context_path"]["conversation_state_summary_source"],
-            json!("llm_agent_validated")
+            json!("deterministic_builder")
         );
         assert_eq!(
-            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["accepted_for_projection"],
-            json!(true)
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["decision"],
+            json!("deferred_current_context_not_blocked")
         );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["trigger"],
+            json!("history_over_limit")
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["provider_called"],
+            json!(false)
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["current_context_waited_for_writer"],
+            json!(false)
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["sync_llm_call_count"],
+            json!(0)
+        );
+        assert_eq!(runtime.profile_inputs().len(), 0);
         let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
         let persisted_trace = load_trace_context(&persisted_conn, "trace-conversation-state-agent")
             .expect("persisted trace context");
         assert_eq!(
             persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_summary_source"],
-            json!("llm_agent_validated")
+            json!("deterministic_builder")
         );
         assert_eq!(
             persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
-                ["accepted_for_projection"],
-            json!(true)
+                ["decision"],
+            json!("deferred_current_context_not_blocked")
         );
         drop(persisted_conn);
         let main_projection = context
@@ -7846,76 +7691,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_pack_records_provider_features_without_raw_agent_output() {
-        let db_path = temp_context_db_path("provider-features-context");
+    async fn deferred_conversation_state_writer_records_no_provider_payload() {
+        let db_path = temp_context_db_path("deferred-writer-context");
         let conn = file_conn(&db_path);
         drop(conn);
-        let summary = json!({
-            "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
-            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
-            "current_topic": "晴雯相关问题",
-            "active_entities": ["晴雯"],
-            "open_questions": ["晴雯后来怎么样？"],
-            "last_answer_boundaries": [],
-            "evidence_package_refs": [],
-            "reviewer_warnings": [],
-            "memory_allowed_as_evidence": false,
-            "summary_confidence": 0.9
-        });
-        let runtime = FakeRuntimeClient::with_outputs(vec![FakeRuntimeOutput {
-            result_summary: summary.to_string(),
-            result_ref: Some(format!(
-                "openai-compatible-network://profiles/{CONVERSATION_STATE_WRITER_PROFILE_ID}/trace-provider-features-context"
-            )),
-            metadata: {
-                let provider_request = json!({
-                    "schema_version": "openai-compatible-provider-request-v1",
-                    "runtime_adapter": "openai-compatible-network",
-                    "profile_id": CONVERSATION_STATE_WRITER_PROFILE_ID,
-                    "model": "provider-request-test-model",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "Tonglingyu conversation-state writer system prompt"
-                        },
-                        {
-                            "role": "user",
-                            "content": "晴雯后来怎么样？"
-                        }
-                    ],
-                    "message_count": 2,
-                    "stream": false,
-                    "authorization_header_embedded": false,
-                    "api_key_embedded": false,
-                    "secret_values_printed": false
-                });
-                let mut metadata = provider_output_metadata(json!({
-                "schema_version": "openai-compatible-provider-output-v1",
-                "response_format_json_requested": true,
-                "content_present": true,
-                "content_sha256": "sha256:raw",
-                "content_contains_think_blocks": true,
-                "content_without_think_sha256": "sha256:clean",
-                "reasoning_details_present": true,
-                "reasoning_details_sha256": "sha256:reasoning",
-                "business_json_candidate_present": true,
-                "business_json_candidate_sha256": "sha256:candidate",
-                "business_json_candidate_source": "embedded_json_object",
-                "business_json_candidate": summary.to_string(),
-                "validator_content_sha256": "sha256:candidate",
-                "preserved_raw_fields": {
-                    "content": "<think>{\"not\":\"context\"}</think>",
-                    "reasoning_details": {"items": [{"text": "internal reasoning"}]}
-                }
-                }));
-                metadata["provider_request_sha256"] =
-                    json!(format!("sha256:{}", digest_json(&provider_request)));
-                metadata["provider_request_embedded"] = json!(true);
-                metadata["provider_request"] = provider_request;
-                metadata["latency_ms"] = json!(1234);
-                metadata
-            },
-        }]);
+        let runtime = FakeRuntimeClient::new(Vec::new());
         let messages = vec![ContextMessage {
             role: "user".to_string(),
             content: "晴雯后来怎么样？".to_string(),
@@ -7924,11 +7704,11 @@ mod tests {
         let context = create_context_for_request_with_agent_runtime_and_modes(
             &db_path,
             ContextRequestInput {
-                trace_id: "trace-provider-features-context",
+                trace_id: "trace-deferred-writer-context",
                 model_id: "tonglingyu",
-                external_user_ref: "user-provider-features-context",
-                external_session_id: "session-provider-features-context",
-                external_message_id: "message-provider-features-context",
+                external_user_ref: "user-deferred-writer-context",
+                external_session_id: "session-deferred-writer-context",
+                external_message_id: "message-deferred-writer-context",
                 question: "晴雯后来怎么样？",
                 messages: &messages,
                 history_over_limit: true,
@@ -7943,113 +7723,38 @@ mod tests {
 
         let agent_audit =
             &context.context_pack["llm_agent_context_path"]["conversation_state_agent"];
-        assert_eq!(agent_audit["accepted_for_projection"], json!(true));
-        assert_eq!(agent_audit["provider_latency_ms"], json!(1234));
-        assert_eq!(agent_audit["trigger"], json!("history_over_limit"));
+        assert_eq!(agent_audit["provider_called"], json!(false));
+        assert_eq!(agent_audit["llm_called"], json!(false));
         assert_eq!(
-            agent_audit["provider_output_features"]["content_contains_think_blocks"],
-            json!(true)
+            agent_audit["decision"],
+            json!("deferred_current_context_not_blocked")
         );
-        assert_eq!(
-            agent_audit["provider_output_features"]["reasoning_details_present"],
-            json!(true)
-        );
-        assert_eq!(
-            agent_audit["provider_output_features"]["raw_provider_fields_embedded_in_validator_audit"],
-            json!(false)
-        );
-        assert_eq!(
-            agent_audit["provider_request"]["provider_request_embedded"],
-            json!(true)
-        );
-        assert_eq!(
-            agent_audit["provider_request"]["provider_request"]["messages"][0]["role"],
-            json!("system")
-        );
-        assert_eq!(
-            agent_audit["provider_request"]["provider_request"]["messages"][0]["content"],
-            json!("Tonglingyu conversation-state writer system prompt")
-        );
-        assert_eq!(
-            agent_audit["provider_request"]["provider_request"]["authorization_header_embedded"],
-            json!(false)
-        );
-        assert_eq!(
-            agent_audit["provider_request"]["provider_request"]["api_key_embedded"],
-            json!(false)
-        );
-        let context_text = context.context_pack["llm_agent_context_path"].to_string();
-        assert!(!context_text.contains("<think>"));
-        assert!(!context_text.contains("internal reasoning"));
-        assert_eq!(
-            context.context_pack["llm_agent_context_path"]["raw_agent_output_embedded"],
-            json!(false)
-        );
+        assert!(agent_audit.get("provider_request").is_none());
+        assert!(agent_audit.get("provider_output_features").is_none());
         assert_eq!(
             context.context_pack["llm_agent_context_path"]["llm_call_budget"]["sync_llm_call_count"],
-            json!(1)
+            json!(0)
         );
-        assert_eq!(
-            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["provider_latency_ms"],
-            json!(1234)
-        );
-        assert_eq!(
-            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["latency_regression"],
-            json!(false)
-        );
-        assert_eq!(
-            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["conversation_state_writer_unconditional"],
-            json!(false)
-        );
-        assert_eq!(
-            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["steps"][1]["provider_latency_ms"],
-            json!(1234)
-        );
+        assert_eq!(runtime.profile_inputs().len(), 0);
+
         let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
-        let persisted_raw_context_path_json: String = persisted_conn
-            .query_row(
-                "SELECT llm_agent_context_path_json FROM context_packs WHERE trace_id = ?1",
-                params!["trace-provider-features-context"],
-                |row| row.get(0),
-            )
-            .expect("raw context path persisted");
-        let persisted_raw_context_path: Value =
-            serde_json::from_str(&persisted_raw_context_path_json).expect("raw context path json");
+        let persisted_trace = load_trace_context(&persisted_conn, "trace-deferred-writer-context")
+            .expect("persisted trace context");
         assert_eq!(
-            persisted_raw_context_path["conversation_state_agent"]["provider_request"]["provider_request"]
-                ["messages"][0]["content"],
-            json!("Tonglingyu conversation-state writer system prompt")
-        );
-        let persisted_trace =
-            load_trace_context(&persisted_conn, "trace-provider-features-context")
-                .expect("persisted trace context");
-        let persisted_message = &persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
-            ["provider_request"]["provider_request"]["messages"][0];
-        assert_eq!(persisted_message["role"], json!("system"));
-        assert!(persisted_message.get("content").is_none());
-        assert_eq!(persisted_message["raw_content_redacted"], json!(true));
-        assert_eq!(persisted_message["raw_content_value_type"], json!("string"));
-        assert!(
-            persisted_message["raw_content_sha256"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("sha256:"))
+            persisted_trace["context_packs"][0]["llm_agent_context_path"]["conversation_state_agent"]
+                ["provider_called"],
+            json!(false)
         );
         drop(persisted_conn);
         remove_file_db(&db_path);
     }
 
     #[tokio::test]
-    async fn rejected_conversation_state_agent_rejects_projection_without_blocking_frame() {
+    async fn deferred_conversation_state_writer_does_not_block_frame() {
         let db_path = temp_context_db_path("conversation-state-agent-reject");
         let conn = file_conn(&db_path);
         drop(conn);
-        let invalid = json!({
-            "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
-            "current_question": "晴雯后来怎么样？",
-            "session_summary": "最近讨论对象：晴雯",
-            "required_active_entities": ["晴雯"]
-        });
-        let runtime = FakeRuntimeClient::new(vec![invalid.clone(), invalid]);
+        let runtime = FakeRuntimeClient::new(Vec::new());
         let messages = vec![ContextMessage {
             role: "user".to_string(),
             content: "晴雯后来怎么样？".to_string(),
@@ -8077,17 +7782,21 @@ mod tests {
 
         assert_eq!(
             context.context_pack["llm_agent_context_path"]["conversation_state_summary_source"],
-            json!("llm_agent_rejected_no_projection")
+            json!("deterministic_builder")
         );
         assert_eq!(
             context.context_pack["conversation_state_summary_projection_visible"],
+            json!(true)
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["provider_called"],
             json!(false)
         );
         assert_eq!(
-            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["contract_accepted"],
-            json!(false)
+            context.context_pack["llm_agent_context_path"]["conversation_state_agent"]["decision"],
+            json!("deferred_current_context_not_blocked")
         );
-        assert_eq!(runtime.profile_inputs().len(), 2);
+        assert_eq!(runtime.profile_inputs().len(), 0);
         let persisted_conn = Connection::open(&db_path).expect("open persisted context db");
         let context_pack_count: i64 = persisted_conn
             .query_row("SELECT COUNT(*) FROM context_packs", [], |row| row.get(0))
@@ -8102,30 +7811,16 @@ mod tests {
         let db_path = temp_context_db_path("llm-agent-provider-prompts");
         let conn = file_conn(&db_path);
         drop(conn);
-        let runtime = FakeRuntimeClient::new(vec![
-            json!({
-                "schema_version": RESOLVER_SCHEMA_VERSION,
-                "resolved_question": "她后来怎么样？",
-                "referent_bindings": [],
-                "used_context_refs": ["current_question"],
-                "confidence": 0.5,
-                "needs_clarification": true,
-                "clarification_question": "请说明“她”指的是哪位人物。",
-                "unsupported_reason": "unresolved_referent"
-            }),
-            json!({
-                "object": crate::conversation_state::CONVERSATION_STATE_SUMMARY_OBJECT,
-                "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
-                "current_topic": "未明确指代问题",
-                "active_entities": [],
-                "open_questions": ["她后来怎么样？"],
-                "last_answer_boundaries": [],
-                "evidence_package_refs": [],
-                "reviewer_warnings": [],
-                "memory_allowed_as_evidence": false,
-                "summary_confidence": 0.9
-            }),
-        ]);
+        let runtime = FakeRuntimeClient::new(vec![json!({
+            "schema_version": RESOLVER_SCHEMA_VERSION,
+            "resolved_question": "她后来怎么样？",
+            "referent_bindings": [],
+            "used_context_refs": ["current_question"],
+            "confidence": 0.5,
+            "needs_clarification": true,
+            "clarification_question": "请说明“她”指的是哪位人物。",
+            "unsupported_reason": "unresolved_referent"
+        })]);
         let messages = vec![ContextMessage {
             role: "user".to_string(),
             content: "她后来怎么样？".to_string(),
@@ -8152,7 +7847,7 @@ mod tests {
         .expect("context created");
 
         let inputs = runtime.profile_inputs();
-        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs.len(), 1);
         let question_input = &inputs[0];
         assert_eq!(question_input.profile_id, QUESTION_NORMALIZER_PROFILE_ID);
         assert!(
@@ -8175,44 +7870,6 @@ mod tests {
         assert!(question_payload.get("structured_payload").is_none());
         assert!(
             !question_input.messages[1]
-                .content
-                .contains("trace-provider-prompt")
-        );
-
-        let state_input = &inputs[1];
-        assert_eq!(state_input.profile_id, CONVERSATION_STATE_WRITER_PROFILE_ID);
-        assert!(
-            state_input.messages[0]
-                .content
-                .contains("Role: conversation_state_writer")
-        );
-        assert!(
-            state_input.messages[0]
-                .content
-                .contains("Context-only fields")
-        );
-        let state_payload: Value =
-            serde_json::from_str(&state_input.messages[1].content).expect("state payload");
-        assert_eq!(
-            state_payload["task"]["role"],
-            json!("conversation_state_writer")
-        );
-        assert!(state_payload.get("agent_request").is_none());
-        assert!(state_payload.get("structured_payload").is_none());
-        assert!(
-            state_payload["input_context"]
-                .get("session_summary")
-                .is_none()
-        );
-        assert!(
-            state_payload["output_contract"]["forbidden_output_fields"]
-                .as_array()
-                .expect("forbidden fields")
-                .iter()
-                .any(|field| field.as_str() == Some("session_summary"))
-        );
-        assert!(
-            !state_input.messages[1]
                 .content
                 .contains("trace-provider-prompt")
         );
@@ -8244,7 +7901,13 @@ mod tests {
         .expect("context created");
 
         assert!(context.user_session_id.starts_with("user-session-"));
-        assert_eq!(context.context_projections.len(), 4);
+        assert_eq!(context.context_projections.len(), 3);
+        assert!(
+            context
+                .context_projections
+                .iter()
+                .all(|projection| projection.consumer_name != "honglou-commentary")
+        );
         let main_projection = context
             .context_projections
             .iter()

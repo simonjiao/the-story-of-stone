@@ -377,14 +377,6 @@ fn test_runtime_context(
             test_runtime_projection(
                 trace_id,
                 &context_pack_ref,
-                &profiles.commentary,
-                question,
-                None,
-                vec!["tonglingyu.commentary.search".to_string()],
-            ),
-            test_runtime_projection(
-                trace_id,
-                &context_pack_ref,
                 &profiles.main,
                 question,
                 Some("test session summary".to_string()),
@@ -520,7 +512,7 @@ fn relation_question_frame_value() -> Value {
             "aliases": ["史湘云", "史湘雲", "湘云"]
         },
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text", "commentary"],
+        "required_evidence_types": ["base_text"],
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -547,7 +539,7 @@ fn xiren_jiamu_relation_question_frame_value() -> Value {
             "aliases": ["贾母", "賈母", "老太太"]
         },
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text", "commentary"],
+        "required_evidence_types": ["base_text"],
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -571,7 +563,7 @@ fn xiren_open_object_relation_question_frame_value() -> Value {
         },
         "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text", "commentary"],
+        "required_evidence_types": ["base_text"],
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -614,7 +606,7 @@ fn lindaiyu_age_question_frame_value() -> Value {
         },
         "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text", "commentary"],
+        "required_evidence_types": ["base_text"],
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -633,7 +625,7 @@ fn lindaiyu_character_fate_question_frame_value() -> Value {
         "predicate": null,
         "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text", "commentary"],
+        "required_evidence_types": ["base_text"],
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -1807,6 +1799,57 @@ fn sample_card(evidence_type: &str) -> EvidenceCard {
         evidence_level: "测试层级".to_string(),
         confidence: "medium".to_string(),
         verification_status: "test".to_string(),
+    }
+}
+
+fn test_retrieved_evidence(
+    question: &str,
+    cards: Vec<EvidenceCard>,
+) -> RuntimeWorkflowRetrievedEvidence {
+    RuntimeWorkflowRetrievedEvidence {
+        schema_version: RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION.to_string(),
+        source: "knownledge_http_retriever".to_string(),
+        cards,
+        retrieval: json!({
+            "schema_version": RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION,
+            "request": {
+                "search_plan": {
+                    "schema_version": "tonglingyu.agent_retriever.search_plan.v1",
+                    "query": question,
+                    "routes": ["bm25", "vector", "entity", "event", "poem", "commentary"],
+                },
+                "retrieve_options": {
+                    "schema_version": "tonglingyu.agent_retriever.retrieve_options.v1",
+                    "trace_level": "route",
+                },
+            },
+            "request_response_trace": {
+                "transport": "http",
+                "tool_name": "tonglingyu.agent_retriever.retrieve_http",
+                "method": "POST",
+                "path": "/retrieve",
+                "request": {
+                    "search_plan": {
+                        "query": question,
+                    },
+                },
+                "response": {
+                    "schema_version": "tonglingyu.agent_retriever.retrieve_response.v1",
+                },
+            },
+            "raw_retrieve_response": {
+                "schema_version": "tonglingyu.agent_retriever.retrieve_response.v1",
+                "record_type": "agent_retriever_retrieve_response",
+            },
+            "evidence_pack": {
+                "schema_version": "tonglingyu.agent_retriever.evidence_pack.v1",
+            },
+            "diagnostics": {
+                "sufficiency": {
+                    "doc_count": 1,
+                },
+            },
+        }),
     }
 }
 
@@ -8139,6 +8182,30 @@ fn runtime_workflow_consumes_pre_retrieved_evidence() {
 }
 
 #[test]
+fn runtime_workflow_rejects_commentary_required_without_external_retrieved_evidence() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+
+    let error = execute_runtime_workflow(
+        &conn,
+        test_workflow_input(
+            "trace-commentary-no-external-retrieval",
+            "脂批如何评价通灵玉？",
+            3,
+            vec!["base_text".to_string(), "commentary".to_string()],
+        ),
+    )
+    .expect_err("commentary evidence without external retrieval must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("runtime commentary fallback is disabled")
+    );
+}
+
+#[test]
 fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
     let conn = Connection::open_in_memory().expect("in-memory sqlite");
     init_runtime_schema(&conn).expect("runtime schema");
@@ -8161,8 +8228,8 @@ fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
         workflow
             .steps
             .iter()
-            .any(|step| step.operation == "commentary_evidence_search"),
-        "frame required evidence types should add commentary search"
+            .all(|step| step.operation != "commentary_evidence_search"),
+        "current workflow must not add commentary fallback search"
     );
     assert!(
         workflow
@@ -8376,17 +8443,22 @@ fn runtime_workflow_answers_character_fate_with_bound_slot_evidence() {
     init_knowledge_base_schema(&conn).expect("kb schema");
     seed_lindaiyu_character_fate_runtime_blocks(&conn);
 
-    let workflow = execute_runtime_workflow(
-        &conn,
-        test_workflow_input_with_question_frame(
-            "trace-character-fate-workflow",
-            "林黛玉结局如何",
-            4,
-            vec!["base_text".to_string()],
-            lindaiyu_character_fate_question_frame_value(),
-        ),
-    )
-    .expect("workflow executes");
+    let mut commentary = sample_card("commentary");
+    commentary.evidence_id = "ev-lindaiyu-fate-commentary".to_string();
+    commentary.block_id = "quality-block-lindaiyu-fate-commentary".to_string();
+    commentary.source_id = "quality-source".to_string();
+    commentary.source_title = "脂硯齋重評石頭記/第五回".to_string();
+    commentary.text = "可嘆停機德，{{~~|【甲夾：此句薛。】}}\n堪憐咏絮才。{{~~|【甲夾：此句林。】}}\n玉帶林中掛，\n金簪雪裡埋。".to_string();
+    let mut input = test_workflow_input_with_question_frame(
+        "trace-character-fate-workflow",
+        "林黛玉结局如何",
+        4,
+        vec!["base_text".to_string()],
+        lindaiyu_character_fate_question_frame_value(),
+    );
+    input.retrieved_evidence = Some(test_retrieved_evidence("林黛玉结局如何", vec![commentary]));
+
+    let workflow = execute_runtime_workflow(&conn, input).expect("workflow executes");
 
     assert!(workflow.package.question_frame.is_some());
     assert!(
@@ -11882,8 +11954,8 @@ async fn agent_runtime_plan_gate_executes_profile_contracts() {
 
     assert_eq!(report.status, "passed");
     assert_eq!(report.agent_runtime_client, "minimal");
-    assert_eq!(report.profile_contract_count, 4);
-    assert_eq!(report.runtime_step_count, 5);
+    assert_eq!(report.profile_contract_count, 3);
+    assert_eq!(report.runtime_step_count, 4);
     assert_eq!(
         report.runtime_step_plan["owner"].as_str(),
         Some("domain_gateway")

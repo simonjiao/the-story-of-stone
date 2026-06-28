@@ -35,8 +35,8 @@ impl RuntimeStepPlan {
             profiles: RuntimeWorkflowProfiles {
                 main: profiles.main.clone(),
                 text: profiles.text.clone(),
-                commentary: profiles.commentary.clone(),
                 reviewer: profiles.reviewer.clone(),
+                ..RuntimeWorkflowProfiles::default()
             },
         })
     }
@@ -87,14 +87,11 @@ pub(crate) fn search_policy(question: &str) -> SearchPolicy {
     } else {
         "base_text"
     };
-    let mut profiles = vec![
+    let profiles = vec![
         "honglou-text".to_string(),
         "honglou-main".to_string(),
         "honglou-reviewer".to_string(),
     ];
-    if asks_commentary {
-        profiles.insert(1, "honglou-commentary".to_string());
-    }
     SearchPolicy {
         question_type: question_type.to_string(),
         required_evidence_types: required.into_iter().collect(),
@@ -116,13 +113,7 @@ pub(crate) fn planned_profiles_for_policy(
     policy: &SearchPolicy,
 ) -> Vec<String> {
     let mut planned = vec![profiles.text.clone()];
-    if policy
-        .required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        planned.push(profiles.commentary.clone());
-    }
+    let _ = policy;
     planned.push(profiles.main.clone());
     planned.push(profiles.reviewer.clone());
     planned
@@ -175,7 +166,6 @@ mod tests {
         InternalProfiles {
             main: "honglou-main".to_string(),
             text: "honglou-text".to_string(),
-            commentary: "honglou-commentary".to_string(),
             reviewer: "honglou-reviewer".to_string(),
         }
     }
@@ -203,8 +193,9 @@ mod tests {
                 .iter()
                 .any(|step| step.profile == "honglou-reviewer" && step.required)
         );
-        assert!(plan.steps.iter().any(|step| {
-            step.allowed_tools
+        assert!(plan.steps.iter().all(|step| {
+            !step
+                .allowed_tools
                 .contains(&"tonglingyu.commentary.search".to_string())
         }));
     }

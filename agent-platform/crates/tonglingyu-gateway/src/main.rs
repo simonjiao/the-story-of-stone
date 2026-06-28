@@ -111,8 +111,7 @@ use crate::context_governance::{
 };
 use crate::eval_command::run_eval_command;
 use crate::llm_agent_contracts::{
-    CONVERSATION_STATE_WRITER_PROFILE_ID, QUESTION_NORMALIZER_PROFILE_ID,
-    tonglingyu_llm_agent_profile_contracts,
+    QUESTION_NORMALIZER_PROFILE_ID, tonglingyu_llm_agent_profile_contracts,
 };
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
@@ -571,12 +570,6 @@ struct ServeArgs {
     profile_text: String,
     #[arg(
         long,
-        env = "TONGLINGYU_PROFILE_COMMENTARY",
-        default_value = "honglou-commentary"
-    )]
-    profile_commentary: String,
-    #[arg(
-        long,
         env = "TONGLINGYU_PROFILE_REVIEWER",
         default_value = "honglou-reviewer"
     )]
@@ -626,7 +619,6 @@ struct AppState {
 struct InternalProfiles {
     main: String,
     text: String,
-    commentary: String,
     reviewer: String,
 }
 
@@ -635,7 +627,6 @@ const PACKAGE_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER";
 const DRAFT_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER";
 const REVIEW_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER";
 const QUESTION_NORMALIZER_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_QUESTION_NORMALIZER_PROVIDER";
-const CONVERSATION_STATE_PROVIDER_ENV: &str = "TONGLINGYU_AGENT_ROLE_CONVERSATION_STATE_PROVIDER";
 
 #[derive(Debug, Clone)]
 struct AgentRoleProviderAssignment {
@@ -767,7 +758,6 @@ fn build_workflow_agent_runtime(
     let profile = AgentProviderProfile::from_source(&provider_profile, &env_nonempty)?;
     let workflow_runtime_profiles = vec![
         profiles.text.clone(),
-        profiles.commentary.clone(),
         profiles.main.clone(),
         profiles.reviewer.clone(),
     ];
@@ -836,7 +826,6 @@ fn build_workflow_agent_runtime_config_from_source(
     let mut mode = None;
     let workflow_runtime_profiles = vec![
         profiles.text.clone(),
-        profiles.commentary.clone(),
         profiles.main.clone(),
         profiles.reviewer.clone(),
     ];
@@ -936,18 +925,11 @@ fn workflow_agent_runtime_mode_for_provider(
 fn llm_agent_provider_assignments_from_source(
     get_env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<AgentRoleProviderAssignment>> {
-    Ok(vec![
-        AgentRoleProviderAssignment {
-            runtime_profile: QUESTION_NORMALIZER_PROFILE_ID.to_string(),
-            role_env: QUESTION_NORMALIZER_PROVIDER_ENV,
-            provider_profile: required_env_value_from(QUESTION_NORMALIZER_PROVIDER_ENV, get_env)?,
-        },
-        AgentRoleProviderAssignment {
-            runtime_profile: CONVERSATION_STATE_WRITER_PROFILE_ID.to_string(),
-            role_env: CONVERSATION_STATE_PROVIDER_ENV,
-            provider_profile: required_env_value_from(CONVERSATION_STATE_PROVIDER_ENV, get_env)?,
-        },
-    ])
+    Ok(vec![AgentRoleProviderAssignment {
+        runtime_profile: QUESTION_NORMALIZER_PROFILE_ID.to_string(),
+        role_env: QUESTION_NORMALIZER_PROVIDER_ENV,
+        provider_profile: required_env_value_from(QUESTION_NORMALIZER_PROVIDER_ENV, get_env)?,
+    }])
 }
 
 fn workflow_agent_provider_assignments_from_source(
@@ -1056,8 +1038,8 @@ fn runtime_workflow_profiles(profiles: &InternalProfiles) -> RuntimeWorkflowProf
     RuntimeWorkflowProfiles {
         main: profiles.main.clone(),
         text: profiles.text.clone(),
-        commentary: profiles.commentary.clone(),
         reviewer: profiles.reviewer.clone(),
+        ..RuntimeWorkflowProfiles::default()
     }
 }
 
@@ -1164,11 +1146,6 @@ fn local_runtime_context_contract(
                 "tonglingyu.text.search".to_string(),
                 RETRIEVER_TOOL_NAME.to_string(),
             ],
-            None,
-        ),
-        (
-            profiles.commentary.as_str(),
-            vec!["tonglingyu.commentary.search".to_string()],
             None,
         ),
         (
@@ -1947,7 +1924,6 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let profiles = InternalProfiles {
         main: args.profile_main,
         text: args.profile_text,
-        commentary: args.profile_commentary,
         reviewer: args.profile_reviewer,
     };
     let (agent_runtime, agent_runtime_mode, workflow_agent_provider_profiles) =
@@ -3160,7 +3136,6 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
     let profiles = InternalProfiles {
         main: "honglou-main".to_string(),
         text: "honglou-text".to_string(),
-        commentary: "honglou-commentary".to_string(),
         reviewer: "honglou-reviewer".to_string(),
     };
     let mut policy = search_policy(&args.question);
@@ -6926,10 +6901,7 @@ async fn chat_completions(
                 "reason": "forbidden_control_fields",
                 "trigger": "forbidden_control_field_detected",
                 "provider_called": false,
-                "profiles_not_called": [
-                    QUESTION_NORMALIZER_PROFILE_ID,
-                    CONVERSATION_STATE_WRITER_PROFILE_ID,
-                ],
+                "profiles_not_called": [QUESTION_NORMALIZER_PROFILE_ID],
                 "forbidden_field_count": forbidden.len(),
                 "forbidden_fields_sha256": forbidden_digest,
                 "raw_agent_output_embedded": false,

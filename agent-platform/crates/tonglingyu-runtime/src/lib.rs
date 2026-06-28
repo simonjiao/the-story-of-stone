@@ -2315,20 +2315,6 @@ pub fn runtime_workflow_plan(input: RuntimeWorkflowPlanInput) -> RuntimeWorkflow
         required: true,
         allowed_tools: vec!["tonglingyu.text.search".to_string()],
     }];
-    if input
-        .required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        steps.push(RuntimeWorkflowPlanStep {
-            step_id: "step-02-commentary-search".to_string(),
-            profile: input.profiles.commentary.clone(),
-            profile_contract_version: PROFILE_CONTRACT_VERSION.to_string(),
-            operation: "commentary_evidence_search".to_string(),
-            required: true,
-            allowed_tools: vec!["tonglingyu.commentary.search".to_string()],
-        });
-    }
     steps.push(RuntimeWorkflowPlanStep {
         step_id: step_id(steps.len() + 1, "package-create"),
         profile: input.profiles.main.clone(),
@@ -2507,7 +2493,6 @@ fn validate_runtime_context_contract(
     let valid_consumers = [
         input.profiles.main.as_str(),
         input.profiles.text.as_str(),
-        input.profiles.commentary.as_str(),
         input.profiles.reviewer.as_str(),
     ]
     .into_iter()
@@ -3339,10 +3324,10 @@ pub async fn execute_agent_runtime_plan_gate(
 fn runtime_profile_descriptors(profiles: &RuntimeWorkflowProfiles) -> Vec<ProfileDescriptor> {
     profile_catalog()
         .into_iter()
+        .filter(|descriptor| descriptor.profile != "honglou-commentary")
         .map(|mut descriptor| {
             descriptor.profile = match descriptor.profile.as_str() {
                 "honglou-text" => profiles.text.clone(),
-                "honglou-commentary" => profiles.commentary.clone(),
                 "honglou-main" => profiles.main.clone(),
                 "honglou-reviewer" => profiles.reviewer.clone(),
                 _ => descriptor.profile,
@@ -3607,6 +3592,14 @@ pub fn execute_runtime_workflow(
         )?);
         retrieved.cards.clone()
     } else {
+        if required_evidence_types
+            .iter()
+            .any(|item| item == "commentary")
+        {
+            return Err(anyhow!(
+                "commentary evidence requires external retrieved_evidence; runtime commentary fallback is disabled"
+            ));
+        }
         let mut cards = Vec::new();
         let text_required_types = text_search_required_evidence_types(&required_evidence_types);
         let text_started = Instant::now();
@@ -3700,58 +3693,6 @@ pub fn execute_runtime_workflow(
             },
         )?);
 
-        if required_evidence_types
-            .iter()
-            .any(|item| item == "commentary")
-        {
-            let commentary_started = Instant::now();
-            let (commentary_cards, commentary_quality_report) = match execute_tool(
-                conn,
-                TonglingyuToolCall::CommentarySearch {
-                    question: search_question.clone(),
-                    limit: input.limit,
-                },
-            )? {
-                TonglingyuToolOutput::EvidenceCards {
-                    cards,
-                    quality_report,
-                    ..
-                } => (cards, *quality_report),
-                other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-            };
-            retrieval_failure_candidates.push((
-                commentary_quality_report.clone(),
-                evidence_ids(&commentary_cards),
-            ));
-            cards = merge_cards(cards, commentary_cards.clone());
-            let commentary_plan_step =
-                workflow_plan_step(&workflow_plan, "commentary_evidence_search")?;
-            steps.push(workflow_step_report(
-                conn,
-                WorkflowStepReportInput {
-                    trace_id: &input.trace_id,
-                    step_id: &commentary_plan_step.step_id,
-                    profile: &commentary_plan_step.profile,
-                    operation: &commentary_plan_step.operation,
-                    required: commentary_plan_step.required,
-                    allowed_tools: commentary_plan_step.allowed_tools.clone(),
-                    tool_calls: commentary_plan_step.allowed_tools.clone(),
-                    input_ref: None,
-                    duration_ms: elapsed_ms(commentary_started),
-                    output: json!({
-                    "object": "tonglingyu.commentary.evidence_analysis",
-                    "card_count": commentary_cards.len(),
-                    "evidence_ids": evidence_ids(&commentary_cards),
-                    "evidence_types": evidence_types(&commentary_cards),
-                    "query_frame_bound": question_frame.is_some(),
-                    "query_sha256": hash_text(&search_question),
-                    "scope_notes": "commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope",
-                    "quality_report": &commentary_quality_report,
-                }),
-                    context: &input.context,
-                },
-            )?);
-        }
         cards
     };
 
@@ -4641,7 +4582,6 @@ fn tonglingyu_agent_runtime_client(
 ) -> Result<Arc<dyn RuntimeClient>> {
     let runtime_profile_ids = [
         profiles.text.as_str(),
-        profiles.commentary.as_str(),
         profiles.main.as_str(),
         profiles.reviewer.as_str(),
     ];
