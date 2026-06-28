@@ -91,6 +91,7 @@ POST /retrieve
     "fail_on_rerank_error": true,
     "raw_plan": {
       "planner": "tonglingyu-gateway",
+      "common_recall_kind": "workflow",
       "route_policy": "all_knownledge_retriever_routes",
       "vector_required": true
     }
@@ -118,6 +119,73 @@ POST /retrieve
 ```
 
 Gateway 只表达 route 和数量上限要求；具体向量库查询由 retriever 内部完成。
+
+## Gateway Common Recall API
+
+外部 workflow 如果只需要常用召回，不应手写 retriever SearchPlan。Gateway 提供认证后的封装接口：
+
+```text
+POST /v1/retrieval/recall/{kind}
+Authorization: Bearer <gateway key>
+```
+
+`kind` 支持：
+
+| kind | 说明 | Gateway SearchPlan 映射 |
+| --- | --- | --- |
+| `person` | 查询人/人物/别名/身份 | `entity` first，辅以 `event/bm25/vector` |
+| `event` | 查询事/情节/事件 | `event` first，辅以 `entity/bm25/vector` |
+| `poem` | 查询诗词/曲词/文本对象 | `poem` first，辅以 `entity/event/commentary/bm25/vector` |
+| `judgement` | 查询判词/册页判语 | `poem` first，辅以 `commentary/event/entity/bm25/vector`，并写入 `entity_subtype:judgement` / `entity_facets:judgment` cues |
+| `commentary` | 查询脂批/批语 | `commentary` first，辅以 `poem/event/bm25/vector` |
+| `workflow` | 与 chat workflow 一致的全路由召回 | `bm25/vector/entity/event/poem/commentary` |
+
+请求体：
+
+```json
+{
+  "query": "宝钗判词",
+  "session_id": "optional-session",
+  "limit": 8,
+  "rerank": false,
+  "trace_level": "route",
+  "trace_doc_limit": 8,
+  "include_raw": false,
+  "metadata": {}
+}
+```
+
+Gateway 会构造 `tonglingyu.agent_retriever.search_plan.v1`，写入：
+
+- canonical `routes`，必须包含 `vector`；
+- `route_weights`、route-specific `queries`、`keyword_queries`、`semantic_queries`；
+- 常用召回所需的 `structured_terms`、`expansion_terms`；
+- schema 允许的 `filters`，例如 `chunk_kinds`、`entity_subtypes`、`entity_facets`；
+- `include_cards=true`、`fail_on_route_error=true`、`fail_on_rerank_error=true`。
+
+Gateway 不解释这些 filters，也不查询向量库；它只把封装后的 SearchPlan 通过 knownledge retriever HTTP `/retrieve` 发送出去。
+
+成功 response：
+
+```json
+{
+  "object": "tonglingyu.retrieval_common_recall",
+  "schema_version": "tonglingyu.gateway.retrieval_common_recall.v1",
+  "trace_id": "tly-...",
+  "kind": "judgement_poem",
+  "request": {
+    "search_plan": {},
+    "retrieve_options": {}
+  },
+  "response": {
+    "schema_version": "tonglingyu.agent_retriever.retrieve_response.v1",
+    "diagnostics": {}
+  },
+  "evidence_pack": {}
+}
+```
+
+失败行为与 chat workflow 一致：retriever 不可达、超时、非 JSON、schema 不匹配或 `ok=false` 时返回 `503 retriever_failed`，记录 `retriever_common_recall_failed`，且 `fallback_used=false`。
 
 ## Retrieve Response
 

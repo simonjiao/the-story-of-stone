@@ -26,6 +26,8 @@ pub(crate) const WORKFLOW_RETRIEVAL_INPUT_SCHEMA_VERSION: &str =
 pub(crate) const RETRIEVER_TOOL_NAME: &str = "tonglingyu.agent_retriever.retrieve_http";
 
 const DEFAULT_ROUTES: &[&str] = &["bm25", "vector", "entity", "event", "poem", "commentary"];
+const MAX_ROUTE_QUERY_REWRITES: usize = 8;
+const MAX_PLAN_TERMS: usize = 16;
 const RETRIEVE_RESPONSE_RECORD_TYPE: &str = "agent_retriever_retrieve_response";
 const HEALTH_RECORD_TYPE: &str = "agent_retriever_service_health";
 const METADATA_RECORD_TYPE: &str = "agent_retriever_service_metadata";
@@ -330,6 +332,317 @@ pub(crate) struct RetrieverRetrieveRequest {
     pub(crate) metadata: Value,
 }
 
+impl RetrieverRetrieveRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn common_recall(
+        request_id: String,
+        session_id: Option<String>,
+        kind: RetrieverCommonRecallKind,
+        query: &str,
+        top_k: usize,
+        rerank: bool,
+        include_raw: bool,
+        metadata: Value,
+        trace_level: &str,
+        trace_doc_limit: usize,
+    ) -> Self {
+        Self {
+            request_id,
+            session_id,
+            caller: "tonglingyu-gateway".to_string(),
+            graph_node: kind.graph_node().to_string(),
+            search_plan: RetrieverSearchPlan::for_common_recall(kind, query, top_k, rerank),
+            retrieve_options: RetrieverRetrieveOptions::common_recall(trace_level, trace_doc_limit),
+            include_raw,
+            metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetrieverCommonRecallKind {
+    Workflow,
+    Person,
+    Event,
+    Poem,
+    JudgementPoem,
+    Commentary,
+}
+
+impl RetrieverCommonRecallKind {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "workflow" | "all" => Some(Self::Workflow),
+            "person" | "people" | "character" | "characters" | "entity" | "entity_lookup" => {
+                Some(Self::Person)
+            }
+            "event" | "story" | "plot" | "event_lookup" => Some(Self::Event),
+            "poem" | "poetry" | "poem_lookup" | "text" | "text_work" => Some(Self::Poem),
+            "judgement" | "judgment" | "judgement_poem" | "judgment_poem" | "panci" => {
+                Some(Self::JudgementPoem)
+            }
+            "commentary" | "commentary_lookup" | "zhiyanzhai" => Some(Self::Commentary),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Workflow => "workflow",
+            Self::Person => "person",
+            Self::Event => "event",
+            Self::Poem => "poem",
+            Self::JudgementPoem => "judgement_poem",
+            Self::Commentary => "commentary",
+        }
+    }
+
+    fn graph_node(self) -> &'static str {
+        match self {
+            Self::Workflow => "chat_workflow",
+            Self::Person => "common_recall_person",
+            Self::Event => "common_recall_event",
+            Self::Poem => "common_recall_poem",
+            Self::JudgementPoem => "common_recall_judgement_poem",
+            Self::Commentary => "common_recall_commentary",
+        }
+    }
+
+    fn route_policy(self) -> &'static str {
+        match self {
+            Self::Workflow => "all_knownledge_retriever_routes",
+            Self::Person => "person_lookup_entity_first_with_event_context",
+            Self::Event => "event_lookup_event_first_with_entity_context",
+            Self::Poem => "poem_lookup_text_route_first",
+            Self::JudgementPoem => "judgement_poem_lookup_text_route_with_commentary_context",
+            Self::Commentary => "commentary_lookup_commentary_first",
+        }
+    }
+
+    fn routes(self) -> &'static [&'static str] {
+        match self {
+            Self::Workflow => DEFAULT_ROUTES,
+            Self::Person => &["entity", "event", "bm25", "vector"],
+            Self::Event => &["event", "entity", "bm25", "vector"],
+            Self::Poem => &["poem", "entity", "event", "commentary", "bm25", "vector"],
+            Self::JudgementPoem => &["poem", "commentary", "event", "entity", "bm25", "vector"],
+            Self::Commentary => &["commentary", "poem", "event", "bm25", "vector"],
+        }
+    }
+
+    fn route_weights(self) -> BTreeMap<String, f64> {
+        let entries: &[(&str, f64)] = match self {
+            Self::Workflow => &[],
+            Self::Person => &[
+                ("entity", 1.4),
+                ("event", 0.95),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Event => &[
+                ("event", 1.45),
+                ("entity", 0.95),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Poem => &[
+                ("poem", 1.5),
+                ("entity", 0.9),
+                ("event", 0.85),
+                ("commentary", 0.75),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::JudgementPoem => &[
+                ("poem", 1.6),
+                ("commentary", 1.05),
+                ("event", 0.9),
+                ("entity", 0.9),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Commentary => &[
+                ("commentary", 1.5),
+                ("poem", 0.85),
+                ("event", 0.8),
+                ("bm25", 1.0),
+                ("vector", 0.85),
+            ],
+        };
+        entries
+            .iter()
+            .map(|(route, weight)| ((*route).to_string(), *weight))
+            .collect()
+    }
+
+    fn queries(self, query: &str) -> BTreeMap<String, Vec<String>> {
+        let mut queries = BTreeMap::new();
+        match self {
+            Self::Workflow => {}
+            Self::Person => {
+                queries.insert(
+                    "entity".to_string(),
+                    query_rewrites(query, &["人物", "别名 身份"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    query_rewrites(query, &["相关事件", "经历"]),
+                );
+                queries.insert("bm25".to_string(), query_rewrites(query, &["人物", "关系"]));
+                queries.insert(
+                    "vector".to_string(),
+                    query_rewrites(query, &["人物关系 经历"]),
+                );
+            }
+            Self::Event => {
+                queries.insert(
+                    "event".to_string(),
+                    query_rewrites(query, &["事件", "情节"]),
+                );
+                queries.insert("entity".to_string(), query_rewrites(query, &["相关人物"]));
+                queries.insert("bm25".to_string(), query_rewrites(query, &["情节", "经过"]));
+                queries.insert(
+                    "vector".to_string(),
+                    query_rewrites(query, &["事件经过 因果"]),
+                );
+            }
+            Self::Poem => {
+                queries.insert(
+                    "poem".to_string(),
+                    query_rewrites(query, &["诗词", "曲词 文本"]),
+                );
+                queries.insert("entity".to_string(), query_rewrites(query, &["诗词题名"]));
+                queries.insert(
+                    "event".to_string(),
+                    query_rewrites(query, &["诗词相关情节"]),
+                );
+                queries.insert(
+                    "commentary".to_string(),
+                    query_rewrites(query, &["诗词 脂批"]),
+                );
+                queries.insert("bm25".to_string(), query_rewrites(query, &["诗词", "题名"]));
+                queries.insert(
+                    "vector".to_string(),
+                    query_rewrites(query, &["诗词文本 含义"]),
+                );
+            }
+            Self::JudgementPoem => {
+                queries.insert(
+                    "poem".to_string(),
+                    query_rewrites(query, &["判词", "册页判语", "金陵十二钗 判词"]),
+                );
+                queries.insert(
+                    "commentary".to_string(),
+                    query_rewrites(query, &["判词 脂批", "册页判语 脂批"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    query_rewrites(query, &["判词相关情节"]),
+                );
+                queries.insert("entity".to_string(), query_rewrites(query, &["判词人物"]));
+                queries.insert("bm25".to_string(), query_rewrites(query, &["判词", "册页"]));
+                queries.insert(
+                    "vector".to_string(),
+                    query_rewrites(query, &["判词 命运 伏笔"]),
+                );
+            }
+            Self::Commentary => {
+                queries.insert(
+                    "commentary".to_string(),
+                    query_rewrites(query, &["脂批", "批语"]),
+                );
+                queries.insert("poem".to_string(), query_rewrites(query, &["脂批所评诗文"]));
+                queries.insert(
+                    "event".to_string(),
+                    query_rewrites(query, &["脂批所评情节"]),
+                );
+                queries.insert("bm25".to_string(), query_rewrites(query, &["脂批", "批语"]));
+                queries.insert("vector".to_string(), query_rewrites(query, &["脂批 评论"]));
+            }
+        }
+        queries
+    }
+
+    fn keyword_queries(self, query: &str) -> Vec<String> {
+        match self {
+            Self::Workflow => vec![query.to_string()],
+            Self::Person => query_rewrites(query, &["人物", "身份", "关系"]),
+            Self::Event => query_rewrites(query, &["事件", "情节", "经过"]),
+            Self::Poem => query_rewrites(query, &["诗词", "题名", "曲词"]),
+            Self::JudgementPoem => query_rewrites(query, &["判词", "册页判语", "金陵十二钗"]),
+            Self::Commentary => query_rewrites(query, &["脂批", "批语", "评点"]),
+        }
+    }
+
+    fn semantic_queries(self, query: &str) -> Vec<String> {
+        match self {
+            Self::Workflow => vec![query.to_string()],
+            Self::Person => query_rewrites(query, &["人物身份经历关系"]),
+            Self::Event => query_rewrites(query, &["情节事件经过因果"]),
+            Self::Poem => query_rewrites(query, &["诗词曲文文本含义"]),
+            Self::JudgementPoem => query_rewrites(query, &["判词册页人物命运伏笔"]),
+            Self::Commentary => query_rewrites(query, &["脂批评点解释"]),
+        }
+    }
+
+    fn structured_terms(self) -> Vec<String> {
+        match self {
+            Self::Workflow => Vec::new(),
+            Self::Person => plan_terms(&["entity_type:person", "entity_class:person"]),
+            Self::Event => plan_terms(&["route_view:event_route_view", "chunk_kind:event_scene"]),
+            Self::Poem => plan_terms(&["entity_type:text", "entity_subtype:poem", "route:poem"]),
+            Self::JudgementPoem => plan_terms(&[
+                "entity_type:text",
+                "entity_subtype:judgement",
+                "entity_facets:judgment",
+                "route:poem",
+            ]),
+            Self::Commentary => plan_terms(&[
+                "route:commentary",
+                "chunk_kind:commentary",
+                "source:zhiyanzhai",
+            ]),
+        }
+    }
+
+    fn expansion_terms(self) -> Vec<String> {
+        match self {
+            Self::Workflow => Vec::new(),
+            Self::Person => plan_terms(&["人物", "别名", "身份", "关系", "经历"]),
+            Self::Event => plan_terms(&["事件", "情节", "经过", "因果", "场景"]),
+            Self::Poem => plan_terms(&["诗词", "曲词", "题名", "文本实体"]),
+            Self::JudgementPoem => plan_terms(&["判词", "册页判语", "金陵十二钗", "正册", "副册"]),
+            Self::Commentary => plan_terms(&["脂批", "批语", "评点", "眉批", "夹批"]),
+        }
+    }
+
+    fn filters(self) -> Option<Value> {
+        match self {
+            Self::Workflow => None,
+            Self::Person => Some(json!({
+                "entity_types": ["person"],
+            })),
+            Self::Event => Some(json!({
+                "chunk_kinds": ["event_scene", "primary_text_segment", "primary_text_window", "theme_anchor"],
+            })),
+            Self::Poem => Some(json!({
+                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window"],
+                "entity_types": ["text"],
+                "entity_subtypes": ["poem", "song"],
+            })),
+            Self::JudgementPoem => Some(json!({
+                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window", "commentary"],
+                "entity_types": ["text"],
+                "entity_subtypes": ["judgement"],
+                "entity_facets": ["judgment"],
+            })),
+            Self::Commentary => Some(json!({
+                "chunk_kinds": ["commentary", "commentary_anchor", "commentary_target_span"],
+            })),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RetrieverSearchPlan {
     pub(crate) schema_version: String,
@@ -349,6 +662,8 @@ pub(crate) struct RetrieverSearchPlan {
     pub(crate) expansion_terms: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) explicit_scope_allowed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub(crate) filters: Option<Value>,
     pub(crate) top_k: usize,
     pub(crate) candidate_limit: usize,
     pub(crate) route_record_limit: usize,
@@ -365,21 +680,32 @@ pub(crate) struct RetrieverSearchPlan {
 
 impl RetrieverSearchPlan {
     pub(crate) fn for_workflow(query: &str, top_k: usize, rerank: bool) -> Self {
+        Self::for_common_recall(RetrieverCommonRecallKind::Workflow, query, top_k, rerank)
+    }
+
+    pub(crate) fn for_common_recall(
+        kind: RetrieverCommonRecallKind,
+        query: &str,
+        top_k: usize,
+        rerank: bool,
+    ) -> Self {
         let top_k = top_k.max(1);
         Self {
             schema_version: SEARCH_PLAN_SCHEMA_VERSION.to_string(),
             query: query.to_string(),
-            routes: DEFAULT_ROUTES
+            routes: kind
+                .routes()
                 .iter()
                 .map(|route| (*route).to_string())
                 .collect(),
-            route_weights: BTreeMap::new(),
-            queries: BTreeMap::new(),
-            keyword_queries: vec![query.to_string()],
-            semantic_queries: vec![query.to_string()],
-            structured_terms: Vec::new(),
-            expansion_terms: Vec::new(),
+            route_weights: kind.route_weights(),
+            queries: kind.queries(query),
+            keyword_queries: kind.keyword_queries(query),
+            semantic_queries: kind.semantic_queries(query),
+            structured_terms: kind.structured_terms(),
+            expansion_terms: kind.expansion_terms(),
             explicit_scope_allowed: None,
+            filters: kind.filters(),
             top_k,
             candidate_limit: (top_k * 20).clamp(20, 160),
             route_record_limit: 10,
@@ -392,11 +718,38 @@ impl RetrieverSearchPlan {
             fail_on_rerank_error: true,
             raw_plan: json!({
                 "planner": "tonglingyu-gateway",
-                "route_policy": "all_knownledge_retriever_routes",
+                "common_recall_kind": kind.as_str(),
+                "route_policy": kind.route_policy(),
                 "vector_required": true,
             }),
         }
     }
+}
+
+fn query_rewrites(query: &str, suffixes: &[&str]) -> Vec<String> {
+    let values = std::iter::once(query.to_string())
+        .chain(suffixes.iter().map(|suffix| format!("{query} {suffix}")));
+    dedupe_limited(values, MAX_ROUTE_QUERY_REWRITES)
+}
+
+fn plan_terms(terms: &[&str]) -> Vec<String> {
+    dedupe_limited(terms.iter().map(|term| (*term).to_string()), MAX_PLAN_TERMS)
+}
+
+fn dedupe_limited(values: impl IntoIterator<Item = String>, max_items: usize) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        out.push(normalized);
+        if out.len() >= max_items {
+            break;
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,9 +767,13 @@ pub(crate) struct RetrieverRetrieveOptions {
 
 impl RetrieverRetrieveOptions {
     pub(crate) fn workflow(trace_doc_limit: usize) -> Self {
+        Self::common_recall("route", trace_doc_limit)
+    }
+
+    pub(crate) fn common_recall(trace_level: &str, trace_doc_limit: usize) -> Self {
         Self {
             schema_version: RETRIEVE_OPTIONS_SCHEMA_VERSION.to_string(),
-            trace_level: "route".to_string(),
+            trace_level: trace_level.to_string(),
             trace_doc_limit: trace_doc_limit.max(1),
             include_ref_audit: false,
             expected_refs: BTreeMap::new(),
@@ -673,6 +1030,8 @@ pub(crate) struct RetrieverNormalizedSearchPlan {
     pub(crate) structured_terms: Vec<String>,
     #[serde(default)]
     pub(crate) expansion_terms: Vec<String>,
+    #[serde(default)]
+    pub(crate) filters: Option<Value>,
     pub(crate) explicit_scope_allowed: bool,
     pub(crate) top_k: usize,
     pub(crate) candidate_limit: usize,
@@ -713,6 +1072,13 @@ impl RetrieverNormalizedSearchPlan {
         validate_unique_strings(&self.semantic_queries, "search_plan.semantic_queries")?;
         validate_unique_strings(&self.structured_terms, "search_plan.structured_terms")?;
         validate_unique_strings(&self.expansion_terms, "search_plan.expansion_terms")?;
+        if let Some(filters) = &self.filters {
+            if !filters.is_object() {
+                return Err(anyhow!(
+                    "retriever normalized search_plan.filters must be an object"
+                ));
+            }
+        }
         if self.keyword_queries.is_empty() || self.semantic_queries.is_empty() {
             return Err(anyhow!(
                 "retriever normalized search_plan must include keyword_queries and semantic_queries"

@@ -1025,6 +1025,63 @@ async fn response_text(response: Response) -> String {
 }
 
 #[test]
+fn common_recall_person_plan_targets_entity_route_with_vector_required() {
+    let plan = RetrieverSearchPlan::for_common_recall(
+        RetrieverCommonRecallKind::Person,
+        "介绍尤三姐",
+        8,
+        false,
+    );
+
+    assert_eq!(plan.routes, vec!["entity", "event", "bm25", "vector"]);
+    assert_eq!(plan.raw_plan["common_recall_kind"], json!("person"));
+    assert_eq!(
+        plan.raw_plan["route_policy"],
+        json!("person_lookup_entity_first_with_event_context")
+    );
+    assert_eq!(plan.route_weights["entity"], 1.4);
+    assert!(plan.routes.contains(&"vector".to_string()));
+    assert!(
+        plan.queries["entity"]
+            .iter()
+            .any(|query| query.contains("人物"))
+    );
+    assert_eq!(
+        plan.filters.as_ref().expect("filters")["entity_types"],
+        json!(["person"])
+    );
+}
+
+#[test]
+fn common_recall_judgement_plan_uses_poem_route_with_structured_terms() {
+    let plan = RetrieverSearchPlan::for_common_recall(
+        RetrieverCommonRecallKind::JudgementPoem,
+        "宝钗判词",
+        6,
+        true,
+    );
+
+    assert_eq!(plan.routes.first().map(String::as_str), Some("poem"));
+    assert!(plan.routes.contains(&"commentary".to_string()));
+    assert!(plan.routes.contains(&"vector".to_string()));
+    assert_eq!(plan.raw_plan["common_recall_kind"], json!("judgement_poem"));
+    assert!(
+        plan.queries["poem"]
+            .iter()
+            .any(|query| query.contains("金陵十二钗"))
+    );
+    assert!(
+        plan.structured_terms
+            .contains(&"entity_subtype:judgement".to_string())
+    );
+    assert!(plan.expansion_terms.contains(&"判词".to_string()));
+    assert_eq!(
+        plan.filters.as_ref().expect("filters")["entity_subtypes"],
+        json!(["judgement"])
+    );
+}
+
+#[test]
 fn eval_quality_summary_fails_closed_without_expected_denominator() {
     let quality = EvalQualityAccumulator {
         total_cases: 1,
@@ -3801,6 +3858,52 @@ async fn chat_completion_fails_closed_when_retriever_is_unavailable() {
             .expect("trace loads")
             .is_some()
     );
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn common_recall_endpoint_fails_closed_when_retriever_is_unavailable() {
+    let db_path = temp_gateway_db_path("tonglingyu-common-recall-retriever-unavailable");
+    let state = Arc::new(test_app_state(db_path.clone()));
+
+    let response = common_recall_endpoint(
+        State(state),
+        gateway_headers("recall-user"),
+        AxumPath("judgement".to_string()),
+        Json(CommonRecallRequest {
+            query: "宝钗判词".to_string(),
+            session_id: Some("recall-session".to_string()),
+            limit: Some(5),
+            rerank: Some(false),
+            trace_level: Some("route".to_string()),
+            trace_doc_limit: Some(5),
+            include_raw: Some(false),
+            metadata: Some(json!({"caller": "test"})),
+        }),
+    )
+    .await;
+
+    let status = response.status();
+    let text = response_text(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    let body: Value = serde_json::from_str(&text).expect("response json");
+    assert_eq!(body["error"]["code"], json!("retriever_failed"));
+    assert_eq!(
+        audit_event_count(&db_path, "retriever_common_recall_requested"),
+        1
+    );
+    assert_eq!(
+        audit_event_count(&db_path, "retriever_common_recall_failed"),
+        1
+    );
+    assert_eq!(
+        audit_event_count(&db_path, "retriever_common_recall_completed"),
+        0
+    );
+    let failed = latest_audit_event_payload(&db_path, "retriever_common_recall_failed");
+    assert_eq!(failed["common_recall_kind"], json!("judgement_poem"));
+    assert_eq!(failed["fallback_used"], json!(false));
 
     remove_sqlite_file_set(&db_path);
 }

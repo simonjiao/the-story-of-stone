@@ -125,8 +125,9 @@ use crate::response::{
     streaming_response_from_runtime_events,
 };
 use crate::retriever_http::{
-    RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest, RetrieverSearchPlan,
-    evidence_cards_from_pack, workflow_retrieval_input,
+    RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverRetrieveOptions,
+    RetrieverRetrieveRequest, RetrieverSearchPlan, evidence_cards_from_pack,
+    workflow_retrieval_input,
 };
 use crate::rqa_lifecycle::rqa_user_lifecycle_command;
 use crate::rule_candidates::{
@@ -141,6 +142,10 @@ const USER_FEEDBACK_SCHEMA_VERSION: &str = "tonglingyu-user-feedback-v1";
 const USER_FEEDBACK_MAX_CHARS: usize = 2_000;
 const USER_FEEDBACK_TASK_TEXT_MAX_CHARS: usize = 360;
 const RQA_RESTORE_CANARY_SCHEMA_VERSION: &str = "tonglingyu-rqa-restore-canary-v1";
+const COMMON_RECALL_SCHEMA_VERSION: &str = "tonglingyu.gateway.retrieval_common_recall.v1";
+const COMMON_RECALL_MAX_QUERY_CHARS: usize = 2_000;
+const COMMON_RECALL_MAX_LIMIT: usize = 200;
+const COMMON_RECALL_MAX_TRACE_DOC_LIMIT: usize = 50;
 
 #[derive(Debug, Parser)]
 #[command(name = "tonglingyu-gateway")]
@@ -1269,6 +1274,19 @@ struct SearchParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommonRecallRequest {
+    query: String,
+    session_id: Option<String>,
+    limit: Option<usize>,
+    rerank: Option<bool>,
+    trace_level: Option<String>,
+    trace_doc_limit: Option<usize>,
+    include_raw: Option<bool>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UserFeedbackRequest {
     trace_id: Option<String>,
     package_id: Option<String>,
@@ -2007,6 +2025,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
         .route("/v1/evidence/packages/{package_id}", get(package_endpoint))
+        .route("/v1/retrieval/recall/{kind}", post(common_recall_endpoint))
         .route(
             "/v1/evidence/packages/{package_id}/replay",
             get(replay_package_endpoint),
@@ -3321,6 +3340,231 @@ async fn search_endpoint(
                 None,
             )
         }
+    }
+}
+
+async fn common_recall_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(kind): AxumPath<String>,
+    Json(payload): Json<CommonRecallRequest>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let kind = match RetrieverCommonRecallKind::parse(&kind) {
+        Some(kind) => kind,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unsupported_recall_kind",
+                "unsupported retrieval recall kind",
+                Some(&trace_id),
+            );
+        }
+    };
+    let query = payload.query.trim().to_string();
+    if query.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "query_required",
+            "query is required",
+            Some(&trace_id),
+        );
+    }
+    let query_char_count = query.chars().count();
+    if query_char_count > COMMON_RECALL_MAX_QUERY_CHARS {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "query_too_long",
+            "query is too long",
+            Some(&trace_id),
+        );
+    }
+    let trace_level = match normalize_common_recall_trace_level(payload.trace_level.as_deref()) {
+        Some(trace_level) => trace_level,
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_trace_level",
+                "trace_level must be one of none, route, or debug",
+                Some(&trace_id),
+            );
+        }
+    };
+    let client_metadata = match payload.metadata {
+        Some(metadata) if metadata.is_object() => metadata,
+        Some(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "metadata_must_be_object",
+                "metadata must be an object",
+                Some(&trace_id),
+            );
+        }
+        None => json!({}),
+    };
+    let session_id = payload
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let limit = payload
+        .limit
+        .unwrap_or(state.max_evidence)
+        .clamp(1, COMMON_RECALL_MAX_LIMIT);
+    let trace_doc_limit = payload
+        .trace_doc_limit
+        .unwrap_or(limit)
+        .clamp(1, COMMON_RECALL_MAX_TRACE_DOC_LIMIT);
+    let rerank = payload.rerank.unwrap_or(state.retriever_rerank);
+    let include_raw = payload.include_raw.unwrap_or(false);
+    let conn = match open_db(&state.db) {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(%trace_id, error = %error, "database unavailable");
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "db_unavailable",
+                "database unavailable",
+                Some(&trace_id),
+            );
+        }
+    };
+    if let Err(error) = tonglingyu_runtime::init_runtime_schema(&conn) {
+        tracing::warn!(%trace_id, error = %error, "runtime schema unavailable");
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime_schema_unavailable",
+            "runtime schema unavailable",
+            Some(&trace_id),
+        );
+    }
+    let subject_ref = audit_subject_ref(&subject);
+    let metadata_keys = client_metadata
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "retriever_common_recall_requested",
+        &json!({
+            "auth_subject_ref": &subject_ref,
+            "session_id": &session_id,
+            "common_recall_kind": kind.as_str(),
+            "query_sha256": hash_text(&query),
+            "query_char_count": query_char_count,
+            "limit": limit,
+            "rerank": rerank,
+            "include_raw": include_raw,
+            "trace_level": &trace_level,
+            "trace_doc_limit": trace_doc_limit,
+            "client_metadata_keys": metadata_keys,
+        }),
+    );
+    let request = RetrieverRetrieveRequest::common_recall(
+        trace_id.clone(),
+        session_id.clone(),
+        kind,
+        &query,
+        limit,
+        rerank,
+        include_raw,
+        json!({
+            "trace_id": &trace_id,
+            "auth_subject_ref": &subject_ref,
+            "session_id": &session_id,
+            "common_recall_kind": kind.as_str(),
+            "client_metadata": client_metadata,
+        }),
+        &trace_level,
+        trace_doc_limit,
+    );
+    let retrieve_response = match state.retriever.retrieve(&request).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%trace_id, kind = kind.as_str(), error = %error, "retriever common recall failed");
+            let _ = insert_audit_event(
+                &conn,
+                &trace_id,
+                "retriever_common_recall_failed",
+                &json!({
+                    "auth_subject_ref": &subject_ref,
+                    "session_id": &session_id,
+                    "common_recall_kind": kind.as_str(),
+                    "retriever_base_url": &state.retriever_base_url,
+                    "error": error.to_string(),
+                    "fallback_used": false,
+                }),
+            );
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "retriever_failed",
+                "retriever common recall request failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "retriever_common_recall_completed",
+        &json!({
+            "auth_subject_ref": &subject_ref,
+            "session_id": &session_id,
+            "common_recall_kind": kind.as_str(),
+            "retriever_base_url": &state.retriever_base_url,
+            "request_id": &request.request_id,
+            "schema_version": &retrieve_response.schema_version,
+            "evidence_pack_schema_version": &retrieve_response.evidence_pack.schema_version,
+            "doc_count": retrieve_response.evidence_pack.docs.len(),
+            "sufficiency": &retrieve_response.evidence_pack.sufficiency,
+            "route_coverage": &retrieve_response.evidence_pack.sufficiency.route_coverage,
+            "route_errors": &retrieve_response.evidence_pack.diagnostics.route_errors,
+            "fallback_used": false,
+        }),
+    );
+    Json(json!({
+        "object": "tonglingyu.retrieval_common_recall",
+        "schema_version": COMMON_RECALL_SCHEMA_VERSION,
+        "trace_id": &trace_id,
+        "kind": kind.as_str(),
+        "retriever_base_url": &state.retriever_base_url,
+        "request": {
+            "request_id": &request.request_id,
+            "session_id": &request.session_id,
+            "caller": &request.caller,
+            "graph_node": &request.graph_node,
+            "search_plan": &request.search_plan,
+            "retrieve_options": &request.retrieve_options,
+            "include_raw": request.include_raw,
+        },
+        "response": {
+            "schema_version": &retrieve_response.schema_version,
+            "request_id": &retrieve_response.request_id,
+            "request_context": &retrieve_response.request_context,
+            "service": &retrieve_response.service,
+            "diagnostics": &retrieve_response.diagnostics,
+        },
+        "evidence_pack": &retrieve_response.evidence_pack,
+    }))
+    .into_response()
+}
+
+fn normalize_common_recall_trace_level(value: Option<&str>) -> Option<String> {
+    let normalized = value.unwrap_or("route").trim().to_ascii_lowercase();
+    let normalized = if normalized.is_empty() {
+        "route".to_string()
+    } else {
+        normalized
+    };
+    match normalized.as_str() {
+        "none" | "route" | "debug" => Some(normalized),
+        _ => None,
     }
 }
 
