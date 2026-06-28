@@ -520,6 +520,7 @@ fn test_app_state(db_path: PathBuf) -> AppState {
     AppState {
         db: db_path.clone(),
         runtime_store: TonglingyuRuntimeStore::new(db_path),
+        response_store: Arc::new(Mutex::new(InMemoryResponseEventStore::default())),
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -970,6 +971,212 @@ async fn response_text(response: Response) -> String {
         .await
         .expect("response body reads");
     String::from_utf8(bytes.to_vec()).expect("response body is utf-8")
+}
+
+async fn response_json(response: Response) -> Value {
+    serde_json::from_str(&response_text(response).await).expect("response json")
+}
+
+#[tokio::test]
+async fn responses_and_runs_share_identity_status_and_replay_events() {
+    let db_path = temp_gateway_db_path("gateway-response-run-projection");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("user-response-run");
+    headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    headers.insert("idempotency-key", "idem-response-run".parse().unwrap());
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "分析这批材料并给出结论",
+        "background": true,
+        "metadata": {"mode": "rag"}
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload.clone()))
+            .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    assert_eq!(created["object"], json!("response"));
+    assert_eq!(created["status"], json!("queued"));
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+
+    let idempotent =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(idempotent.status(), StatusCode::OK);
+    let idempotent = response_json(idempotent).await;
+    assert_eq!(idempotent["response_id"], json!(response_id));
+    assert_eq!(idempotent["run_id"], json!(run_id));
+
+    let run_status = get_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+    )
+    .await;
+    assert_eq!(run_status.status(), StatusCode::OK);
+    let run_status = response_json(run_status).await;
+    assert_eq!(run_status["object"], json!("run"));
+    assert_eq!(run_status["id"], json!(run_id));
+    assert_eq!(run_status["response_id"], json!(response_id));
+    assert_eq!(run_status["status"], json!("queued"));
+
+    let events = response_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(response_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("id: 1\n"));
+    assert!(events.contains("event: response.created"));
+    assert!(events.contains(&response_id));
+    assert!(!events.contains("trace_id"));
+    assert!(!events.contains("[DONE]"));
+
+    let mut resume_headers = headers.clone();
+    resume_headers.insert("last-event-id", "1".parse().unwrap());
+    let resumed = run_events_endpoint(
+        State(state),
+        resume_headers,
+        AxumPath(run_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    assert_eq!(response_text(resumed).await, "");
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_owner_scope_requires_tenant_and_subject() {
+    let db_path = temp_gateway_db_path("gateway-response-owner");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut owner_headers = gateway_headers("owner-user");
+    owner_headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    let created = create_response_endpoint(
+        State(state.clone()),
+        owner_headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "分析材料",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    let mut wrong_tenant_headers = gateway_headers("owner-user");
+    wrong_tenant_headers.insert("x-tonglingyu-tenant-id", "tenant-b".parse().unwrap());
+    let wrong_tenant = get_response_endpoint(
+        State(state.clone()),
+        wrong_tenant_headers,
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(wrong_tenant.status(), StatusCode::NOT_FOUND);
+
+    let mut wrong_subject_headers = gateway_headers("other-user");
+    wrong_subject_headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    let wrong_subject = get_response_endpoint(
+        State(state.clone()),
+        wrong_subject_headers,
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(wrong_subject.status(), StatusCode::NOT_FOUND);
+
+    let owner = get_response_endpoint(State(state), owner_headers, AxumPath(response_id)).await;
+    assert_eq!(owner.status(), StatusCode::OK);
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn run_cancel_writes_terminal_events_and_rejects_late_action() {
+    let db_path = temp_gateway_db_path("gateway-run-cancel");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("cancel-user");
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "执行长时间研究任务",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+
+    let canceled = cancel_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+    )
+    .await;
+    assert_eq!(canceled.status(), StatusCode::OK);
+    let canceled = response_json(canceled).await;
+    assert_eq!(canceled["object"], json!("run"));
+    assert_eq!(canceled["status"], json!("canceled"));
+    assert_eq!(canceled["cancel_requested"], json!(true));
+
+    let events = run_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.created"));
+    assert!(events.contains("event: response.status"));
+    assert!(events.contains("event: response.canceled"));
+    assert!(events.contains("data: [DONE]"));
+    assert!(!events.contains("trace_id"));
+
+    let action = submit_run_action_endpoint(
+        State(state),
+        headers,
+        AxumPath((run_id, "approval-test".to_string())),
+    )
+    .await;
+    assert_eq!(action.status(), StatusCode::CONFLICT);
+    let action = response_json(action).await;
+    assert_eq!(action["error"]["code"], json!("run_terminal"));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_create_rejects_metadata_scope_override_before_state_creation() {
+    let db_path = temp_gateway_db_path("gateway-response-metadata-override");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let response = create_response_endpoint(
+        State(state),
+        gateway_headers("metadata-user"),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "分析材料",
+            "metadata": {
+                "tenant_id": "tenant-override"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = response_json(response).await;
+    assert_eq!(response["error"]["code"], json!("metadata_overrides_auth"));
+
+    remove_sqlite_file_set(&db_path);
 }
 
 #[test]

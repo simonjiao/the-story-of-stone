@@ -66,6 +66,57 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
 - 默认 smoke 不依赖完整 runtime 数据；端到端 RQA smoke 显式依赖外部 runtime DB。
 - 后续如需接入新的内容，应扩展外部 runtime DB 发布契约或 release bundle 校验。
 
+## Gateway Run/Response 实施记录
+
+### 2026-06-29
+
+- 基线：`gateway-orchestrator-docs` 已 rebase 到 `origin/main` 的 `c28dd2b`，保留
+  gateway orchestrator 设计提交。
+- P0 开始：新增 `tonglingyu-gateway` 合同模块 `run_manager.rs` 和
+  `response_events.rs`。
+- P0 落点：
+  - `run_manager.rs` 负责 canonical `run_id -> response_id -> chat_completion_id`
+    归一化、owner scope、幂等键、metadata 信任边界和 forbidden control field gate。
+  - `response_events.rs` 负责 `ResponseEvent`、`ResponseStatus`、事件白名单、
+    public/admin 可见性和公开 payload 递归脱敏。
+  - `response_events.rs` 已补齐 `RuntimeWorkflowStreamEvent -> ResponseEvent` 映射，
+    当前将 `started`、`content_delta`、`final_output` 投影为公开事件，将
+    `step_completed` 和未知 Runtime event 投影为 admin-only 事件。
+- P1 开始：新增 `response_store.rs`，定义 `ResponseEventStore` trait 和内存实现，
+  覆盖 `run_id -> response_id` 映射、原子 sequence/state 更新、状态机校验、
+  replay 和 `requires_action` 计数。
+- P4 最小 HTTP 投影开始：`main.rs` 已接入 `/v1/responses` 和 `/v1/runs`
+  create/status/events/cancel，以及 `/v1/runs/{run_id}/actions/{action_id}`。
+  当前所有入口共用 `RunIdentity` 和 `ResponseEventStore`，不会创建第二套执行对象。
+- P4 已补强：
+  - create 支持幂等键复用既有 response/run state。
+  - status 与 events 使用 tenant + subject owner scope 校验。
+  - SSE replay 输出 `id: <sequence>`，支持 query `after` 和 `Last-Event-ID` 恢复。
+  - cancel 写入 `response.status(canceling)` 和 `response.canceled` 事件，并返回终态。
+  - action submit 当前只允许在非终态继续检查；终态 run 返回 `run_terminal`。
+- 当前限制：
+  - P1 仍未连接 Redis；内存实现只作为合同测试和最小 HTTP 投影基底，后续 Redis
+    实现必须遵守同一 trait 和状态机。
+  - P2/P3 worker 与真正在线 stream 尚未接入；`/v1/responses` create 当前只创建
+    queued state 和可 replay 事件，不伪装成已完成同步 workflow。
+  - `/v1/chat/completions` 仍沿用现有 RQA path，尚未桥接到统一 Run/Response store。
+  - `control stream`、action store、WS 和 background callback 尚未实现。
+- 已验证：
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `run_manager` 通过，5 个测试。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_events` 通过，7 个测试。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_store` 通过，6 个测试。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过，224 个测试。
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - 上述命令编译过程中出现的 `tonglingyu-runtime` dead code warning 属于既有 warning，
+    本轮未处理。
+- 下一步：按顺序进入 P1 Redis store 与 P2 response job worker。Redis 未接入前，
+  不能声明后台任务、断线长轮询、WS 或 production-ready replay 已完成。
+
 ## 验证边界
 
 必须区分三类验证：

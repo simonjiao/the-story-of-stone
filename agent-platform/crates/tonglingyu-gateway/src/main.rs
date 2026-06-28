@@ -27,7 +27,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
@@ -74,10 +74,13 @@ mod llm_resolver;
 mod plan;
 mod question_frame;
 mod response;
+mod response_events;
+mod response_store;
 mod retrieval_suggestion;
 mod retriever_http;
 mod rqa_lifecycle;
 mod rule_candidates;
+mod run_manager;
 mod user_response_safety;
 
 use crate::answer_quality::{
@@ -124,6 +127,11 @@ use crate::response::{
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
 };
+use crate::response_events::{ResponseEventType, ResponseStatus};
+use crate::response_store::{
+    AppendResponseEventInput, InMemoryResponseEventStore, ResponseEventStore, ResponseStateRecord,
+    ResponseStoreError,
+};
 use crate::retriever_http::{
     RETRIEVER_TOOL_NAME, RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest,
     RetrieverSearchPlan, evidence_cards_from_pack, query_plan_from_gateway_policy,
@@ -134,6 +142,9 @@ use crate::rule_candidates::{
     RuleCandidateListInput, RuleCandidatePromotionInput, RuleCandidatePromotionPaths,
     RuleCandidateRegressionEvidenceInput, RuleCandidateReviewRunInput,
     RuleCandidateTransitionInput,
+};
+use crate::run_manager::{
+    RunApiType, RunIdentity, RunNormalizationError, RunNormalizationInput, normalize_run,
 };
 
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
@@ -581,6 +592,7 @@ struct ServeArgs {
 struct AppState {
     db: PathBuf,
     runtime_store: TonglingyuRuntimeStore,
+    response_store: Arc<Mutex<InMemoryResponseEventStore>>,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -1267,6 +1279,11 @@ struct MessagePart {
 struct SearchParams {
     q: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseEventsQuery {
+    after: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1962,6 +1979,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
+        response_store: Arc::new(Mutex::new(InMemoryResponseEventStore::default())),
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -2018,6 +2036,24 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(create_response_endpoint))
+        .route("/v1/responses/{response_id}", get(get_response_endpoint))
+        .route(
+            "/v1/responses/{response_id}/events",
+            get(response_events_endpoint),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(cancel_response_endpoint),
+        )
+        .route("/v1/runs", post(create_run_endpoint))
+        .route("/v1/runs/{run_id}", get(get_run_endpoint))
+        .route("/v1/runs/{run_id}/events", get(run_events_endpoint))
+        .route("/v1/runs/{run_id}/cancel", post(cancel_run_endpoint))
+        .route(
+            "/v1/runs/{run_id}/actions/{action_id}",
+            post(submit_run_action_endpoint),
+        )
         .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
         .route("/v1/evidence/packages/{package_id}", get(package_endpoint))
@@ -3309,6 +3345,643 @@ async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         }]
     }))
     .into_response()
+}
+
+async fn create_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    create_run_projection(state, headers, payload, RunApiType::Responses, "response").await
+}
+
+async fn create_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    create_run_projection(state, headers, payload, RunApiType::Run, "run").await
+}
+
+async fn get_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+) -> Response {
+    get_response_projection(state, headers, response_id, "response").await
+}
+
+async fn get_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    get_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn response_events_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+    Query(params): Query<ResponseEventsQuery>,
+) -> Response {
+    get_response_events_projection(state, headers, response_id, params.after).await
+}
+
+async fn run_events_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+    Query(params): Query<ResponseEventsQuery>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    get_response_events_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        params.after,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn cancel_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+) -> Response {
+    cancel_response_projection(state, headers, response_id, "response").await
+}
+
+async fn cancel_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    cancel_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn submit_run_action_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((run_id, action_id)): AxumPath<(String, String)>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    let state_record = match response_state_for_id(&state, &response_id) {
+        Ok(state_record) => state_record,
+        Err(response) => return response,
+    };
+    if !response_owned_by_request(&state_record, &headers, &auth_subject) {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            Some(&trace_id),
+        );
+    }
+    if state_record.status.is_terminal() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "run_terminal",
+            "terminal run cannot accept actions",
+            Some(&trace_id),
+        );
+    }
+    error_response(
+        StatusCode::CONFLICT,
+        "action_not_available",
+        &format!("action {action_id} is not waiting for input"),
+        Some(&trace_id),
+    )
+}
+
+async fn create_run_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    payload: Value,
+    api_type: RunApiType,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let input = match run_normalization_input(&state, &headers, &payload, auth_subject, api_type) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = match normalize_run(input) {
+        Ok(identity) => identity,
+        Err(error) => return run_normalization_error_response(error, Some(&trace_id)),
+    };
+    let created = match create_response_state(&state, &identity) {
+        Ok(state_record) => state_record,
+        Err(response) => return response,
+    };
+    Json(response_state_projection(&created, object_type)).into_response()
+}
+
+async fn get_response_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    get_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        object_type,
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn get_response_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let state_record = match response_state_for_id(&state, &response_id) {
+        Ok(state_record) => state_record,
+        Err(response) => return response,
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    Json(response_state_projection(&state_record, object_type)).into_response()
+}
+
+async fn get_response_events_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    after: Option<u64>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    get_response_events_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        after,
+        "response",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn get_response_events_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    after: Option<u64>,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let after = after.or_else(|| {
+        header_value(headers, "last-event-id").and_then(|value| value.parse::<u64>().ok())
+    });
+    let (state_record, events) = {
+        let store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                    Some(trace_id),
+                );
+            }
+        };
+        let state_record = match store.state(&response_id) {
+            Ok(state_record) => state_record,
+            Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+        };
+        let events = match store.read_after(&response_id, after) {
+            Ok(events) => events,
+            Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+        };
+        (state_record, events)
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    let mut body = String::new();
+    for event in events {
+        if let Some(public) = event.public_projection() {
+            let event_name = public
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("message");
+            let data = serde_json::to_string(&public).unwrap_or_else(|_| "{}".to_string());
+            body.push_str(&format!("id: {}\n", event.sequence));
+            body.push_str(&format!("event: {event_name}\n"));
+            body.push_str(&format!("data: {data}\n\n"));
+        }
+    }
+    if state_record.status.is_terminal() {
+        body.push_str("data: [DONE]\n\n");
+    }
+    (
+        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+async fn cancel_response_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    cancel_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        object_type,
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn cancel_response_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let mut store = match state.response_store.lock() {
+        Ok(store) => store,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_store_unavailable",
+                "response store unavailable",
+                Some(trace_id),
+            );
+        }
+    };
+    let state_record = match store.state(&response_id) {
+        Ok(state_record) => state_record,
+        Err(_) => return response_not_found_response(object_type, Some(trace_id)),
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    if state_record.status.is_terminal() {
+        return Json(response_state_projection(&state_record, object_type)).into_response();
+    }
+    let (canceling, _) = match store.append_event(AppendResponseEventInput {
+        response_id: response_id.clone(),
+        event_type: ResponseEventType::ResponseStatus,
+        payload: json!({"status": "canceling", "reason": "client_cancelled"}),
+        status_update: Some(ResponseStatus::Canceling),
+        visibility: None,
+        package_id: None,
+        final_response_ref: None,
+    }) {
+        Ok(result) => result,
+        Err(_) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "invalid_cancel_transition",
+                "response cannot be canceled from its current state",
+                Some(trace_id),
+            );
+        }
+    };
+    let (canceled, _) = match store.append_event(AppendResponseEventInput {
+        response_id,
+        event_type: ResponseEventType::ResponseCanceled,
+        payload: json!({"status": "canceled", "reason": "client_cancelled"}),
+        status_update: Some(ResponseStatus::Canceled),
+        visibility: None,
+        package_id: None,
+        final_response_ref: None,
+    }) {
+        Ok(result) => result,
+        Err(_) => (canceling, unreachable_event()),
+    };
+    Json(response_state_projection(&canceled, object_type)).into_response()
+}
+
+fn run_normalization_input(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: &Value,
+    auth_subject: String,
+    api_type: RunApiType,
+) -> Result<RunNormalizationInput, Response> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&state.model_id);
+    if model != state.model_id {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "requested model is not available",
+            None,
+        ));
+    }
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.clone());
+    let user_id = header_value(headers, "x-tonglingyu-user-id")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .or_else(|| header_value(headers, "x-user-id"));
+    let session_id = header_value(headers, "x-tonglingyu-session-id").or_else(|| {
+        payload
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let idempotency_key = header_value(headers, "idempotency-key")
+        .or_else(|| header_value(headers, "x-idempotency-key"))
+        .or_else(|| {
+            payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    Ok(RunNormalizationInput {
+        api_type,
+        model: model.to_string(),
+        session_id,
+        auth_subject,
+        tenant_id,
+        user_id,
+        idempotency_key,
+        metadata: payload
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        request: payload.clone(),
+        stream: payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        background: payload
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn create_response_state(
+    state: &AppState,
+    identity: &RunIdentity,
+) -> Result<ResponseStateRecord, Response> {
+    let mut store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            Some(&identity.trace_id),
+        )
+    })?;
+    let created = match store.create_response(identity) {
+        Ok(created) => created,
+        Err(ResponseStoreError::DuplicateIdempotencyKey { response_id }) => {
+            return store.state(&response_id).map_err(|_| {
+                error_response(
+                    StatusCode::CONFLICT,
+                    "response_create_conflict",
+                    "idempotency key points to missing response state",
+                    Some(&identity.trace_id),
+                )
+            });
+        }
+        Err(_) => {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "response_create_conflict",
+                "response identity conflicts with existing state",
+                Some(&identity.trace_id),
+            ));
+        }
+    };
+    let (state_record, _) = store
+        .append_event(AppendResponseEventInput {
+            response_id: identity.response_id.clone(),
+            event_type: ResponseEventType::ResponseCreated,
+            payload: json!({
+                "run_id": identity.run_id,
+                "response_id": identity.response_id,
+                "session_id": identity.session_id,
+                "status": "queued",
+            }),
+            status_update: None,
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_event_append_failed",
+                "failed to append response event",
+                Some(&identity.trace_id),
+            )
+        })?;
+    debug_assert_eq!(created.response_id, state_record.response_id);
+    Ok(state_record)
+}
+
+fn response_state_for_id(
+    state: &AppState,
+    response_id: &str,
+) -> Result<ResponseStateRecord, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store.state(response_id).map_err(|_| {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "response_not_found",
+            "response not found",
+            None,
+        )
+    })
+}
+
+fn response_id_for_run(state: &AppState, run_id: &str) -> Result<String, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store.response_id_for_run(run_id).map_err(|_| {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            None,
+        )
+    })
+}
+
+fn response_owned_by_request(
+    state: &ResponseStateRecord,
+    headers: &HeaderMap,
+    auth_subject: &str,
+) -> bool {
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.to_string());
+    state.subject == auth_subject && state.tenant_id == tenant_id
+}
+
+fn response_not_found_response(object_type: &str, trace_id: Option<&str>) -> Response {
+    if object_type == "run" {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            trace_id,
+        )
+    } else {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "response_not_found",
+            "response not found",
+            trace_id,
+        )
+    }
+}
+
+fn response_state_projection(state: &ResponseStateRecord, object_type: &str) -> Value {
+    json!({
+        "id": if object_type == "run" { &state.run_id } else { &state.response_id },
+        "object": object_type,
+        "run_id": state.run_id,
+        "response_id": state.response_id,
+        "session_id": state.session_id,
+        "status": state.status,
+        "created_at": state.created_at.unix_timestamp(),
+        "updated_at": state.updated_at.unix_timestamp(),
+        "completed_at": state.completed_at.map(|value| value.unix_timestamp()),
+        "events_url": if object_type == "run" {
+            format!("/v1/runs/{}/events", state.run_id)
+        } else {
+            format!("/v1/responses/{}/events", state.response_id)
+        },
+        "cancel_requested": state.cancel_requested,
+        "requires_action_count": state.requires_action_count,
+        "evidence_package_id": state.package_id,
+        "final_response_ref": state.final_response_ref,
+    })
+}
+
+fn run_normalization_error_response(
+    error: RunNormalizationError,
+    trace_id: Option<&str>,
+) -> Response {
+    let message = match &error {
+        RunNormalizationError::ForbiddenControlFields(_) => {
+            "request contains fields reserved for gateway control"
+        }
+        RunNormalizationError::MetadataOverridesAuth(_) => {
+            "metadata cannot override authenticated scope or callback policy"
+        }
+        RunNormalizationError::EmptyAuthSubject => "authenticated subject is required",
+        RunNormalizationError::EmptyTenant => "tenant is required",
+        RunNormalizationError::EmptyModel => "model is required",
+    };
+    error_response(StatusCode::BAD_REQUEST, error.code(), message, trace_id)
+}
+
+fn unreachable_event() -> response_events::ResponseEvent {
+    response_events::ResponseEvent::new(
+        "run_unreachable",
+        "resp_unreachable",
+        "session_unreachable",
+        "trace_unreachable",
+        0,
+        ResponseEventType::ResponseFailed,
+        json!({"error": "unreachable"}),
+    )
 }
 
 async fn search_endpoint(
