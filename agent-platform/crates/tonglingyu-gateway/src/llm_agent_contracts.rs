@@ -2,11 +2,9 @@ use agent_core::{ProfileContract, RuntimeToolPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[cfg(test)]
-use crate::llm_contracts::CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION;
 use crate::llm_contracts::{
-    LLM_RESOLVER_ALLOWED_CONTEXT_REFS, LLM_RESOLVER_FORBIDDEN_FIELDS,
-    QUESTION_RESOLVER_SCHEMA_VERSION,
+    CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_CONTEXT_REFS,
+    LLM_RESOLVER_FORBIDDEN_FIELDS, QUESTION_RESOLVER_SCHEMA_VERSION,
 };
 
 pub(crate) const LLM_AGENT_REQUEST_SCHEMA_VERSION: &str = "tonglingyu-llm-agent-request-v1";
@@ -15,11 +13,9 @@ pub(crate) const QUESTION_NORMALIZER_PROFILE_ID: &str = "tonglingyu-question-nor
 pub(crate) const CONVERSATION_STATE_WRITER_PROFILE_ID: &str =
     "tonglingyu-conversation-state-writer";
 pub(crate) const QUESTION_NORMALIZER_AGENT_TYPE: &str = "tonglingyu_question_normalizer";
-#[cfg(test)]
 pub(crate) const CONVERSATION_STATE_WRITER_AGENT_TYPE: &str =
     "tonglingyu_conversation_state_writer";
 pub(crate) const QUESTION_NORMALIZER_TIMEOUT_MS: u64 = 20_000;
-#[cfg(test)]
 pub(crate) const CONVERSATION_STATE_WRITER_TIMEOUT_MS: u64 = 20_000;
 pub(crate) const RULE_CANDIDATE_TYPES: &[&str] = &[
     "entity_alias",
@@ -98,7 +94,6 @@ impl LlmAgentRequestEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg(test)]
 pub(crate) struct AgentContextMessage {
     pub(crate) role: String,
     pub(crate) content: String,
@@ -182,7 +177,6 @@ pub(crate) struct QuestionNormalizerAgentOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg(test)]
 pub(crate) struct ConversationStateWriterAgentInput {
     pub(crate) schema_version: String,
     pub(crate) current_question: String,
@@ -196,7 +190,6 @@ pub(crate) struct ConversationStateWriterAgentInput {
     pub(crate) forbidden_output_fields: Vec<String>,
 }
 
-#[cfg(test)]
 impl ConversationStateWriterAgentInput {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -228,7 +221,10 @@ impl ConversationStateWriterAgentInput {
 }
 
 pub(crate) fn tonglingyu_llm_agent_profile_contracts() -> Vec<ProfileContract> {
-    vec![question_normalizer_profile_contract()]
+    vec![
+        question_normalizer_profile_contract(),
+        conversation_state_writer_profile_contract(),
+    ]
 }
 
 pub(crate) fn question_normalizer_profile_contract() -> ProfileContract {
@@ -239,7 +235,6 @@ pub(crate) fn question_normalizer_profile_contract() -> ProfileContract {
     )
 }
 
-#[cfg(test)]
 pub(crate) fn conversation_state_writer_profile_contract() -> ProfileContract {
     read_only_profile_contract(
         CONVERSATION_STATE_WRITER_PROFILE_ID,
@@ -315,13 +310,17 @@ mod tests {
     #[tokio::test]
     async fn llm_agent_profile_contracts_pass_runtime_safety_gate() {
         let runtime = MinimalRuntimeClient::default();
-        let mut contracts = tonglingyu_llm_agent_profile_contracts();
+        let contracts = tonglingyu_llm_agent_profile_contracts();
         assert!(
             contracts
                 .iter()
-                .all(|contract| contract.profile_id != CONVERSATION_STATE_WRITER_PROFILE_ID)
+                .any(|contract| contract.profile_id == CONVERSATION_STATE_WRITER_PROFILE_ID)
         );
-        contracts.push(conversation_state_writer_profile_contract());
+        let explicit_state_contract = conversation_state_writer_profile_contract();
+        assert_eq!(
+            explicit_state_contract.profile_id,
+            CONVERSATION_STATE_WRITER_PROFILE_ID
+        );
         for contract in contracts {
             let profile_id = contract.profile_id.clone();
             let result = runtime

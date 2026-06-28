@@ -19,15 +19,19 @@ use crate::{
         write_conversation_state_summary,
     },
     llm_agent_contracts::{
-        CONVERSATION_STATE_WRITER_PROFILE_ID, LlmAgentRequestEnvelope,
-        QUESTION_NORMALIZER_AGENT_TYPE, QUESTION_NORMALIZER_PROFILE_ID,
-        QUESTION_NORMALIZER_TIMEOUT_MS, QuestionNormalizerAgentInput, RuleCandidateSuggestion,
-        question_normalizer_profile_contract,
+        AgentContextMessage, CONVERSATION_STATE_WRITER_AGENT_TYPE,
+        CONVERSATION_STATE_WRITER_PROFILE_ID, CONVERSATION_STATE_WRITER_TIMEOUT_MS,
+        ConversationStateWriterAgentInput, LlmAgentRequestEnvelope, QUESTION_NORMALIZER_AGENT_TYPE,
+        QUESTION_NORMALIZER_PROFILE_ID, QUESTION_NORMALIZER_TIMEOUT_MS,
+        QuestionNormalizerAgentInput, RuleCandidateSuggestion,
+        conversation_state_writer_profile_contract, question_normalizer_profile_contract,
     },
     llm_agent_prompt::build_llm_agent_provider_prompt,
     llm_agent_validator::{
-        QuestionNormalizerValidationDecision, error_digest,
-        question_normalizer_runtime_error_decision, validate_question_normalizer_runtime_output,
+        ConversationStateValidationDecision, QuestionNormalizerValidationDecision,
+        conversation_state_runtime_error_decision, error_digest,
+        question_normalizer_runtime_error_decision, validate_conversation_state_runtime_output,
+        validate_question_normalizer_runtime_output,
     },
     llm_contracts::{CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_TRIGGERS},
     llm_modes::LlmMode,
@@ -78,6 +82,7 @@ const MEMORY_POLICY_MODE_MANUAL: &str = "manual_required";
 const MEMORY_POLICY_MODE_SHADOW: &str = "shadow_only";
 #[cfg(test)]
 const CONVERSATION_STATE_SUMMARY_MODE_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_SUMMARY_MODE";
+const CONVERSATION_STATE_SYNC_GATE_ONLY_ENV: &str = "TONGLINGYU_CONVERSATION_STATE_SYNC_GATE_ONLY";
 const MEMORY_READ_BUDGET_TOTAL: usize = 8;
 const MEMORY_READ_BUDGET_USER_PRIVATE: usize = 4;
 const MEMORY_READ_BUDGET_SHARED: usize = 4;
@@ -749,6 +754,25 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
     question_agent_mode: LlmMode,
     conversation_state_mode: LlmMode,
 ) -> Result<ContextResolution> {
+    create_context_for_request_with_agent_runtime_modes_and_sync_gate(
+        db_path,
+        input,
+        runtime_client,
+        question_agent_mode,
+        conversation_state_mode,
+        conversation_state_sync_gate_only_enabled(),
+    )
+    .await
+}
+
+async fn create_context_for_request_with_agent_runtime_modes_and_sync_gate(
+    db_path: &Path,
+    input: ContextRequestInput<'_>,
+    runtime_client: &dyn RuntimeClient,
+    question_agent_mode: LlmMode,
+    conversation_state_mode: LlmMode,
+    sync_gate_only: bool,
+) -> Result<ContextResolution> {
     let conn = Connection::open(db_path).context("open context governance db")?;
     let prepared = prepare_context_request(&conn, &input)?;
     drop(conn);
@@ -785,27 +809,54 @@ async fn create_context_for_request_with_agent_runtime_and_modes(
         };
     }
 
-    let conversation_state_summary = deterministic_conversation_state_summary(
+    let mut conversation_state_summary = deterministic_conversation_state_summary(
         &input,
         &prepared.session_summary,
         &prepared.last_public_answer,
         conversation_state_mode,
     );
-    let conversation_state_source = "deterministic_builder";
+    let mut conversation_state_source = "deterministic_builder";
     let conversation_state_trigger = conversation_state_agent_trigger(&input, &prepared, &resolver);
     let conversation_state_agent_audit = if conversation_state_mode == LlmMode::Disabled {
         None
-    } else if conversation_state_trigger.is_some() {
-        Some(conversation_state_agent_deferred_audit(
-            conversation_state_mode,
-            input.trace_id,
-            conversation_state_trigger,
-        ))
+    } else if let Some(trigger) = conversation_state_trigger {
+        if sync_gate_only {
+            let decision = run_conversation_state_writer_agent(
+                runtime_client,
+                conversation_state_mode,
+                trigger,
+                &input,
+                &prepared,
+                conversation_state_summary.as_ref(),
+            )
+            .await;
+            let mut audit = decision.audit_json();
+            annotate_conversation_state_sync_gate_audit(&mut audit, trigger);
+            if let Some(sealed) = decision.accepted_summary() {
+                conversation_state_summary = Some(sealed.summary().clone());
+                conversation_state_source = "llm_agent";
+            } else if conversation_state_mode == LlmMode::Enforced {
+                return Err(enforced_llm_agent_rejection(
+                    CONVERSATION_STATE_WRITER_PROFILE_ID,
+                    &audit,
+                    decision.errors(),
+                ));
+            }
+            Some(audit)
+        } else {
+            Some(conversation_state_agent_deferred_audit(
+                conversation_state_mode,
+                input.trace_id,
+                conversation_state_trigger,
+                sync_gate_only,
+            ))
+        }
     } else if conversation_state_mode != LlmMode::Disabled {
         Some(conversation_state_agent_skipped_audit(
             conversation_state_mode,
             input.trace_id,
             conversation_state_trigger,
+            sync_gate_only,
         ))
     } else {
         None
@@ -968,6 +1019,7 @@ fn conversation_state_agent_skipped_audit(
     mode: LlmMode,
     trace_id: &str,
     trigger: Option<&str>,
+    sync_gate_only: bool,
 ) -> Value {
     json!({
         "schema_version": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -984,6 +1036,8 @@ fn conversation_state_agent_skipped_audit(
         "skip_reason": "conversation_state_writer_not_required_for_current_window",
         "schema_repair_attempted": false,
         "active_path_visible": false,
+        "sync_gate_only": sync_gate_only,
+        "current_context_waited_for_writer": false,
     })
 }
 
@@ -991,6 +1045,7 @@ fn conversation_state_agent_deferred_audit(
     mode: LlmMode,
     trace_id: &str,
     trigger: Option<&str>,
+    sync_gate_only: bool,
 ) -> Value {
     json!({
         "schema_version": crate::llm_agent_contracts::LLM_AGENT_VALIDATOR_SCHEMA_VERSION,
@@ -1008,7 +1063,18 @@ fn conversation_state_agent_deferred_audit(
         "schema_repair_attempted": false,
         "active_path_visible": false,
         "current_context_waited_for_writer": false,
+        "sync_gate_only": sync_gate_only,
     })
+}
+
+fn annotate_conversation_state_sync_gate_audit(audit: &mut Value, trigger: &str) {
+    if let Some(object) = audit.as_object_mut() {
+        object.insert("trigger".to_string(), json!(trigger));
+        object.insert("sync_gate_only".to_string(), json!(true));
+        object.insert("current_context_waited_for_writer".to_string(), json!(true));
+        object.insert("skip_reason".to_string(), Value::Null);
+        object.insert("active_path_visible".to_string(), json!(false));
+    }
 }
 
 fn llm_agent_context_budget_audit(
@@ -1046,6 +1112,9 @@ fn llm_agent_context_budget_audit(
         "conversation_state_writer_unconditional": conversation_state_agent.is_some_and(|audit| {
             audit.get("provider_called") == Some(&json!(true))
                 && audit.get("trigger").and_then(Value::as_str).is_none()
+        }),
+        "conversation_state_sync_gate_only": conversation_state_agent.is_some_and(|audit| {
+            audit.get("sync_gate_only") == Some(&json!(true))
         }),
     })
 }
@@ -1708,13 +1777,135 @@ async fn run_question_normalizer_agent(
     }
 }
 
+async fn run_conversation_state_writer_agent(
+    runtime_client: &dyn RuntimeClient,
+    mode: LlmMode,
+    trigger: &str,
+    input: &ContextRequestInput<'_>,
+    prepared: &PreparedContext,
+    deterministic_summary: Option<&ConversationStateSummary>,
+) -> ConversationStateValidationDecision {
+    let recent_messages = input
+        .messages
+        .iter()
+        .rev()
+        .take(8)
+        .map(|message| AgentContextMessage {
+            role: message.role.clone(),
+            content: bounded_summary(&message.content, 420),
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let evidence_package_refs = prepared.last_public_answer.evidence_package_refs.clone();
+    let required_last_answer_boundaries = prepared
+        .last_public_answer
+        .boundary
+        .as_deref()
+        .into_iter()
+        .map(|boundary| bounded_summary(boundary, CONVERSATION_STATE_BOUNDARY_MAX_CHARS))
+        .collect::<Vec<_>>();
+    let required_active_entities = deterministic_summary
+        .map(|summary| summary.active_entities.clone())
+        .unwrap_or_default();
+    let agent_input = ConversationStateWriterAgentInput::new(
+        input.question,
+        recent_messages,
+        prepared.session_summary.clone(),
+        prepared.last_public_answer.boundary.clone(),
+        evidence_package_refs.clone(),
+        Vec::new(),
+        required_active_entities.clone(),
+        required_last_answer_boundaries.clone(),
+    );
+    let structured_payload = json!(agent_input);
+    let input_digest = format!("sha256:{}", digest_json(&structured_payload));
+    let envelope = LlmAgentRequestEnvelope::new(
+        new_id("req"),
+        CONVERSATION_STATE_WRITER_AGENT_TYPE,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+        mode.as_str(),
+        input.trace_id,
+        prepared.user_session_id.clone(),
+        prepared.interaction_context_id.clone(),
+        llm_agent_projection_ref(
+            input.trace_id,
+            CONVERSATION_STATE_WRITER_PROFILE_ID,
+            &input_digest,
+        ),
+        input_digest,
+        CONVERSATION_STATE_WRITER_TIMEOUT_MS,
+        structured_payload,
+    );
+    let state_messages = input
+        .messages
+        .iter()
+        .map(|message| ConversationStateMessage {
+            role: message.role.as_str(),
+            content: message.content.as_str(),
+        })
+        .collect::<Vec<_>>();
+    let evidence_ref_views = evidence_package_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_entity_views = required_active_entities
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let required_boundary_views = required_last_answer_boundaries
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let conversation_state_input = ConversationStateInput {
+        current_question: input.question,
+        recent_messages: &state_messages,
+        session_summary: &prepared.session_summary,
+        last_public_answer_boundary: prepared.last_public_answer.boundary.as_deref(),
+        evidence_package_refs: &evidence_ref_views,
+        reviewer_warnings: &[],
+    };
+    let validation_context = conversation_state_validation_context(
+        &conversation_state_input,
+        &required_entity_views,
+        &required_boundary_views,
+    );
+    let output = execute_llm_agent_profile(
+        runtime_client,
+        CONVERSATION_STATE_WRITER_PROFILE_ID,
+        &envelope,
+        None,
+    )
+    .await;
+    match output {
+        Ok(output) => validate_conversation_state_runtime_output(
+            mode,
+            &envelope,
+            &output.result_summary,
+            output.result_ref.as_deref(),
+            Some(&output.metadata),
+            &validation_context,
+        ),
+        Err(error) => conversation_state_runtime_error_decision(
+            mode,
+            &envelope,
+            format!("trigger={trigger}; {error}"),
+        ),
+    }
+}
+
 async fn execute_llm_agent_profile(
     runtime_client: &dyn RuntimeClient,
     profile_id: &str,
     envelope: &LlmAgentRequestEnvelope,
     repair_errors: Option<&[String]>,
 ) -> Result<RuntimeOutput> {
-    let contract = question_normalizer_profile_contract();
+    let contract = match profile_id {
+        QUESTION_NORMALIZER_PROFILE_ID => question_normalizer_profile_contract(),
+        CONVERSATION_STATE_WRITER_PROFILE_ID => conversation_state_writer_profile_contract(),
+        other => return Err(anyhow!("unsupported llm agent profile: {other}")),
+    };
     let runtime_step = RuntimeStep::from_profile_contract(
         &contract,
         json!({
@@ -4936,6 +5127,22 @@ fn memory_policy_mode() -> String {
     }
 }
 
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn conversation_state_sync_gate_only_enabled() -> bool {
+    env_truthy(CONVERSATION_STATE_SYNC_GATE_ONLY_ENV)
+}
+
 #[cfg(test)]
 fn conversation_state_summary_mode() -> LlmMode {
     env::var(CONVERSATION_STATE_SUMMARY_MODE_ENV)
@@ -7750,6 +7957,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_state_writer_sync_gate_invokes_provider_and_records_audit() {
+        let db_path = temp_context_db_path("conversation-state-sync-gate");
+        let conn = file_conn(&db_path);
+        drop(conn);
+        let runtime = FakeRuntimeClient::with_outputs(vec![FakeRuntimeOutput {
+            result_summary: json!({
+                "object": "tonglingyu.conversation_state_summary",
+                "schema_version": CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION,
+                "current_topic": "晴雯相关问题",
+                "active_entities": ["晴雯"],
+                "open_questions": ["晴雯后来怎么样？"],
+                "last_answer_boundaries": [],
+                "evidence_package_refs": [],
+                "reviewer_warnings": [],
+                "memory_allowed_as_evidence": false,
+                "summary_confidence": 0.91
+            })
+            .to_string(),
+            result_ref: Some(
+                "openai-compatible-network://profiles/tonglingyu-conversation-state-writer/trace-conversation-state-sync-gate".to_string(),
+            ),
+            metadata: json!({"fake_runtime": true}),
+        }]);
+        let messages = vec![ContextMessage {
+            role: "user".to_string(),
+            content: "晴雯后来怎么样？".to_string(),
+        }];
+
+        let context = create_context_for_request_with_agent_runtime_modes_and_sync_gate(
+            &db_path,
+            ContextRequestInput {
+                trace_id: "trace-conversation-state-sync-gate",
+                model_id: "tonglingyu",
+                external_user_ref: "user-conversation-state-sync-gate",
+                external_session_id: "session-conversation-state-sync-gate",
+                external_message_id: "message-conversation-state-sync-gate",
+                question: "晴雯后来怎么样？",
+                messages: &messages,
+                history_over_limit: true,
+                max_messages: 20,
+            },
+            &runtime,
+            LlmMode::Disabled,
+            LlmMode::Enforced,
+            true,
+        )
+        .await
+        .expect("sync gate context created");
+
+        let inputs = runtime.profile_inputs();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].profile_id, CONVERSATION_STATE_WRITER_PROFILE_ID);
+        let agent = &context.context_pack["llm_agent_context_path"]["conversation_state_agent"];
+        assert_eq!(agent["provider_called"], json!(true));
+        assert_eq!(agent["llm_called"], json!(true));
+        assert_eq!(agent["contract_accepted"], json!(true));
+        assert_eq!(agent["raw_output_embedded"], json!(false));
+        assert_eq!(agent["runtime_adapter"], json!("openai-compatible-network"));
+        assert_eq!(agent["sync_gate_only"], json!(true));
+        assert_eq!(agent["current_context_waited_for_writer"], json!(true));
+        assert!(agent["input_digest"].as_str().is_some());
+        assert!(agent["raw_output_sha256"].as_str().is_some());
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["conversation_state_summary_source"],
+            json!("llm_agent")
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["sync_llm_call_count"],
+            json!(1)
+        );
+        assert_eq!(
+            context.context_pack["llm_agent_context_path"]["llm_call_budget"]["conversation_state_sync_gate_only"],
+            json!(true)
+        );
+        remove_file_db(&db_path);
+    }
+
+    #[tokio::test]
     async fn deferred_conversation_state_writer_does_not_block_frame() {
         let db_path = temp_context_db_path("conversation-state-agent-reject");
         let conn = file_conn(&db_path);
@@ -7949,7 +8234,7 @@ mod tests {
                 .as_array()
                 .expect("trace projections")
                 .len(),
-            4
+            3
         );
         assert!(
             trace["context_projections"]

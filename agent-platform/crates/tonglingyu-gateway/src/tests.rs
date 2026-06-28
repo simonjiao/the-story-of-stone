@@ -118,6 +118,7 @@ fn llm_agent_runtime_requires_role_provider_config_over_legacy_envs() {
 fn llm_agent_runtime_builds_deepseek_provider_profile_without_secret_summary() {
     let env = test_env(&[
         (QUESTION_NORMALIZER_PROVIDER_ENV, "deepseek_flash"),
+        (CONVERSATION_STATE_PROVIDER_ENV, "deepseek_flash"),
         (
             "TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BACKEND",
             "openai-compatible-network",
@@ -3627,7 +3628,7 @@ ASSISTANT: 证据不足或需要降级：未命中可追溯证据，必须返回
     );
     assert_eq!(
         table_count(&conn, "context_projections").expect("context projection count"),
-        4
+        3
     );
     assert_eq!(
         table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
@@ -3725,7 +3726,7 @@ ASSISTANT: 当前证据状态较为有限，但已有正文材料可直接支持
     );
     assert_eq!(
         table_count(&conn, "context_projections").expect("context projection count"),
-        4
+        3
     );
     assert_eq!(
         table_count(&conn, "gateway_messages").expect("legacy gateway message count"),
@@ -4010,7 +4011,10 @@ async fn forbidden_control_fields_audit_llm_provider_not_called() {
     assert_eq!(payload["provider_called"], json!(false));
     assert_eq!(
         payload["profiles_not_called"],
-        json!([QUESTION_NORMALIZER_PROFILE_ID])
+        json!([
+            QUESTION_NORMALIZER_PROFILE_ID,
+            CONVERSATION_STATE_WRITER_PROFILE_ID
+        ])
     );
     assert_eq!(payload["raw_agent_output_embedded"], json!(false));
     assert!(payload["forbidden_fields_sha256"].as_str().is_some());
