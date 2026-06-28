@@ -6638,14 +6638,21 @@ fn agent_runtime_draft_evidence_tier_rejection(
     if extraction.claim_evidence_refs.is_empty() || package.tiered_evidence_bindings.is_empty() {
         return None;
     }
-    let answer_basis_ids = answer_basis_evidence_ids(package).unwrap_or_default();
+    let bindings_by_id = package
+        .tiered_evidence_bindings
+        .iter()
+        .map(|binding| (binding.evidence_id.as_str(), binding))
+        .collect::<BTreeMap<_, _>>();
     extraction
         .claim_evidence_refs
         .iter()
         .filter(|refs| !refs.is_empty())
         .any(|refs| {
-            refs.iter()
-                .all(|evidence_id| !answer_basis_ids.contains(evidence_id))
+            refs.iter().all(|evidence_id| {
+                bindings_by_id
+                    .get(evidence_id.as_str())
+                    .is_some_and(|binding| !evidence_binding_is_answer_basis(binding))
+            })
         })
         .then_some("draft_claim_uses_only_supplemental_evidence")
 }
@@ -15407,6 +15414,7 @@ fn answer_basis_intro(package: &EvidencePackage) -> String {
     }
 }
 
+#[cfg(test)]
 fn answer_basis_evidence_ids(package: &EvidencePackage) -> Option<BTreeSet<String>> {
     if package.tiered_evidence_bindings.is_empty() {
         return None;

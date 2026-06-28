@@ -2223,6 +2223,53 @@ fn upstream_draft_accepts_knownledge_retriever_source_backed_evidence() {
     );
 }
 
+#[test]
+fn upstream_draft_accepts_package_evidence_without_tier_binding() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut raw_card = sample_card("base_text");
+    raw_card.evidence_id = "ev-source-snapshot-raw-binding".to_string();
+    raw_card.text = "黛玉方進榮國府，賈母等敘其年幼情狀。".to_string();
+    raw_card.verification_status = "source_snapshot_ready_not_scholarly_collated".to_string();
+    let mut package = create_evidence_package(
+        &conn,
+        "trace-unbound-package-evidence-draft",
+        "林黛玉进贾府时多大了",
+        vec![raw_card],
+    )
+    .expect("package");
+    assert_eq!(
+        package.tiered_evidence_bindings[0].answer_use,
+        "supplemental_only"
+    );
+    let mut unbound_retriever_card = sample_card("base_text");
+    unbound_retriever_card.evidence_id = "ev-knownledge-retriever-unbound".to_string();
+    unbound_retriever_card.text = "第005回判词写道：展眼吊斜暉，湘江水逝楚雲飛。".to_string();
+    unbound_retriever_card.verification_status = "knownledge_retriever_source_backed".to_string();
+    package.cards.push(unbound_retriever_card.clone());
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("判词写到“湘江水逝楚雲飛”，只能据此作范围内说明。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_evidence_refs: vec![vec![unbound_retriever_card.evidence_id]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_evidence_tier_rejection(&extraction, &package),
+        None
+    );
+}
+
 fn yousanjie_test_cards() -> Vec<EvidenceCard> {
     let mut vow = sample_card("base_text");
     vow.evidence_id = "ev-yousanjie-vow".to_string();
