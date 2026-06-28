@@ -35,6 +35,7 @@ use crate::{
     llm_contracts::{CONVERSATION_STATE_SUMMARY_SCHEMA_VERSION, LLM_RESOLVER_ALLOWED_TRIGGERS},
     llm_modes::LlmMode,
     question_frame::{self, QuestionFrame},
+    retriever_http::RETRIEVER_TOOL_NAME,
     rule_candidates::{
         RULE_CANDIDATE_PREFLIGHT_SCHEMA_VERSION, RULE_CANDIDATE_PROMOTION_SCHEMA_VERSION,
         RULE_CANDIDATE_REVIEW_RUN_SCHEMA_VERSION, RULE_CANDIDATE_SCHEMA_VERSION,
@@ -6244,7 +6245,10 @@ fn profile_views(
             visible_question: resolver.resolved_question.to_string(),
             question_frame: question_frame.clone(),
             session_summary: None,
-            allowed_tools: vec!["tonglingyu.text.search".to_string()],
+            allowed_tools: vec![
+                "tonglingyu.text.search".to_string(),
+                RETRIEVER_TOOL_NAME.to_string(),
+            ],
             forbidden_context: vec![
                 "complete_user_history".to_string(),
                 "user_private_memory".to_string(),
@@ -8260,6 +8264,16 @@ mod tests {
             main_projection
                 .context_projection_ref
                 .starts_with("context-projection://tonglingyu/trace-test/")
+        );
+        let text_projection = context
+            .context_projections
+            .iter()
+            .find(|projection| projection.consumer_name == "honglou-text")
+            .expect("text projection");
+        assert!(
+            text_projection
+                .allowed_tools
+                .contains(&RETRIEVER_TOOL_NAME.to_string())
         );
         let trace = load_trace_context(&conn, "trace-test").expect("trace context");
         let rendered = serde_json::to_string(&trace).expect("trace json");

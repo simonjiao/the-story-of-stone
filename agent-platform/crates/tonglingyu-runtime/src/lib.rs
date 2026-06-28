@@ -2997,7 +2997,10 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
             profile: "honglou-text".to_string(),
             version: PROFILE_CONTRACT_VERSION.to_string(),
             role: "正文、版本、人物和 source snapshot 证据检索 profile。".to_string(),
-            allowed_tools: vec!["tonglingyu.text.search".to_string()],
+            allowed_tools: vec![
+                "tonglingyu.text.search".to_string(),
+                RUNTIME_RETRIEVER_HTTP_TOOL_NAME.to_string(),
+            ],
             input_contract: json!({
                 "required": ["question", "required_evidence_types", "trace_id"],
                 "forbidden": ["system_prompt", "profile_override", "write_tools"]

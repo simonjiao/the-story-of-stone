@@ -179,7 +179,7 @@ pub(crate) fn extract_upstream_bundle_draft(
     allowed_evidence_ids: &BTreeSet<String>,
 ) -> UpstreamBundleDraftExtraction {
     let trimmed = result_summary.trim();
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+    let Some(value) = parse_result_summary_json(trimmed) else {
         return rejected_bundle("invalid", Some("invalid_json_draft"));
     };
     let Some(object) = value.as_object() else {
@@ -188,7 +188,7 @@ pub(crate) fn extract_upstream_bundle_draft(
     let Some(schema_version) = object.get("schema_version").and_then(Value::as_str) else {
         return rejected_bundle("json", Some("bundle_schema_missing"));
     };
-    if schema_version != UPSTREAM_BUNDLE_SCHEMA_VERSION {
+    if !upstream_bundle_schema_version_matches(schema_version) {
         return rejected_bundle("json", Some("bundle_schema_mismatch"));
     }
     let package_id = object
@@ -224,11 +224,7 @@ pub(crate) fn extract_upstream_bundle_draft(
             ..rejected_bundle("json", Some("source_scope_policy_mismatch"))
         };
     }
-    let coverage_status = object
-        .get("coverage_assessment")
-        .and_then(|value| value.get("status"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
+    let coverage_status = object_coverage_assessment_status(object);
     let evidence_hint_count = object
         .get("evidence_hints")
         .and_then(Value::as_array)
@@ -386,6 +382,62 @@ fn rejected_bundle(
     }
 }
 
+fn parse_result_summary_json(trimmed: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(trimmed).ok().or_else(|| {
+        extract_first_json_object(trimmed).and_then(|raw| serde_json::from_str(raw).ok())
+    })
+}
+
+fn extract_first_json_object(text: &str) -> Option<&str> {
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+            }
+            continue;
+        }
+
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return start.map(|start| &text[start..index + ch.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn upstream_bundle_schema_version_matches(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed == UPSTREAM_BUNDLE_SCHEMA_VERSION {
+        return true;
+    }
+    let normalized = trimmed.to_ascii_lowercase().replace(['_', '.'], "-");
+    normalized == UPSTREAM_BUNDLE_SCHEMA_VERSION
+        || normalized == format!("{}.0", UPSTREAM_BUNDLE_SCHEMA_VERSION).replace('.', "-")
+}
+
 fn question_explicitly_allows_later_forty(question: &str) -> bool {
     source_scope_question_allows_later_forty(question).unwrap_or(false)
 }
@@ -438,6 +490,39 @@ fn value_string_set(value: Option<&Value>) -> BTreeSet<&str> {
         .flatten()
         .filter_map(Value::as_str)
         .collect()
+}
+
+fn object_coverage_assessment_status(object: &serde_json::Map<String, Value>) -> Option<String> {
+    object
+        .get("coverage_assessment")
+        .and_then(coverage_assessment_status)
+        .or_else(|| {
+            object
+                .get("coverage_status")
+                .and_then(coverage_assessment_status)
+        })
+        .or_else(|| object.get("coverage").and_then(coverage_assessment_status))
+}
+
+fn coverage_assessment_status(value: &Value) -> Option<String> {
+    let raw = value.as_str().or_else(|| {
+        value.as_object().and_then(|object| {
+            object
+                .get("status")
+                .or_else(|| object.get("coverage_status"))
+                .or_else(|| object.get("coverage"))
+                .or_else(|| object.get("result"))
+                .and_then(Value::as_str)
+        })
+    })?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(match raw.to_ascii_lowercase().as_str() {
+        "ok" | "complete" | "completed" | "covered" | "sufficient" => "passed".to_string(),
+        value => value.to_string(),
+    })
 }
 
 fn invalid_claim_statements(
@@ -508,4 +593,222 @@ fn claim_statement_evidence_refs(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_upstream_bundle_accepts_coverage_alias_for_passed_status() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let result_summary = json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_assessment": {
+                "coverage": "sufficient",
+                "missing_in_scope_slots": [],
+                "out_of_scope_slots": []
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {"recommended": false, "queries": []},
+            "out_of_scope_hints": []
+        })
+        .to_string();
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(extraction.rejected_reason, None);
+        assert_eq!(extraction.coverage_status.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn extract_upstream_bundle_still_rejects_partial_coverage_alias() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let result_summary = json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_assessment": {
+                "coverage": "partial",
+                "missing_in_scope_slots": ["仍缺少一条证据"],
+                "out_of_scope_slots": []
+            }
+        })
+        .to_string();
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(
+            extraction.rejected_reason,
+            Some("coverage_assessment_not_passed")
+        );
+        assert_eq!(extraction.coverage_status.as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn extract_upstream_bundle_accepts_string_coverage_assessment() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let result_summary = json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_assessment": "passed"
+        })
+        .to_string();
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(extraction.rejected_reason, None);
+        assert_eq!(extraction.coverage_status.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn extract_upstream_bundle_accepts_top_level_coverage_status() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let result_summary = json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_status": "ok"
+        })
+        .to_string();
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(extraction.rejected_reason, None);
+        assert_eq!(extraction.coverage_status.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn extract_upstream_bundle_accepts_wrapped_json_object() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let bundle = json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_assessment": {"status": "passed"}
+        });
+        let result_summary = format!("```json\n{}\n```", bundle);
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(extraction.rejected_reason, None);
+        assert_eq!(extraction.coverage_status.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn extract_upstream_bundle_accepts_dotted_schema_version() {
+        let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
+        let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
+        let result_summary = json!({
+            "schema_version": "tonglingyu.upstream.bundle.v1",
+            "package_id": "pkg-1",
+            "source_scope_policy": expected_policy,
+            "draft_candidate": {
+                "package_id": "pkg-1",
+                "draft_answer": "通灵玉即通灵宝玉。",
+                "claim_statements": [
+                    {
+                        "text": "通灵玉即通灵宝玉。",
+                        "evidence_refs": ["ev-1"]
+                    }
+                ]
+            },
+            "coverage_assessment": {"status": "passed"}
+        })
+        .to_string();
+
+        let extraction = extract_upstream_bundle_draft(
+            &result_summary,
+            "pkg-1",
+            &source_scope_policy_for_question("通灵玉是什么？"),
+            &allowed_evidence_ids,
+        );
+
+        assert_eq!(extraction.rejected_reason, None);
+        assert_eq!(extraction.coverage_status.as_deref(), Some("passed"));
+    }
 }

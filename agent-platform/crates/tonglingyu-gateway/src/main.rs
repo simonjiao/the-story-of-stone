@@ -125,7 +125,7 @@ use crate::response::{
     streaming_response_from_runtime_events,
 };
 use crate::retriever_http::{
-    RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverQueryPlannerPlan,
+    RETRIEVER_TOOL_NAME, RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverQueryPlannerPlan,
     RetrieverRetrieveOptions, RetrieverRetrieveRequest, RetrieverSearchPlan,
     evidence_cards_from_pack, workflow_retrieval_input,
 };
@@ -1160,7 +1160,10 @@ fn local_runtime_context_contract(
         ),
         (
             profiles.text.as_str(),
-            vec!["tonglingyu.text.search".to_string()],
+            vec![
+                "tonglingyu.text.search".to_string(),
+                RETRIEVER_TOOL_NAME.to_string(),
+            ],
             None,
         ),
         (
