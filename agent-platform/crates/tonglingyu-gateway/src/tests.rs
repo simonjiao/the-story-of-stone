@@ -527,6 +527,7 @@ fn test_app_state(db_path: PathBuf) -> AppState {
             InMemoryResponseJobQueue::default(),
         ))),
         response_job_max_attempts: 3,
+        response_sync_wait_secs: 2,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -1155,6 +1156,86 @@ async fn response_worker_completes_empty_input_from_queued_job() {
 }
 
 #[tokio::test]
+async fn responses_stream_true_reads_same_response_events() {
+    let db_path = temp_gateway_db_path("gateway-response-stream-bridge");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("response-stream-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "stream": true
+    });
+
+    let response =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued response job")
+    };
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let body = response_text(response).await;
+    assert!(body.contains("event: response.created"));
+    assert!(body.contains("event: output_text.delta"));
+    assert!(body.contains("event: response.completed"));
+    assert!(body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("trace_id"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_background_false_waits_until_worker_terminal_state() {
+    let db_path = temp_gateway_db_path("gateway-response-sync-wait");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("response-sync-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "background": false
+    });
+
+    let create_future =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload));
+    let worker_future = async {
+        for _ in 0..40 {
+            let lease = {
+                let mut queue = state.response_jobs.lock().expect("queue");
+                queue.claim_next("test-worker", 0).expect("claim")
+            };
+            if let Some(lease) = lease {
+                execute_response_job(state.clone(), lease.job.clone())
+                    .await
+                    .expect("worker execution");
+                let mut queue = state.response_jobs.lock().expect("queue");
+                queue.complete(lease).expect("complete");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("response job was not queued before sync wait timeout");
+    };
+    let (created, _) = tokio::join!(create_future, worker_future);
+
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    assert_eq!(created["object"], json!("response"));
+    assert_eq!(created["status"], json!("completed"));
+    assert!(created["completed_at"].as_i64().is_some());
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
 async fn chat_stream_bridges_to_response_job_events() {
     let db_path = temp_gateway_db_path("gateway-chat-stream-bridge");
     let state = Arc::new(test_app_state(db_path.clone()));
@@ -1291,11 +1372,99 @@ async fn run_cancel_writes_terminal_events_and_rejects_late_action() {
         State(state),
         headers,
         AxumPath((run_id, "approval-test".to_string())),
+        Json(json!({})),
     )
     .await;
     assert_eq!(action.status(), StatusCode::CONFLICT);
     let action = response_json(action).await;
     assert_eq!(action["error"]["code"], json!("run_terminal"));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn run_action_submit_restores_waiting_run_idempotently() {
+    let db_path = temp_gateway_db_path("gateway-run-action-submit");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("action-user");
+    headers.insert("idempotency-key", "submit-action-once".parse().unwrap());
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "等待人工审批",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .expect("start response");
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseRequiresAction,
+        json!({
+            "action_id": "approval-1",
+            "action_type": "human_approval",
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        }),
+        Some(ResponseStatus::RequiresAction),
+        None,
+        None,
+        None,
+    )
+    .expect("require action");
+
+    let submitted = submit_run_action_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath((run_id.clone(), "approval-1".to_string())),
+        Json(json!({"approved": true})),
+    )
+    .await;
+    assert_eq!(submitted.status(), StatusCode::OK);
+    let submitted = response_json(submitted).await;
+    assert_eq!(submitted["status"], json!("in_progress"));
+    assert_eq!(submitted["requires_action_count"], json!(0));
+
+    let duplicate = submit_run_action_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath((run_id.clone(), "approval-1".to_string())),
+        Json(json!({"approved": true})),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let duplicate = response_json(duplicate).await;
+    assert_eq!(duplicate["status"], json!("in_progress"));
+
+    let events = run_events_endpoint(
+        State(state),
+        headers,
+        AxumPath(run_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.requires_action"));
+    assert_eq!(events.matches("\"action_status\":\"submitted\"").count(), 1);
+    assert!(!events.contains("trace_id"));
 
     remove_sqlite_file_set(&db_path);
 }

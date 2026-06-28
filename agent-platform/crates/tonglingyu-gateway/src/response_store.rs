@@ -180,6 +180,7 @@ impl ResponseEventStore for InMemoryResponseEventStore {
         input: AppendResponseEventInput,
     ) -> Result<(ResponseStateRecord, ResponseEvent), ResponseStoreError> {
         let mut state = self.state(&input.response_id)?;
+        let previous_status = state.status.clone();
         if let Some(next) = &input.status_update {
             if !state.status.can_transition_to(next) {
                 return Err(ResponseStoreError::InvalidStatusTransition {
@@ -208,6 +209,12 @@ impl ResponseEventStore for InMemoryResponseEventStore {
         state.last_event_id = Some(event.event_id.clone());
         state.updated_at = OffsetDateTime::now_utc();
         if let Some(next) = input.status_update {
+            if previous_status == ResponseStatus::RequiresAction
+                && next == ResponseStatus::InProgress
+                && state.requires_action_count > 0
+            {
+                state.requires_action_count -= 1;
+            }
             state.status = next;
             if state.status.is_terminal() {
                 state.completed_at = Some(state.updated_at);
@@ -729,6 +736,7 @@ return {"ok", state_json}
             .map_err(|error| ResponseStoreError::CorruptState(error.to_string()))?
             .trim_matches('"')
             .to_string();
+        let previous_status = state.status.clone();
         if let Some(next) = &input.status_update {
             if !state.status.can_transition_to(next) {
                 return Err(ResponseStoreError::InvalidStatusTransition {
@@ -757,6 +765,12 @@ return {"ok", state_json}
         state.last_event_id = Some(event.event_id.clone());
         state.updated_at = OffsetDateTime::now_utc();
         if let Some(next) = input.status_update {
+            if previous_status == ResponseStatus::RequiresAction
+                && next == ResponseStatus::InProgress
+                && state.requires_action_count > 0
+            {
+                state.requires_action_count -= 1;
+            }
             state.status = next;
             if state.status.is_terminal() {
                 state.completed_at = Some(state.updated_at);

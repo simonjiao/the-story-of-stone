@@ -571,6 +571,8 @@ struct ServeArgs {
         default_value_t = true
     )]
     response_worker_enabled: bool,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_SYNC_WAIT_SECS", default_value_t = 30)]
+    response_sync_wait_secs: u64,
     #[arg(long, env = "TONGLINGYU_RESPONSE_WORKER_ID")]
     response_worker_id: Option<String>,
     #[arg(
@@ -678,6 +680,7 @@ struct AppState {
     response_store: Arc<Mutex<ResponseStoreBackend>>,
     response_jobs: Arc<Mutex<ResponseJobQueueBackend>>,
     response_job_max_attempts: u32,
+    response_sync_wait_secs: u64,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -745,6 +748,13 @@ struct ChatCompletionSseState {
     after_sequence: u64,
     role_sent: bool,
     emitted_text: String,
+    done: bool,
+}
+
+struct ResponseEventSseState {
+    state: Arc<AppState>,
+    response_id: String,
+    after_sequence: u64,
     done: bool,
 }
 
@@ -2129,6 +2139,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         response_store: Arc::new(Mutex::new(response_store)),
         response_jobs: Arc::new(Mutex::new(response_jobs)),
         response_job_max_attempts: args.response_job_max_attempts,
+        response_sync_wait_secs: args.response_sync_wait_secs,
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -4774,6 +4785,7 @@ async fn submit_run_action_endpoint(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((run_id, action_id)): AxumPath<(String, String)>,
+    Json(payload): Json<Value>,
 ) -> Response {
     let trace_id = new_trace_id();
     let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
@@ -4797,6 +4809,16 @@ async fn submit_run_action_endpoint(
         );
     }
     if state_record.status.is_terminal() {
+        if let Err(response) = append_run_action_audit(
+            &state,
+            &response_id,
+            &action_id,
+            "action_submit_rejected",
+            json!({"reason": "run_terminal"}),
+            Some(&trace_id),
+        ) {
+            return response;
+        }
         return error_response(
             StatusCode::CONFLICT,
             "run_terminal",
@@ -4804,33 +4826,236 @@ async fn submit_run_action_endpoint(
             Some(&trace_id),
         );
     }
-    {
-        let mut store = match state.response_store.lock() {
-            Ok(store) => store,
-            Err(_) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "response_store_unavailable",
-                    "response store unavailable",
-                    Some(&trace_id),
-                );
-            }
+    let idempotency_digest = action_idempotency_digest(&headers, &payload);
+    if let Some(digest) = idempotency_digest.as_deref() {
+        let events = match response_events_for_id(&state, &response_id) {
+            Ok(events) => events,
+            Err(response) => return response,
         };
-        if let Err(error) = store.append_action_event(
+        if action_submission_already_recorded(&events, &action_id, digest) {
+            return Json(response_state_projection(&state_record, "run")).into_response();
+        }
+    }
+    let events = match response_events_for_id(&state, &response_id) {
+        Ok(events) => events,
+        Err(response) => return response,
+    };
+    let waiting_action = waiting_run_action(&events, &action_id);
+    if state_record.status != ResponseStatus::RequiresAction || waiting_action.is_none() {
+        if let Err(response) = append_run_action_audit(
+            &state,
             &response_id,
             &action_id,
             "action_submit_rejected",
             json!({"reason": "action_not_available"}),
+            Some(&trace_id),
         ) {
-            return response_store_failure_response(error, Some(&trace_id));
+            return response;
         }
+        return error_response(
+            StatusCode::CONFLICT,
+            "action_not_available",
+            &format!("action {action_id} is not waiting for input"),
+            Some(&trace_id),
+        );
     }
-    error_response(
-        StatusCode::CONFLICT,
-        "action_not_available",
-        &format!("action {action_id} is not waiting for input"),
+    let waiting_action = waiting_action.expect("checked waiting action");
+    if waiting_action_expired(&waiting_action) {
+        if let Err(response) = append_run_action_audit(
+            &state,
+            &response_id,
+            &action_id,
+            "action_submit_expired",
+            json!({"reason": "action_expired"}),
+            Some(&trace_id),
+        ) {
+            return response;
+        }
+        let expired = match append_response_event_for_response_id(
+            &state,
+            &response_id,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "status": "expired",
+                "error": {
+                    "code": "action_expired",
+                    "message": "waiting action expired before submission",
+                },
+                "action_id": action_id,
+            }),
+            Some(ResponseStatus::Expired),
+            None,
+            None,
+            None,
+        ) {
+            Ok(state_record) => state_record,
+            Err(error) => return response_store_failure_response(error, Some(&trace_id)),
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(response_state_projection(&expired, "run")),
+        )
+            .into_response();
+    }
+    if let Err(response) = append_run_action_audit(
+        &state,
+        &response_id,
+        &action_id,
+        "action_submitted",
+        json!({
+            "payload": payload,
+            "idempotency_digest": idempotency_digest,
+            "waiting_event_sequence": waiting_action.sequence,
+        }),
         Some(&trace_id),
-    )
+    ) {
+        return response;
+    }
+    let resumed = match append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({
+            "status": "in_progress",
+            "reason": "action_submitted",
+            "action_id": action_id,
+            "action_status": "submitted",
+            "idempotency_digest": idempotency_digest,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    ) {
+        Ok(state_record) => state_record,
+        Err(error) => return response_store_failure_response(error, Some(&trace_id)),
+    };
+    Json(response_state_projection(&resumed, "run")).into_response()
+}
+
+#[derive(Debug, Clone)]
+struct WaitingRunAction {
+    sequence: u64,
+    expires_at: Option<OffsetDateTime>,
+}
+
+fn action_idempotency_digest(headers: &HeaderMap, payload: &Value) -> Option<String> {
+    header_value(headers, "idempotency-key")
+        .or_else(|| header_value(headers, "x-idempotency-key"))
+        .or_else(|| {
+            payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| hash_text(value.trim()))
+}
+
+fn waiting_run_action(
+    events: &[response_events::ResponseEvent],
+    action_id: &str,
+) -> Option<WaitingRunAction> {
+    events
+        .iter()
+        .filter(|event| event.event_type == ResponseEventType::ResponseRequiresAction)
+        .filter_map(|event| {
+            let payload_action_id = event
+                .payload
+                .get("action_id")
+                .and_then(Value::as_str)
+                .filter(|value| *value == action_id)?;
+            let _ = payload_action_id;
+            Some(WaitingRunAction {
+                sequence: event.sequence,
+                expires_at: action_expires_at(&event.payload),
+            })
+        })
+        .max_by_key(|action| action.sequence)
+}
+
+fn action_expires_at(payload: &Value) -> Option<OffsetDateTime> {
+    let value = payload.get("expires_at")?;
+    if let Some(epoch) = value.as_i64() {
+        return OffsetDateTime::from_unix_timestamp(epoch).ok();
+    }
+    value.as_str().and_then(|text| {
+        OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+    })
+}
+
+fn waiting_action_expired(action: &WaitingRunAction) -> bool {
+    action
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
+}
+
+fn action_submission_already_recorded(
+    events: &[response_events::ResponseEvent],
+    action_id: &str,
+    idempotency_digest: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.event_type == ResponseEventType::ResponseStatus
+            && event
+                .payload
+                .get("action_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == action_id)
+            && event
+                .payload
+                .get("action_status")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "submitted")
+            && event
+                .payload
+                .get("idempotency_digest")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == idempotency_digest)
+    })
+}
+
+fn response_events_for_id(
+    state: &AppState,
+    response_id: &str,
+) -> Result<Vec<response_events::ResponseEvent>, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store
+        .read_after(response_id, None)
+        .map_err(|error| response_store_failure_response(error, None))
+}
+
+fn append_run_action_audit(
+    state: &AppState,
+    response_id: &str,
+    action_id: &str,
+    event_type: &str,
+    payload: Value,
+    trace_id: Option<&str>,
+) -> Result<String, Response> {
+    {
+        let mut store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                    trace_id,
+                ));
+            }
+        };
+        store
+            .append_action_event(response_id, action_id, event_type, payload)
+            .map_err(|error| response_store_failure_response(error, trace_id))
+    }
 }
 
 async fn create_run_projection(
@@ -4862,11 +5087,19 @@ async fn create_run_projection(
             return response;
         }
     }
-    Json(response_state_projection(
-        &created.state_record,
-        object_type,
-    ))
-    .into_response()
+    let response_id = created.state_record.response_id.clone();
+    if identity.stream {
+        return response_event_sse_response(state, response_id, 0);
+    }
+    let state_record = if identity.background {
+        created.state_record
+    } else {
+        match wait_for_response_terminal(state.clone(), &response_id).await {
+            Ok(state_record) => state_record,
+            Err(error) => return response_store_failure_response(error, Some(&identity.trace_id)),
+        }
+    };
+    Json(response_state_projection(&state_record, object_type)).into_response()
 }
 
 async fn get_response_projection(
@@ -4983,15 +5216,8 @@ fn get_response_events_projection_for_subject(
     }
     let mut body = String::new();
     for event in events {
-        if let Some(public) = event.public_projection() {
-            let event_name = public
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("message");
-            let data = serde_json::to_string(&public).unwrap_or_else(|_| "{}".to_string());
-            body.push_str(&format!("id: {}\n", event.sequence));
-            body.push_str(&format!("event: {event_name}\n"));
-            body.push_str(&format!("data: {data}\n\n"));
+        if let Some(frame) = response_event_sse_frame(&event) {
+            body.push_str(&frame);
         }
     }
     if state_record.status.is_terminal() {
@@ -5002,6 +5228,135 @@ fn get_response_events_projection_for_subject(
         body,
     )
         .into_response()
+}
+
+fn response_event_sse_response(
+    state: Arc<AppState>,
+    response_id: String,
+    after_sequence: u64,
+) -> Response {
+    let sse_state = ResponseEventSseState {
+        state,
+        response_id,
+        after_sequence,
+        done: false,
+    };
+    let body_stream = stream::unfold(sse_state, |mut sse_state| async move {
+        response_event_sse_next(&mut sse_state)
+            .await
+            .map(|chunk| (Ok::<Bytes, Infallible>(Bytes::from(chunk)), sse_state))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream_build_failed",
+                "failed to build stream response",
+                None,
+            )
+        })
+}
+
+async fn response_event_sse_next(sse_state: &mut ResponseEventSseState) -> Option<String> {
+    if sse_state.done {
+        return None;
+    }
+    loop {
+        match response_event_collect_events(sse_state) {
+            Ok((state_record, events)) => {
+                let mut body = String::new();
+                for event in events {
+                    sse_state.after_sequence = sse_state.after_sequence.max(event.sequence);
+                    if let Some(frame) = response_event_sse_frame(&event) {
+                        body.push_str(&frame);
+                    }
+                }
+                if state_record.status.is_terminal() {
+                    body.push_str("data: [DONE]\n\n");
+                    sse_state.done = true;
+                }
+                if !body.is_empty() {
+                    return Some(body);
+                }
+            }
+            Err(error_event) => {
+                let data = serde_json::to_string(&error_event).unwrap_or_else(|_| "{}".to_string());
+                let mut body = String::new();
+                body.push_str("event: response.failed\n");
+                body.push_str(&format!("data: {data}\n\n"));
+                body.push_str("data: [DONE]\n\n");
+                sse_state.done = true;
+                return Some(body);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn response_event_collect_events(
+    sse_state: &ResponseEventSseState,
+) -> Result<(ResponseStateRecord, Vec<response_events::ResponseEvent>), Value> {
+    let store = sse_state
+        .state
+        .response_store
+        .lock()
+        .map_err(|_| response_event_stream_error_event("response_store_unavailable"))?;
+    let state_record = store
+        .state(&sse_state.response_id)
+        .map_err(|_| response_event_stream_error_event("response_not_found"))?;
+    let events = store
+        .read_after(&sse_state.response_id, Some(sse_state.after_sequence))
+        .map_err(|_| response_event_stream_error_event("response_events_unavailable"))?;
+    Ok((state_record, events))
+}
+
+fn response_event_sse_frame(event: &response_events::ResponseEvent) -> Option<String> {
+    let public = event.public_projection()?;
+    let event_name = public
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    let data = serde_json::to_string(&public).unwrap_or_else(|_| "{}".to_string());
+    Some(format!(
+        "id: {}\nevent: {event_name}\ndata: {data}\n\n",
+        event.sequence
+    ))
+}
+
+fn response_event_stream_error_event(code: &str) -> Value {
+    json!({
+        "type": "response.failed",
+        "payload": {
+            "error": {
+                "code": code,
+                "message": "response event stream could not read response events",
+            }
+        }
+    })
+}
+
+async fn wait_for_response_terminal(
+    state: Arc<AppState>,
+    response_id: &str,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let timeout = Duration::from_secs(state.response_sync_wait_secs);
+    let started = Instant::now();
+    loop {
+        let state_record = {
+            let store = state.response_store.lock().map_err(|_| {
+                ResponseStoreError::BackendUnavailable("response store unavailable".to_string())
+            })?;
+            store.state(response_id)?
+        };
+        if state_record.status.is_terminal() || timeout.is_zero() || started.elapsed() >= timeout {
+            return Ok(state_record);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 async fn cancel_response_projection(
@@ -5287,6 +5642,33 @@ fn append_response_event_for_identity(
     store
         .append_event(AppendResponseEventInput {
             response_id: identity.response_id.clone(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+}
+
+fn append_response_event_for_response_id(
+    state: &AppState,
+    response_id: &str,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let mut store = state
+        .response_store
+        .lock()
+        .map_err(|_| ResponseStoreError::BackendUnavailable("response store unavailable".into()))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
             event_type,
             payload,
             status_update,

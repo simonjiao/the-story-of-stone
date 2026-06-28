@@ -214,6 +214,36 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
     filter `chat_stream_bridges_to_response_job_events` 通过。
 
+### 2026-06-29 P4 Responses/Run HTTP projection
+
+- P4 已补齐 `/v1/responses` 和 `/v1/runs` 的 create/status/events/cancel/action 语义：
+  - `stream=true` create 不返回 queued JSON，而是直接读取同一个 ResponseEvent SSE
+    stream；Responses/Run 原生 SSE 输出 `response.*` 事件，Chat Completions 仍由 P3
+    转换为 OpenAI chunk。
+  - `background=false` 且非 stream 的 create 会等待同一 response state 进入终态，等待
+    上限由 `TONGLINGYU_RESPONSE_SYNC_WAIT_SECS` 控制，默认 30 秒；超时返回当前 state，
+    不伪造 completed。
+  - `background=true` 继续立即返回 queued state，并只入队一次 response job。
+  - status/events/cancel/action 均复用 `run_id -> response_id` 映射和 owner scope 校验，
+    普通用户跨 tenant 或 subject 读取仍返回 not found。
+  - action submit 现在只有在 run 处于 `requires_action` 且事件流存在匹配 `action_id`
+    时接受；过期、未知 action 和终态 run 均 fail-closed，并写入 action audit stream。
+  - action submit 使用 idempotency key digest 做幂等复用；重复提交同一 action 不追加
+    第二个公开 `action_status=submitted` 事件。
+  - `requires_action_count` 在恢复到 `in_progress` 时递减，避免状态投影长期显示待处理。
+- 配置与部署：
+  - CLI/env 新增 `TONGLINGYU_RESPONSE_SYNC_WAIT_SECS`。
+  - `deploy/docker-compose.yml` 已传入该变量。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过，239 个测试。
+- 当前边界：
+  - P4 action submit 只恢复等待态并写审计/公开状态事件；真正由 action result 重新唤醒
+    paused worker 的细粒度安全点在 P6 与 Runtime live sink 中继续补齐。
+  - background webhook 尚未实现，仍按设计留到 P7 smoke/runbook 与后续 webhook worker。
+
 ## 验证边界
 
 必须区分三类验证：
