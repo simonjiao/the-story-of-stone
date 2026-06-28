@@ -2166,6 +2166,7 @@ fn upstream_draft_using_only_supplemental_evidence_is_rejected() {
         observed_bundle_package_id: Some(package.package_id.clone()),
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
+        claim_statements: vec!["林黛玉进贾府时尚幼。".to_string()],
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2208,6 +2209,7 @@ fn upstream_draft_accepts_knownledge_retriever_source_backed_evidence() {
         observed_bundle_package_id: Some(package.package_id.clone()),
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
+        claim_statements: vec!["判词写到“湘江水逝楚雲飛”。".to_string()],
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2255,6 +2257,7 @@ fn upstream_draft_accepts_package_evidence_without_tier_binding() {
         observed_bundle_package_id: Some(package.package_id.clone()),
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
+        claim_statements: vec!["判词写到“湘江水逝楚雲飛”。".to_string()],
         claim_evidence_refs: vec![vec![unbound_retriever_card.evidence_id]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2266,6 +2269,86 @@ fn upstream_draft_accepts_package_evidence_without_tier_binding() {
 
     assert_eq!(
         agent_runtime_draft_evidence_tier_rejection(&extraction, &package),
+        None
+    );
+}
+
+#[test]
+fn upstream_draft_rejects_claim_ref_without_textual_support() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-jade-diagram-only".to_string();
+    card.source_title = "紅樓夢/第008回".to_string();
+    card.text = "第008回｜正文片段\n通靈寶玉正面圖式".to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-jade-loss-unsupported-ref",
+        "通灵宝玉丢了几次？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("通灵宝玉在第八回丢失过一次，袭人发现后找回。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["通灵宝玉在第八回丢失过一次，袭人发现后找回。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        Some("draft_claim_ref_text_unsupported")
+    );
+}
+
+#[test]
+fn upstream_draft_accepts_claim_ref_with_textual_support() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-lianger-stole-jade-supported".to_string();
+    card.source_title = "紅樓夢/第五十二回".to_string();
+    card.text = "平兒道：“那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。”".to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-jade-loss-supported-ref",
+        "通灵宝玉丢了几次？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("第五十二回良儿偷玉可作为失玉线索。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["第五十二回良儿偷玉。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
         None
     );
 }

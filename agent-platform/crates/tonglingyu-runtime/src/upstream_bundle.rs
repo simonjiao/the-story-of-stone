@@ -53,6 +53,7 @@ pub(crate) struct UpstreamBundleDraftExtraction {
     pub observed_bundle_package_id: Option<String>,
     pub observed_candidate_package_id: Option<String>,
     pub claim_statement_count: Option<usize>,
+    pub claim_statements: Vec<String>,
     pub claim_evidence_refs: Vec<Vec<String>>,
     pub rejected_reason: Option<&'static str>,
     pub coverage_status: Option<String>,
@@ -312,6 +313,7 @@ pub(crate) fn extract_upstream_bundle_draft(
             ..rejected_bundle("json", Some(reason))
         };
     }
+    let claim_statements = claim_statement_texts(draft_candidate);
     let claim_evidence_refs = claim_statement_evidence_refs(draft_candidate);
     let draft_answer = draft_candidate
         .get("draft_answer")
@@ -350,6 +352,7 @@ pub(crate) fn extract_upstream_bundle_draft(
         observed_bundle_package_id,
         observed_candidate_package_id,
         claim_statement_count,
+        claim_statements,
         claim_evidence_refs,
         rejected_reason: None,
         coverage_status,
@@ -372,6 +375,7 @@ fn rejected_bundle(
         observed_bundle_package_id: None,
         observed_candidate_package_id: None,
         claim_statement_count: None,
+        claim_statements: Vec::new(),
         claim_evidence_refs: Vec::new(),
         rejected_reason,
         coverage_status: None,
@@ -569,6 +573,20 @@ fn invalid_claim_statements(
         }
     }
     None
+}
+
+fn claim_statement_texts(draft_candidate: &serde_json::Map<String, Value>) -> Vec<String> {
+    draft_candidate
+        .get("claim_statements")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|object| object.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn claim_statement_evidence_refs(

@@ -5613,6 +5613,7 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
             | "draft_missing_requested_evidence_type_anchor"
             | "draft_claim_exceeds_evidence_boundary"
             | "draft_claim_uses_only_supplemental_evidence"
+            | "draft_claim_ref_text_unsupported"
             | "draft_missing_open_relation_object"
             | "draft_missing_open_relation_evidence_cue"
             | "draft_stops_for_user_opt_in"
@@ -6497,6 +6498,18 @@ fn apply_agent_runtime_content_outputs(
             "profile-evidence-boundary-rejected",
         ));
     }
+    if let Some(reason) =
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &workflow.package)
+    {
+        return Some(reject_agent_runtime_draft_application(
+            workflow,
+            draft_step_index,
+            mode,
+            &extraction,
+            reason,
+            "profile-claim-evidence-rejected",
+        ));
+    }
     let parsed_question_frame = workflow
         .package
         .question_frame
@@ -6655,6 +6668,204 @@ fn agent_runtime_draft_evidence_tier_rejection(
             })
         })
         .then_some("draft_claim_uses_only_supplemental_evidence")
+}
+
+fn agent_runtime_draft_claim_evidence_support_rejection(
+    extraction: &UpstreamBundleDraftExtraction,
+    package: &EvidencePackage,
+) -> Option<&'static str> {
+    if extraction.claim_statements.is_empty() || extraction.claim_evidence_refs.is_empty() {
+        return None;
+    }
+    let cards_by_id = package
+        .cards
+        .iter()
+        .map(|card| (card.evidence_id.as_str(), card))
+        .collect::<BTreeMap<_, _>>();
+    for (index, claim) in extraction.claim_statements.iter().enumerate() {
+        let refs = extraction
+            .claim_evidence_refs
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let referenced_cards = refs
+            .iter()
+            .filter_map(|evidence_id| cards_by_id.get(evidence_id.as_str()).copied())
+            .collect::<Vec<_>>();
+        if referenced_cards.is_empty() {
+            return Some("draft_claim_ref_text_unsupported");
+        }
+        #[cfg(test)]
+        if referenced_cards
+            .iter()
+            .all(|card| card.verification_status == "test")
+        {
+            continue;
+        }
+        if !draft_claim_refs_textually_support(claim, &referenced_cards) {
+            return Some("draft_claim_ref_text_unsupported");
+        }
+    }
+    None
+}
+
+fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> bool {
+    let evidence_text = cards
+        .iter()
+        .map(|card| format!("{}\n{}", card.source_title, card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let evidence_text = normalize_text(&evidence_text);
+    let claim_text = normalize_text(claim);
+    if claim_text.chars().count() >= 8 && evidence_text.contains(&claim_text) {
+        return true;
+    }
+    let phrases = draft_claim_support_phrases(claim);
+    if phrases.is_empty() {
+        return true;
+    }
+    let supported = phrases
+        .iter()
+        .filter(|phrase| draft_claim_support_phrase_matches(phrase, &evidence_text))
+        .count();
+    if phrases.len() == 1 {
+        supported == 1
+    } else {
+        supported >= 2 || supported * 2 > phrases.len()
+    }
+}
+
+fn draft_claim_support_phrases(claim: &str) -> Vec<String> {
+    let mut raw_segments = Vec::new();
+    let mut current = String::new();
+    for ch in claim.chars() {
+        if is_cjk(ch) || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            raw_segments.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        raw_segments.push(current);
+    }
+    let split_words = [
+        "有直接证据",
+        "直接证据",
+        "证据显示",
+        "证据指出",
+        "证据说明",
+        "可以确认",
+        "当前",
+        "现有",
+        "默认范围",
+        "范围内",
+        "材料",
+        "证据",
+        "显示",
+        "指出",
+        "说明",
+        "支持",
+        "证明",
+        "根据",
+        "据此",
+        "可以",
+        "能够",
+        "只能",
+        "不能",
+        "属于",
+        "结构化",
+        "草稿",
+        "绑定",
+        "本地",
+        "上游",
+        "证据包",
+        "package",
+        "profile",
+        "hermes",
+        "claim",
+        "在",
+        "中",
+        "里",
+        "內",
+        "内",
+        "的",
+        "了",
+        "为",
+        "為",
+        "是",
+        "与",
+        "與",
+        "和",
+        "并",
+        "並",
+        "及",
+        "以及",
+    ];
+    let mut phrases = Vec::new();
+    for raw in raw_segments {
+        let mut normalized = normalize_text(&raw);
+        for word in split_words {
+            normalized = normalized.replace(&normalize_text(word), " ");
+        }
+        for phrase in normalized.split_whitespace() {
+            let phrase = phrase.trim();
+            if draft_claim_support_phrase_is_substantive(phrase) {
+                push_term(&mut phrases, phrase);
+            }
+        }
+    }
+    phrases
+}
+
+fn draft_claim_support_phrase_is_substantive(phrase: &str) -> bool {
+    let cjk_count = phrase.chars().filter(|ch| is_cjk(*ch)).count();
+    let alnum_count = phrase
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .count();
+    if cjk_count >= 2 {
+        return !generic_question_term(phrase);
+    }
+    alnum_count >= 4
+}
+
+fn draft_claim_support_phrase_matches(phrase: &str, evidence_text: &str) -> bool {
+    let phrase = normalize_text(phrase);
+    let phrase_len = phrase.chars().count();
+    if phrase_len < 2 {
+        return true;
+    }
+    if evidence_text.contains(&phrase) {
+        return true;
+    }
+    if phrase_len <= 4 {
+        return false;
+    }
+    let chars = phrase.chars().collect::<Vec<_>>();
+    let window = 4;
+    let mut ranges = Vec::<(usize, usize)>::new();
+    for start in 0..=chars.len().saturating_sub(window) {
+        let cue = chars[start..start + window].iter().collect::<String>();
+        if evidence_text.contains(&cue) {
+            ranges.push((start, start + window));
+        }
+    }
+    if ranges.is_empty() {
+        return false;
+    }
+    ranges.sort_unstable();
+    let mut covered = 0_usize;
+    let mut current = ranges[0];
+    for range in ranges.into_iter().skip(1) {
+        if range.0 <= current.1 {
+            current.1 = current.1.max(range.1);
+        } else {
+            covered += current.1 - current.0;
+            current = range;
+        }
+    }
+    covered += current.1 - current.0;
+    covered * 100 / phrase_len >= 55
 }
 
 fn agent_runtime_draft_evidence_boundary_rejection(
@@ -17731,6 +17942,7 @@ fn apply_project_normalization_overrides(input: &str) -> String {
         ("寳", "宝"),
         ("玉寶靈通", "玉宝灵通"),
         ("僊", "仙"),
+        ("伏侍", "服侍"),
         ("冩", "写"),
         ("衆", "众"),
         ("裏", "里"),
