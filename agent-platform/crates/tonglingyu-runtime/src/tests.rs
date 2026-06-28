@@ -9006,6 +9006,21 @@ fn runtime_allows_commentary_question_draft_with_commentary_text_anchor() {
 }
 
 #[test]
+fn runtime_allows_commentary_question_draft_with_normalized_text_anchor_fragment() {
+    let mut commentary = sample_card("commentary");
+    commentary.source_title = "脂硯齋重評石頭記/第十五回".to_string();
+    commentary.text = "第015回｜批语\n總寫阿鳳聰明中的痴人。".to_string();
+
+    let rejected = agent_runtime_draft_evidence_boundary_rejection(
+        "关于史湘云的结局，脂批中的证据呢",
+        "脂批中可见第十五回批语“总写阿凤聪明中的痴人”，但它只能作为当前检索到的脂批线索，不能替代后四十回叙事。",
+        &[commentary],
+    );
+
+    assert_eq!(rejected, None);
+}
+
+#[test]
 fn runtime_allows_version_boundary_question_draft_with_text_chapter_anchor() {
     let mut version_note = sample_card("version_note");
     version_note.source_id = "hongloumeng-wikisource-chengyi".to_string();

@@ -169,8 +169,8 @@ fn source_anchor_cues_for_card(card: &EvidenceCard, policy: &AnswerCuePolicy) ->
 fn text_anchor_cues_for_card(card: &EvidenceCard, policy: &AnswerCuePolicy) -> Vec<String> {
     let mut cues = Vec::new();
     push_external_ranking_text_cues(&mut cues, &card.text, policy);
-    push_chapter_marker_text_cues(&mut cues, &card.text, policy);
     push_public_text_excerpt_cues(&mut cues, &card.text, policy);
+    push_chapter_marker_text_cues(&mut cues, &card.text, policy);
     cues.truncate(policy.max_anchor_cues_per_card);
     cues
 }
@@ -228,13 +228,14 @@ fn push_public_text_excerpt_cues(cues: &mut Vec<String>, text: &str, policy: &An
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
     {
+        let cue_count = cues.len();
         push_public_cue(
             cues,
             segment,
             policy.max_text_anchor_cue_chars,
             policy.text_cue_min_chars,
         );
-        if !cues.is_empty() {
+        if cues.len() > cue_count && !public_cue_match_fragments(segment).is_empty() {
             return;
         }
     }
@@ -280,6 +281,30 @@ fn text_contains_public_cue(text: &str, cue: &str) -> bool {
 
 fn source_cue_matches(draft_text: &str, cue: &str) -> bool {
     text_contains_public_cue(draft_text, cue)
+        || public_cue_match_fragments(cue)
+            .iter()
+            .any(|fragment| text_contains_public_cue(draft_text, fragment))
+}
+
+fn public_cue_match_fragments(cue: &str) -> Vec<String> {
+    cue.split([
+        '\n', '\r', ' ', '\t', '　', '｜', '|', ':', '：', '。', '；', ';', '！', '!', '？', '?',
+    ])
+    .map(str::trim)
+    .filter(|fragment| substantive_cue_fragment(fragment))
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn substantive_cue_fragment(fragment: &str) -> bool {
+    let cjk_count = fragment
+        .chars()
+        .filter(|ch| ('\u{4e00}'..='\u{9fff}').contains(ch))
+        .count();
+    if cjk_count >= 4 {
+        return true;
+    }
+    fragment.chars().filter(|ch| ch.is_alphanumeric()).count() >= 8
 }
 
 fn push_public_cue(cues: &mut Vec<String>, cue: &str, max_chars: usize, min_chars: usize) {
