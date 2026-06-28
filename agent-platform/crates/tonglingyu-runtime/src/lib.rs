@@ -16177,6 +16177,365 @@ struct QueryExpansionTrigger {
     all_any: Vec<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainQueryExpansion {
+    pub terms: Vec<String>,
+    pub recall_hints: Vec<String>,
+}
+
+pub const DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION: &str = "tonglingyu.domain_retrieval_plan.v1";
+
+const DOMAIN_MAX_ROUTE_QUERY_REWRITES: usize = 8;
+const DOMAIN_MAX_PLAN_TERMS: usize = 16;
+const DOMAIN_DEFAULT_ROUTES: &[&str] = &["bm25", "vector", "entity", "event", "poem", "commentary"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DomainRetrievalPlan {
+    pub schema_version: String,
+    pub planner_version: String,
+    pub original_query: String,
+    pub retrieval_profile: String,
+    pub graph_node: String,
+    pub route_policy: String,
+    pub primary_intent: String,
+    pub secondary_intents: Vec<String>,
+    pub explicit_scope_allowed: bool,
+    pub routes: Vec<String>,
+    pub retrieval_routes: Vec<String>,
+    pub route_weights: BTreeMap<String, f64>,
+    pub queries: BTreeMap<String, Vec<String>>,
+    pub keyword_queries: Vec<String>,
+    pub semantic_queries: Vec<String>,
+    pub structured_terms: Vec<String>,
+    pub expansion_terms: Vec<String>,
+    pub recall_hints: Vec<String>,
+    pub filters: Option<Value>,
+    pub diagnostics: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainRetrievalProfile {
+    Workflow,
+    Person,
+    Event,
+    Poem,
+    JudgementPoem,
+    Commentary,
+}
+
+impl DomainRetrievalProfile {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "workflow" | "all" => Some(Self::Workflow),
+            "person" | "people" | "character" | "characters" | "entity" | "entity_lookup" => {
+                Some(Self::Person)
+            }
+            "event" | "story" | "plot" | "event_lookup" => Some(Self::Event),
+            "poem" | "poetry" | "poem_lookup" | "text" | "text_work" => Some(Self::Poem),
+            "judgement" | "judgment" | "judgement_poem" | "judgment_poem" | "panci" => {
+                Some(Self::JudgementPoem)
+            }
+            "commentary" | "commentary_lookup" | "zhiyanzhai" => Some(Self::Commentary),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Workflow => "workflow",
+            Self::Person => "person",
+            Self::Event => "event",
+            Self::Poem => "poem",
+            Self::JudgementPoem => "judgement_poem",
+            Self::Commentary => "commentary",
+        }
+    }
+
+    fn graph_node(self) -> &'static str {
+        match self {
+            Self::Workflow => "chat_workflow",
+            Self::Person => "common_recall_person",
+            Self::Event => "common_recall_event",
+            Self::Poem => "common_recall_poem",
+            Self::JudgementPoem => "common_recall_judgement_poem",
+            Self::Commentary => "common_recall_commentary",
+        }
+    }
+
+    fn route_policy(self) -> &'static str {
+        match self {
+            Self::Workflow => "all_knownledge_retriever_routes",
+            Self::Person => "person_lookup_entity_first_with_event_context",
+            Self::Event => "event_lookup_event_first_with_entity_context",
+            Self::Poem => "poem_lookup_text_route_first",
+            Self::JudgementPoem => "judgement_poem_lookup_text_route_with_commentary_context",
+            Self::Commentary => "commentary_lookup_commentary_first",
+        }
+    }
+
+    fn routes(self) -> &'static [&'static str] {
+        match self {
+            Self::Workflow => DOMAIN_DEFAULT_ROUTES,
+            Self::Person => &["entity", "event", "bm25", "vector"],
+            Self::Event => &["event", "entity", "bm25", "vector"],
+            Self::Poem => &["poem", "entity", "event", "commentary", "bm25", "vector"],
+            Self::JudgementPoem => &["poem", "commentary", "event", "entity", "bm25", "vector"],
+            Self::Commentary => &["commentary", "poem", "event", "bm25", "vector"],
+        }
+    }
+
+    fn route_weights(self) -> BTreeMap<String, f64> {
+        let entries: &[(&str, f64)] = match self {
+            Self::Workflow => &[],
+            Self::Person => &[
+                ("entity", 1.4),
+                ("event", 0.95),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Event => &[
+                ("event", 1.45),
+                ("entity", 0.95),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Poem => &[
+                ("poem", 1.5),
+                ("entity", 0.9),
+                ("event", 0.85),
+                ("commentary", 0.75),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::JudgementPoem => &[
+                ("poem", 1.6),
+                ("commentary", 1.05),
+                ("event", 0.9),
+                ("entity", 0.9),
+                ("bm25", 1.0),
+                ("vector", 0.9),
+            ],
+            Self::Commentary => &[
+                ("commentary", 1.5),
+                ("poem", 0.85),
+                ("event", 0.8),
+                ("bm25", 1.0),
+                ("vector", 0.85),
+            ],
+        };
+        entries
+            .iter()
+            .map(|(route, weight)| ((*route).to_string(), *weight))
+            .collect()
+    }
+
+    fn queries(self, query: &str) -> BTreeMap<String, Vec<String>> {
+        let mut queries = BTreeMap::new();
+        match self {
+            Self::Workflow => {}
+            Self::Person => {
+                queries.insert(
+                    "entity".to_string(),
+                    domain_query_rewrites(query, &["人物", "别名 身份"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    domain_query_rewrites(query, &["相关事件", "经历"]),
+                );
+                queries.insert(
+                    "bm25".to_string(),
+                    domain_query_rewrites(query, &["人物", "关系"]),
+                );
+                queries.insert(
+                    "vector".to_string(),
+                    domain_query_rewrites(query, &["人物关系 经历"]),
+                );
+            }
+            Self::Event => {
+                queries.insert(
+                    "event".to_string(),
+                    domain_query_rewrites(query, &["事件", "情节"]),
+                );
+                queries.insert(
+                    "entity".to_string(),
+                    domain_query_rewrites(query, &["相关人物"]),
+                );
+                queries.insert(
+                    "bm25".to_string(),
+                    domain_query_rewrites(query, &["情节", "经过"]),
+                );
+                queries.insert(
+                    "vector".to_string(),
+                    domain_query_rewrites(query, &["事件经过 因果"]),
+                );
+            }
+            Self::Poem => {
+                queries.insert(
+                    "poem".to_string(),
+                    domain_query_rewrites(query, &["诗词", "曲词 文本"]),
+                );
+                queries.insert(
+                    "entity".to_string(),
+                    domain_query_rewrites(query, &["诗词题名"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    domain_query_rewrites(query, &["诗词相关情节"]),
+                );
+                queries.insert(
+                    "commentary".to_string(),
+                    domain_query_rewrites(query, &["诗词 脂批"]),
+                );
+                queries.insert(
+                    "bm25".to_string(),
+                    domain_query_rewrites(query, &["诗词", "题名"]),
+                );
+                queries.insert(
+                    "vector".to_string(),
+                    domain_query_rewrites(query, &["诗词文本 含义"]),
+                );
+            }
+            Self::JudgementPoem => {
+                queries.insert(
+                    "poem".to_string(),
+                    domain_query_rewrites(query, &["判词", "册页判语", "金陵十二钗 判词"]),
+                );
+                queries.insert(
+                    "commentary".to_string(),
+                    domain_query_rewrites(query, &["判词 脂批", "册页判语 脂批"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    domain_query_rewrites(query, &["判词相关情节"]),
+                );
+                queries.insert(
+                    "entity".to_string(),
+                    domain_query_rewrites(query, &["判词人物"]),
+                );
+                queries.insert(
+                    "bm25".to_string(),
+                    domain_query_rewrites(query, &["判词", "册页"]),
+                );
+                queries.insert(
+                    "vector".to_string(),
+                    domain_query_rewrites(query, &["判词 命运 伏笔"]),
+                );
+            }
+            Self::Commentary => {
+                queries.insert(
+                    "commentary".to_string(),
+                    domain_query_rewrites(query, &["脂批", "批语"]),
+                );
+                queries.insert(
+                    "poem".to_string(),
+                    domain_query_rewrites(query, &["脂批所评诗文"]),
+                );
+                queries.insert(
+                    "event".to_string(),
+                    domain_query_rewrites(query, &["脂批所评情节"]),
+                );
+                queries.insert(
+                    "bm25".to_string(),
+                    domain_query_rewrites(query, &["脂批", "批语"]),
+                );
+                queries.insert(
+                    "vector".to_string(),
+                    domain_query_rewrites(query, &["脂批 评论"]),
+                );
+            }
+        }
+        queries
+    }
+
+    fn keyword_queries(self, query: &str) -> Vec<String> {
+        match self {
+            Self::Workflow => vec![query.to_string()],
+            Self::Person => domain_query_rewrites(query, &["人物", "身份", "关系"]),
+            Self::Event => domain_query_rewrites(query, &["事件", "情节", "经过"]),
+            Self::Poem => domain_query_rewrites(query, &["诗词", "题名", "曲词"]),
+            Self::JudgementPoem => {
+                domain_query_rewrites(query, &["判词", "册页判语", "金陵十二钗"])
+            }
+            Self::Commentary => domain_query_rewrites(query, &["脂批", "批语", "评点"]),
+        }
+    }
+
+    fn semantic_queries(self, query: &str) -> Vec<String> {
+        match self {
+            Self::Workflow => vec![query.to_string()],
+            Self::Person => domain_query_rewrites(query, &["人物身份经历关系"]),
+            Self::Event => domain_query_rewrites(query, &["情节事件经过因果"]),
+            Self::Poem => domain_query_rewrites(query, &["诗词曲文文本含义"]),
+            Self::JudgementPoem => domain_query_rewrites(query, &["判词册页人物命运伏笔"]),
+            Self::Commentary => domain_query_rewrites(query, &["脂批评点解释"]),
+        }
+    }
+
+    fn structured_terms(self) -> Vec<String> {
+        match self {
+            Self::Workflow => Vec::new(),
+            Self::Person => domain_plan_terms(&["entity_type:person", "entity_class:person"]),
+            Self::Event => {
+                domain_plan_terms(&["route_view:event_route_view", "chunk_kind:event_scene"])
+            }
+            Self::Poem => {
+                domain_plan_terms(&["entity_type:text", "entity_subtype:poem", "route:poem"])
+            }
+            Self::JudgementPoem => domain_plan_terms(&[
+                "entity_type:text",
+                "entity_subtype:judgement",
+                "entity_facets:judgment",
+                "route:poem",
+            ]),
+            Self::Commentary => domain_plan_terms(&[
+                "route:commentary",
+                "chunk_kind:commentary",
+                "source:zhiyanzhai",
+            ]),
+        }
+    }
+
+    fn expansion_terms(self) -> Vec<String> {
+        match self {
+            Self::Workflow => Vec::new(),
+            Self::Person => domain_plan_terms(&["人物", "别名", "身份", "关系", "经历"]),
+            Self::Event => domain_plan_terms(&["事件", "情节", "经过", "因果", "场景"]),
+            Self::Poem => domain_plan_terms(&["诗词", "曲词", "题名", "文本实体"]),
+            Self::JudgementPoem => {
+                domain_plan_terms(&["判词", "册页判语", "金陵十二钗", "正册", "副册"])
+            }
+            Self::Commentary => domain_plan_terms(&["脂批", "批语", "评点", "眉批", "夹批"]),
+        }
+    }
+
+    fn filters(self) -> Option<Value> {
+        match self {
+            Self::Workflow => None,
+            Self::Person => Some(json!({
+                "entity_types": ["person"],
+            })),
+            Self::Event => Some(json!({
+                "chunk_kinds": ["event_scene", "primary_text_segment", "primary_text_window", "theme_anchor"],
+            })),
+            Self::Poem => Some(json!({
+                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window"],
+                "entity_types": ["text"],
+                "entity_subtypes": ["poem", "song"],
+            })),
+            Self::JudgementPoem => Some(json!({
+                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window", "commentary"],
+                "entity_types": ["text"],
+                "entity_subtypes": ["judgement"],
+                "entity_facets": ["judgment"],
+            })),
+            Self::Commentary => Some(json!({
+                "chunk_kinds": ["commentary", "primary_text_segment", "primary_text_window", "text_work", "text_work_body"],
+                "source_layers": ["zhiyanzhai", "primary_text"],
+            })),
+        }
+    }
+}
+
 fn query_expansion_catalog() -> Result<QueryExpansionCatalog> {
     let path = rule_catalog::configured_path(QUERY_EXPANSIONS_PATH_ENV);
     let cache =
@@ -16284,13 +16643,580 @@ fn required_exact_terms(question: &str) -> Result<Vec<String>> {
     Ok(terms)
 }
 
-pub(crate) fn query_expansion_search_terms(question: &str) -> Result<Vec<String>> {
+pub fn domain_query_expansion(question: &str) -> Result<DomainQueryExpansion> {
     let catalog = query_expansion_catalog()?;
     let normalized = normalize_query(question);
     let mut terms = Vec::new();
+    let mut matched_entry_ids = Vec::new();
     apply_query_expansion_exact_terms(&catalog, question, &normalized, &mut terms);
     apply_query_expansion_terms(&catalog, question, &normalized, &mut terms);
-    Ok(terms)
+    collect_query_expansion_matches(&catalog, question, &normalized, &mut matched_entry_ids);
+    let recall_hints = query_expansion_recall_hints(&matched_entry_ids, &terms);
+    Ok(DomainQueryExpansion {
+        terms,
+        recall_hints,
+    })
+}
+
+pub fn domain_common_retrieval_plan(kind: &str, question: &str) -> Result<DomainRetrievalPlan> {
+    let profile = DomainRetrievalProfile::parse(kind)
+        .ok_or_else(|| anyhow!("unsupported domain retrieval profile: {kind}"))?;
+    let domain_expansion = domain_query_expansion(question)?;
+    let structured_terms =
+        domain_merge_terms(&domain_query_terms(question), &profile.structured_terms());
+    domain_retrieval_plan_from_parts(
+        profile,
+        question,
+        profile.as_str().to_string(),
+        Vec::new(),
+        false,
+        Vec::new(),
+        BTreeMap::new(),
+        profile.keyword_queries(question),
+        profile.semantic_queries(question),
+        structured_terms,
+        domain_expansion,
+        json!({
+            "planner_kind": "runtime_domain_common_recall",
+            "requested_profile": kind,
+        }),
+    )
+}
+
+pub fn domain_retrieval_plan(
+    question: &str,
+    question_type: &str,
+    required_evidence_types: &[String],
+    question_frame_intent: Option<&str>,
+) -> Result<DomainRetrievalPlan> {
+    let domain_expansion = domain_query_expansion(question)?;
+    let primary_intent = domain_primary_intent(
+        question,
+        question_type,
+        required_evidence_types,
+        question_frame_intent,
+    );
+    let secondary_intents = domain_secondary_intents(
+        question,
+        &primary_intent,
+        required_evidence_types,
+        question_frame_intent,
+    );
+    let retrieval_routes = domain_planner_routes_for_intents(&primary_intent, &secondary_intents);
+    let route_weights = domain_planner_route_weights(&primary_intent, &secondary_intents);
+    let query_terms = domain_query_terms(question);
+    let keyword_queries = domain_planner_keyword_queries(question, &primary_intent, &query_terms);
+    let semantic_queries = domain_planner_semantic_queries(question, &primary_intent, &query_terms);
+    let profile = domain_profile_for_plan(
+        &primary_intent,
+        &secondary_intents,
+        &domain_expansion.recall_hints,
+    );
+    domain_retrieval_plan_from_parts(
+        profile,
+        question,
+        primary_intent,
+        secondary_intents,
+        domain_query_mentions_explicit_scope(question),
+        retrieval_routes,
+        route_weights,
+        keyword_queries,
+        semantic_queries,
+        query_terms,
+        domain_expansion,
+        json!({
+            "planner_kind": "runtime_domain_retrieval_plan",
+            "question_type": question_type,
+            "required_evidence_types": required_evidence_types,
+            "question_frame_intent": question_frame_intent,
+        }),
+    )
+}
+
+pub fn domain_query_expansion_terms(question: &str) -> Result<Vec<String>> {
+    Ok(domain_query_expansion(question)?.terms)
+}
+
+pub(crate) fn query_expansion_search_terms(question: &str) -> Result<Vec<String>> {
+    domain_query_expansion_terms(question)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn domain_retrieval_plan_from_parts(
+    profile: DomainRetrievalProfile,
+    question: &str,
+    primary_intent: String,
+    secondary_intents: Vec<String>,
+    explicit_scope_allowed: bool,
+    retrieval_routes: Vec<String>,
+    route_weights: BTreeMap<String, f64>,
+    keyword_queries: Vec<String>,
+    semantic_queries: Vec<String>,
+    structured_terms: Vec<String>,
+    domain_expansion: DomainQueryExpansion,
+    diagnostics: Value,
+) -> Result<DomainRetrievalPlan> {
+    let canonical_routes = retrieval_routes
+        .iter()
+        .filter_map(|route| {
+            domain_canonical_route_from_planner_route(route).map(ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    let routes = domain_merge_route_lists(profile.routes(), &canonical_routes);
+    let route_weights = domain_merged_route_weights(profile, &route_weights);
+    let queries = domain_route_queries(profile, question, &keyword_queries, &semantic_queries);
+    let structured_terms = domain_merge_terms(&structured_terms, &profile.structured_terms());
+    let expansion_terms = domain_merge_terms(&domain_expansion.terms, &profile.expansion_terms());
+    Ok(DomainRetrievalPlan {
+        schema_version: DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION.to_string(),
+        planner_version: "runtime_domain_retrieval_plan_v0.1".to_string(),
+        original_query: question.to_string(),
+        retrieval_profile: profile.as_str().to_string(),
+        graph_node: profile.graph_node().to_string(),
+        route_policy: profile.route_policy().to_string(),
+        primary_intent,
+        secondary_intents,
+        explicit_scope_allowed,
+        routes,
+        retrieval_routes,
+        route_weights,
+        queries,
+        keyword_queries,
+        semantic_queries,
+        structured_terms,
+        expansion_terms,
+        recall_hints: domain_expansion.recall_hints,
+        filters: profile.filters(),
+        diagnostics,
+    })
+}
+
+fn domain_profile_for_plan(
+    primary_intent: &str,
+    secondary_intents: &[String],
+    recall_hints: &[String],
+) -> DomainRetrievalProfile {
+    if domain_has_recall_hint(recall_hints, "judgement_poem") {
+        return DomainRetrievalProfile::JudgementPoem;
+    }
+    match primary_intent {
+        "commentary_lookup" => return DomainRetrievalProfile::Commentary,
+        "text_lookup" => return DomainRetrievalProfile::Poem,
+        "event_lookup" => return DomainRetrievalProfile::Event,
+        "relation_lookup" | "entity_lookup" => return DomainRetrievalProfile::Person,
+        _ => {}
+    }
+    let intents = std::iter::once(primary_intent)
+        .chain(secondary_intents.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    if intents.contains("commentary_lookup") {
+        return DomainRetrievalProfile::Commentary;
+    }
+    if intents.contains("text_lookup") {
+        return DomainRetrievalProfile::Poem;
+    }
+    if intents.contains("event_lookup") {
+        return DomainRetrievalProfile::Event;
+    }
+    if intents.contains("relation_lookup") || intents.contains("entity_lookup") {
+        return DomainRetrievalProfile::Person;
+    }
+    DomainRetrievalProfile::Workflow
+}
+
+fn domain_has_recall_hint(recall_hints: &[String], expected: &str) -> bool {
+    let expected = expected.trim().replace('-', "_");
+    recall_hints.iter().any(|hint| {
+        hint.trim()
+            .replace('-', "_")
+            .eq_ignore_ascii_case(&expected)
+    })
+}
+
+fn domain_canonical_route_from_planner_route(route: &str) -> Option<&'static str> {
+    match route.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "bm25" | "bm25_fts" | "fts" | "keyword" => Some("bm25"),
+        "vector" | "dense_vector" | "embedding" | "semantic" => Some("vector"),
+        "entity" | "entity_lookup" => Some("entity"),
+        "event" | "event_lookup" => Some("event"),
+        "poem" | "poem_lookup" | "text" | "text_work" | "poetry" => Some("poem"),
+        "commentary" | "commentary_lookup" => Some("commentary"),
+        "scope_filter" | "graph_expansion" | "reranker" => None,
+        _ => None,
+    }
+}
+
+fn domain_merged_route_weights(
+    profile: DomainRetrievalProfile,
+    route_weights: &BTreeMap<String, f64>,
+) -> BTreeMap<String, f64> {
+    let mut weights = profile.route_weights();
+    for (route, weight) in route_weights {
+        if let Some(canonical) = domain_canonical_route_from_planner_route(route) {
+            weights.insert(canonical.to_string(), *weight);
+        }
+    }
+    weights
+}
+
+fn domain_route_queries(
+    profile: DomainRetrievalProfile,
+    query: &str,
+    keyword_queries: &[String],
+    semantic_queries: &[String],
+) -> BTreeMap<String, Vec<String>> {
+    let mut queries = profile.queries(query);
+    if !keyword_queries.is_empty() {
+        queries.insert("bm25".to_string(), keyword_queries.to_vec());
+        for route in ["entity", "event", "poem", "commentary"] {
+            if let Some(existing) = queries.remove(route) {
+                queries.insert(
+                    route.to_string(),
+                    domain_merge_terms(keyword_queries, &existing),
+                );
+            }
+        }
+    }
+    if !semantic_queries.is_empty() {
+        queries.insert("vector".to_string(), semantic_queries.to_vec());
+    }
+    queries
+}
+
+fn domain_query_rewrites(query: &str, suffixes: &[&str]) -> Vec<String> {
+    let values = std::iter::once(query.to_string())
+        .chain(suffixes.iter().map(|suffix| format!("{query} {suffix}")));
+    domain_dedupe_limited(values, DOMAIN_MAX_ROUTE_QUERY_REWRITES)
+}
+
+fn domain_plan_terms(terms: &[&str]) -> Vec<String> {
+    domain_dedupe_limited(
+        terms.iter().map(|term| (*term).to_string()),
+        DOMAIN_MAX_PLAN_TERMS,
+    )
+}
+
+fn domain_dedupe_limited(
+    values: impl IntoIterator<Item = String>,
+    max_items: usize,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        out.push(normalized);
+        if out.len() >= max_items {
+            break;
+        }
+    }
+    out
+}
+
+fn domain_merge_terms(left: &[String], right: &[String]) -> Vec<String> {
+    domain_dedupe_limited(
+        left.iter().chain(right.iter()).cloned(),
+        DOMAIN_MAX_PLAN_TERMS,
+    )
+}
+
+fn domain_merge_route_lists(primary: &[&str], secondary: &[String]) -> Vec<String> {
+    let mut routes = domain_dedupe_limited(
+        primary
+            .iter()
+            .map(|route| (*route).to_string())
+            .chain(secondary.iter().cloned()),
+        12,
+    );
+    if !routes.iter().any(|route| route == "vector") {
+        routes.push("vector".to_string());
+    }
+    routes
+}
+
+fn domain_primary_intent(
+    query: &str,
+    question_type: &str,
+    required_evidence_types: &[String],
+    question_frame_intent: Option<&str>,
+) -> String {
+    let question_type = question_type.trim();
+    let frame = question_frame_intent.unwrap_or_default();
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+        || question_type == "commentary"
+        || frame.contains("commentary")
+        || domain_contains_any(query, &["脂批", "批语", "評語", "评语"])
+    {
+        return "commentary_lookup".to_string();
+    }
+    if question_type == "poem_or_judgement"
+        || domain_contains_any(query, &["判词", "判詞", "诗", "詞", "词", "曲"])
+    {
+        return "text_lookup".to_string();
+    }
+    if frame.contains("relation")
+        || frame.contains("attribute")
+        || domain_contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"])
+    {
+        return "relation_lookup".to_string();
+    }
+    if frame.contains("chapter_location")
+        || frame.contains("character_fate")
+        || question_type == "character_fate"
+        || domain_contains_any(query, &["情节", "事件", "哪一回", "第几回", "发生", "经过"])
+    {
+        return "event_lookup".to_string();
+    }
+    if question_type == "version"
+        || domain_contains_any(query, &["版本", "前八十", "后四十", "後四十"])
+    {
+        return "version_lookup".to_string();
+    }
+    if domain_contains_any(query, &["为什么", "为何", "如何理解", "象征", "寓意"]) {
+        return "explanation_lookup".to_string();
+    }
+    "mixed_lookup".to_string()
+}
+
+fn domain_secondary_intents(
+    query: &str,
+    primary_intent: &str,
+    required_evidence_types: &[String],
+    question_frame_intent: Option<&str>,
+) -> Vec<String> {
+    let mut intents = Vec::new();
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+    {
+        intents.push("commentary_lookup".to_string());
+    }
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "base_text" || item == "direct_text")
+    {
+        intents.push("text_lookup".to_string());
+    }
+    if question_frame_intent
+        .unwrap_or_default()
+        .contains("character_fate")
+    {
+        intents.push("event_lookup".to_string());
+    }
+    if domain_contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"]) {
+        intents.push("relation_lookup".to_string());
+    }
+    if domain_contains_any(query, &["情节", "事件", "哪一回", "发生", "经过"]) {
+        intents.push("event_lookup".to_string());
+    }
+    if domain_contains_any(query, &["脂批", "批语", "評語", "评语"]) {
+        intents.push("commentary_lookup".to_string());
+    }
+    domain_dedupe_limited(
+        intents
+            .into_iter()
+            .filter(|intent| intent != primary_intent),
+        8,
+    )
+}
+
+fn domain_planner_routes_for_intents(
+    primary_intent: &str,
+    secondary_intents: &[String],
+) -> Vec<String> {
+    let intents = std::iter::once(primary_intent)
+        .chain(secondary_intents.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut routes = vec!["bm25_fts".to_string(), "dense_vector".to_string()];
+    if intents.contains("relation_lookup") {
+        routes.push("entity_lookup".to_string());
+        routes.push("graph_expansion".to_string());
+    }
+    if intents.contains("event_lookup") || intents.contains("explanation_lookup") {
+        routes.push("event_lookup".to_string());
+        routes.push("graph_expansion".to_string());
+    }
+    if intents.contains("text_lookup") || intents.contains("version_lookup") {
+        routes.push("poem_lookup".to_string());
+    }
+    if intents.contains("commentary_lookup") || intents.contains("version_lookup") {
+        routes.push("commentary_lookup".to_string());
+    }
+    routes.push("scope_filter".to_string());
+    routes.push("reranker".to_string());
+    domain_dedupe_limited(routes, 12)
+}
+
+fn domain_planner_route_weights(
+    primary_intent: &str,
+    secondary_intents: &[String],
+) -> BTreeMap<String, f64> {
+    let intents = std::iter::once(primary_intent)
+        .chain(secondary_intents.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut weights = BTreeMap::from([
+        ("bm25_fts".to_string(), 0.72),
+        ("dense_vector".to_string(), 0.58),
+        ("scope_filter".to_string(), 1.0),
+        ("reranker".to_string(), 0.45),
+    ]);
+    if intents.contains("relation_lookup") {
+        weights.insert("entity_lookup".to_string(), 1.15);
+        weights.insert("graph_expansion".to_string(), 0.76);
+    }
+    if intents.contains("event_lookup") {
+        weights.insert("event_lookup".to_string(), 1.15);
+        weights.insert("graph_expansion".to_string(), 0.72);
+    }
+    if intents.contains("text_lookup") {
+        weights.insert("poem_lookup".to_string(), 1.2);
+        weights.insert("bm25_fts".to_string(), 0.9);
+    }
+    if intents.contains("commentary_lookup") {
+        weights.insert("commentary_lookup".to_string(), 1.2);
+        weights.insert("bm25_fts".to_string(), 0.9);
+    }
+    if intents.contains("explanation_lookup") {
+        weights.insert("dense_vector".to_string(), 0.82);
+        weights.insert("reranker".to_string(), 0.7);
+    }
+    weights
+}
+
+fn domain_planner_keyword_queries(
+    query: &str,
+    primary_intent: &str,
+    terms: &[String],
+) -> Vec<String> {
+    let mut queries = vec![query.to_string()];
+    if !terms.is_empty() {
+        queries.push(terms.join(" "));
+    }
+    match primary_intent {
+        "commentary_lookup" => queries.push(format!("{query} 脂批 批语 评点")),
+        "relation_lookup" => queries.push(format!("{query} 人物 关系 身份")),
+        "event_lookup" => queries.push(format!("{query} 情节 事件 经过")),
+        "text_lookup" => queries.push(format!("{query} 诗词 判词 曲词 原文")),
+        "version_lookup" => queries.push(format!("{query} 版本 异文 对齐")),
+        _ => {}
+    }
+    domain_dedupe_limited(queries, 8)
+}
+
+fn domain_planner_semantic_queries(
+    query: &str,
+    primary_intent: &str,
+    terms: &[String],
+) -> Vec<String> {
+    let core = if terms.is_empty() {
+        query.to_string()
+    } else {
+        terms.join(" ")
+    };
+    let mut queries = vec![query.to_string()];
+    match primary_intent {
+        "commentary_lookup" => queries.push(format!("{core} 脂批评点 所评正文")),
+        "relation_lookup" => queries.push(format!("{core} 人物关系 身份 经历 证据")),
+        "event_lookup" => queries.push(format!("{core} 情节事件 发生经过 因果")),
+        "text_lookup" => queries.push(format!("{core} 诗词曲文 文本含义 所在章节")),
+        "version_lookup" => queries.push(format!("{core} 版本差异 异文 对齐")),
+        "explanation_lookup" => queries.push(format!("{core} 象征意义 主题解释 情节因果")),
+        _ => queries.push(format!("{core} 相关人物 事件 原文证据")),
+    }
+    domain_dedupe_limited(queries, 8)
+}
+
+fn domain_query_terms(query: &str) -> Vec<String> {
+    let terms = query
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '，' | '。' | '？' | '?' | '！' | '!' | '、' | '：' | ':' | '；' | ';'
+                )
+        })
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(ToString::to_string);
+    domain_dedupe_limited(terms, DOMAIN_MAX_PLAN_TERMS)
+}
+
+fn domain_query_mentions_explicit_scope(query: &str) -> bool {
+    domain_contains_any(
+        query,
+        &[
+            "前八十",
+            "前80",
+            "后四十",
+            "後四十",
+            "程高本",
+            "脂批",
+            "正文",
+            "原文",
+        ],
+    )
+}
+
+fn domain_contains_any(value: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| value.contains(term))
+}
+
+fn collect_query_expansion_matches(
+    catalog: &QueryExpansionCatalog,
+    question: &str,
+    normalized: &str,
+    matched_entry_ids: &mut Vec<String>,
+) {
+    for entry in &catalog.entries {
+        if query_expansion_entry_matches(entry, question, normalized) {
+            push_term(matched_entry_ids, &entry.id);
+        }
+    }
+}
+
+fn query_expansion_recall_hints(entry_ids: &[String], terms: &[String]) -> Vec<String> {
+    let judgement_entry = entry_ids.iter().any(|id| {
+        id == "intent:character-fate"
+            || id == "core:judgment"
+            || id.contains("judgement")
+            || id.contains("judgment")
+    });
+    let judgement_term = terms
+        .iter()
+        .any(|term| query_expansion_term_indicates_judgement_recall(term));
+    let mut hints = Vec::new();
+    if judgement_entry || judgement_term {
+        push_term(&mut hints, "judgement_poem");
+    }
+    hints
+}
+
+fn query_expansion_term_indicates_judgement_recall(term: &str) -> bool {
+    text_contains_any(
+        term,
+        &[
+            "判词",
+            "判詞",
+            "册页",
+            "冊頁",
+            "曲文",
+            "红楼梦曲",
+            "紅樓夢曲",
+            "樂中悲",
+            "乐中悲",
+            "枉凝眉",
+            "湘江水逝楚雲飛",
+            "湘江水逝楚云飞",
+        ],
+    )
+}
+
+fn text_contains_any(value: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| value.contains(term))
 }
 
 fn apply_query_expansion_terms(

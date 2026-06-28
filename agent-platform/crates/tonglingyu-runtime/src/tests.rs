@@ -4801,6 +4801,41 @@ fn required_exact_terms_protect_core_eval_targets() {
 }
 
 #[test]
+fn domain_query_expansion_returns_recall_hints_for_character_fate() {
+    let expansion =
+        domain_query_expansion("关于史湘云的结局，脂批中的证据呢？").expect("domain expansion");
+
+    assert!(expansion.terms.contains(&"樂中悲".to_string()));
+    assert!(
+        expansion
+            .recall_hints
+            .contains(&"judgement_poem".to_string())
+    );
+}
+
+#[test]
+fn domain_retrieval_plan_selects_judgement_profile_for_xiangyun_fate_evidence() {
+    let plan = domain_retrieval_plan(
+        "关于史湘云的结局，脂批中的证据呢？",
+        "evidence",
+        &["base_text".to_string(), "commentary".to_string()],
+        Some("evidence_query"),
+    )
+    .expect("domain retrieval plan");
+
+    assert_eq!(plan.schema_version, DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION);
+    assert_eq!(plan.primary_intent, "commentary_lookup");
+    assert_eq!(plan.retrieval_profile, "judgement_poem");
+    assert!(plan.routes.contains(&"poem".to_string()));
+    assert!(plan.routes.contains(&"commentary".to_string()));
+    assert!(plan.expansion_terms.contains(&"樂中悲".to_string()));
+    assert_eq!(
+        plan.filters.as_ref().expect("filters")["entity_subtypes"],
+        json!(["judgement"])
+    );
+}
+
+#[test]
 fn query_expansion_catalog_cache_hot_reloads_external_file() {
     let catalog_path = std::env::temp_dir().join(format!(
         "tonglingyu-query-expansions-{}.json",

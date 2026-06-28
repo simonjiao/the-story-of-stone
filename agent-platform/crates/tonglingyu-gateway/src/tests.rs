@@ -11,8 +11,8 @@ use agent_core::{
     RuntimeSessionInput,
 };
 use tonglingyu_runtime::{
-    KnowledgeItemCreateInput, KnowledgeItemStateUpdateInput, RetrievalFailureListInput,
-    RetrievalFailureView, ReviewRecord,
+    DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION, KnowledgeItemCreateInput, KnowledgeItemStateUpdateInput,
+    RetrievalFailureListInput, RetrievalFailureView, ReviewRecord, domain_common_retrieval_plan,
 };
 
 fn test_env(pairs: &[(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
@@ -974,15 +974,12 @@ async fn response_text(response: Response) -> String {
 
 #[test]
 fn common_recall_person_plan_targets_entity_route_with_vector_required() {
-    let plan = RetrieverSearchPlan::for_common_recall(
-        RetrieverCommonRecallKind::Person,
-        "介绍尤三姐",
-        8,
-        false,
-    );
+    let domain_plan =
+        domain_common_retrieval_plan("person", "介绍尤三姐").expect("domain common retrieval plan");
+    let plan = RetrieverSearchPlan::for_domain_plan(&domain_plan, 8, false);
 
     assert_eq!(plan.routes, vec!["entity", "event", "bm25", "vector"]);
-    assert_eq!(plan.raw_plan["common_recall_kind"], json!("person"));
+    assert_eq!(plan.raw_plan["domain_retrieval_profile"], json!("person"));
     assert_eq!(
         plan.raw_plan["route_policy"],
         json!("person_lookup_entity_first_with_event_context")
@@ -1002,17 +999,17 @@ fn common_recall_person_plan_targets_entity_route_with_vector_required() {
 
 #[test]
 fn common_recall_judgement_plan_uses_poem_route_with_structured_terms() {
-    let plan = RetrieverSearchPlan::for_common_recall(
-        RetrieverCommonRecallKind::JudgementPoem,
-        "宝钗判词",
-        6,
-        true,
-    );
+    let domain_plan = domain_common_retrieval_plan("judgement_poem", "宝钗判词")
+        .expect("domain common retrieval plan");
+    let plan = RetrieverSearchPlan::for_domain_plan(&domain_plan, 6, true);
 
     assert_eq!(plan.routes.first().map(String::as_str), Some("poem"));
     assert!(plan.routes.contains(&"commentary".to_string()));
     assert!(plan.routes.contains(&"vector".to_string()));
-    assert_eq!(plan.raw_plan["common_recall_kind"], json!("judgement_poem"));
+    assert_eq!(
+        plan.raw_plan["domain_retrieval_profile"],
+        json!("judgement_poem")
+    );
     assert!(
         plan.queries["poem"]
             .iter()
@@ -1031,29 +1028,32 @@ fn common_recall_judgement_plan_uses_poem_route_with_structured_terms() {
 
 #[test]
 fn query_planner_adapter_preserves_planner_shape_and_selects_judgement_recall() {
-    let query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+    let query_plan = query_plan_from_gateway_policy(
         "宝钗判词",
         "poem_or_judgement",
         &["base_text".to_string()],
         Some("base_text_query"),
-    );
-    let search_plan = RetrieverSearchPlan::for_query_planner(&query_plan, 6, false);
+    )
+    .expect("query plan");
+    let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 6, false);
 
     assert_eq!(
         query_plan.schema_version,
-        retriever_http::QUERY_PLAN_SCHEMA_VERSION
+        DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION
+    );
+    assert_eq!(query_plan.retrieval_profile, "judgement_poem");
+    assert!(
+        query_plan
+            .recall_hints
+            .contains(&"judgement_poem".to_string())
     );
     assert_eq!(
-        query_plan.common_recall_kind(),
-        RetrieverCommonRecallKind::JudgementPoem
-    );
-    assert_eq!(
-        search_plan.raw_plan["common_recall_kind"],
+        search_plan.raw_plan["domain_retrieval_profile"],
         json!("judgement_poem")
     );
     assert_eq!(
-        search_plan.raw_plan["query_plan"]["schema_version"],
-        json!(retriever_http::QUERY_PLAN_SCHEMA_VERSION)
+        search_plan.raw_plan["domain_plan"]["schema_version"],
+        json!(DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION)
     );
     assert!(
         search_plan
@@ -1070,20 +1070,63 @@ fn query_planner_adapter_preserves_planner_shape_and_selects_judgement_recall() 
 }
 
 #[test]
+fn query_planner_xiangyun_fate_evidence_uses_runtime_catalog_judgement_recall() {
+    let query = "关于史湘云的结局，脂批中的证据呢？";
+    let query_plan = query_plan_from_gateway_policy(
+        query,
+        "evidence",
+        &["base_text".to_string(), "commentary".to_string()],
+        Some("evidence_query"),
+    )
+    .expect("query plan");
+    let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 8, false);
+
+    assert_eq!(query_plan.primary_intent, "commentary_lookup");
+    assert_eq!(query_plan.retrieval_profile, "judgement_poem");
+    assert!(
+        query_plan
+            .recall_hints
+            .contains(&"judgement_poem".to_string())
+    );
+    assert_eq!(
+        search_plan.raw_plan["domain_retrieval_profile"],
+        json!("judgement_poem")
+    );
+    assert!(search_plan.routes.contains(&"poem".to_string()));
+    assert!(search_plan.routes.contains(&"commentary".to_string()));
+    assert_eq!(
+        search_plan.filters.as_ref().expect("filters")["entity_subtypes"],
+        json!(["judgement"])
+    );
+    assert!(search_plan.expansion_terms.contains(&"樂中悲".to_string()));
+    assert!(
+        search_plan
+            .retrieval_routes
+            .contains(&"poem_lookup".to_string())
+    );
+    assert!(
+        search_plan
+            .retrieval_routes
+            .contains(&"commentary_lookup".to_string())
+    );
+}
+
+#[test]
 fn query_planner_adapter_maps_person_intro_to_person_recall() {
-    let query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+    let query_plan = query_plan_from_gateway_policy(
         "介绍尤三姐",
         "base_text",
         &["base_text".to_string()],
         Some("base_text_query"),
-    );
-    let search_plan = RetrieverSearchPlan::for_query_planner(&query_plan, 8, false);
+    )
+    .expect("query plan");
+    let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 8, false);
 
+    assert_eq!(query_plan.retrieval_profile, "person");
     assert_eq!(
-        query_plan.common_recall_kind(),
-        RetrieverCommonRecallKind::Person
+        search_plan.raw_plan["domain_retrieval_profile"],
+        json!("person")
     );
-    assert_eq!(search_plan.raw_plan["common_recall_kind"], json!("person"));
     assert_eq!(
         search_plan.routes.first().map(String::as_str),
         Some("entity")
@@ -3870,12 +3913,9 @@ async fn chat_completion_fails_closed_when_retriever_is_unavailable() {
     let retrieval_plan = latest_audit_event_payload(&db_path, "retrieval_plan_created");
     assert_eq!(
         retrieval_plan["retriever_query_plan"]["schema_version"],
-        json!(retriever_http::QUERY_PLAN_SCHEMA_VERSION)
+        json!(DOMAIN_RETRIEVAL_PLAN_SCHEMA_VERSION)
     );
-    assert_eq!(
-        retrieval_plan["retriever_common_recall_kind"],
-        json!("person")
-    );
+    assert_eq!(retrieval_plan["domain_retrieval_profile"], json!("person"));
     assert!(
         load_trace(&db_path, &trace_id)
             .expect("trace loads")
@@ -3925,7 +3965,7 @@ async fn common_recall_endpoint_fails_closed_when_retriever_is_unavailable() {
         0
     );
     let failed = latest_audit_event_payload(&db_path, "retriever_common_recall_failed");
-    assert_eq!(failed["common_recall_kind"], json!("judgement_poem"));
+    assert_eq!(failed["domain_retrieval_profile"], json!("judgement_poem"));
     assert_eq!(failed["fallback_used"], json!(false));
 
     remove_sqlite_file_set(&db_path);

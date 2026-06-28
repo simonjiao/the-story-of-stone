@@ -51,8 +51,8 @@ GET /metadata
 - `contracts.retrieve_response_schema = tonglingyu.agent_retriever.retrieve_response.v1`
 - `contracts.evidence_pack_schema = tonglingyu.agent_retriever.evidence_pack.v1`
 - `contracts.error_response_schema = tonglingyu.agent_retriever.error_response.v1`
-- `capabilities.routes` 包含 `bm25/vector/entity/event/poem/commentary`
-- `capabilities.required_routes` 包含 `vector`
+- `capabilities.routes` 非空
+- `capabilities.required_routes` 非空
 - `adapter_guidance.stable_input` 声明 `SearchPlan + RetrieveOptions`
 
 任一检查失败时 Gateway 启动失败，不进入服务状态。
@@ -90,10 +90,12 @@ POST /retrieve
     "fail_on_route_error": true,
     "fail_on_rerank_error": true,
     "raw_plan": {
-      "planner": "tonglingyu-gateway",
-      "common_recall_kind": "workflow",
+      "planner": "tonglingyu-gateway-domain-plan-adapter",
+      "domain_retrieval_profile": "workflow",
       "route_policy": "all_knownledge_retriever_routes",
-      "vector_required": true
+      "domain_plan": {
+        "schema_version": "tonglingyu.domain_retrieval_plan.v1"
+      }
     }
   },
   "retrieve_options": {
@@ -113,70 +115,65 @@ POST /retrieve
     "context_pack_id": "context-pack-...",
     "context_pack_ref": "context-pack://...",
     "required_evidence_types": ["base_text"],
-    "question_type": "base_text"
+    "question_type": "base_text",
+    "domain_retrieval_profile": "workflow"
   }
 }
 ```
 
-Gateway 只表达 query planner 结果、route 和数量上限要求；具体向量库查询由 retriever 内部完成。
+Gateway 只包装 Runtime/domain 返回的 retrieval plan，并补充 request id、top_k、rerank、trace 等 HTTP 调用参数；具体 route taxonomy、filters、query expansion、向量库查询由 domain/runtime 和 retriever 内部完成。
 
-## Gateway Query Planner Adapter
+## Runtime Domain Retrieval Plan
 
 chat workflow 的内部主路径不是直接调用 common recall HTTP API，而是：
 
 ```text
 SearchPolicy + question_frame intent
-  -> RetrieverQueryPlannerPlan
-  -> RetrieverSearchPlan
+  -> Runtime domain_retrieval_plan(...)
+  -> Gateway RetrieverSearchPlan HTTP adapter
   -> knownledge HTTP /retrieve
 ```
 
-`RetrieverQueryPlannerPlan` 兼容 knownledge deterministic query planner 的核心字段：
+`domain_retrieval_plan(...)` 是领域侧 contract，当前红楼域返回：
 
-- `schema_version = tonglingyu.retrieval.query_plan.v1`
+- `schema_version = tonglingyu.domain_retrieval_plan.v1`
+- `retrieval_profile`
+- canonical `routes`
 - `primary_intent`
 - `secondary_intents`
 - `retrieval_routes`
 - `route_weights`
+- route-specific `queries`
 - `keyword_queries`
 - `semantic_queries`
 - `structured_terms`
 - `expansion_terms`
 - `explicit_scope_allowed`
+- `filters`
+- `recall_hints`
 - `diagnostics`
 
-Gateway adapter 根据 planner intent 选择 common recall kind：
-
-| planner intent | common recall kind |
-| --- | --- |
-| `relation_lookup` / `entity_lookup` | `person` |
-| `event_lookup` | `event` |
-| `text_lookup` + 判词/册页 cue | `judgement_poem` |
-| `text_lookup` | `poem` |
-| `commentary_lookup` | `commentary` |
-| `version_lookup` / `explanation_lookup` / `mixed_lookup` | `workflow` |
-
-生成的 `SearchPlan.raw_plan` 保留完整 `query_plan`，同时写入 `common_recall_kind`、`route_policy` 和 `vector_required=true`。`retrieval_plan_created` audit、workflow planned state 和 retriever request metadata 都会记录 query planner 结果，便于检查内部 planner 到 retriever 的实际映射。
+Gateway adapter 不再根据 intent 推导 profile，也不内置 `poem/commentary/entity` 之类的领域 route 表。生成的 `SearchPlan.raw_plan` 保留完整 `domain_plan`，并写入 `domain_retrieval_profile`、`route_policy`。`retrieval_plan_created` audit、workflow planned state 和 retriever request metadata 都会记录 domain plan，便于检查 domain/runtime 到 retriever 的实际映射。
 
 ## Gateway Common Recall API
 
-Gateway 也保留认证后的常用召回接口，供外部 workflow 在不接入内部 query planner 时直接使用：
+Gateway 也保留认证后的常用召回接口，供外部 workflow 在不接入 chat workflow 时直接使用：
 
 ```text
 POST /v1/retrieval/recall/{kind}
 Authorization: Bearer <gateway key>
 ```
 
-`kind` 支持：
+`kind` 是 domain retrieval profile 名称，由 Runtime/domain 解析。Gateway 不维护可用 kind 列表，也不根据 kind 生成 route/weight/filter；当前红楼域 runtime 支持：
 
-| kind | 说明 | Gateway SearchPlan 映射 |
-| --- | --- | --- |
-| `person` | 查询人/人物/别名/身份 | `entity` first，辅以 `event/bm25/vector` |
-| `event` | 查询事/情节/事件 | `event` first，辅以 `entity/bm25/vector` |
-| `poem` | 查询诗词/曲词/文本对象 | `poem` first，辅以 `entity/event/commentary/bm25/vector` |
-| `judgement` | 查询判词/册页判语 | `poem` first，辅以 `commentary/event/entity/bm25/vector`，并写入 `entity_subtype:judgement` / `entity_facets:judgment` cues |
-| `commentary` | 查询脂批/批语 | `commentary` first，辅以 `poem/event/bm25/vector` |
-| `workflow` | 与 chat workflow 一致的全路由召回 | `bm25/vector/entity/event/poem/commentary` |
+| kind | 当前红楼域说明 |
+| --- | --- |
+| `person` | 查询人/人物/别名/身份 |
+| `event` | 查询事/情节/事件 |
+| `poem` | 查询诗词/曲词/文本对象 |
+| `judgement` / `judgement_poem` | 查询判词/册页判语 |
+| `commentary` | 查询脂批/批语 |
+| `workflow` | 与 chat workflow 一致的全路由召回 |
 
 请求体：
 
@@ -193,15 +190,15 @@ Authorization: Bearer <gateway key>
 }
 ```
 
-Gateway 会构造 `tonglingyu.agent_retriever.search_plan.v1`，写入：
+Runtime/domain 会构造领域 plan，Gateway 会把它包装为 `tonglingyu.agent_retriever.search_plan.v1`，写入：
 
-- canonical `routes`，必须包含 `vector`；
+- canonical `routes`；
 - `route_weights`、route-specific `queries`、`keyword_queries`、`semantic_queries`；
 - 常用召回所需的 `structured_terms`、`expansion_terms`；
 - schema 允许的 `filters`，例如 `chunk_kinds`、`entity_subtypes`、`entity_facets`；
 - `include_cards=true`、`fail_on_route_error=true`、`fail_on_rerank_error=true`。
 
-Gateway 不解释这些 filters，也不查询向量库；它只把封装后的 SearchPlan 通过 knownledge retriever HTTP `/retrieve` 发送出去。
+Gateway 不解释这些 routes/filters，也不查询向量库；它只把封装后的 SearchPlan 通过 knownledge retriever HTTP `/retrieve` 发送出去。
 
 成功 response：
 
@@ -259,8 +256,8 @@ Gateway 会校验：
 
 - response / pack / doc / service schema version。
 - response `record_type`。
-- pack 中 normalized SearchPlan 必须包含 `vector` route。
-- EvidenceDoc 主 route 必须是 canonical route。
+- pack 中 normalized SearchPlan 的 route 字符串必须非空且不重复。
+- EvidenceDoc 主 route 必须非空；Gateway 不固定 route vocabulary。
 - `sufficiency.doc_count == docs.len()`。
 - `sufficiency.direct_evidence_doc_count` 与 `segment_ids/commentary_ids` 实际数量一致。
 - `diagnostics.fusion.fused_count >= docs.len()`。

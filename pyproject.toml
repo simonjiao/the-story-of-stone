@@ -1,6 +1,6 @@
 [project]
 name = "the-story-of-stone"
-version = "0.42.0"
+version = "0.43.0"
 requires-python = ">=3.11"
 dependencies = []
 

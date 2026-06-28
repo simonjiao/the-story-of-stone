@@ -7,12 +7,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-use tonglingyu_runtime::EvidenceCard;
+use tonglingyu_runtime::{
+    DomainRetrievalPlan, EvidenceCard, domain_common_retrieval_plan, domain_retrieval_plan,
+};
 
 pub(crate) const SEARCH_PLAN_SCHEMA_VERSION: &str = "tonglingyu.agent_retriever.search_plan.v1";
 pub(crate) const RETRIEVE_OPTIONS_SCHEMA_VERSION: &str =
     "tonglingyu.agent_retriever.retrieve_options.v1";
-pub(crate) const QUERY_PLAN_SCHEMA_VERSION: &str = "tonglingyu.retrieval.query_plan.v1";
 pub(crate) const SERVICE_SCHEMA_VERSION: &str = "tonglingyu.agent_retriever.service.v1";
 pub(crate) const RETRIEVE_RESPONSE_SCHEMA_VERSION: &str =
     "tonglingyu.agent_retriever.retrieve_response.v1";
@@ -26,9 +27,6 @@ pub(crate) const WORKFLOW_RETRIEVAL_INPUT_SCHEMA_VERSION: &str =
     "tonglingyu.gateway.workflow_retrieval_input.v1";
 pub(crate) const RETRIEVER_TOOL_NAME: &str = "tonglingyu.agent_retriever.retrieve_http";
 
-const DEFAULT_ROUTES: &[&str] = &["bm25", "vector", "entity", "event", "poem", "commentary"];
-const MAX_ROUTE_QUERY_REWRITES: usize = 8;
-const MAX_PLAN_TERMS: usize = 16;
 const RETRIEVE_RESPONSE_RECORD_TYPE: &str = "agent_retriever_retrieve_response";
 const HEALTH_RECORD_TYPE: &str = "agent_retriever_service_health";
 const METADATA_RECORD_TYPE: &str = "agent_retriever_service_metadata";
@@ -308,13 +306,6 @@ fn validate_non_empty(value: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_canonical_route(route: &str, field: &str) -> Result<()> {
-    if !DEFAULT_ROUTES.contains(&route) {
-        return Err(anyhow!("unsupported retriever route in {field}: {route}"));
-    }
-    Ok(())
-}
-
 fn direct_evidence_doc_count(docs: &[RetrieverEvidenceDoc]) -> usize {
     docs.iter()
         .filter(|doc| !doc.refs.segment_ids.is_empty() || !doc.refs.commentary_ids.is_empty())
@@ -338,7 +329,7 @@ impl RetrieverRetrieveRequest {
     pub(crate) fn common_recall(
         request_id: String,
         session_id: Option<String>,
-        kind: RetrieverCommonRecallKind,
+        kind: &str,
         query: &str,
         top_k: usize,
         rerank: bool,
@@ -346,301 +337,19 @@ impl RetrieverRetrieveRequest {
         metadata: Value,
         trace_level: &str,
         trace_doc_limit: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let domain_plan = domain_common_retrieval_plan(kind, query)
+            .context("build runtime domain common retrieval plan")?;
+        Ok(Self {
             request_id,
             session_id,
             caller: "tonglingyu-gateway".to_string(),
-            graph_node: kind.graph_node().to_string(),
-            search_plan: RetrieverSearchPlan::for_common_recall(kind, query, top_k, rerank),
+            graph_node: domain_plan.graph_node.clone(),
+            search_plan: RetrieverSearchPlan::for_domain_plan(&domain_plan, top_k, rerank),
             retrieve_options: RetrieverRetrieveOptions::common_recall(trace_level, trace_doc_limit),
             include_raw,
             metadata,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RetrieverCommonRecallKind {
-    Workflow,
-    Person,
-    Event,
-    Poem,
-    JudgementPoem,
-    Commentary,
-}
-
-impl RetrieverCommonRecallKind {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-            "workflow" | "all" => Some(Self::Workflow),
-            "person" | "people" | "character" | "characters" | "entity" | "entity_lookup" => {
-                Some(Self::Person)
-            }
-            "event" | "story" | "plot" | "event_lookup" => Some(Self::Event),
-            "poem" | "poetry" | "poem_lookup" | "text" | "text_work" => Some(Self::Poem),
-            "judgement" | "judgment" | "judgement_poem" | "judgment_poem" | "panci" => {
-                Some(Self::JudgementPoem)
-            }
-            "commentary" | "commentary_lookup" | "zhiyanzhai" => Some(Self::Commentary),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Workflow => "workflow",
-            Self::Person => "person",
-            Self::Event => "event",
-            Self::Poem => "poem",
-            Self::JudgementPoem => "judgement_poem",
-            Self::Commentary => "commentary",
-        }
-    }
-
-    fn graph_node(self) -> &'static str {
-        match self {
-            Self::Workflow => "chat_workflow",
-            Self::Person => "common_recall_person",
-            Self::Event => "common_recall_event",
-            Self::Poem => "common_recall_poem",
-            Self::JudgementPoem => "common_recall_judgement_poem",
-            Self::Commentary => "common_recall_commentary",
-        }
-    }
-
-    fn route_policy(self) -> &'static str {
-        match self {
-            Self::Workflow => "all_knownledge_retriever_routes",
-            Self::Person => "person_lookup_entity_first_with_event_context",
-            Self::Event => "event_lookup_event_first_with_entity_context",
-            Self::Poem => "poem_lookup_text_route_first",
-            Self::JudgementPoem => "judgement_poem_lookup_text_route_with_commentary_context",
-            Self::Commentary => "commentary_lookup_commentary_first",
-        }
-    }
-
-    fn routes(self) -> &'static [&'static str] {
-        match self {
-            Self::Workflow => DEFAULT_ROUTES,
-            Self::Person => &["entity", "event", "bm25", "vector"],
-            Self::Event => &["event", "entity", "bm25", "vector"],
-            Self::Poem => &["poem", "entity", "event", "commentary", "bm25", "vector"],
-            Self::JudgementPoem => &["poem", "commentary", "event", "entity", "bm25", "vector"],
-            Self::Commentary => &["commentary", "poem", "event", "bm25", "vector"],
-        }
-    }
-
-    fn route_weights(self) -> BTreeMap<String, f64> {
-        let entries: &[(&str, f64)] = match self {
-            Self::Workflow => &[],
-            Self::Person => &[
-                ("entity", 1.4),
-                ("event", 0.95),
-                ("bm25", 1.0),
-                ("vector", 0.9),
-            ],
-            Self::Event => &[
-                ("event", 1.45),
-                ("entity", 0.95),
-                ("bm25", 1.0),
-                ("vector", 0.9),
-            ],
-            Self::Poem => &[
-                ("poem", 1.5),
-                ("entity", 0.9),
-                ("event", 0.85),
-                ("commentary", 0.75),
-                ("bm25", 1.0),
-                ("vector", 0.9),
-            ],
-            Self::JudgementPoem => &[
-                ("poem", 1.6),
-                ("commentary", 1.05),
-                ("event", 0.9),
-                ("entity", 0.9),
-                ("bm25", 1.0),
-                ("vector", 0.9),
-            ],
-            Self::Commentary => &[
-                ("commentary", 1.5),
-                ("poem", 0.85),
-                ("event", 0.8),
-                ("bm25", 1.0),
-                ("vector", 0.85),
-            ],
-        };
-        entries
-            .iter()
-            .map(|(route, weight)| ((*route).to_string(), *weight))
-            .collect()
-    }
-
-    fn queries(self, query: &str) -> BTreeMap<String, Vec<String>> {
-        let mut queries = BTreeMap::new();
-        match self {
-            Self::Workflow => {}
-            Self::Person => {
-                queries.insert(
-                    "entity".to_string(),
-                    query_rewrites(query, &["人物", "别名 身份"]),
-                );
-                queries.insert(
-                    "event".to_string(),
-                    query_rewrites(query, &["相关事件", "经历"]),
-                );
-                queries.insert("bm25".to_string(), query_rewrites(query, &["人物", "关系"]));
-                queries.insert(
-                    "vector".to_string(),
-                    query_rewrites(query, &["人物关系 经历"]),
-                );
-            }
-            Self::Event => {
-                queries.insert(
-                    "event".to_string(),
-                    query_rewrites(query, &["事件", "情节"]),
-                );
-                queries.insert("entity".to_string(), query_rewrites(query, &["相关人物"]));
-                queries.insert("bm25".to_string(), query_rewrites(query, &["情节", "经过"]));
-                queries.insert(
-                    "vector".to_string(),
-                    query_rewrites(query, &["事件经过 因果"]),
-                );
-            }
-            Self::Poem => {
-                queries.insert(
-                    "poem".to_string(),
-                    query_rewrites(query, &["诗词", "曲词 文本"]),
-                );
-                queries.insert("entity".to_string(), query_rewrites(query, &["诗词题名"]));
-                queries.insert(
-                    "event".to_string(),
-                    query_rewrites(query, &["诗词相关情节"]),
-                );
-                queries.insert(
-                    "commentary".to_string(),
-                    query_rewrites(query, &["诗词 脂批"]),
-                );
-                queries.insert("bm25".to_string(), query_rewrites(query, &["诗词", "题名"]));
-                queries.insert(
-                    "vector".to_string(),
-                    query_rewrites(query, &["诗词文本 含义"]),
-                );
-            }
-            Self::JudgementPoem => {
-                queries.insert(
-                    "poem".to_string(),
-                    query_rewrites(query, &["判词", "册页判语", "金陵十二钗 判词"]),
-                );
-                queries.insert(
-                    "commentary".to_string(),
-                    query_rewrites(query, &["判词 脂批", "册页判语 脂批"]),
-                );
-                queries.insert(
-                    "event".to_string(),
-                    query_rewrites(query, &["判词相关情节"]),
-                );
-                queries.insert("entity".to_string(), query_rewrites(query, &["判词人物"]));
-                queries.insert("bm25".to_string(), query_rewrites(query, &["判词", "册页"]));
-                queries.insert(
-                    "vector".to_string(),
-                    query_rewrites(query, &["判词 命运 伏笔"]),
-                );
-            }
-            Self::Commentary => {
-                queries.insert(
-                    "commentary".to_string(),
-                    query_rewrites(query, &["脂批", "批语"]),
-                );
-                queries.insert("poem".to_string(), query_rewrites(query, &["脂批所评诗文"]));
-                queries.insert(
-                    "event".to_string(),
-                    query_rewrites(query, &["脂批所评情节"]),
-                );
-                queries.insert("bm25".to_string(), query_rewrites(query, &["脂批", "批语"]));
-                queries.insert("vector".to_string(), query_rewrites(query, &["脂批 评论"]));
-            }
-        }
-        queries
-    }
-
-    fn keyword_queries(self, query: &str) -> Vec<String> {
-        match self {
-            Self::Workflow => vec![query.to_string()],
-            Self::Person => query_rewrites(query, &["人物", "身份", "关系"]),
-            Self::Event => query_rewrites(query, &["事件", "情节", "经过"]),
-            Self::Poem => query_rewrites(query, &["诗词", "题名", "曲词"]),
-            Self::JudgementPoem => query_rewrites(query, &["判词", "册页判语", "金陵十二钗"]),
-            Self::Commentary => query_rewrites(query, &["脂批", "批语", "评点"]),
-        }
-    }
-
-    fn semantic_queries(self, query: &str) -> Vec<String> {
-        match self {
-            Self::Workflow => vec![query.to_string()],
-            Self::Person => query_rewrites(query, &["人物身份经历关系"]),
-            Self::Event => query_rewrites(query, &["情节事件经过因果"]),
-            Self::Poem => query_rewrites(query, &["诗词曲文文本含义"]),
-            Self::JudgementPoem => query_rewrites(query, &["判词册页人物命运伏笔"]),
-            Self::Commentary => query_rewrites(query, &["脂批评点解释"]),
-        }
-    }
-
-    fn structured_terms(self) -> Vec<String> {
-        match self {
-            Self::Workflow => Vec::new(),
-            Self::Person => plan_terms(&["entity_type:person", "entity_class:person"]),
-            Self::Event => plan_terms(&["route_view:event_route_view", "chunk_kind:event_scene"]),
-            Self::Poem => plan_terms(&["entity_type:text", "entity_subtype:poem", "route:poem"]),
-            Self::JudgementPoem => plan_terms(&[
-                "entity_type:text",
-                "entity_subtype:judgement",
-                "entity_facets:judgment",
-                "route:poem",
-            ]),
-            Self::Commentary => plan_terms(&[
-                "route:commentary",
-                "chunk_kind:commentary",
-                "source:zhiyanzhai",
-            ]),
-        }
-    }
-
-    fn expansion_terms(self) -> Vec<String> {
-        match self {
-            Self::Workflow => Vec::new(),
-            Self::Person => plan_terms(&["人物", "别名", "身份", "关系", "经历"]),
-            Self::Event => plan_terms(&["事件", "情节", "经过", "因果", "场景"]),
-            Self::Poem => plan_terms(&["诗词", "曲词", "题名", "文本实体"]),
-            Self::JudgementPoem => plan_terms(&["判词", "册页判语", "金陵十二钗", "正册", "副册"]),
-            Self::Commentary => plan_terms(&["脂批", "批语", "评点", "眉批", "夹批"]),
-        }
-    }
-
-    fn filters(self) -> Option<Value> {
-        match self {
-            Self::Workflow => None,
-            Self::Person => Some(json!({
-                "entity_types": ["person"],
-            })),
-            Self::Event => Some(json!({
-                "chunk_kinds": ["event_scene", "primary_text_segment", "primary_text_window", "theme_anchor"],
-            })),
-            Self::Poem => Some(json!({
-                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window"],
-                "entity_types": ["text"],
-                "entity_subtypes": ["poem", "song"],
-            })),
-            Self::JudgementPoem => Some(json!({
-                "chunk_kinds": ["text_work", "text_work_body", "text_work_body_line", "primary_text_segment", "primary_text_window", "commentary"],
-                "entity_types": ["text"],
-                "entity_subtypes": ["judgement"],
-                "entity_facets": ["judgment"],
-            })),
-            Self::Commentary => Some(json!({
-                "chunk_kinds": ["commentary", "commentary_anchor", "commentary_target_span"],
-            })),
-        }
+        })
     }
 }
 
@@ -682,73 +391,25 @@ pub(crate) struct RetrieverSearchPlan {
 }
 
 impl RetrieverSearchPlan {
-    pub(crate) fn for_workflow(query: &str, top_k: usize, rerank: bool) -> Self {
-        Self::for_common_recall(RetrieverCommonRecallKind::Workflow, query, top_k, rerank)
-    }
-
-    pub(crate) fn for_query_planner(
-        query_plan: &RetrieverQueryPlannerPlan,
-        top_k: usize,
-        rerank: bool,
-    ) -> Self {
-        let kind = query_plan.common_recall_kind();
-        let mut plan = if kind == RetrieverCommonRecallKind::Workflow {
-            Self::for_workflow(&query_plan.original_query, top_k, rerank)
-        } else {
-            Self::for_common_recall(kind, &query_plan.original_query, top_k, rerank)
-        };
-        let planner_routes = query_plan.canonical_routes();
-        plan.routes = merge_route_lists(kind.routes(), &planner_routes);
-        plan.retrieval_routes = query_plan.retrieval_routes.clone();
-        plan.route_weights = query_plan.merged_route_weights(kind);
-        plan.queries = query_plan.route_queries(kind);
-        plan.keyword_queries = if query_plan.keyword_queries.is_empty() {
-            kind.keyword_queries(&query_plan.original_query)
-        } else {
-            query_plan.keyword_queries.clone()
-        };
-        plan.semantic_queries = if query_plan.semantic_queries.is_empty() {
-            kind.semantic_queries(&query_plan.original_query)
-        } else {
-            query_plan.semantic_queries.clone()
-        };
-        plan.structured_terms = merge_terms(&query_plan.structured_terms, &kind.structured_terms());
-        plan.expansion_terms = merge_terms(&query_plan.expansion_terms, &kind.expansion_terms());
-        plan.explicit_scope_allowed = Some(query_plan.explicit_scope_allowed);
-        plan.raw_plan = json!({
-            "planner": "tonglingyu-gateway-query-planner-adapter",
-            "common_recall_kind": kind.as_str(),
-            "route_policy": kind.route_policy(),
-            "vector_required": true,
-            "query_plan": query_plan,
-        });
-        plan
-    }
-
-    pub(crate) fn for_common_recall(
-        kind: RetrieverCommonRecallKind,
-        query: &str,
+    pub(crate) fn for_domain_plan(
+        domain_plan: &DomainRetrievalPlan,
         top_k: usize,
         rerank: bool,
     ) -> Self {
         let top_k = top_k.max(1);
         Self {
             schema_version: SEARCH_PLAN_SCHEMA_VERSION.to_string(),
-            query: query.to_string(),
-            routes: kind
-                .routes()
-                .iter()
-                .map(|route| (*route).to_string())
-                .collect(),
-            retrieval_routes: Vec::new(),
-            route_weights: kind.route_weights(),
-            queries: kind.queries(query),
-            keyword_queries: kind.keyword_queries(query),
-            semantic_queries: kind.semantic_queries(query),
-            structured_terms: kind.structured_terms(),
-            expansion_terms: kind.expansion_terms(),
-            explicit_scope_allowed: None,
-            filters: kind.filters(),
+            query: domain_plan.original_query.clone(),
+            routes: domain_plan.routes.clone(),
+            retrieval_routes: domain_plan.retrieval_routes.clone(),
+            route_weights: domain_plan.route_weights.clone(),
+            queries: domain_plan.queries.clone(),
+            keyword_queries: domain_plan.keyword_queries.clone(),
+            semantic_queries: domain_plan.semantic_queries.clone(),
+            structured_terms: domain_plan.structured_terms.clone(),
+            expansion_terms: domain_plan.expansion_terms.clone(),
+            explicit_scope_allowed: Some(domain_plan.explicit_scope_allowed),
+            filters: domain_plan.filters.clone(),
             top_k,
             candidate_limit: (top_k * 20).clamp(20, 160),
             route_record_limit: 10,
@@ -760,462 +421,29 @@ impl RetrieverSearchPlan {
             fail_on_route_error: true,
             fail_on_rerank_error: true,
             raw_plan: json!({
-                "planner": "tonglingyu-gateway",
-                "common_recall_kind": kind.as_str(),
-                "route_policy": kind.route_policy(),
-                "vector_required": true,
+                "planner": "tonglingyu-gateway-domain-plan-adapter",
+                "domain_retrieval_profile": &domain_plan.retrieval_profile,
+                "route_policy": &domain_plan.route_policy,
+                "vector_required": domain_plan.routes.iter().any(|route| route == "vector"),
+                "domain_plan": domain_plan,
             }),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RetrieverQueryPlannerPlan {
-    pub(crate) schema_version: String,
-    pub(crate) planner_version: String,
-    pub(crate) original_query: String,
-    pub(crate) primary_intent: String,
-    pub(crate) secondary_intents: Vec<String>,
-    pub(crate) explicit_scope_allowed: bool,
-    pub(crate) retrieval_routes: Vec<String>,
-    pub(crate) route_weights: BTreeMap<String, f64>,
-    pub(crate) keyword_queries: Vec<String>,
-    pub(crate) semantic_queries: Vec<String>,
-    pub(crate) structured_terms: Vec<String>,
-    pub(crate) expansion_terms: Vec<String>,
-    #[serde(default)]
-    pub(crate) diagnostics: Value,
-}
-
-impl RetrieverQueryPlannerPlan {
-    pub(crate) fn from_gateway_policy(
-        query: &str,
-        question_type: &str,
-        required_evidence_types: &[String],
-        question_frame_intent: Option<&str>,
-    ) -> Self {
-        let primary_intent = gateway_primary_intent(
-            query,
-            question_type,
-            required_evidence_types,
-            question_frame_intent,
-        );
-        let secondary_intents = gateway_secondary_intents(
-            query,
-            &primary_intent,
-            required_evidence_types,
-            question_frame_intent,
-        );
-        let retrieval_routes = planner_routes_for_intents(&primary_intent, &secondary_intents);
-        let route_weights = planner_route_weights(&primary_intent, &secondary_intents);
-        let query_terms = query_terms(query);
-        let keyword_queries = planner_keyword_queries(query, &primary_intent, &query_terms);
-        let semantic_queries = planner_semantic_queries(query, &primary_intent, &query_terms);
-        Self {
-            schema_version: QUERY_PLAN_SCHEMA_VERSION.to_string(),
-            planner_version: "gateway_query_planner_adapter_v0.1".to_string(),
-            original_query: query.to_string(),
-            primary_intent,
-            secondary_intents,
-            explicit_scope_allowed: query_mentions_explicit_scope(query),
-            retrieval_routes,
-            route_weights,
-            keyword_queries,
-            semantic_queries,
-            structured_terms: query_terms,
-            expansion_terms: gateway_expansion_terms(query),
-            diagnostics: json!({
-                "planner_kind": "gateway_policy_adapter",
-                "question_type": question_type,
-                "required_evidence_types": required_evidence_types,
-                "question_frame_intent": question_frame_intent,
-            }),
-        }
-    }
-
-    pub(crate) fn common_recall_kind(&self) -> RetrieverCommonRecallKind {
-        match self.primary_intent.as_str() {
-            "commentary_lookup" => return RetrieverCommonRecallKind::Commentary,
-            "text_lookup" => {
-                return if contains_judgement_marker(&self.original_query)
-                    || self
-                        .structured_terms
-                        .iter()
-                        .chain(self.expansion_terms.iter())
-                        .any(|term| contains_judgement_marker(term))
-                {
-                    RetrieverCommonRecallKind::JudgementPoem
-                } else {
-                    RetrieverCommonRecallKind::Poem
-                };
-            }
-            "event_lookup" => return RetrieverCommonRecallKind::Event,
-            "relation_lookup" | "entity_lookup" => return RetrieverCommonRecallKind::Person,
-            _ => {}
-        }
-        let intents = self.intent_set();
-        if intents.contains("commentary_lookup") {
-            return RetrieverCommonRecallKind::Commentary;
-        }
-        if intents.contains("text_lookup") {
-            return if contains_judgement_marker(&self.original_query)
-                || self
-                    .structured_terms
-                    .iter()
-                    .chain(self.expansion_terms.iter())
-                    .any(|term| contains_judgement_marker(term))
-            {
-                RetrieverCommonRecallKind::JudgementPoem
-            } else {
-                RetrieverCommonRecallKind::Poem
-            };
-        }
-        if intents.contains("event_lookup") {
-            return RetrieverCommonRecallKind::Event;
-        }
-        if intents.contains("relation_lookup") || intents.contains("entity_lookup") {
-            return RetrieverCommonRecallKind::Person;
-        }
-        RetrieverCommonRecallKind::Workflow
-    }
-
-    fn intent_set(&self) -> BTreeSet<&str> {
-        std::iter::once(self.primary_intent.as_str())
-            .chain(self.secondary_intents.iter().map(String::as_str))
-            .collect()
-    }
-
-    fn canonical_routes(&self) -> Vec<String> {
-        let routes = self
-            .retrieval_routes
-            .iter()
-            .filter_map(|route| canonical_route_from_planner_route(route).map(ToString::to_string));
-        dedupe_limited(routes, 12)
-    }
-
-    fn merged_route_weights(&self, kind: RetrieverCommonRecallKind) -> BTreeMap<String, f64> {
-        let mut weights = kind.route_weights();
-        for (route, weight) in &self.route_weights {
-            if let Some(canonical) = canonical_route_from_planner_route(route) {
-                weights.insert(canonical.to_string(), *weight);
-            }
-        }
-        weights
-    }
-
-    fn route_queries(&self, kind: RetrieverCommonRecallKind) -> BTreeMap<String, Vec<String>> {
-        let mut queries = kind.queries(&self.original_query);
-        if !self.keyword_queries.is_empty() {
-            queries.insert("bm25".to_string(), self.keyword_queries.clone());
-            for route in ["entity", "event", "poem", "commentary"] {
-                if let Some(existing) = queries.remove(route) {
-                    queries.insert(
-                        route.to_string(),
-                        merge_terms(&self.keyword_queries, &existing),
-                    );
-                }
-            }
-        }
-        if !self.semantic_queries.is_empty() {
-            queries.insert("vector".to_string(), self.semantic_queries.clone());
-        }
-        queries
-    }
-}
-
-fn query_rewrites(query: &str, suffixes: &[&str]) -> Vec<String> {
-    let values = std::iter::once(query.to_string())
-        .chain(suffixes.iter().map(|suffix| format!("{query} {suffix}")));
-    dedupe_limited(values, MAX_ROUTE_QUERY_REWRITES)
-}
-
-fn plan_terms(terms: &[&str]) -> Vec<String> {
-    dedupe_limited(terms.iter().map(|term| (*term).to_string()), MAX_PLAN_TERMS)
-}
-
-fn dedupe_limited(values: impl IntoIterator<Item = String>, max_items: usize) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for value in values {
-        let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-        if normalized.is_empty() || !seen.insert(normalized.clone()) {
-            continue;
-        }
-        out.push(normalized);
-        if out.len() >= max_items {
-            break;
-        }
-    }
-    out
-}
-
-fn merge_terms(left: &[String], right: &[String]) -> Vec<String> {
-    dedupe_limited(left.iter().chain(right.iter()).cloned(), MAX_PLAN_TERMS)
-}
-
-fn merge_route_lists(primary: &[&str], secondary: &[String]) -> Vec<String> {
-    let mut routes = dedupe_limited(
-        primary
-            .iter()
-            .map(|route| (*route).to_string())
-            .chain(secondary.iter().cloned()),
-        12,
-    );
-    if !routes.iter().any(|route| route == "vector") {
-        routes.push("vector".to_string());
-    }
-    routes
-}
-
-fn canonical_route_from_planner_route(route: &str) -> Option<&'static str> {
-    match route.trim().to_ascii_lowercase().replace('-', "_").as_str() {
-        "bm25" | "bm25_fts" | "fts" | "keyword" => Some("bm25"),
-        "vector" | "dense_vector" | "embedding" | "semantic" => Some("vector"),
-        "entity" | "entity_lookup" => Some("entity"),
-        "event" | "event_lookup" => Some("event"),
-        "poem" | "poem_lookup" | "text" | "text_work" | "poetry" => Some("poem"),
-        "commentary" | "commentary_lookup" => Some("commentary"),
-        "scope_filter" | "graph_expansion" | "reranker" => None,
-        _ => None,
-    }
-}
-
-fn gateway_primary_intent(
+pub(crate) fn query_plan_from_gateway_policy(
     query: &str,
     question_type: &str,
     required_evidence_types: &[String],
     question_frame_intent: Option<&str>,
-) -> String {
-    let question_type = question_type.trim();
-    let frame = question_frame_intent.unwrap_or_default();
-    if required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-        || question_type == "commentary"
-        || frame.contains("commentary")
-        || contains_any(query, &["脂批", "批语", "評語", "评语"])
-    {
-        return "commentary_lookup".to_string();
-    }
-    if question_type == "poem_or_judgement"
-        || contains_any(query, &["判词", "判詞", "诗", "詞", "词", "曲"])
-    {
-        return "text_lookup".to_string();
-    }
-    if frame.contains("relation")
-        || frame.contains("attribute")
-        || contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"])
-    {
-        return "relation_lookup".to_string();
-    }
-    if frame.contains("chapter_location")
-        || frame.contains("character_fate")
-        || question_type == "character_fate"
-        || contains_any(query, &["情节", "事件", "哪一回", "第几回", "发生", "经过"])
-    {
-        return "event_lookup".to_string();
-    }
-    if question_type == "version" || contains_any(query, &["版本", "前八十", "后四十", "後四十"])
-    {
-        return "version_lookup".to_string();
-    }
-    if contains_any(query, &["为什么", "为何", "如何理解", "象征", "寓意"]) {
-        return "explanation_lookup".to_string();
-    }
-    "mixed_lookup".to_string()
-}
-
-fn gateway_secondary_intents(
-    query: &str,
-    primary_intent: &str,
-    required_evidence_types: &[String],
-    question_frame_intent: Option<&str>,
-) -> Vec<String> {
-    let mut intents = Vec::new();
-    if required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        intents.push("commentary_lookup".to_string());
-    }
-    if required_evidence_types
-        .iter()
-        .any(|item| item == "base_text" || item == "direct_text")
-    {
-        intents.push("text_lookup".to_string());
-    }
-    if question_frame_intent
-        .unwrap_or_default()
-        .contains("character_fate")
-    {
-        intents.push("event_lookup".to_string());
-    }
-    if contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"]) {
-        intents.push("relation_lookup".to_string());
-    }
-    if contains_any(query, &["情节", "事件", "哪一回", "发生", "经过"]) {
-        intents.push("event_lookup".to_string());
-    }
-    if contains_any(query, &["脂批", "批语", "評語", "评语"]) {
-        intents.push("commentary_lookup".to_string());
-    }
-    dedupe_limited(
-        intents
-            .into_iter()
-            .filter(|intent| intent != primary_intent),
-        8,
-    )
-}
-
-fn planner_routes_for_intents(primary_intent: &str, secondary_intents: &[String]) -> Vec<String> {
-    let intents = std::iter::once(primary_intent)
-        .chain(secondary_intents.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let mut routes = vec!["bm25_fts".to_string(), "dense_vector".to_string()];
-    if intents.contains("relation_lookup") {
-        routes.push("entity_lookup".to_string());
-        routes.push("graph_expansion".to_string());
-    }
-    if intents.contains("event_lookup") || intents.contains("explanation_lookup") {
-        routes.push("event_lookup".to_string());
-        routes.push("graph_expansion".to_string());
-    }
-    if intents.contains("text_lookup") || intents.contains("version_lookup") {
-        routes.push("poem_lookup".to_string());
-    }
-    if intents.contains("commentary_lookup") || intents.contains("version_lookup") {
-        routes.push("commentary_lookup".to_string());
-    }
-    routes.push("scope_filter".to_string());
-    routes.push("reranker".to_string());
-    dedupe_limited(routes, 12)
-}
-
-fn planner_route_weights(
-    primary_intent: &str,
-    secondary_intents: &[String],
-) -> BTreeMap<String, f64> {
-    let intents = std::iter::once(primary_intent)
-        .chain(secondary_intents.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let mut weights = BTreeMap::from([
-        ("bm25_fts".to_string(), 0.72),
-        ("dense_vector".to_string(), 0.58),
-        ("scope_filter".to_string(), 1.0),
-        ("reranker".to_string(), 0.45),
-    ]);
-    if intents.contains("relation_lookup") {
-        weights.insert("entity_lookup".to_string(), 1.15);
-        weights.insert("graph_expansion".to_string(), 0.76);
-    }
-    if intents.contains("event_lookup") {
-        weights.insert("event_lookup".to_string(), 1.15);
-        weights.insert("graph_expansion".to_string(), 0.72);
-    }
-    if intents.contains("text_lookup") {
-        weights.insert("poem_lookup".to_string(), 1.2);
-        weights.insert("bm25_fts".to_string(), 0.9);
-    }
-    if intents.contains("commentary_lookup") {
-        weights.insert("commentary_lookup".to_string(), 1.2);
-        weights.insert("bm25_fts".to_string(), 0.9);
-    }
-    if intents.contains("explanation_lookup") {
-        weights.insert("dense_vector".to_string(), 0.82);
-        weights.insert("reranker".to_string(), 0.7);
-    }
-    weights
-}
-
-fn planner_keyword_queries(query: &str, primary_intent: &str, terms: &[String]) -> Vec<String> {
-    let mut queries = vec![query.to_string()];
-    if !terms.is_empty() {
-        queries.push(terms.join(" "));
-    }
-    match primary_intent {
-        "commentary_lookup" => queries.push(format!("{query} 脂批 批语 评点")),
-        "relation_lookup" => queries.push(format!("{query} 人物 关系 身份")),
-        "event_lookup" => queries.push(format!("{query} 情节 事件 经过")),
-        "text_lookup" => queries.push(format!("{query} 诗词 判词 曲词 原文")),
-        "version_lookup" => queries.push(format!("{query} 版本 异文 对齐")),
-        _ => {}
-    }
-    dedupe_limited(queries, 8)
-}
-
-fn planner_semantic_queries(query: &str, primary_intent: &str, terms: &[String]) -> Vec<String> {
-    let core = if terms.is_empty() {
-        query.to_string()
-    } else {
-        terms.join(" ")
-    };
-    let mut queries = vec![query.to_string()];
-    match primary_intent {
-        "commentary_lookup" => queries.push(format!("{core} 脂批评点 所评正文")),
-        "relation_lookup" => queries.push(format!("{core} 人物关系 身份 经历 证据")),
-        "event_lookup" => queries.push(format!("{core} 情节事件 发生经过 因果")),
-        "text_lookup" => queries.push(format!("{core} 诗词曲文 文本含义 所在章节")),
-        "version_lookup" => queries.push(format!("{core} 版本差异 异文 对齐")),
-        "explanation_lookup" => queries.push(format!("{core} 象征意义 主题解释 情节因果")),
-        _ => queries.push(format!("{core} 相关人物 事件 原文证据")),
-    }
-    dedupe_limited(queries, 8)
-}
-
-fn query_terms(query: &str) -> Vec<String> {
-    let terms = query
-        .split(|ch: char| {
-            ch.is_whitespace()
-                || matches!(
-                    ch,
-                    '，' | '。' | '？' | '?' | '！' | '!' | '、' | '：' | ':' | '；' | ';'
-                )
-        })
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(ToString::to_string);
-    dedupe_limited(terms, 16)
-}
-
-fn gateway_expansion_terms(query: &str) -> Vec<String> {
-    let expansions: &[(&str, &[&str])] = &[
-        ("宝钗", &["薛宝钗", "金玉良缘", "冷香丸"]),
-        ("黛玉", &["林黛玉", "林妹妹", "潇湘妃子", "木石前盟"]),
-        ("宝玉", &["贾宝玉", "通灵宝玉", "怡红公子"]),
-        ("判词", &["册页判语", "金陵十二钗", "正册"]),
-        ("通灵玉", &["通灵宝玉", "劳什子", "石头"]),
-    ];
-    let mut out = Vec::new();
-    for (trigger, terms) in expansions {
-        if query.contains(trigger) {
-            out.extend(terms.iter().map(|term| (*term).to_string()));
-        }
-    }
-    dedupe_limited(out, 16)
-}
-
-fn query_mentions_explicit_scope(query: &str) -> bool {
-    contains_any(
+) -> Result<DomainRetrievalPlan> {
+    domain_retrieval_plan(
         query,
-        &[
-            "第",
-            "前八十",
-            "前80",
-            "后四十",
-            "後四十",
-            "后40",
-            "程甲",
-            "程乙",
-        ],
+        question_type,
+        required_evidence_types,
+        question_frame_intent,
     )
-}
-
-fn contains_judgement_marker(value: &str) -> bool {
-    contains_any(value, &["判词", "判詞", "册页", "冊頁", "金陵十二钗"])
-}
-
-fn contains_any(value: &str, terms: &[&str]) -> bool {
-    terms.iter().any(|term| value.contains(term))
+    .context("build runtime domain retrieval plan")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1366,17 +594,15 @@ impl RetrieverMetadataResponse {
             ERROR_RESPONSE_SCHEMA_VERSION,
         )?;
         let routes = string_array_from_value(&self.capabilities, "routes")?;
-        for route in DEFAULT_ROUTES {
-            if !routes.iter().any(|item| item == route) {
-                return Err(anyhow!(
-                    "retriever metadata capabilities.routes missing required route {route}"
-                ));
-            }
+        if routes.is_empty() {
+            return Err(anyhow!(
+                "retriever metadata capabilities.routes must not be empty"
+            ));
         }
         let required_routes = string_array_from_value(&self.capabilities, "required_routes")?;
-        if !required_routes.iter().any(|route| route == "vector") {
+        if required_routes.is_empty() {
             return Err(anyhow!(
-                "retriever metadata capabilities.required_routes must include vector"
+                "retriever metadata capabilities.required_routes must not be empty"
             ));
         }
         let stable_input = self
@@ -1524,15 +750,8 @@ impl RetrieverNormalizedSearchPlan {
             return Err(anyhow!("retriever normalized search_plan.routes is empty"));
         }
         validate_unique_strings(&self.routes, "search_plan.routes")?;
-        let mut has_vector = false;
         for route in &self.routes {
-            validate_canonical_route(route, "search_plan.routes")?;
-            has_vector |= route == "vector";
-        }
-        if !has_vector {
-            return Err(anyhow!(
-                "retriever normalized search_plan.routes must include vector"
-            ));
+            validate_non_empty(route, "search_plan.routes[]")?;
         }
         validate_unique_strings(&self.keyword_queries, "search_plan.keyword_queries")?;
         validate_unique_strings(&self.semantic_queries, "search_plan.semantic_queries")?;
@@ -1612,7 +831,7 @@ impl RetrieverEvidenceDoc {
             ));
         }
         validate_non_empty(&self.doc_id, &format!("{context}.doc_id"))?;
-        validate_canonical_route(&self.route, &format!("{context}.route"))?;
+        validate_non_empty(&self.route, &format!("{context}.route"))?;
         if !self.score.is_finite() {
             return Err(anyhow!("retriever {context}.score must be finite"));
         }

@@ -125,9 +125,9 @@ use crate::response::{
     streaming_response_from_runtime_events,
 };
 use crate::retriever_http::{
-    RETRIEVER_TOOL_NAME, RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverQueryPlannerPlan,
-    RetrieverRetrieveOptions, RetrieverRetrieveRequest, RetrieverSearchPlan,
-    evidence_cards_from_pack, workflow_retrieval_input,
+    RETRIEVER_TOOL_NAME, RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest,
+    RetrieverSearchPlan, evidence_cards_from_pack, query_plan_from_gateway_policy,
+    workflow_retrieval_input,
 };
 use crate::rqa_lifecycle::rqa_user_lifecycle_command;
 use crate::rule_candidates::{
@@ -3349,17 +3349,15 @@ async fn common_recall_endpoint(
         Ok(subject) => subject,
         Err(response) => return *response,
     };
-    let kind = match RetrieverCommonRecallKind::parse(&kind) {
-        Some(kind) => kind,
-        None => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "unsupported_recall_kind",
-                "unsupported retrieval recall kind",
-                Some(&trace_id),
-            );
-        }
-    };
+    let requested_profile = kind.trim().to_string();
+    if requested_profile.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "unsupported_recall_kind",
+            "unsupported retrieval recall kind",
+            Some(&trace_id),
+        );
+    }
     let query = payload.query.trim().to_string();
     if query.is_empty() {
         return error_response(
@@ -3443,6 +3441,51 @@ async fn common_recall_endpoint(
         .as_object()
         .map(|object| object.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
+    let request = match RetrieverRetrieveRequest::common_recall(
+        trace_id.clone(),
+        session_id.clone(),
+        &requested_profile,
+        &query,
+        limit,
+        rerank,
+        include_raw,
+        json!({
+            "trace_id": &trace_id,
+            "auth_subject_ref": &subject_ref,
+            "session_id": &session_id,
+            "requested_domain_retrieval_profile": &requested_profile,
+            "client_metadata": client_metadata,
+        }),
+        &trace_level,
+        trace_doc_limit,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(%trace_id, profile = %requested_profile, error = %error, "runtime domain recall plan failed");
+            let _ = insert_audit_event(
+                &conn,
+                &trace_id,
+                "retriever_common_recall_failed",
+                &json!({
+                    "auth_subject_ref": &subject_ref,
+                    "session_id": &session_id,
+                    "requested_domain_retrieval_profile": &requested_profile,
+                    "error": error.to_string(),
+                    "fallback_used": false,
+                }),
+            );
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "unsupported_recall_kind",
+                "unsupported retrieval recall kind",
+                Some(&trace_id),
+            );
+        }
+    };
+    let domain_retrieval_profile = request.search_plan.raw_plan["domain_retrieval_profile"]
+        .as_str()
+        .unwrap_or(requested_profile.as_str())
+        .to_string();
     let _ = insert_audit_event(
         &conn,
         &trace_id,
@@ -3450,7 +3493,8 @@ async fn common_recall_endpoint(
         &json!({
             "auth_subject_ref": &subject_ref,
             "session_id": &session_id,
-            "common_recall_kind": kind.as_str(),
+            "requested_domain_retrieval_profile": &requested_profile,
+            "domain_retrieval_profile": &domain_retrieval_profile,
             "query_sha256": hash_text(&query),
             "query_char_count": query_char_count,
             "limit": limit,
@@ -3461,28 +3505,10 @@ async fn common_recall_endpoint(
             "client_metadata_keys": metadata_keys,
         }),
     );
-    let request = RetrieverRetrieveRequest::common_recall(
-        trace_id.clone(),
-        session_id.clone(),
-        kind,
-        &query,
-        limit,
-        rerank,
-        include_raw,
-        json!({
-            "trace_id": &trace_id,
-            "auth_subject_ref": &subject_ref,
-            "session_id": &session_id,
-            "common_recall_kind": kind.as_str(),
-            "client_metadata": client_metadata,
-        }),
-        &trace_level,
-        trace_doc_limit,
-    );
     let retrieve_response = match state.retriever.retrieve(&request).await {
         Ok(response) => response,
         Err(error) => {
-            tracing::warn!(%trace_id, kind = kind.as_str(), error = %error, "retriever common recall failed");
+            tracing::warn!(%trace_id, profile = %domain_retrieval_profile, error = %error, "retriever common recall failed");
             let _ = insert_audit_event(
                 &conn,
                 &trace_id,
@@ -3490,7 +3516,8 @@ async fn common_recall_endpoint(
                 &json!({
                     "auth_subject_ref": &subject_ref,
                     "session_id": &session_id,
-                    "common_recall_kind": kind.as_str(),
+                    "requested_domain_retrieval_profile": &requested_profile,
+                    "domain_retrieval_profile": &domain_retrieval_profile,
                     "retriever_base_url": &state.retriever_base_url,
                     "error": error.to_string(),
                     "fallback_used": false,
@@ -3511,7 +3538,8 @@ async fn common_recall_endpoint(
         &json!({
             "auth_subject_ref": &subject_ref,
             "session_id": &session_id,
-            "common_recall_kind": kind.as_str(),
+            "requested_domain_retrieval_profile": &requested_profile,
+            "domain_retrieval_profile": &domain_retrieval_profile,
             "retriever_base_url": &state.retriever_base_url,
             "request_id": &request.request_id,
             "schema_version": &retrieve_response.schema_version,
@@ -3527,7 +3555,8 @@ async fn common_recall_endpoint(
         "object": "tonglingyu.retrieval_common_recall",
         "schema_version": COMMON_RECALL_SCHEMA_VERSION,
         "trace_id": &trace_id,
-        "kind": kind.as_str(),
+        "requested_domain_retrieval_profile": &requested_profile,
+        "domain_retrieval_profile": &domain_retrieval_profile,
         "retriever_base_url": &state.retriever_base_url,
         "request": {
             "request_id": &request.request_id,
@@ -7346,13 +7375,37 @@ async fn chat_completions(
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let frame_intent = question_frame_intent(&scoped_context.context_pack);
-    let retriever_query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+    let retriever_query_plan = query_plan_from_gateway_policy(
         &scoped_context.resolved_question,
         &policy.question_type,
         &policy.required_evidence_types,
         frame_intent.as_deref(),
-    );
-    let retriever_common_recall_kind = retriever_query_plan.common_recall_kind();
+    )
+    .map_err(|error| {
+        tracing::error!(%trace_id, error = %error, "retriever query plan failed");
+        error
+    });
+    let retriever_query_plan = match retriever_query_plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&scoped_context.user_session_id),
+                None,
+                "Failed with Controlled Response",
+                "retriever_query_plan_failed",
+                &json!({"error": error.to_string()}),
+            );
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "retriever_query_plan_failed",
+                "retriever query plan failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let domain_retrieval_profile = retriever_query_plan.retrieval_profile.clone();
     let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
         question: scoped_context.resolved_question.clone(),
@@ -7392,7 +7445,7 @@ async fn chat_completions(
             "policy": &policy,
             "runtime_step_plan": &runtime_step_plan,
             "retriever_query_plan": &retriever_query_plan,
-            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+            "domain_retrieval_profile": &domain_retrieval_profile,
             "agent_runtime_plan_gate": &agent_runtime_plan_gate,
         }),
     );
@@ -7411,7 +7464,7 @@ async fn chat_completions(
             "runtime_step_plan": &runtime_step_plan,
             "agent_runtime_plan_gate": &agent_runtime_plan_gate,
             "retriever_query_plan": &retriever_query_plan,
-            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+            "domain_retrieval_profile": &domain_retrieval_profile,
         }),
     );
     let _ = insert_audit_event(
@@ -7432,8 +7485,8 @@ async fn chat_completions(
         request_id: trace_id.clone(),
         session_id: Some(scoped_context.user_session_id.clone()),
         caller: "tonglingyu-gateway".to_string(),
-        graph_node: "chat_workflow".to_string(),
-        search_plan: RetrieverSearchPlan::for_query_planner(
+        graph_node: retriever_query_plan.graph_node.clone(),
+        search_plan: RetrieverSearchPlan::for_domain_plan(
             &retriever_query_plan,
             state.max_evidence,
             state.retriever_rerank,
@@ -7450,7 +7503,7 @@ async fn chat_completions(
             "question_type": &policy.question_type,
             "question_frame_intent": &frame_intent,
             "retriever_query_plan": &retriever_query_plan,
-            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+            "domain_retrieval_profile": &domain_retrieval_profile,
         }),
     };
     let retrieve_response = match state.retriever.retrieve(&retrieve_request).await {
