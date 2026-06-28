@@ -150,6 +150,47 @@ agent-platform/scripts/tonglingyu-knowledge-calibration-smoke.sh
   - Responses/Run 的 background/sync wait 完整语义和 action 等待态。
   - `/v1/realtime/ws`、Runtime live event sink、smoke/runbook/release gate。
 
+### 2026-06-29 P2 job queue and worker
+
+- P2 新增 `response_jobs.rs`：
+  - `ResponseJob` 使用 `tonglingyu.response_job.v1` schema，记录 run/response/session、
+    owner scope、原始 request、attempt 和 max_attempts。
+  - `ResponseJobQueueBackend` 支持本地内存测试后端和 Redis 后端。
+  - Redis 后端使用 `tonglingyu:jobs` stream、`tonglingyu:jobs:dead` dead-letter stream、
+    `XGROUP CREATE MKSTREAM`、`XREADGROUP`、`XACK`、retry requeue 和 `XAUTOCLAIM`
+    stale reclaim。
+- Gateway create 流程已改为：
+  - 新建 response state 后写 `response.created` 并入队 `ResponseJob`。
+  - 幂等命中只返回既有 response state，不重复入队。
+  - 入队失败时将刚创建的 response 标记为 `response.failed`，避免永久 queued 半状态。
+- Gateway worker 已接入：
+  - `TONGLINGYU_RESPONSE_WORKER_ENABLED` 控制后台 worker。
+  - worker claim job 后执行真实链路：context governance -> HTTP retriever -> Runtime
+    workflow -> SQLite journal -> response events。
+  - worker 在安全点检查 cancel；已取消/终态 job 正常 ack，不进入 retry。
+  - worker failure 写 `worker.retry_scheduled`；达到最大重试后写
+    `worker.dead_lettered` 和公开 `response.failed`。
+  - worker 输出 `evidence.searching`、`evidence.found`、`review.started`、
+    `review.completed`、Runtime stream event 投影和 `response.completed`。
+- `/healthz`、JSON metrics 和 Prometheus metrics 已增加 `response_jobs` 依赖状态。
+- `deploy/docker-compose.yml` 已补齐 worker、job group、retry、claim/reclaim 相关 env。
+- 已验证：
+  - `cargo check --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_jobs` 通过，5 个测试。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_create_enqueues_job_only_for_new_identity` 通过。
+  - `cargo test --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway`
+    filter `response_worker_completes_empty_input_from_queued_job` 通过。
+  - 既有 Run/Response 投影测试、owner scope、cancel/action 和 metadata override 测试
+    均已重跑通过。
+- 当前边界：
+  - Runtime workflow 的 step-level live emit 仍等待 P6；P2 worker 目前在 Runtime
+    workflow 返回后投影 `RuntimeWorkflowStreamEvent`。
+  - chat stream 仍未桥接统一 response event stream，进入 P3 处理。
+  - background webhook、sync wait、requires_action 等完整 Responses/Run 语义进入 P4。
+
 ## 验证边界
 
 必须区分三类验证：

@@ -75,6 +75,7 @@ mod plan;
 mod question_frame;
 mod response;
 mod response_events;
+mod response_jobs;
 mod response_store;
 mod retrieval_suggestion;
 mod retriever_http;
@@ -127,7 +128,14 @@ use crate::response::{
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
 };
+use crate::response_events::response_event_from_runtime_stream_event;
 use crate::response_events::{ResponseEventType, ResponseStatus};
+#[cfg(test)]
+use crate::response_jobs::InMemoryResponseJobQueue;
+use crate::response_jobs::{
+    ResponseJob, ResponseJobLease, ResponseJobQueueBackend, ResponseJobQueueConfig,
+    ResponseJobQueueError, ResponseJobQueueHealth, RetryDecision,
+};
 #[cfg(test)]
 use crate::response_store::InMemoryResponseEventStore;
 use crate::response_store::{
@@ -556,6 +564,58 @@ struct ServeArgs {
     response_event_ttl_secs: u64,
     #[arg(
         long,
+        env = "TONGLINGYU_RESPONSE_WORKER_ENABLED",
+        default_value_t = true
+    )]
+    response_worker_enabled: bool,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_WORKER_ID")]
+    response_worker_id: Option<String>,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_GROUP",
+        default_value = "tonglingyu-gateway-workers"
+    )]
+    response_job_group: String,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_JOB_MAXLEN", default_value_t = 2000)]
+    response_job_maxlen: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_TTL_SECS",
+        default_value_t = 86_400
+    )]
+    response_job_ttl_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_MAX_ATTEMPTS",
+        default_value_t = 3
+    )]
+    response_job_max_attempts: u32,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_CLAIM_BLOCK_MS",
+        default_value_t = 1000
+    )]
+    response_worker_claim_block_ms: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_IDLE_SLEEP_MS",
+        default_value_t = 250
+    )]
+    response_worker_idle_sleep_ms: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_RECLAIM_IDLE_MS",
+        default_value_t = 30_000
+    )]
+    response_worker_reclaim_idle_ms: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_RECLAIM_INTERVAL_SECS",
+        default_value_t = 30
+    )]
+    response_worker_reclaim_interval_secs: u64,
+    #[arg(
+        long,
         env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
         default_value_t = true
     )]
@@ -613,6 +673,8 @@ struct AppState {
     db: PathBuf,
     runtime_store: TonglingyuRuntimeStore,
     response_store: Arc<Mutex<ResponseStoreBackend>>,
+    response_jobs: Arc<Mutex<ResponseJobQueueBackend>>,
+    response_job_max_attempts: u32,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -646,6 +708,30 @@ struct AppState {
     llm_agent_provider_profiles: Value,
     workflow_agent_provider_profiles: Value,
     started_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseWorkerConfig {
+    worker_id: String,
+    claim_block_ms: usize,
+    idle_sleep_ms: u64,
+    reclaim_idle_ms: usize,
+    reclaim_interval_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseJobExecutionError {
+    code: &'static str,
+    message: String,
+}
+
+impl ResponseJobExecutionError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2004,10 +2090,31 @@ async fn serve(args: ServeArgs) -> Result<()> {
         event_ttl_secs: args.response_event_ttl_secs,
     })
     .map_err(|error| anyhow!("response store initialization failed: {error:?}"))?;
+    let response_jobs = ResponseJobQueueBackend::from_config(ResponseJobQueueConfig {
+        redis_url: args.redis_url.clone(),
+        redis_required: args.redis_required,
+        stream_prefix: args.response_stream_prefix.clone(),
+        group: args.response_job_group.clone(),
+        job_maxlen: args.response_job_maxlen,
+        job_ttl_secs: args.response_job_ttl_secs,
+    })
+    .map_err(|error| anyhow!("response job queue initialization failed: {error:?}"))?;
+    let response_worker_config = ResponseWorkerConfig {
+        worker_id: args
+            .response_worker_id
+            .clone()
+            .unwrap_or_else(|| format!("gateway-{}", uuid::Uuid::now_v7().simple())),
+        claim_block_ms: args.response_worker_claim_block_ms,
+        idle_sleep_ms: args.response_worker_idle_sleep_ms,
+        reclaim_idle_ms: args.response_worker_reclaim_idle_ms,
+        reclaim_interval_secs: args.response_worker_reclaim_interval_secs,
+    };
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
         response_store: Arc::new(Mutex::new(response_store)),
+        response_jobs: Arc::new(Mutex::new(response_jobs)),
+        response_job_max_attempts: args.response_job_max_attempts,
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -2059,6 +2166,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
             args.online_evidence_card_worker_batch_size,
             args.online_evidence_card_worker_retrieval_limit,
         );
+    }
+    if args.response_worker_enabled {
+        spawn_response_job_worker(state.clone(), response_worker_config);
     }
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -2351,6 +2461,852 @@ fn spawn_online_evidence_card_background_worker(
             }
         }
     });
+}
+
+fn spawn_response_job_worker(state: Arc<AppState>, config: ResponseWorkerConfig) {
+    let worker_id = config.worker_id.clone();
+    tracing::info!(
+        worker_id = %worker_id,
+        claim_block_ms = config.claim_block_ms,
+        reclaim_idle_ms = config.reclaim_idle_ms,
+        "response job worker started"
+    );
+    tokio::spawn(async move {
+        let mut last_reclaim = Instant::now()
+            .checked_sub(Duration::from_secs(config.reclaim_interval_secs.max(1)))
+            .unwrap_or_else(Instant::now);
+        loop {
+            if last_reclaim.elapsed() >= Duration::from_secs(config.reclaim_interval_secs.max(1)) {
+                let reclaimed = {
+                    match state.response_jobs.lock() {
+                        Ok(mut queue) => queue.reclaim_stale(
+                            &config.worker_id,
+                            config.reclaim_idle_ms.max(1),
+                            16,
+                        ),
+                        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                            "response job queue mutex poisoned".to_string(),
+                        )),
+                    }
+                };
+                match reclaimed {
+                    Ok(count) if count > 0 => {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            reclaimed_jobs = count,
+                            "response job worker reclaimed stale jobs"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            error = ?error,
+                            "response job reclaim failed"
+                        );
+                    }
+                }
+                last_reclaim = Instant::now();
+            }
+
+            let lease = {
+                match state.response_jobs.lock() {
+                    Ok(mut queue) => queue.claim_next(&config.worker_id, config.claim_block_ms),
+                    Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                        "response job queue mutex poisoned".to_string(),
+                    )),
+                }
+            };
+            let lease = match lease {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    tokio::time::sleep(Duration::from_millis(config.idle_sleep_ms.max(10))).await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        worker_id = %config.worker_id,
+                        error = ?error,
+                        "response job claim failed"
+                    );
+                    tokio::time::sleep(Duration::from_millis(config.idle_sleep_ms.max(250))).await;
+                    continue;
+                }
+            };
+
+            let job = lease.job.clone();
+            let result = execute_response_job(state.clone(), job.clone()).await;
+            match result {
+                Ok(()) => {
+                    let complete = match state.response_jobs.lock() {
+                        Ok(mut queue) => queue.complete(lease),
+                        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                            "response job queue mutex poisoned".to_string(),
+                        )),
+                    };
+                    if let Err(error) = complete {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            response_id = %job.response_id,
+                            error = ?error,
+                            "response job ack failed after successful workflow"
+                        );
+                    }
+                }
+                Err(error) => {
+                    handle_response_job_failure(&state, lease, error);
+                }
+            }
+        }
+    });
+}
+
+fn handle_response_job_failure(
+    state: &AppState,
+    lease: ResponseJobLease,
+    error: ResponseJobExecutionError,
+) {
+    let job = lease.job.clone();
+    let decision = match state.response_jobs.lock() {
+        Ok(mut queue) => queue.retry_or_dead_letter(lease, error.code, &error.message),
+        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+            "response job queue mutex poisoned".to_string(),
+        )),
+    };
+    match decision {
+        Ok(RetryDecision::Requeued) => {
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::WorkerRetryScheduled,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                    },
+                    "attempt": job.attempt,
+                    "max_attempts": job.max_attempts,
+                }),
+                None,
+                None,
+                None,
+                None,
+            );
+            tracing::warn!(
+                response_id = %job.response_id,
+                attempt = job.attempt,
+                max_attempts = job.max_attempts,
+                error_code = error.code,
+                "response job scheduled for retry"
+            );
+        }
+        Ok(RetryDecision::DeadLettered) => {
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::WorkerDeadLettered,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                    },
+                    "attempt": job.attempt,
+                    "max_attempts": job.max_attempts,
+                }),
+                None,
+                None,
+                None,
+                None,
+            );
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::ResponseFailed,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": "response job failed after maximum retry attempts",
+                    }
+                }),
+                Some(ResponseStatus::Failed),
+                None,
+                None,
+                None,
+            );
+            tracing::error!(
+                response_id = %job.response_id,
+                attempt = job.attempt,
+                max_attempts = job.max_attempts,
+                error_code = error.code,
+                "response job dead-lettered"
+            );
+        }
+        Err(queue_error) => {
+            tracing::error!(
+                response_id = %job.response_id,
+                error = ?queue_error,
+                original_error_code = error.code,
+                "response job failure could not be recorded in queue"
+            );
+        }
+    }
+}
+
+async fn execute_response_job(
+    state: Arc<AppState>,
+    job: ResponseJob,
+) -> Result<(), ResponseJobExecutionError> {
+    let started = Instant::now();
+    let state_record = response_state_record_for_job(&state, &job)?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    if state_record.cancel_requested || state_record.status == ResponseStatus::Canceling {
+        return cancel_response_job_at_safe_point(&state, &job);
+    }
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress", "worker": "response_job"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )?;
+
+    let input = response_job_input(&job)?;
+    if input.question.chars().count() > state.max_question_chars {
+        append_response_event_for_job(
+            &state,
+            &job,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "error": {
+                    "code": "request_too_large",
+                    "message": "request question is too large",
+                }
+            }),
+            Some(ResponseStatus::Failed),
+            None,
+            None,
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    tonglingyu_runtime::init_runtime_schema(&conn).map_err(|error| {
+        ResponseJobExecutionError::new("runtime_schema_unavailable", error.to_string())
+    })?;
+    let user_ref = job
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&job.subject);
+    let user_session_id = context_governance::get_or_create_user_session(
+        &conn,
+        user_ref,
+        &job.session_id,
+        &state.model_id,
+    )
+    .map_err(|error| ResponseJobExecutionError::new("session_mapping_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&user_session_id),
+        None,
+        "Response Job Claimed",
+        "ok",
+        &json!({
+            "response_id": &job.response_id,
+            "run_id": &job.run_id,
+            "attempt": job.attempt,
+            "max_attempts": job.max_attempts,
+        }),
+    );
+    drop(conn);
+
+    let scoped_context = create_context_for_request_with_agent_runtime(
+        &state.db,
+        ContextRequestInput {
+            trace_id: &job.trace_id,
+            model_id: &state.model_id,
+            external_user_ref: user_ref,
+            external_session_id: &job.session_id,
+            external_message_id: &job.response_id,
+            question: &input.question,
+            messages: &input.messages,
+            history_over_limit: false,
+            max_messages: state.max_messages,
+        },
+        state.llm_agent_runtime.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        ResponseJobExecutionError::new("context_governance_failed", error.to_string())
+    })?;
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ContextPackCreated,
+        json!({
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "context_pack_digest": &scoped_context.context_pack_digest,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+        }),
+        None,
+        None,
+        None,
+        None,
+    )?;
+
+    if input.question.trim().is_empty() {
+        complete_response_job_with_text(
+            &state,
+            &job,
+            &scoped_context,
+            None,
+            "请提出一个《红楼梦》相关问题。".to_string(),
+            started,
+        )?;
+        return Ok(());
+    }
+
+    if scoped_context.needs_clarification {
+        let content = scoped_context
+            .clarification_question
+            .clone()
+            .unwrap_or_else(|| "请补充明确的指代对象后再继续。".to_string());
+        complete_response_job_with_text(&state, &job, &scoped_context, None, content, started)?;
+        return Ok(());
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&input.question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &input.question);
+        complete_response_job_with_text(&state, &job, &scoped_context, None, content, started)?;
+        return Ok(());
+    }
+
+    if check_response_job_cancel(&state, &job)? {
+        return Ok(());
+    }
+
+    let mut policy = search_policy(&scoped_context.resolved_question);
+    apply_question_frame_required_evidence_types(&mut policy, &scoped_context.context_pack);
+    policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
+    let runtime_context = runtime_context_contract(&scoped_context);
+    let frame_intent = question_frame_intent(&scoped_context.context_pack);
+    let retriever_query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+        &scoped_context.resolved_question,
+        &policy.question_type,
+        &policy.required_evidence_types,
+        frame_intent.as_deref(),
+    );
+    let retriever_common_recall_kind = retriever_query_plan.common_recall_kind();
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        None,
+        "Response Job Planned",
+        "ok",
+        &json!({
+            "policy": &policy,
+            "runtime_step_plan": &runtime_step_plan,
+            "retriever_query_plan": &retriever_query_plan,
+            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+        }),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::RuntimePlanCreated,
+        json!({
+            "runtime_step_plan": &runtime_step_plan,
+            "planned_profiles": &policy.planned_profiles,
+        }),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::EvidenceSearching,
+        json!({
+            "required_evidence_types": &policy.required_evidence_types,
+        }),
+        Some(ResponseStatus::Retrieving),
+        None,
+        None,
+        None,
+    )?;
+
+    let retrieve_request = RetrieverRetrieveRequest {
+        request_id: job.trace_id.clone(),
+        session_id: Some(scoped_context.user_session_id.clone()),
+        caller: "tonglingyu-gateway".to_string(),
+        graph_node: "response_job_workflow".to_string(),
+        search_plan: RetrieverSearchPlan::for_query_planner(
+            &retriever_query_plan,
+            state.max_evidence,
+            state.retriever_rerank,
+        ),
+        retrieve_options: RetrieverRetrieveOptions::workflow(state.max_evidence),
+        include_raw: false,
+        metadata: json!({
+            "trace_id": &job.trace_id,
+            "response_id": &job.response_id,
+            "run_id": &job.run_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "required_evidence_types": &policy.required_evidence_types,
+            "question_type": &policy.question_type,
+            "question_frame_intent": &frame_intent,
+            "retriever_query_plan": &retriever_query_plan,
+            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+        }),
+    };
+    let retrieve_response = state
+        .retriever
+        .retrieve(&retrieve_request)
+        .await
+        .map_err(|error| {
+            ResponseJobExecutionError::new("retriever_failed", format!("retriever failed: {error}"))
+        })?;
+    let retrieved_cards = evidence_cards_from_pack(&retrieve_response.evidence_pack);
+    let workflow_retrieval = workflow_retrieval_input(
+        &retrieve_response,
+        state.retriever.base_url(),
+        &retrieve_request,
+        &retrieved_cards,
+    );
+    let evidence_types = retrieved_cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>();
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::EvidenceFound,
+        json!({
+            "count": retrieved_cards.len(),
+            "evidence_types": evidence_types,
+        }),
+        Some(ResponseStatus::Composing),
+        None,
+        None,
+        None,
+    )?;
+
+    if check_response_job_cancel(&state, &job)? {
+        return Ok(());
+    }
+
+    let workflow = state
+        .runtime_store
+        .execute_workflow_with_agent_runtime_client(
+            RuntimeWorkflowInput {
+                trace_id: job.trace_id.clone(),
+                question: scoped_context.resolved_question.clone(),
+                limit: state.max_evidence,
+                required_evidence_types: policy.required_evidence_types.clone(),
+                retrieved_evidence: Some(RuntimeWorkflowRetrievedEvidence {
+                    schema_version: retriever_http::WORKFLOW_RETRIEVAL_INPUT_SCHEMA_VERSION
+                        .to_string(),
+                    source: "knownledge_http_retriever".to_string(),
+                    cards: retrieved_cards,
+                    retrieval: workflow_retrieval,
+                }),
+                profiles: runtime_workflow_profiles(&state.profiles),
+                context: runtime_context.clone(),
+            },
+            state.agent_runtime_mode,
+            state.agent_runtime.clone(),
+        )
+        .await
+        .map_err(|error| {
+            ResponseJobExecutionError::new("runtime_workflow_failed", error.to_string())
+        })?;
+
+    let agent_runtime_summary = workflow.agent_runtime_summary.clone();
+    let package = workflow.package.clone();
+    let package_id = package.package_id.clone();
+    let final_answer = workflow.final_answer.clone();
+    let value = completion_value(
+        &state.model_id,
+        final_answer.clone(),
+        Some(&package),
+        Some(&scoped_context.user_session_id),
+    );
+    let cached_value = cache_completion_value(&value, &workflow.stream_events);
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        Some(&package_id),
+        "Response Job Runtime Executed",
+        "ok",
+        &json!({
+            "runtime_step_outputs": &workflow.steps,
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    append_runtime_step_journal(
+        &conn,
+        &job.trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package_id),
+        json!({
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    )
+    .map_err(|error| ResponseJobExecutionError::new("runtime_journal_failed", error.to_string()))?;
+    append_review_journal(
+        &conn,
+        &job.trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package_id),
+        json!(&package.review),
+    )
+    .map_err(|error| ResponseJobExecutionError::new("review_journal_failed", error.to_string()))?;
+    append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &job.trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &job.response_id,
+            package_id: Some(&package_id),
+            response: &cached_value,
+        },
+    )
+    .map_err(|error| ResponseJobExecutionError::new("final_journal_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        Some(&package_id),
+        "Response Job Finalized",
+        "ok",
+        &json!({
+            "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ReviewStarted,
+        json!({"package_id": &package_id}),
+        Some(ResponseStatus::Reviewing),
+        None,
+        Some(package_id.clone()),
+        None,
+    )?;
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ReviewCompleted,
+        json!({
+            "status": &package.review.status,
+            "package_id": &package_id,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        Some(package_id.clone()),
+        None,
+    )?;
+
+    for runtime_event in &workflow.stream_events {
+        let mapped = response_event_from_runtime_stream_event(
+            &job.run_id,
+            &job.response_id,
+            &job.session_id,
+            runtime_event,
+        );
+        let status_update = match mapped.event_type {
+            ResponseEventType::ResponseStatus => Some(ResponseStatus::InProgress),
+            _ => None,
+        };
+        append_response_event_for_job(
+            &state,
+            &job,
+            mapped.event_type,
+            mapped.payload,
+            status_update,
+            Some(mapped.visibility),
+            runtime_event.package_id.clone(),
+            None,
+        )?;
+    }
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ResponseCompleted,
+        json!({
+            "response_id": &job.response_id,
+            "status": "completed",
+            "package_id": &package_id,
+        }),
+        Some(ResponseStatus::Completed),
+        None,
+        Some(package_id),
+        Some(format!("final_response:{}", job.response_id)),
+    )?;
+    Ok(())
+}
+
+struct ResponseJobInput {
+    question: String,
+    messages: Vec<ContextMessage>,
+}
+
+fn response_job_input(job: &ResponseJob) -> Result<ResponseJobInput, ResponseJobExecutionError> {
+    if job.api_type == "chat_completions" {
+        let request = serde_json::from_value::<ChatCompletionRequest>(job.request.clone())
+            .map_err(|error| {
+                ResponseJobExecutionError::new("invalid_request", error.to_string())
+            })?;
+        let question = last_user_message(&request.messages);
+        let messages = context_messages_from_chat(&request.messages);
+        return Ok(ResponseJobInput { question, messages });
+    }
+
+    if let Some(messages) = job.request.get("messages").and_then(Value::as_array) {
+        let messages = messages
+            .iter()
+            .map(context_message_from_value)
+            .collect::<Vec<_>>();
+        let question = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        return Ok(ResponseJobInput { question, messages });
+    }
+
+    let question = response_input_text(job.request.get("input")).unwrap_or_default();
+    Ok(ResponseJobInput {
+        question: question.clone(),
+        messages: vec![ContextMessage {
+            role: "user".to_string(),
+            content: question,
+        }],
+    })
+}
+
+fn context_message_from_value(value: &Value) -> ContextMessage {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user")
+        .to_string();
+    let content = response_input_text(value.get("content")).unwrap_or_default();
+    ContextMessage { role, content }
+}
+
+fn response_input_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.as_str() {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("content").and_then(Value::as_str))
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>();
+            Some(parts.join("\n"))
+        }
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("content").and_then(Value::as_str))
+            .map(ToString::to_string),
+        other => Some(other.to_string()),
+    }
+}
+
+fn response_state_record_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let store = state.response_store.lock().map_err(|_| {
+        ResponseJobExecutionError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    store.state(&job.response_id).map_err(|error| {
+        ResponseJobExecutionError::new(
+            "response_state_unavailable",
+            format!("response state unavailable: {error:?}"),
+        )
+    })
+}
+
+fn check_response_job_cancel(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<bool, ResponseJobExecutionError> {
+    let state_record = response_state_record_for_job(state, job)?;
+    if state_record.status.is_terminal() {
+        return Ok(true);
+    }
+    if state_record.cancel_requested || state_record.status == ResponseStatus::Canceling {
+        cancel_response_job_at_safe_point(state, job)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn cancel_response_job_at_safe_point(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<(), ResponseJobExecutionError> {
+    let state_record = response_state_record_for_job(state, job)?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    let response_id = job.response_id.clone();
+    let status = state_record.status;
+    if status != ResponseStatus::Canceling {
+        append_response_event_for_job(
+            state,
+            job,
+            ResponseEventType::ResponseStatus,
+            json!({"status": "canceling", "reason": "worker_safe_point"}),
+            Some(ResponseStatus::Canceling),
+            None,
+            None,
+            None,
+        )?;
+    }
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::ResponseCanceled,
+        json!({"status": "canceled", "reason": "worker_safe_point"}),
+        Some(ResponseStatus::Canceled),
+        None,
+        None,
+        None,
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        ResponseJobExecutionError::new(
+            "response_cancel_failed",
+            format!("cancel response {response_id} failed: {}", error.message),
+        )
+    })
+}
+
+fn complete_response_job_with_text(
+    state: &AppState,
+    job: &ResponseJob,
+    scoped_context: &ContextResolution,
+    package: Option<&EvidencePackage>,
+    content: String,
+    started: Instant,
+) -> Result<(), ResponseJobExecutionError> {
+    let package_id = package.map(|package| package.package_id.clone());
+    let value = completion_value(
+        &state.model_id,
+        content.clone(),
+        package,
+        Some(&scoped_context.user_session_id),
+    );
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &job.trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &job.response_id,
+            package_id: package_id.as_deref(),
+            response: &value,
+        },
+    )
+    .map_err(|error| ResponseJobExecutionError::new("final_journal_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        package_id.as_deref(),
+        "Response Job Finalized",
+        "controlled_response",
+        &json!({"elapsed_ms": elapsed_ms(started)}),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::OutputTextDelta,
+        json!({"text": content}),
+        None,
+        None,
+        package_id.clone(),
+        None,
+    )?;
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::OutputTextDone,
+        json!({"char_count": value["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .count()}),
+        None,
+        None,
+        package_id.clone(),
+        None,
+    )?;
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::ResponseCompleted,
+        json!({
+            "response_id": &job.response_id,
+            "status": "completed",
+        }),
+        Some(ResponseStatus::Completed),
+        None,
+        package_id,
+        Some(format!("final_response:{}", job.response_id)),
+    )?;
+    Ok(())
 }
 
 fn remove_sqlite_file_set(path: &Path) {
@@ -3284,6 +4240,11 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
         .lock()
         .map(|store| store.health_snapshot())
         .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     match (
         state.runtime_store.store_stats(),
         state.runtime_store.online_evidence_card_ingest_stats(),
@@ -3295,53 +4256,61 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             Ok(online_evidence_card_ingest),
             Ok(runtime_rule_catalogs),
             Ok(retriever_health),
-        ) if retriever_health.ready && response_store_health.status == "ok" => Json(json!({
-            "status": "ok",
-            "model": state.model_id,
-            "retriever": {
-                "base_url": &state.retriever_base_url,
-                "timeout_secs": state.retriever_timeout_secs,
-                "rerank": state.retriever_rerank,
-                "health": retriever_health,
-            },
-            "agent_runtime": {
-                "mode": state.agent_runtime_mode.as_str(),
-                "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
-                "provider_profiles": &state.workflow_agent_provider_profiles,
-            },
-            "llm_agent_runtime": {
-                "mode": &state.llm_agent_runtime_mode,
-                "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
-                "provider_profiles": &state.llm_agent_provider_profiles,
-            },
-            "rate_limit": {
-                "public_per_minute": state.rate_limit_per_minute,
-                "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
-                "disabled": state.rate_limit_per_minute == 0,
-            },
-            "response_store": response_store_health,
-            "request_limits": {
-                "max_messages": state.max_messages,
-                "max_question_chars": state.max_question_chars,
-                "max_body_bytes": state.max_body_bytes,
-            },
-            "online_evidence_card_ingest": {
-                "worker_enabled": state.online_evidence_card_worker_enabled,
-                "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
-                "worker_batch_size": state.online_evidence_card_worker_batch_size,
-                "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
-                "stats": online_evidence_card_ingest,
-            },
-            "runtime_rule_catalogs": runtime_rule_catalogs,
-            "sources": stats.sources,
-            "blocks": stats.blocks
-        }))
-        .into_response(),
+        ) if retriever_health.ready
+            && response_store_health.status == "ok"
+            && response_jobs_health.status == "ok" =>
+        {
+            Json(json!({
+                "status": "ok",
+                "model": state.model_id,
+                "retriever": {
+                    "base_url": &state.retriever_base_url,
+                    "timeout_secs": state.retriever_timeout_secs,
+                    "rerank": state.retriever_rerank,
+                    "health": retriever_health,
+                },
+                "agent_runtime": {
+                    "mode": state.agent_runtime_mode.as_str(),
+                    "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
+                    "provider_profiles": &state.workflow_agent_provider_profiles,
+                },
+                "llm_agent_runtime": {
+                    "mode": &state.llm_agent_runtime_mode,
+                    "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
+                    "provider_profiles": &state.llm_agent_provider_profiles,
+                },
+                "rate_limit": {
+                    "public_per_minute": state.rate_limit_per_minute,
+                    "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
+                    "disabled": state.rate_limit_per_minute == 0,
+                },
+                "response_store": response_store_health,
+                "response_jobs": response_jobs_health,
+                "request_limits": {
+                    "max_messages": state.max_messages,
+                    "max_question_chars": state.max_question_chars,
+                    "max_body_bytes": state.max_body_bytes,
+                },
+                "online_evidence_card_ingest": {
+                    "worker_enabled": state.online_evidence_card_worker_enabled,
+                    "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
+                    "worker_batch_size": state.online_evidence_card_worker_batch_size,
+                    "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
+                    "stats": online_evidence_card_ingest,
+                },
+                "runtime_rule_catalogs": runtime_rule_catalogs,
+                "sources": stats.sources,
+                "blocks": stats.blocks
+            }))
+            .into_response()
+        }
         (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => {
             let error = if !retriever_health.ready {
                 "retriever_unready"
-            } else {
+            } else if response_store_health.status != "ok" {
                 "response_store_unavailable"
+            } else {
+                "response_jobs_unavailable"
             };
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -3353,6 +4322,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                         "health": retriever_health,
                     },
                     "response_store": response_store_health,
+                    "response_jobs": response_jobs_health,
                 })),
             )
                 .into_response()
@@ -3367,6 +4337,7 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "error": "health_check_failed",
                 "detail": safe_error_detail(&error),
                 "response_store": response_store_health,
+                "response_jobs": response_jobs_health,
             })),
         )
             .into_response(),
@@ -3382,6 +4353,17 @@ fn response_store_unavailable_health() -> ResponseStoreHealth {
         event_ttl_secs: 0,
         status: "unavailable",
         error: Some("response store mutex poisoned".to_string()),
+    }
+}
+
+fn response_jobs_unavailable_health() -> ResponseJobQueueHealth {
+    ResponseJobQueueHealth {
+        mode: "unknown",
+        required: true,
+        prefix: "unknown".to_string(),
+        group: "unknown".to_string(),
+        status: "unavailable",
+        error: Some("response job queue mutex poisoned".to_string()),
     }
 }
 
@@ -3601,10 +4583,19 @@ async fn create_run_projection(
         Err(error) => return run_normalization_error_response(error, Some(&trace_id)),
     };
     let created = match create_response_state(&state, &identity) {
-        Ok(state_record) => state_record,
+        Ok(outcome) => outcome,
         Err(response) => return response,
     };
-    Json(response_state_projection(&created, object_type)).into_response()
+    if created.should_enqueue {
+        if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            return response;
+        }
+    }
+    Json(response_state_projection(
+        &created.state_record,
+        object_type,
+    ))
+    .into_response()
 }
 
 async fn get_response_projection(
@@ -3901,10 +4892,15 @@ fn run_normalization_input(
     })
 }
 
+struct CreateResponseStateOutcome {
+    state_record: ResponseStateRecord,
+    should_enqueue: bool,
+}
+
 fn create_response_state(
     state: &AppState,
     identity: &RunIdentity,
-) -> Result<ResponseStateRecord, Response> {
+) -> Result<CreateResponseStateOutcome, Response> {
     let mut store = state.response_store.lock().map_err(|_| {
         error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3918,6 +4914,10 @@ fn create_response_state(
         Err(ResponseStoreError::DuplicateIdempotencyKey { response_id }) => {
             return store
                 .state(&response_id)
+                .map(|state_record| CreateResponseStateOutcome {
+                    state_record,
+                    should_enqueue: false,
+                })
                 .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)));
         }
         Err(ResponseStoreError::DuplicateResponseId(_) | ResponseStoreError::DuplicateRunId(_)) => {
@@ -3952,7 +4952,110 @@ fn create_response_state(
         })
         .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)))?;
     debug_assert_eq!(created.response_id, state_record.response_id);
-    Ok(state_record)
+    Ok(CreateResponseStateOutcome {
+        state_record,
+        should_enqueue: true,
+    })
+}
+
+fn enqueue_response_job(
+    state: &AppState,
+    identity: &RunIdentity,
+    payload: Value,
+) -> Result<String, Response> {
+    let job = ResponseJob::new(identity, payload, state.response_job_max_attempts);
+    let mut queue = state.response_jobs.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_jobs_unavailable",
+            "response job queue unavailable",
+            Some(&identity.trace_id),
+        )
+    })?;
+    match queue.enqueue(job) {
+        Ok(stream_id) => Ok(stream_id),
+        Err(error) => {
+            drop(queue);
+            let _ = append_response_event_for_identity(
+                state,
+                identity,
+                ResponseEventType::ResponseFailed,
+                json!({
+                    "error": {
+                        "code": "response_job_enqueue_failed",
+                        "message": "response job queue unavailable",
+                    }
+                }),
+                Some(ResponseStatus::Failed),
+                None,
+                None,
+                None,
+            );
+            Err(response_job_queue_failure_response(
+                error,
+                Some(&identity.trace_id),
+            ))
+        }
+    }
+}
+
+fn append_response_event_for_identity(
+    state: &AppState,
+    identity: &RunIdentity,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let mut store = state
+        .response_store
+        .lock()
+        .map_err(|_| ResponseStoreError::BackendUnavailable("response store unavailable".into()))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: identity.response_id.clone(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+}
+
+fn append_response_event_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let mut store = state.response_store.lock().map_err(|_| {
+        ResponseJobExecutionError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: job.response_id.clone(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+        .map_err(|error| {
+            ResponseJobExecutionError::new(
+                "response_event_append_failed",
+                format!("append response event failed: {error:?}"),
+            )
+        })
 }
 
 fn response_state_for_id(
@@ -4069,6 +5172,32 @@ fn response_store_failure_response(error: ResponseStoreError, trace_id: Option<&
             StatusCode::CONFLICT,
             "response_create_conflict",
             "response identity conflicts with existing state",
+            trace_id,
+        ),
+    }
+}
+
+fn response_job_queue_failure_response(
+    error: ResponseJobQueueError,
+    trace_id: Option<&str>,
+) -> Response {
+    match error {
+        ResponseJobQueueError::BackendUnavailable(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_jobs_unavailable",
+            "response job queue unavailable",
+            trace_id,
+        ),
+        ResponseJobQueueError::CorruptJob(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_job_corrupt",
+            "response job payload is invalid",
+            trace_id,
+        ),
+        ResponseJobQueueError::UnknownLease(_) => error_response(
+            StatusCode::CONFLICT,
+            "response_job_lease_unknown",
+            "response job lease is no longer active",
             trace_id,
         ),
     }
@@ -9641,6 +10770,11 @@ fn load_metrics(state: &AppState) -> Result<Value> {
         .lock()
         .map(|store| store.health_snapshot())
         .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -9657,6 +10791,7 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "upstream_api_key_configured": state.upstream_api_key.is_some(),
             "upstream_timeout_secs": state.upstream_timeout_secs,
             "response_store": response_store_health,
+            "response_jobs": response_jobs_health,
             "agent_runtime": {
                 "mode": state.agent_runtime_mode.as_str(),
                 "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
@@ -9754,6 +10889,11 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         .lock()
         .map(|store| store.health_snapshot())
         .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -9780,6 +10920,22 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         response_store_health.required,
         bounded_metric_label(&response_store_health.prefix, 80),
         if response_store_health.status == "ok" {
+            1
+        } else {
+            0
+        },
+    ));
+    lines.push(
+        "# HELP tonglingyu_response_jobs_up Response job queue dependency status.".to_string(),
+    );
+    lines.push("# TYPE tonglingyu_response_jobs_up gauge".to_string());
+    lines.push(format!(
+        "tonglingyu_response_jobs_up{{mode=\"{}\",required=\"{}\",prefix=\"{}\",group=\"{}\"}} {}",
+        bounded_metric_label(response_jobs_health.mode, 32),
+        response_jobs_health.required,
+        bounded_metric_label(&response_jobs_health.prefix, 80),
+        bounded_metric_label(&response_jobs_health.group, 80),
+        if response_jobs_health.status == "ok" {
             1
         } else {
             0

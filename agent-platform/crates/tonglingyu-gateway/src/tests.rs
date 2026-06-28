@@ -523,6 +523,10 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         response_store: Arc::new(Mutex::new(ResponseStoreBackend::InMemory(
             InMemoryResponseEventStore::default(),
         ))),
+        response_jobs: Arc::new(Mutex::new(ResponseJobQueueBackend::InMemory(
+            InMemoryResponseJobQueue::default(),
+        ))),
+        response_job_max_attempts: 3,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -1050,6 +1054,103 @@ async fn responses_and_runs_share_identity_status_and_replay_events() {
     assert_eq!(resumed.status(), StatusCode::OK);
     assert_eq!(response_text(resumed).await, "");
 
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_create_enqueues_job_only_for_new_identity() {
+    let db_path = temp_gateway_db_path("gateway-response-job-enqueue");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("enqueue-user");
+    headers.insert("idempotency-key", "enqueue-once".parse().unwrap());
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "分析这批材料",
+        "background": true,
+        "metadata": {"client_request_id": "enqueue-once"}
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload.clone()))
+            .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let idempotent = create_response_endpoint(State(state.clone()), headers, Json(payload)).await;
+    assert_eq!(idempotent.status(), StatusCode::OK);
+    let idempotent = response_json(idempotent).await;
+    assert_eq!(created["response_id"], idempotent["response_id"]);
+
+    let first = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("first job")
+    };
+    assert_eq!(json!(first.job.response_id), created["response_id"]);
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(first).expect("complete");
+        assert!(queue.claim_next("test-worker", 0).expect("claim").is_none());
+    }
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_worker_completes_empty_input_from_queued_job() {
+    let db_path = temp_gateway_db_path("gateway-response-worker-empty");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("worker-empty-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "background": true
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"]
+        .as_str()
+        .expect("response id")
+        .to_string();
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued job")
+    };
+
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let final_state = get_response_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(final_state.status(), StatusCode::OK);
+    let final_state = response_json(final_state).await;
+    assert_eq!(final_state["status"], json!("completed"));
+
+    let events = response_events_endpoint(
+        State(state),
+        headers,
+        AxumPath(response_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    let events = response_text(events).await;
+    assert!(events.contains("event: output_text.delta"));
+    assert!(events.contains("event: response.completed"));
     remove_sqlite_file_set(&db_path);
 }
 
