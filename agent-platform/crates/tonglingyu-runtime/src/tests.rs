@@ -9282,6 +9282,21 @@ fn chapter_location_draft_rejections_are_governed_decisions() {
     ));
 }
 
+#[test]
+fn unsupported_claim_ref_rejection_skips_draft_repair() {
+    let application = AgentRuntimeContentApplication {
+        draft_consumed: false,
+        content_used_for_final_answer: false,
+        result_format: "json",
+        rejected_reason: Some("draft_claim_ref_text_unsupported"),
+    };
+
+    assert!(!should_repair_agent_runtime_draft(
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+        Some(&application),
+    ));
+}
+
 #[tokio::test]
 async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
     let question = "袭人先后服侍过哪些人？";

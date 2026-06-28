@@ -5628,8 +5628,7 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
 }
 
 fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
-    let _ = reason;
-    false
+    matches!(reason, "draft_claim_ref_text_unsupported")
 }
 
 #[allow(clippy::too_many_arguments)]
