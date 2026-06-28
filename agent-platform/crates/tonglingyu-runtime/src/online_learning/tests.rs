@@ -206,6 +206,43 @@ fn source_snapshot_card_without_source_hash_stays_raw_full_text_hit() {
 }
 
 #[test]
+fn knownledge_retriever_source_backed_card_is_request_scoped_without_local_source_hash() {
+    let conn = test_conn();
+    let card = sample_card(
+        "ev-knownledge-retriever",
+        "knownledge_retriever_source_backed",
+    );
+    let summary = build_online_learning_trace_summary(
+        &conn,
+        "pkg-retriever",
+        "trace-retriever",
+        std::slice::from_ref(&card),
+        &[claim_map(&card.evidence_id)],
+        &json!({"later_forty_allowed": false}),
+        &review(),
+    )
+    .expect("trace summary");
+
+    let binding = &summary.tiered_evidence_bindings[0];
+    assert_eq!(binding.evidence_tier, "request_scoped_evidence");
+    assert_eq!(binding.answer_use, "request_bound_basis");
+    assert_eq!(
+        binding.source_span_ref["source_hash_status"],
+        json!("retriever_source_backed_hash")
+    );
+    assert_eq!(
+        binding.evidence_gate["request_scoped_evidence_ready"],
+        json!(true)
+    );
+    assert_eq!(binding.evidence_gate["status"], json!("passed"));
+    assert_eq!(binding.evidence_gate["missing_required_fields"], json!([]));
+    assert_eq!(
+        binding.evidence_gate["decision_answer_use"],
+        json!("request_bound_basis")
+    );
+}
+
+#[test]
 fn promoted_card_keeps_stable_evidence_tier() {
     let conn = test_conn();
     let card = sample_card("evc-promoted-card", "online_promoted_source_backed");

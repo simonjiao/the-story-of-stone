@@ -735,6 +735,15 @@ fn source_hash_for_card(conn: &Connection, card: &EvidenceCard) -> Result<Source
             status: "source_snapshot_hash",
         });
     }
+    if retriever_source_backed_card(card) {
+        return Ok(SourceHashStatus {
+            value: hash_text(&format!(
+                "{}:{}:{}:{}",
+                card.source_id, card.block_id, card.source_title, card.text
+            )),
+            status: "retriever_source_backed_hash",
+        });
+    }
     Ok(SourceHashStatus {
         value: hash_text(&format!(
             "{}:{}:{}",
@@ -742,6 +751,17 @@ fn source_hash_for_card(conn: &Connection, card: &EvidenceCard) -> Result<Source
         )),
         status: "derived_fallback_hash",
     })
+}
+
+fn retriever_source_backed_card(card: &EvidenceCard) -> bool {
+    card.verification_status == "knownledge_retriever_source_backed"
+}
+
+fn request_scoped_source_hash_status(status: &str) -> bool {
+    matches!(
+        status,
+        "source_snapshot_hash" | "retriever_source_backed_hash"
+    )
 }
 
 fn source_span_ref_for_card(card: &EvidenceCard, source_hash: &SourceHashStatus) -> Value {
@@ -772,7 +792,7 @@ fn evidence_gate_for_card(
     if card.source_id.trim().is_empty() {
         missing.push("source_id");
     }
-    if source_hash.status != "source_snapshot_hash" {
+    if !request_scoped_source_hash_status(source_hash.status) {
         missing.push("source_hash");
     }
     if source_scope_policy_sha256.trim().is_empty() {
