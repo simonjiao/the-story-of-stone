@@ -578,6 +578,11 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         upstream_model: DEFAULT_MODEL_ID.to_string(),
         upstream_timeout_secs: 30,
         max_evidence: 8,
+        retriever: RetrieverHttpClient::new("http://127.0.0.1:1", 1)
+            .expect("test retriever client"),
+        retriever_base_url: "http://127.0.0.1:1".to_string(),
+        retriever_timeout_secs: 1,
+        retriever_rerank: false,
         gateway_api_keys: vec!["gateway-key".to_string()],
         admin_api_keys: vec!["admin-key".to_string()],
         allow_admin_with_gateway_key: false,
@@ -3743,12 +3748,12 @@ USER: 介绍尤三姐
 }
 
 #[tokio::test]
-async fn chat_completion_resolves_follow_up_from_session_journal() {
+async fn chat_completion_fails_closed_when_retriever_is_unavailable() {
     let db_path = temp_gateway_db_path("tonglingyu-scoped-context-follow-up");
     seed_runtime_chat_source(&db_path);
     let state = Arc::new(test_app_state(db_path.clone()));
 
-    let first = chat_completions(
+    let response = chat_completions(
         State(state.clone()),
         gateway_headers("scoped-user"),
         Json(json!({
@@ -3762,115 +3767,39 @@ async fn chat_completion_resolves_follow_up_from_session_journal() {
         })),
     )
     .await;
-    let first_status = first.status();
-    let first_text = response_text(first).await;
-    assert_eq!(first_status, StatusCode::OK, "{first_text}");
-
-    let second = chat_completions(
-        State(state),
-        gateway_headers("scoped-user"),
-        Json(json!({
-            "model": DEFAULT_MODEL_ID,
-            "messages": [{"role": "user", "content": "她最后怎么样？"}],
-            "metadata": {
-                "user_id": "scoped-user",
-                "chat_id": "scoped-chat",
-                "message_id": "scoped-message-2",
-            },
-        })),
-    )
-    .await;
-    let second_status = second.status();
-    let second_text = response_text(second).await;
-    assert_eq!(second_status, StatusCode::OK, "{second_text}");
-    let body: Value = serde_json::from_str(&second_text).expect("response json");
-    assert!(body.get("context_pack_id").is_none());
-    assert!(body.get("context_pack_ref").is_none());
-    assert!(body.get("context_projection_id").is_none());
-    assert!(body.get("context_projection_ref").is_none());
-    assert!(body.get("context_projections").is_none());
-    assert!(body.get("interaction_context_id").is_none());
-    assert!(body.get("session_journal").is_none());
+    let status = response.status();
+    let text = response_text(response).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    let body: Value = serde_json::from_str(&text).expect("response json");
+    assert_eq!(body["error"]["code"], json!("retriever_failed"));
 
     let conn = open_db(&db_path).expect("db opens");
     let (trace_id, resolved_question): (String, String) = conn
-            .query_row(
-                "SELECT trace_id, resolved_question FROM context_packs ORDER BY created_at DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("latest context pack");
-    assert_eq!(resolved_question, "尤三姐最后怎么样？");
-
-    let trace = load_trace(&db_path, &trace_id)
-        .expect("trace loads")
-        .expect("trace exists");
+        .query_row(
+            "SELECT trace_id, resolved_question FROM context_packs ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("latest context pack");
+    assert_eq!(resolved_question, "介绍尤三姐");
     assert_eq!(
-        trace["scoped_context"]["context_packs"][0]["resolved_question"],
-        json!("尤三姐最后怎么样？")
+        conn.query_row(
+            "SELECT status FROM workflow_states WHERE state = 'Failed with Controlled Response' ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("failure state"),
+        "retriever_failed"
     );
-    let rendered_trace = serde_json::to_string(&trace).expect("trace json");
-    assert!(!rendered_trace.contains("\"content\":"));
-    assert!(!rendered_trace.contains("memory_candidate_created"));
-    assert!(!rendered_trace.contains("memory_card"));
-    assert!(!rendered_trace.contains("\"projection_payload\":"));
-    let profile_views = trace["scoped_context"]["context_packs"][0]["profile_views"]
-        .as_array()
-        .expect("profile views");
-    for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
-        let view = profile_views
-            .iter()
-            .find(|view| view["profile_name"] == json!(profile))
-            .expect("profile view exists");
-        assert!(view["session_summary"].is_null());
-        assert!(
-            !serde_json::to_string(view)
-                .expect("profile view json")
-                .contains("介绍尤三姐")
-        );
-    }
-    let projections = trace["scoped_context"]["context_projections"]
-        .as_array()
-        .expect("context projections");
-    assert_eq!(projections.len(), 4);
-    for profile in ["honglou-text", "honglou-commentary", "honglou-reviewer"] {
-        let projection = projections
-            .iter()
-            .find(|projection| projection["consumer_name"] == json!(profile))
-            .expect("profile projection exists");
-        assert_eq!(projection["consumer_type"], json!("runtime_profile"));
-        assert_eq!(
-            projection["runtime_adapter"],
-            json!("tonglingyu-runtime-adapter-v1")
-        );
-        assert!(
-            projection["context_projection_ref"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("context-projection://tonglingyu/"))
-        );
-        assert_eq!(
-            projection["projection_payload_summary"]["has_session_summary"],
-            json!(false)
-        );
-        assert!(
-            !serde_json::to_string(projection)
-                .expect("projection json")
-                .contains("介绍尤三姐")
-        );
-    }
-    let main_projection = projections
-        .iter()
-        .find(|projection| projection["consumer_name"] == "honglou-main")
-        .expect("main projection exists");
     assert_eq!(
-        main_projection["projection_payload_summary"]["has_session_summary"],
-        json!(true)
+        audit_event_count(&db_path, "retriever_http_failed"),
+        1,
+        "retriever failures must be audited instead of falling back"
     );
     assert!(
-        main_projection["allowed_tools"]
-            .as_array()
-            .expect("allowed tools")
-            .contains(&json!("tonglingyu.evidence.package.create"))
+        load_trace(&db_path, &trace_id)
+            .expect("trace loads")
+            .is_some()
     );
 
     remove_sqlite_file_set(&db_path);

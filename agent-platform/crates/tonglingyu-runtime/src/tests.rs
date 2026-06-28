@@ -479,6 +479,7 @@ fn test_workflow_input(
         question: question.to_string(),
         limit,
         required_evidence_types,
+        retrieved_evidence: None,
         context: test_runtime_context(trace_id, question, &profiles),
         profiles,
     }
@@ -8041,6 +8042,100 @@ fn runtime_workflow_emits_profile_step_refs_and_review() {
         )
         .expect("audit count");
     assert_eq!(profile_step_events, workflow.steps.len() as i64);
+}
+
+#[test]
+fn runtime_workflow_consumes_pre_retrieved_evidence() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    init_knowledge_base_schema(&conn).expect("kb schema");
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-pre-retrieved".to_string();
+    card.block_id = "chunk-pre-retrieved".to_string();
+    card.source_id = "knownledge-retriever".to_string();
+    card.source_title = "knownledge retriever evidence".to_string();
+    card.text = "黛玉葬花一节可作为人物心境与诗文结构的检索证据。".to_string();
+
+    let mut input = test_workflow_input(
+        "trace-pre-retrieved-workflow",
+        "黛玉葬花为什么重要？",
+        3,
+        vec!["base_text".to_string()],
+    );
+    input.retrieved_evidence = Some(RuntimeWorkflowRetrievedEvidence {
+        schema_version: RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION.to_string(),
+        source: "knownledge_http_retriever".to_string(),
+        cards: vec![card],
+        retrieval: json!({
+            "schema_version": RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION,
+            "request": {
+                "search_plan": {
+                    "schema_version": "tonglingyu.agent_retriever.search_plan.v1",
+                    "query": "黛玉葬花为什么重要？",
+                    "routes": ["bm25", "vector", "entity", "event", "poem", "commentary"],
+                },
+                "retrieve_options": {
+                    "schema_version": "tonglingyu.agent_retriever.retrieve_options.v1",
+                    "trace_level": "route",
+                },
+            },
+            "request_response_trace": {
+                "transport": "http",
+                "tool_name": "tonglingyu.agent_retriever.retrieve_http",
+                "method": "POST",
+                "path": "/retrieve",
+                "request": {
+                    "search_plan": {
+                        "query": "黛玉葬花为什么重要？",
+                    },
+                },
+                "response": {
+                    "schema_version": "tonglingyu.agent_retriever.retrieve_response.v1",
+                },
+            },
+            "raw_retrieve_response": {
+                "schema_version": "tonglingyu.agent_retriever.retrieve_response.v1",
+                "record_type": "agent_retriever_retrieve_response",
+            },
+            "evidence_pack": {
+                "schema_version": "tonglingyu.agent_retriever.evidence_pack.v1",
+                "doc_count": 1,
+            },
+            "diagnostics": {
+                "sufficiency": {
+                    "doc_count": 1,
+                },
+            },
+        }),
+    });
+
+    let workflow = execute_runtime_workflow(&conn, input).expect("workflow executes");
+
+    assert_eq!(workflow.steps[0].operation, "text_evidence_search");
+    assert_eq!(
+        workflow.steps[0].allowed_tools,
+        vec!["tonglingyu.agent_retriever.retrieve_http".to_string()]
+    );
+    assert_eq!(
+        workflow.steps[0].tool_calls,
+        vec!["tonglingyu.agent_retriever.retrieve_http".to_string()]
+    );
+    assert_eq!(
+        workflow.steps[0].output["object"],
+        json!("tonglingyu.retriever_http.evidence_analysis")
+    );
+    assert_eq!(
+        workflow.steps[0].output["request_response_trace"]["tool_name"],
+        json!("tonglingyu.agent_retriever.retrieve_http")
+    );
+    assert_eq!(
+        workflow.steps[0].output["raw_retrieve_response"]["schema_version"],
+        json!("tonglingyu.agent_retriever.retrieve_response.v1")
+    );
+    assert!(workflow.package.cards.iter().any(|stored| {
+        stored.block_id == "chunk-pre-retrieved" && stored.source_id == "knownledge-retriever"
+    }));
+    assert!(workflow.final_answer.contains("黛玉葬花"));
 }
 
 #[test]

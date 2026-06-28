@@ -185,6 +185,9 @@ pub const KNOWLEDGE_BASE_SCHEMA_VERSION: &str = "tonglingyu-v1-sqlite-fts";
 pub const KB_VERSION_DIFF_REPORT_SCHEMA_VERSION: &str = "tonglingyu-kb-version-diff-v1";
 pub const RUNTIME_WORKFLOW_PLAN_SCHEMA_VERSION: &str = "tonglingyu-runtime-step-plan-v1";
 pub const RUNTIME_WORKFLOW_PLAN_POLICY_VERSION: &str = "tonglingyu-plan-policy-v1";
+pub const RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION: &str =
+    "tonglingyu.gateway.workflow_retrieval_input.v1";
+pub const RUNTIME_RETRIEVER_HTTP_TOOL_NAME: &str = "tonglingyu.agent_retriever.retrieve_http";
 pub const RETRIEVAL_QUALITY_REPORT_SCHEMA_VERSION: &str = "tonglingyu-rqa-report-v1";
 pub const RETRIEVAL_QUALITY_REPORT_MAX_TERMS: usize = 24;
 pub const RETRIEVAL_QUALITY_REPORT_MAX_SOURCE_REFS: usize = 32;
@@ -2367,8 +2370,20 @@ pub struct RuntimeWorkflowInput {
     pub limit: usize,
     #[serde(default)]
     pub required_evidence_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieved_evidence: Option<RuntimeWorkflowRetrievedEvidence>,
     pub profiles: RuntimeWorkflowProfiles,
     pub context: RuntimeContextContract,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkflowRetrievedEvidence {
+    pub schema_version: String,
+    pub source: String,
+    #[serde(default)]
+    pub cards: Vec<EvidenceCard>,
+    #[serde(default)]
+    pub retrieval: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2890,6 +2905,36 @@ pub fn tool_catalog() -> Vec<ToolDescriptor> {
             }),
         },
         ToolDescriptor {
+            name: RUNTIME_RETRIEVER_HTTP_TOOL_NAME.to_string(),
+            version: TOOL_CATALOG_VERSION.to_string(),
+            allowed_profiles: vec!["honglou-text".to_string()],
+            effect_scope: "read_only_knownledge_http_retriever".to_string(),
+            input_contract: json!({
+                "required": ["search_plan", "retrieve_options"],
+                "search_plan_schema": "tonglingyu.agent_retriever.search_plan.v1",
+                "retrieve_options_schema": "tonglingyu.agent_retriever.retrieve_options.v1",
+                "transport": "http"
+            }),
+            output_contract: json!({
+                "object": "tonglingyu.retriever_http.evidence_analysis",
+                "required": ["request_response_trace", "evidence_pack", "cards", "diagnostics"],
+                "retrieve_response_schema": "tonglingyu.agent_retriever.retrieve_response.v1",
+                "evidence_pack_schema": "tonglingyu.agent_retriever.evidence_pack.v1",
+                "evidence_doc_schema": "tonglingyu.agent_retriever.evidence_doc.v1",
+                "preserves": [
+                    "request",
+                    "raw_request",
+                    "retrieve_response",
+                    "raw_retrieve_response",
+                    "evidence_pack.docs[].refs",
+                    "evidence_pack.docs[].source",
+                    "evidence_pack.docs[].display",
+                    "evidence_pack.diagnostics",
+                    "evidence_pack.sufficiency"
+                ]
+            }),
+        },
+        ToolDescriptor {
             name: "tonglingyu.commentary.search".to_string(),
             version: TOOL_CATALOG_VERSION.to_string(),
             allowed_profiles: vec!["honglou-commentary".to_string()],
@@ -3223,6 +3268,7 @@ pub async fn execute_agent_runtime_plan_gate(
             question: input.question.clone(),
             limit: 1,
             required_evidence_types: input.required_evidence_types.clone(),
+            retrieved_evidence: None,
             profiles: input.profiles.clone(),
             context: input.context.clone(),
         },
@@ -3473,104 +3519,100 @@ pub fn execute_runtime_workflow(
         .as_ref()
         .and_then(|frame| serde_json::to_value(frame).ok());
     let mut steps = Vec::new();
-    let mut cards = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
-    let text_required_types = text_search_required_evidence_types(&required_evidence_types);
-    let text_started = Instant::now();
-    let (mut text_cards, text_quality_report) = match execute_tool(
-        conn,
-        TonglingyuToolCall::TextSearch {
-            question: search_question.clone(),
-            limit: input.limit,
-            required_evidence_types: text_required_types,
-        },
-    )? {
-        TonglingyuToolOutput::EvidenceCards {
-            cards,
-            quality_report,
-            ..
-        } => (cards, *quality_report),
-        other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
-    };
-    let question_frame_focus_cards =
-        question_frame_focus_search(conn, &input.question, question_frame.as_ref(), input.limit)?;
-    let question_frame_focus_evidence_ids = evidence_ids(&question_frame_focus_cards);
-    let attribute_direct_cards =
-        attribute_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
-    let attribute_direct_evidence_ids = evidence_ids(&attribute_direct_cards);
-    let relation_direct_cards =
-        relation_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
-    let relation_direct_evidence_ids = evidence_ids(&relation_direct_cards);
-    let relation_open_object_cards =
-        relation_open_object_support_search(conn, question_frame.as_ref(), input.limit)?;
-    let relation_open_object_evidence_ids = evidence_ids(&relation_open_object_cards);
-    let rehydrated_staged_hits =
-        online_evidence_card_ingest::rehydrate_staged_source_hits_for_frame(
+    let cards = if let Some(retrieved) = input.retrieved_evidence.as_ref() {
+        if retrieved.schema_version != RUNTIME_WORKFLOW_RETRIEVED_EVIDENCE_SCHEMA_VERSION {
+            return Err(anyhow!(
+                "unsupported retrieved evidence schema version: {}",
+                retrieved.schema_version
+            ));
+        }
+        if retrieved.source.trim().is_empty() {
+            return Err(anyhow!("retrieved evidence source is empty"));
+        }
+        for field in [
+            "request",
+            "raw_retrieve_response",
+            "request_response_trace",
+            "evidence_pack",
+            "diagnostics",
+        ] {
+            if retrieved.retrieval.get(field).is_none() {
+                return Err(anyhow!(
+                    "retrieved evidence retrieval trace missing required field {field}"
+                ));
+            }
+        }
+        let retrieved_started = Instant::now();
+        let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
+        let retriever_tools = vec![RUNTIME_RETRIEVER_HTTP_TOOL_NAME.to_string()];
+        let request_response_trace = retrieved
+            .retrieval
+            .get("request_response_trace")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let retriever_request = retrieved
+            .retrieval
+            .get("request")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let raw_retriever_response = retrieved
+            .retrieval
+            .get("raw_retrieve_response")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let evidence_pack = retrieved
+            .retrieval
+            .get("evidence_pack")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let retrieval_diagnostics = retrieved
+            .retrieval
+            .get("diagnostics")
+            .cloned()
+            .unwrap_or(Value::Null);
+        steps.push(workflow_step_report(
             conn,
-            &input.trace_id,
-            question_frame.as_ref(),
-            input.limit,
-        )?;
-    let rehydrated_staged_card_ids = rehydrated_staged_hits
-        .iter()
-        .map(|hit| hit.staged_card_id.clone())
-        .collect::<Vec<_>>();
-    let rehydrated_staged_cards = rehydrated_staged_hits
-        .into_iter()
-        .map(|hit| hit.card)
-        .collect::<Vec<_>>();
-    let rehydrated_staged_evidence_ids = evidence_ids(&rehydrated_staged_cards);
-    let protected_relation_cards = merge_cards(relation_direct_cards, relation_open_object_cards);
-    let protected_question_frame_cards =
-        merge_cards(protected_relation_cards, attribute_direct_cards);
-    let protected_focus_cards =
-        merge_cards(protected_question_frame_cards, question_frame_focus_cards);
-    let protected_rehydrated_cards = merge_cards(rehydrated_staged_cards, protected_focus_cards);
-    text_cards = merge_cards(protected_rehydrated_cards, text_cards);
-    retrieval_failure_candidates.push((text_quality_report.clone(), evidence_ids(&text_cards)));
-    cards = merge_cards(cards, text_cards.clone());
-    let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
-    steps.push(workflow_step_report(
-        conn,
-        WorkflowStepReportInput {
-            trace_id: &input.trace_id,
-            step_id: &text_plan_step.step_id,
-            profile: &text_plan_step.profile,
-            operation: &text_plan_step.operation,
-            required: text_plan_step.required,
-            allowed_tools: text_plan_step.allowed_tools.clone(),
-            tool_calls: text_plan_step.allowed_tools.clone(),
-            input_ref: None,
-            duration_ms: elapsed_ms(text_started),
-            output: json!({
-            "object": "tonglingyu.text.evidence_analysis",
-            "card_count": text_cards.len(),
-            "evidence_ids": evidence_ids(&text_cards),
-                "evidence_types": evidence_types(&text_cards),
-                "query_frame_bound": question_frame.is_some(),
-                "question_frame_focus_evidence_ids": question_frame_focus_evidence_ids,
-                "question_frame_attribute_support_evidence_ids": attribute_direct_evidence_ids,
-                "question_frame_direct_support_evidence_ids": relation_direct_evidence_ids,
-                "question_frame_open_object_support_evidence_ids": relation_open_object_evidence_ids,
-                "rehydrated_staged_source_hit_ids": rehydrated_staged_evidence_ids,
-                "rehydrated_staged_card_ids": rehydrated_staged_card_ids,
-                "query_sha256": hash_text(&search_question),
-                "quality_report": &text_quality_report,
-            }),
-            context: &input.context,
-        },
-    )?);
-
-    if required_evidence_types
-        .iter()
-        .any(|item| item == "commentary")
-    {
-        let commentary_started = Instant::now();
-        let (commentary_cards, commentary_quality_report) = match execute_tool(
+            WorkflowStepReportInput {
+                trace_id: &input.trace_id,
+                step_id: &text_plan_step.step_id,
+                profile: &text_plan_step.profile,
+                operation: &text_plan_step.operation,
+                required: text_plan_step.required,
+                allowed_tools: retriever_tools.clone(),
+                tool_calls: retriever_tools,
+                input_ref: None,
+                duration_ms: elapsed_ms(retrieved_started),
+                output: json!({
+                    "object": "tonglingyu.retriever_http.evidence_analysis",
+                    "source": &retrieved.source,
+                    "card_count": retrieved.cards.len(),
+                    "evidence_ids": evidence_ids(&retrieved.cards),
+                    "evidence_types": evidence_types(&retrieved.cards),
+                    "query_frame_bound": question_frame.is_some(),
+                    "query_sha256": hash_text(&search_question),
+                    "required_evidence_types": &required_evidence_types,
+                    "request": retriever_request,
+                    "request_response_trace": request_response_trace,
+                    "raw_retrieve_response": raw_retriever_response,
+                    "evidence_pack": evidence_pack,
+                    "diagnostics": retrieval_diagnostics,
+                    "retrieval": &retrieved.retrieval,
+                }),
+                context: &input.context,
+            },
+        )?);
+        retrieved.cards.clone()
+    } else {
+        let mut cards = Vec::new();
+        let text_required_types = text_search_required_evidence_types(&required_evidence_types);
+        let text_started = Instant::now();
+        let (mut text_cards, text_quality_report) = match execute_tool(
             conn,
-            TonglingyuToolCall::CommentarySearch {
+            TonglingyuToolCall::TextSearch {
                 question: search_question.clone(),
                 limit: input.limit,
+                required_evidence_types: text_required_types,
             },
         )? {
             TonglingyuToolOutput::EvidenceCards {
@@ -3580,39 +3622,135 @@ pub fn execute_runtime_workflow(
             } => (cards, *quality_report),
             other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
         };
-        retrieval_failure_candidates.push((
-            commentary_quality_report.clone(),
-            evidence_ids(&commentary_cards),
-        ));
-        cards = merge_cards(cards, commentary_cards.clone());
-        let commentary_plan_step =
-            workflow_plan_step(&workflow_plan, "commentary_evidence_search")?;
+        let question_frame_focus_cards = question_frame_focus_search(
+            conn,
+            &input.question,
+            question_frame.as_ref(),
+            input.limit,
+        )?;
+        let question_frame_focus_evidence_ids = evidence_ids(&question_frame_focus_cards);
+        let attribute_direct_cards =
+            attribute_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
+        let attribute_direct_evidence_ids = evidence_ids(&attribute_direct_cards);
+        let relation_direct_cards =
+            relation_direct_support_search(conn, question_frame.as_ref(), input.limit)?;
+        let relation_direct_evidence_ids = evidence_ids(&relation_direct_cards);
+        let relation_open_object_cards =
+            relation_open_object_support_search(conn, question_frame.as_ref(), input.limit)?;
+        let relation_open_object_evidence_ids = evidence_ids(&relation_open_object_cards);
+        let rehydrated_staged_hits =
+            online_evidence_card_ingest::rehydrate_staged_source_hits_for_frame(
+                conn,
+                &input.trace_id,
+                question_frame.as_ref(),
+                input.limit,
+            )?;
+        let rehydrated_staged_card_ids = rehydrated_staged_hits
+            .iter()
+            .map(|hit| hit.staged_card_id.clone())
+            .collect::<Vec<_>>();
+        let rehydrated_staged_cards = rehydrated_staged_hits
+            .into_iter()
+            .map(|hit| hit.card)
+            .collect::<Vec<_>>();
+        let rehydrated_staged_evidence_ids = evidence_ids(&rehydrated_staged_cards);
+        let protected_relation_cards =
+            merge_cards(relation_direct_cards, relation_open_object_cards);
+        let protected_question_frame_cards =
+            merge_cards(protected_relation_cards, attribute_direct_cards);
+        let protected_focus_cards =
+            merge_cards(protected_question_frame_cards, question_frame_focus_cards);
+        let protected_rehydrated_cards =
+            merge_cards(rehydrated_staged_cards, protected_focus_cards);
+        text_cards = merge_cards(protected_rehydrated_cards, text_cards);
+        retrieval_failure_candidates.push((text_quality_report.clone(), evidence_ids(&text_cards)));
+        cards = merge_cards(cards, text_cards.clone());
+        let text_plan_step = workflow_plan_step(&workflow_plan, "text_evidence_search")?;
         steps.push(workflow_step_report(
             conn,
             WorkflowStepReportInput {
                 trace_id: &input.trace_id,
-                step_id: &commentary_plan_step.step_id,
-                profile: &commentary_plan_step.profile,
-                operation: &commentary_plan_step.operation,
-                required: commentary_plan_step.required,
-                allowed_tools: commentary_plan_step.allowed_tools.clone(),
-                tool_calls: commentary_plan_step.allowed_tools.clone(),
+                step_id: &text_plan_step.step_id,
+                profile: &text_plan_step.profile,
+                operation: &text_plan_step.operation,
+                required: text_plan_step.required,
+                allowed_tools: text_plan_step.allowed_tools.clone(),
+                tool_calls: text_plan_step.allowed_tools.clone(),
                 input_ref: None,
-                duration_ms: elapsed_ms(commentary_started),
+                duration_ms: elapsed_ms(text_started),
                 output: json!({
-                "object": "tonglingyu.commentary.evidence_analysis",
-                "card_count": commentary_cards.len(),
-                "evidence_ids": evidence_ids(&commentary_cards),
-                "evidence_types": evidence_types(&commentary_cards),
-                "query_frame_bound": question_frame.is_some(),
-                "query_sha256": hash_text(&search_question),
-                "scope_notes": "commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope",
-                "quality_report": &commentary_quality_report,
-            }),
+                "object": "tonglingyu.text.evidence_analysis",
+                "card_count": text_cards.len(),
+                "evidence_ids": evidence_ids(&text_cards),
+                    "evidence_types": evidence_types(&text_cards),
+                    "query_frame_bound": question_frame.is_some(),
+                    "question_frame_focus_evidence_ids": question_frame_focus_evidence_ids,
+                    "question_frame_attribute_support_evidence_ids": attribute_direct_evidence_ids,
+                    "question_frame_direct_support_evidence_ids": relation_direct_evidence_ids,
+                    "question_frame_open_object_support_evidence_ids": relation_open_object_evidence_ids,
+                    "rehydrated_staged_source_hit_ids": rehydrated_staged_evidence_ids,
+                    "rehydrated_staged_card_ids": rehydrated_staged_card_ids,
+                    "query_sha256": hash_text(&search_question),
+                    "quality_report": &text_quality_report,
+                }),
                 context: &input.context,
             },
         )?);
-    }
+
+        if required_evidence_types
+            .iter()
+            .any(|item| item == "commentary")
+        {
+            let commentary_started = Instant::now();
+            let (commentary_cards, commentary_quality_report) = match execute_tool(
+                conn,
+                TonglingyuToolCall::CommentarySearch {
+                    question: search_question.clone(),
+                    limit: input.limit,
+                },
+            )? {
+                TonglingyuToolOutput::EvidenceCards {
+                    cards,
+                    quality_report,
+                    ..
+                } => (cards, *quality_report),
+                other => return Err(anyhow!("unexpected runtime tool output: {:?}", other)),
+            };
+            retrieval_failure_candidates.push((
+                commentary_quality_report.clone(),
+                evidence_ids(&commentary_cards),
+            ));
+            cards = merge_cards(cards, commentary_cards.clone());
+            let commentary_plan_step =
+                workflow_plan_step(&workflow_plan, "commentary_evidence_search")?;
+            steps.push(workflow_step_report(
+                conn,
+                WorkflowStepReportInput {
+                    trace_id: &input.trace_id,
+                    step_id: &commentary_plan_step.step_id,
+                    profile: &commentary_plan_step.profile,
+                    operation: &commentary_plan_step.operation,
+                    required: commentary_plan_step.required,
+                    allowed_tools: commentary_plan_step.allowed_tools.clone(),
+                    tool_calls: commentary_plan_step.allowed_tools.clone(),
+                    input_ref: None,
+                    duration_ms: elapsed_ms(commentary_started),
+                    output: json!({
+                    "object": "tonglingyu.commentary.evidence_analysis",
+                    "card_count": commentary_cards.len(),
+                    "evidence_ids": evidence_ids(&commentary_cards),
+                    "evidence_types": evidence_types(&commentary_cards),
+                    "query_frame_bound": question_frame.is_some(),
+                    "query_sha256": hash_text(&search_question),
+                    "scope_notes": "commentary is first-class evidence within the default pre-80 scope; later-forty material still requires explicit scope",
+                    "quality_report": &commentary_quality_report,
+                }),
+                    context: &input.context,
+                },
+            )?);
+        }
+        cards
+    };
 
     let cards = filter_cards_for_question_frame_answer_scope(
         &input.question,

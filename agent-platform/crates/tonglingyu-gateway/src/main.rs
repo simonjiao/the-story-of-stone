@@ -47,10 +47,10 @@ use tonglingyu_runtime::{
     RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
     RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
-    RuntimeWorkflowInput, RuntimeWorkflowProfiles, TONGLINGYU_RUNTIME_ADAPTER,
-    TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore, agent_runtime_profile_contracts,
-    append_rqa_lifecycle_tombstone, append_runtime_audit_event, execute_agent_runtime_plan_gate,
-    package_json,
+    RuntimeWorkflowInput, RuntimeWorkflowProfiles, RuntimeWorkflowRetrievedEvidence,
+    TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
+    agent_runtime_profile_contracts, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
+    execute_agent_runtime_plan_gate, package_json,
 };
 #[cfg(test)]
 use tonglingyu_runtime::{OnlineEvidenceCardUpdateRequestInput, RuntimeWorkflowStreamEvent};
@@ -75,6 +75,7 @@ mod plan;
 mod question_frame;
 mod response;
 mod retrieval_suggestion;
+mod retriever_http;
 mod rqa_lifecycle;
 mod rule_candidates;
 mod user_response_safety;
@@ -122,6 +123,10 @@ use crate::response::{
     cache_completion_value, completion_value, public_completion_value,
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
+};
+use crate::retriever_http::{
+    RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest, RetrieverSearchPlan,
+    evidence_cards_from_pack, workflow_retrieval_input,
 };
 use crate::rqa_lifecycle::rqa_user_lifecycle_command;
 use crate::rule_candidates::{
@@ -481,6 +486,12 @@ struct ServeArgs {
     upstream_model: String,
     #[arg(long, env = "TONGLINGYU_MAX_EVIDENCE", default_value_t = 8)]
     max_evidence: usize,
+    #[arg(long, env = "TONGLINGYU_RETRIEVER_BASE_URL")]
+    retriever_base_url: String,
+    #[arg(long, env = "TONGLINGYU_RETRIEVER_TIMEOUT_SECS", default_value_t = 20)]
+    retriever_timeout_secs: u64,
+    #[arg(long, env = "TONGLINGYU_RETRIEVER_RERANK", default_value_t = false)]
+    retriever_rerank: bool,
     #[arg(long, env = "TONGLINGYU_GATEWAY_API_KEY")]
     gateway_api_key: Option<String>,
     #[arg(long, env = "TONGLINGYU_GATEWAY_API_KEYS")]
@@ -578,6 +589,10 @@ struct AppState {
     upstream_model: String,
     upstream_timeout_secs: u64,
     max_evidence: usize,
+    retriever: RetrieverHttpClient,
+    retriever_base_url: String,
+    retriever_timeout_secs: u64,
+    retriever_rerank: bool,
     gateway_api_keys: Vec<String>,
     admin_api_keys: Vec<String>,
     allow_admin_with_gateway_key: bool,
@@ -1907,6 +1922,29 @@ async fn serve(args: ServeArgs) -> Result<()> {
         build_workflow_agent_runtime(&profiles)?;
     let (llm_agent_runtime, llm_agent_runtime_mode, llm_agent_provider_profiles) =
         build_llm_agent_runtime()?;
+    let retriever =
+        RetrieverHttpClient::new(&args.retriever_base_url, args.retriever_timeout_secs)?;
+    let retriever_health = retriever
+        .health()
+        .await
+        .context("tonglingyu retriever health check failed")?;
+    if !retriever_health.ready {
+        return Err(anyhow!(
+            "tonglingyu retriever is not ready: status={}, required_failed={:?}",
+            retriever_health.status,
+            retriever_health.required_failed
+        ));
+    }
+    let retriever_metadata = retriever
+        .metadata()
+        .await
+        .context("tonglingyu retriever metadata check failed")?;
+    tracing::info!(
+        retriever_status = %retriever_health.status,
+        retriever_service = %retriever_metadata.service.name,
+        retriever_version = %retriever_metadata.service.version,
+        "tonglingyu retriever connected"
+    );
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
@@ -1919,6 +1957,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
         upstream_model: args.upstream_model,
         upstream_timeout_secs: args.upstream_timeout_secs,
         max_evidence: args.max_evidence,
+        retriever,
+        retriever_base_url: args.retriever_base_url.trim_end_matches('/').to_string(),
+        retriever_timeout_secs: args.retriever_timeout_secs,
+        retriever_rerank: args.retriever_rerank,
         gateway_api_keys,
         admin_api_keys,
         allow_admin_with_gateway_key: args.allow_admin_with_gateway_key,
@@ -3108,6 +3150,7 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
             question: args.question.clone(),
             limit: args.limit,
             required_evidence_types: policy.required_evidence_types.clone(),
+            retrieved_evidence: None,
             profiles: runtime_profiles,
             context: runtime_context,
         })
@@ -3157,14 +3200,27 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
 }
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
+    let retriever_health = state.retriever.health().await;
     match (
         state.runtime_store.store_stats(),
         state.runtime_store.online_evidence_card_ingest_stats(),
         state.runtime_store.rule_catalog_metadata(),
+        retriever_health,
     ) {
-        (Ok(stats), Ok(online_evidence_card_ingest), Ok(runtime_rule_catalogs)) => Json(json!({
+        (
+            Ok(stats),
+            Ok(online_evidence_card_ingest),
+            Ok(runtime_rule_catalogs),
+            Ok(retriever_health),
+        ) if retriever_health.ready => Json(json!({
             "status": "ok",
             "model": state.model_id,
+            "retriever": {
+                "base_url": &state.retriever_base_url,
+                "timeout_secs": state.retriever_timeout_secs,
+                "rerank": state.retriever_rerank,
+                "health": retriever_health,
+            },
             "agent_runtime": {
                 "mode": state.agent_runtime_mode.as_str(),
                 "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
@@ -3197,7 +3253,22 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             "blocks": stats.blocks
         }))
         .into_response(),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => (
+        (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "degraded",
+                "error": "retriever_unready",
+                "retriever": {
+                    "base_url": &state.retriever_base_url,
+                    "health": retriever_health,
+                },
+            })),
+        )
+            .into_response(),
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "degraded",
@@ -7106,6 +7177,106 @@ async fn chat_completions(
             "runtime_step_outputs": &agent_runtime_plan_gate.runtime_step_outputs,
         }),
     );
+    let retrieve_request = RetrieverRetrieveRequest {
+        request_id: trace_id.clone(),
+        session_id: Some(scoped_context.user_session_id.clone()),
+        caller: "tonglingyu-gateway".to_string(),
+        graph_node: "chat_workflow".to_string(),
+        search_plan: RetrieverSearchPlan::for_workflow(
+            &scoped_context.resolved_question,
+            state.max_evidence,
+            state.retriever_rerank,
+        ),
+        retrieve_options: RetrieverRetrieveOptions::workflow(state.max_evidence),
+        include_raw: false,
+        metadata: json!({
+            "trace_id": &trace_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "required_evidence_types": &policy.required_evidence_types,
+            "question_type": &policy.question_type,
+        }),
+    };
+    let retrieve_response = match state.retriever.retrieve(&retrieve_request).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%trace_id, error = %error, "retriever workflow request failed");
+            let _ = record_workflow_state(
+                &conn,
+                &trace_id,
+                Some(&scoped_context.user_session_id),
+                None,
+                "Failed with Controlled Response",
+                "retriever_failed",
+                &json!({
+                    "error": error.to_string(),
+                    "retriever_base_url": &state.retriever_base_url,
+                    "fallback_used": false,
+                }),
+            );
+            let _ = insert_audit_event(
+                &conn,
+                &trace_id,
+                "retriever_http_failed",
+                &json!({
+                    "user_session_id": &scoped_context.user_session_id,
+                    "context_pack_id": &scoped_context.context_pack_id,
+                    "retriever_base_url": &state.retriever_base_url,
+                    "error": error.to_string(),
+                    "fallback_used": false,
+                }),
+            );
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "retriever_failed",
+                "retriever workflow request failed",
+                Some(&trace_id),
+            );
+        }
+    };
+    let retrieved_cards = evidence_cards_from_pack(&retrieve_response.evidence_pack);
+    let workflow_retrieval = workflow_retrieval_input(
+        &retrieve_response,
+        state.retriever.base_url(),
+        &retrieve_request,
+        &retrieved_cards,
+    );
+    let _ = record_workflow_state(
+        &conn,
+        &trace_id,
+        Some(&scoped_context.user_session_id),
+        None,
+        "Retriever Executed",
+        "ok",
+        &json!({
+            "retriever_base_url": &state.retriever_base_url,
+            "doc_count": retrieve_response.evidence_pack.docs.len(),
+            "card_count": retrieved_cards.len(),
+            "sufficiency": &retrieve_response.evidence_pack.sufficiency,
+            "route_coverage": &retrieve_response.evidence_pack.sufficiency.route_coverage,
+            "route_errors": &retrieve_response.evidence_pack.diagnostics.route_errors,
+        }),
+    );
+    let _ = insert_audit_event(
+        &conn,
+        &trace_id,
+        "retriever_http_completed",
+        &json!({
+            "user_session_id": &scoped_context.user_session_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "retriever_base_url": &state.retriever_base_url,
+            "request_id": &retrieve_request.request_id,
+            "schema_version": &retrieve_response.schema_version,
+            "evidence_pack_schema_version": &retrieve_response.evidence_pack.schema_version,
+            "doc_count": retrieve_response.evidence_pack.docs.len(),
+            "card_count": retrieved_cards.len(),
+            "sufficiency": &retrieve_response.evidence_pack.sufficiency,
+            "route_coverage": &retrieve_response.evidence_pack.sufficiency.route_coverage,
+            "fallback_used": false,
+        }),
+    );
     let workflow = match state
         .runtime_store
         .execute_workflow_with_agent_runtime_client(
@@ -7114,6 +7285,13 @@ async fn chat_completions(
                 question: scoped_context.resolved_question.clone(),
                 limit: state.max_evidence,
                 required_evidence_types: policy.required_evidence_types.clone(),
+                retrieved_evidence: Some(RuntimeWorkflowRetrievedEvidence {
+                    schema_version: retriever_http::WORKFLOW_RETRIEVAL_INPUT_SCHEMA_VERSION
+                        .to_string(),
+                    source: "knownledge_http_retriever".to_string(),
+                    cards: retrieved_cards,
+                    retrieval: workflow_retrieval,
+                }),
                 profiles: runtime_workflow_profiles(&state.profiles),
                 context: runtime_context.clone(),
             },

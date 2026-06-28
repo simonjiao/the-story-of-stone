@@ -121,6 +121,7 @@ fn run_eval(args: &EvalArgs) -> Result<Value> {
             question: case.question.to_string(),
             limit: case.limit.unwrap_or(args.limit),
             required_evidence_types: policy.required_evidence_types.clone(),
+            retrieved_evidence: None,
             profiles,
             context: runtime_context,
         })?;
