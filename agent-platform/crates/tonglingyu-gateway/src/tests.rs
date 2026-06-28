@@ -1082,6 +1082,72 @@ fn common_recall_judgement_plan_uses_poem_route_with_structured_terms() {
 }
 
 #[test]
+fn query_planner_adapter_preserves_planner_shape_and_selects_judgement_recall() {
+    let query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+        "宝钗判词",
+        "poem_or_judgement",
+        &["base_text".to_string()],
+        Some("base_text_query"),
+    );
+    let search_plan = RetrieverSearchPlan::for_query_planner(&query_plan, 6, false);
+
+    assert_eq!(
+        query_plan.schema_version,
+        retriever_http::QUERY_PLAN_SCHEMA_VERSION
+    );
+    assert_eq!(
+        query_plan.common_recall_kind(),
+        RetrieverCommonRecallKind::JudgementPoem
+    );
+    assert_eq!(
+        search_plan.raw_plan["common_recall_kind"],
+        json!("judgement_poem")
+    );
+    assert_eq!(
+        search_plan.raw_plan["query_plan"]["schema_version"],
+        json!(retriever_http::QUERY_PLAN_SCHEMA_VERSION)
+    );
+    assert!(
+        search_plan
+            .retrieval_routes
+            .contains(&"poem_lookup".to_string())
+    );
+    assert_eq!(search_plan.routes.first().map(String::as_str), Some("poem"));
+    assert!(search_plan.routes.contains(&"vector".to_string()));
+    assert!(
+        search_plan
+            .structured_terms
+            .contains(&"entity_subtype:judgement".to_string())
+    );
+}
+
+#[test]
+fn query_planner_adapter_maps_person_intro_to_person_recall() {
+    let query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+        "介绍尤三姐",
+        "base_text",
+        &["base_text".to_string()],
+        Some("base_text_query"),
+    );
+    let search_plan = RetrieverSearchPlan::for_query_planner(&query_plan, 8, false);
+
+    assert_eq!(
+        query_plan.common_recall_kind(),
+        RetrieverCommonRecallKind::Person
+    );
+    assert_eq!(search_plan.raw_plan["common_recall_kind"], json!("person"));
+    assert_eq!(
+        search_plan.routes.first().map(String::as_str),
+        Some("entity")
+    );
+    assert!(
+        search_plan
+            .retrieval_routes
+            .contains(&"entity_lookup".to_string())
+    );
+}
+
+#[test]
 fn eval_quality_summary_fails_closed_without_expected_denominator() {
     let quality = EvalQualityAccumulator {
         total_cases: 1,
@@ -3852,6 +3918,15 @@ async fn chat_completion_fails_closed_when_retriever_is_unavailable() {
         audit_event_count(&db_path, "retriever_http_failed"),
         1,
         "retriever failures must be audited instead of falling back"
+    );
+    let retrieval_plan = latest_audit_event_payload(&db_path, "retrieval_plan_created");
+    assert_eq!(
+        retrieval_plan["retriever_query_plan"]["schema_version"],
+        json!(retriever_http::QUERY_PLAN_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        retrieval_plan["retriever_common_recall_kind"],
+        json!("person")
     );
     assert!(
         load_trace(&db_path, &trace_id)

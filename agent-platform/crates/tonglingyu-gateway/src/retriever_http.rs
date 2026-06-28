@@ -12,6 +12,7 @@ use tonglingyu_runtime::EvidenceCard;
 pub(crate) const SEARCH_PLAN_SCHEMA_VERSION: &str = "tonglingyu.agent_retriever.search_plan.v1";
 pub(crate) const RETRIEVE_OPTIONS_SCHEMA_VERSION: &str =
     "tonglingyu.agent_retriever.retrieve_options.v1";
+pub(crate) const QUERY_PLAN_SCHEMA_VERSION: &str = "tonglingyu.retrieval.query_plan.v1";
 pub(crate) const SERVICE_SCHEMA_VERSION: &str = "tonglingyu.agent_retriever.service.v1";
 pub(crate) const RETRIEVE_RESPONSE_SCHEMA_VERSION: &str =
     "tonglingyu.agent_retriever.retrieve_response.v1";
@@ -648,6 +649,8 @@ pub(crate) struct RetrieverSearchPlan {
     pub(crate) schema_version: String,
     pub(crate) query: String,
     pub(crate) routes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) retrieval_routes: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub(crate) route_weights: BTreeMap<String, f64>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
@@ -683,6 +686,45 @@ impl RetrieverSearchPlan {
         Self::for_common_recall(RetrieverCommonRecallKind::Workflow, query, top_k, rerank)
     }
 
+    pub(crate) fn for_query_planner(
+        query_plan: &RetrieverQueryPlannerPlan,
+        top_k: usize,
+        rerank: bool,
+    ) -> Self {
+        let kind = query_plan.common_recall_kind();
+        let mut plan = if kind == RetrieverCommonRecallKind::Workflow {
+            Self::for_workflow(&query_plan.original_query, top_k, rerank)
+        } else {
+            Self::for_common_recall(kind, &query_plan.original_query, top_k, rerank)
+        };
+        let planner_routes = query_plan.canonical_routes();
+        plan.routes = merge_route_lists(kind.routes(), &planner_routes);
+        plan.retrieval_routes = query_plan.retrieval_routes.clone();
+        plan.route_weights = query_plan.merged_route_weights(kind);
+        plan.queries = query_plan.route_queries(kind);
+        plan.keyword_queries = if query_plan.keyword_queries.is_empty() {
+            kind.keyword_queries(&query_plan.original_query)
+        } else {
+            query_plan.keyword_queries.clone()
+        };
+        plan.semantic_queries = if query_plan.semantic_queries.is_empty() {
+            kind.semantic_queries(&query_plan.original_query)
+        } else {
+            query_plan.semantic_queries.clone()
+        };
+        plan.structured_terms = merge_terms(&query_plan.structured_terms, &kind.structured_terms());
+        plan.expansion_terms = merge_terms(&query_plan.expansion_terms, &kind.expansion_terms());
+        plan.explicit_scope_allowed = Some(query_plan.explicit_scope_allowed);
+        plan.raw_plan = json!({
+            "planner": "tonglingyu-gateway-query-planner-adapter",
+            "common_recall_kind": kind.as_str(),
+            "route_policy": kind.route_policy(),
+            "vector_required": true,
+            "query_plan": query_plan,
+        });
+        plan
+    }
+
     pub(crate) fn for_common_recall(
         kind: RetrieverCommonRecallKind,
         query: &str,
@@ -698,6 +740,7 @@ impl RetrieverSearchPlan {
                 .iter()
                 .map(|route| (*route).to_string())
                 .collect(),
+            retrieval_routes: Vec::new(),
             route_weights: kind.route_weights(),
             queries: kind.queries(query),
             keyword_queries: kind.keyword_queries(query),
@@ -726,6 +769,160 @@ impl RetrieverSearchPlan {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RetrieverQueryPlannerPlan {
+    pub(crate) schema_version: String,
+    pub(crate) planner_version: String,
+    pub(crate) original_query: String,
+    pub(crate) primary_intent: String,
+    pub(crate) secondary_intents: Vec<String>,
+    pub(crate) explicit_scope_allowed: bool,
+    pub(crate) retrieval_routes: Vec<String>,
+    pub(crate) route_weights: BTreeMap<String, f64>,
+    pub(crate) keyword_queries: Vec<String>,
+    pub(crate) semantic_queries: Vec<String>,
+    pub(crate) structured_terms: Vec<String>,
+    pub(crate) expansion_terms: Vec<String>,
+    #[serde(default)]
+    pub(crate) diagnostics: Value,
+}
+
+impl RetrieverQueryPlannerPlan {
+    pub(crate) fn from_gateway_policy(
+        query: &str,
+        question_type: &str,
+        required_evidence_types: &[String],
+        question_frame_intent: Option<&str>,
+    ) -> Self {
+        let primary_intent = gateway_primary_intent(
+            query,
+            question_type,
+            required_evidence_types,
+            question_frame_intent,
+        );
+        let secondary_intents = gateway_secondary_intents(
+            query,
+            &primary_intent,
+            required_evidence_types,
+            question_frame_intent,
+        );
+        let retrieval_routes = planner_routes_for_intents(&primary_intent, &secondary_intents);
+        let route_weights = planner_route_weights(&primary_intent, &secondary_intents);
+        let query_terms = query_terms(query);
+        let keyword_queries = planner_keyword_queries(query, &primary_intent, &query_terms);
+        let semantic_queries = planner_semantic_queries(query, &primary_intent, &query_terms);
+        Self {
+            schema_version: QUERY_PLAN_SCHEMA_VERSION.to_string(),
+            planner_version: "gateway_query_planner_adapter_v0.1".to_string(),
+            original_query: query.to_string(),
+            primary_intent,
+            secondary_intents,
+            explicit_scope_allowed: query_mentions_explicit_scope(query),
+            retrieval_routes,
+            route_weights,
+            keyword_queries,
+            semantic_queries,
+            structured_terms: query_terms,
+            expansion_terms: gateway_expansion_terms(query),
+            diagnostics: json!({
+                "planner_kind": "gateway_policy_adapter",
+                "question_type": question_type,
+                "required_evidence_types": required_evidence_types,
+                "question_frame_intent": question_frame_intent,
+            }),
+        }
+    }
+
+    pub(crate) fn common_recall_kind(&self) -> RetrieverCommonRecallKind {
+        match self.primary_intent.as_str() {
+            "commentary_lookup" => return RetrieverCommonRecallKind::Commentary,
+            "text_lookup" => {
+                return if contains_judgement_marker(&self.original_query)
+                    || self
+                        .structured_terms
+                        .iter()
+                        .chain(self.expansion_terms.iter())
+                        .any(|term| contains_judgement_marker(term))
+                {
+                    RetrieverCommonRecallKind::JudgementPoem
+                } else {
+                    RetrieverCommonRecallKind::Poem
+                };
+            }
+            "event_lookup" => return RetrieverCommonRecallKind::Event,
+            "relation_lookup" | "entity_lookup" => return RetrieverCommonRecallKind::Person,
+            _ => {}
+        }
+        let intents = self.intent_set();
+        if intents.contains("commentary_lookup") {
+            return RetrieverCommonRecallKind::Commentary;
+        }
+        if intents.contains("text_lookup") {
+            return if contains_judgement_marker(&self.original_query)
+                || self
+                    .structured_terms
+                    .iter()
+                    .chain(self.expansion_terms.iter())
+                    .any(|term| contains_judgement_marker(term))
+            {
+                RetrieverCommonRecallKind::JudgementPoem
+            } else {
+                RetrieverCommonRecallKind::Poem
+            };
+        }
+        if intents.contains("event_lookup") {
+            return RetrieverCommonRecallKind::Event;
+        }
+        if intents.contains("relation_lookup") || intents.contains("entity_lookup") {
+            return RetrieverCommonRecallKind::Person;
+        }
+        RetrieverCommonRecallKind::Workflow
+    }
+
+    fn intent_set(&self) -> BTreeSet<&str> {
+        std::iter::once(self.primary_intent.as_str())
+            .chain(self.secondary_intents.iter().map(String::as_str))
+            .collect()
+    }
+
+    fn canonical_routes(&self) -> Vec<String> {
+        let routes = self
+            .retrieval_routes
+            .iter()
+            .filter_map(|route| canonical_route_from_planner_route(route).map(ToString::to_string));
+        dedupe_limited(routes, 12)
+    }
+
+    fn merged_route_weights(&self, kind: RetrieverCommonRecallKind) -> BTreeMap<String, f64> {
+        let mut weights = kind.route_weights();
+        for (route, weight) in &self.route_weights {
+            if let Some(canonical) = canonical_route_from_planner_route(route) {
+                weights.insert(canonical.to_string(), *weight);
+            }
+        }
+        weights
+    }
+
+    fn route_queries(&self, kind: RetrieverCommonRecallKind) -> BTreeMap<String, Vec<String>> {
+        let mut queries = kind.queries(&self.original_query);
+        if !self.keyword_queries.is_empty() {
+            queries.insert("bm25".to_string(), self.keyword_queries.clone());
+            for route in ["entity", "event", "poem", "commentary"] {
+                if let Some(existing) = queries.remove(route) {
+                    queries.insert(
+                        route.to_string(),
+                        merge_terms(&self.keyword_queries, &existing),
+                    );
+                }
+            }
+        }
+        if !self.semantic_queries.is_empty() {
+            queries.insert("vector".to_string(), self.semantic_queries.clone());
+        }
+        queries
+    }
+}
+
 fn query_rewrites(query: &str, suffixes: &[&str]) -> Vec<String> {
     let values = std::iter::once(query.to_string())
         .chain(suffixes.iter().map(|suffix| format!("{query} {suffix}")));
@@ -750,6 +947,275 @@ fn dedupe_limited(values: impl IntoIterator<Item = String>, max_items: usize) ->
         }
     }
     out
+}
+
+fn merge_terms(left: &[String], right: &[String]) -> Vec<String> {
+    dedupe_limited(left.iter().chain(right.iter()).cloned(), MAX_PLAN_TERMS)
+}
+
+fn merge_route_lists(primary: &[&str], secondary: &[String]) -> Vec<String> {
+    let mut routes = dedupe_limited(
+        primary
+            .iter()
+            .map(|route| (*route).to_string())
+            .chain(secondary.iter().cloned()),
+        12,
+    );
+    if !routes.iter().any(|route| route == "vector") {
+        routes.push("vector".to_string());
+    }
+    routes
+}
+
+fn canonical_route_from_planner_route(route: &str) -> Option<&'static str> {
+    match route.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "bm25" | "bm25_fts" | "fts" | "keyword" => Some("bm25"),
+        "vector" | "dense_vector" | "embedding" | "semantic" => Some("vector"),
+        "entity" | "entity_lookup" => Some("entity"),
+        "event" | "event_lookup" => Some("event"),
+        "poem" | "poem_lookup" | "text" | "text_work" | "poetry" => Some("poem"),
+        "commentary" | "commentary_lookup" => Some("commentary"),
+        "scope_filter" | "graph_expansion" | "reranker" => None,
+        _ => None,
+    }
+}
+
+fn gateway_primary_intent(
+    query: &str,
+    question_type: &str,
+    required_evidence_types: &[String],
+    question_frame_intent: Option<&str>,
+) -> String {
+    let question_type = question_type.trim();
+    let frame = question_frame_intent.unwrap_or_default();
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+        || question_type == "commentary"
+        || frame.contains("commentary")
+        || contains_any(query, &["脂批", "批语", "評語", "评语"])
+    {
+        return "commentary_lookup".to_string();
+    }
+    if question_type == "poem_or_judgement"
+        || contains_any(query, &["判词", "判詞", "诗", "詞", "词", "曲"])
+    {
+        return "text_lookup".to_string();
+    }
+    if frame.contains("relation")
+        || frame.contains("attribute")
+        || contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"])
+    {
+        return "relation_lookup".to_string();
+    }
+    if frame.contains("chapter_location")
+        || frame.contains("character_fate")
+        || question_type == "character_fate"
+        || contains_any(query, &["情节", "事件", "哪一回", "第几回", "发生", "经过"])
+    {
+        return "event_lookup".to_string();
+    }
+    if question_type == "version" || contains_any(query, &["版本", "前八十", "后四十", "後四十"])
+    {
+        return "version_lookup".to_string();
+    }
+    if contains_any(query, &["为什么", "为何", "如何理解", "象征", "寓意"]) {
+        return "explanation_lookup".to_string();
+    }
+    "mixed_lookup".to_string()
+}
+
+fn gateway_secondary_intents(
+    query: &str,
+    primary_intent: &str,
+    required_evidence_types: &[String],
+    question_frame_intent: Option<&str>,
+) -> Vec<String> {
+    let mut intents = Vec::new();
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "commentary")
+    {
+        intents.push("commentary_lookup".to_string());
+    }
+    if required_evidence_types
+        .iter()
+        .any(|item| item == "base_text" || item == "direct_text")
+    {
+        intents.push("text_lookup".to_string());
+    }
+    if question_frame_intent
+        .unwrap_or_default()
+        .contains("character_fate")
+    {
+        intents.push("event_lookup".to_string());
+    }
+    if contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"]) {
+        intents.push("relation_lookup".to_string());
+    }
+    if contains_any(query, &["情节", "事件", "哪一回", "发生", "经过"]) {
+        intents.push("event_lookup".to_string());
+    }
+    if contains_any(query, &["脂批", "批语", "評語", "评语"]) {
+        intents.push("commentary_lookup".to_string());
+    }
+    dedupe_limited(
+        intents
+            .into_iter()
+            .filter(|intent| intent != primary_intent),
+        8,
+    )
+}
+
+fn planner_routes_for_intents(primary_intent: &str, secondary_intents: &[String]) -> Vec<String> {
+    let intents = std::iter::once(primary_intent)
+        .chain(secondary_intents.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut routes = vec!["bm25_fts".to_string(), "dense_vector".to_string()];
+    if intents.contains("relation_lookup") {
+        routes.push("entity_lookup".to_string());
+        routes.push("graph_expansion".to_string());
+    }
+    if intents.contains("event_lookup") || intents.contains("explanation_lookup") {
+        routes.push("event_lookup".to_string());
+        routes.push("graph_expansion".to_string());
+    }
+    if intents.contains("text_lookup") || intents.contains("version_lookup") {
+        routes.push("poem_lookup".to_string());
+    }
+    if intents.contains("commentary_lookup") || intents.contains("version_lookup") {
+        routes.push("commentary_lookup".to_string());
+    }
+    routes.push("scope_filter".to_string());
+    routes.push("reranker".to_string());
+    dedupe_limited(routes, 12)
+}
+
+fn planner_route_weights(
+    primary_intent: &str,
+    secondary_intents: &[String],
+) -> BTreeMap<String, f64> {
+    let intents = std::iter::once(primary_intent)
+        .chain(secondary_intents.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let mut weights = BTreeMap::from([
+        ("bm25_fts".to_string(), 0.72),
+        ("dense_vector".to_string(), 0.58),
+        ("scope_filter".to_string(), 1.0),
+        ("reranker".to_string(), 0.45),
+    ]);
+    if intents.contains("relation_lookup") {
+        weights.insert("entity_lookup".to_string(), 1.15);
+        weights.insert("graph_expansion".to_string(), 0.76);
+    }
+    if intents.contains("event_lookup") {
+        weights.insert("event_lookup".to_string(), 1.15);
+        weights.insert("graph_expansion".to_string(), 0.72);
+    }
+    if intents.contains("text_lookup") {
+        weights.insert("poem_lookup".to_string(), 1.2);
+        weights.insert("bm25_fts".to_string(), 0.9);
+    }
+    if intents.contains("commentary_lookup") {
+        weights.insert("commentary_lookup".to_string(), 1.2);
+        weights.insert("bm25_fts".to_string(), 0.9);
+    }
+    if intents.contains("explanation_lookup") {
+        weights.insert("dense_vector".to_string(), 0.82);
+        weights.insert("reranker".to_string(), 0.7);
+    }
+    weights
+}
+
+fn planner_keyword_queries(query: &str, primary_intent: &str, terms: &[String]) -> Vec<String> {
+    let mut queries = vec![query.to_string()];
+    if !terms.is_empty() {
+        queries.push(terms.join(" "));
+    }
+    match primary_intent {
+        "commentary_lookup" => queries.push(format!("{query} 脂批 批语 评点")),
+        "relation_lookup" => queries.push(format!("{query} 人物 关系 身份")),
+        "event_lookup" => queries.push(format!("{query} 情节 事件 经过")),
+        "text_lookup" => queries.push(format!("{query} 诗词 判词 曲词 原文")),
+        "version_lookup" => queries.push(format!("{query} 版本 异文 对齐")),
+        _ => {}
+    }
+    dedupe_limited(queries, 8)
+}
+
+fn planner_semantic_queries(query: &str, primary_intent: &str, terms: &[String]) -> Vec<String> {
+    let core = if terms.is_empty() {
+        query.to_string()
+    } else {
+        terms.join(" ")
+    };
+    let mut queries = vec![query.to_string()];
+    match primary_intent {
+        "commentary_lookup" => queries.push(format!("{core} 脂批评点 所评正文")),
+        "relation_lookup" => queries.push(format!("{core} 人物关系 身份 经历 证据")),
+        "event_lookup" => queries.push(format!("{core} 情节事件 发生经过 因果")),
+        "text_lookup" => queries.push(format!("{core} 诗词曲文 文本含义 所在章节")),
+        "version_lookup" => queries.push(format!("{core} 版本差异 异文 对齐")),
+        "explanation_lookup" => queries.push(format!("{core} 象征意义 主题解释 情节因果")),
+        _ => queries.push(format!("{core} 相关人物 事件 原文证据")),
+    }
+    dedupe_limited(queries, 8)
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let terms = query
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '，' | '。' | '？' | '?' | '！' | '!' | '、' | '：' | ':' | '；' | ';'
+                )
+        })
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(ToString::to_string);
+    dedupe_limited(terms, 16)
+}
+
+fn gateway_expansion_terms(query: &str) -> Vec<String> {
+    let expansions: &[(&str, &[&str])] = &[
+        ("宝钗", &["薛宝钗", "金玉良缘", "冷香丸"]),
+        ("黛玉", &["林黛玉", "林妹妹", "潇湘妃子", "木石前盟"]),
+        ("宝玉", &["贾宝玉", "通灵宝玉", "怡红公子"]),
+        ("判词", &["册页判语", "金陵十二钗", "正册"]),
+        ("通灵玉", &["通灵宝玉", "劳什子", "石头"]),
+    ];
+    let mut out = Vec::new();
+    for (trigger, terms) in expansions {
+        if query.contains(trigger) {
+            out.extend(terms.iter().map(|term| (*term).to_string()));
+        }
+    }
+    dedupe_limited(out, 16)
+}
+
+fn query_mentions_explicit_scope(query: &str) -> bool {
+    contains_any(
+        query,
+        &[
+            "第",
+            "前八十",
+            "前80",
+            "后四十",
+            "後四十",
+            "后40",
+            "程甲",
+            "程乙",
+        ],
+    )
+}
+
+fn contains_judgement_marker(value: &str) -> bool {
+    contains_any(value, &["判词", "判詞", "册页", "冊頁", "金陵十二钗"])
+}
+
+fn contains_any(value: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| value.contains(term))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

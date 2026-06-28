@@ -118,11 +118,49 @@ POST /retrieve
 }
 ```
 
-Gateway 只表达 route 和数量上限要求；具体向量库查询由 retriever 内部完成。
+Gateway 只表达 query planner 结果、route 和数量上限要求；具体向量库查询由 retriever 内部完成。
+
+## Gateway Query Planner Adapter
+
+chat workflow 的内部主路径不是直接调用 common recall HTTP API，而是：
+
+```text
+SearchPolicy + question_frame intent
+  -> RetrieverQueryPlannerPlan
+  -> RetrieverSearchPlan
+  -> knownledge HTTP /retrieve
+```
+
+`RetrieverQueryPlannerPlan` 兼容 knownledge deterministic query planner 的核心字段：
+
+- `schema_version = tonglingyu.retrieval.query_plan.v1`
+- `primary_intent`
+- `secondary_intents`
+- `retrieval_routes`
+- `route_weights`
+- `keyword_queries`
+- `semantic_queries`
+- `structured_terms`
+- `expansion_terms`
+- `explicit_scope_allowed`
+- `diagnostics`
+
+Gateway adapter 根据 planner intent 选择 common recall kind：
+
+| planner intent | common recall kind |
+| --- | --- |
+| `relation_lookup` / `entity_lookup` | `person` |
+| `event_lookup` | `event` |
+| `text_lookup` + 判词/册页 cue | `judgement_poem` |
+| `text_lookup` | `poem` |
+| `commentary_lookup` | `commentary` |
+| `version_lookup` / `explanation_lookup` / `mixed_lookup` | `workflow` |
+
+生成的 `SearchPlan.raw_plan` 保留完整 `query_plan`，同时写入 `common_recall_kind`、`route_policy` 和 `vector_required=true`。`retrieval_plan_created` audit、workflow planned state 和 retriever request metadata 都会记录 query planner 结果，便于检查内部 planner 到 retriever 的实际映射。
 
 ## Gateway Common Recall API
 
-外部 workflow 如果只需要常用召回，不应手写 retriever SearchPlan。Gateway 提供认证后的封装接口：
+Gateway 也保留认证后的常用召回接口，供外部 workflow 在不接入内部 query planner 时直接使用：
 
 ```text
 POST /v1/retrieval/recall/{kind}

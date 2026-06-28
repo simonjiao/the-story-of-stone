@@ -125,9 +125,9 @@ use crate::response::{
     streaming_response_from_runtime_events,
 };
 use crate::retriever_http::{
-    RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverRetrieveOptions,
-    RetrieverRetrieveRequest, RetrieverSearchPlan, evidence_cards_from_pack,
-    workflow_retrieval_input,
+    RetrieverCommonRecallKind, RetrieverHttpClient, RetrieverQueryPlannerPlan,
+    RetrieverRetrieveOptions, RetrieverRetrieveRequest, RetrieverSearchPlan,
+    evidence_cards_from_pack, workflow_retrieval_input,
 };
 use crate::rqa_lifecycle::rqa_user_lifecycle_command;
 use crate::rule_candidates::{
@@ -1102,6 +1102,17 @@ fn apply_question_frame_required_evidence_types(policy: &mut SearchPolicy, conte
         }
     }
     policy.required_evidence_types = required.into_iter().collect();
+}
+
+fn question_frame_intent(context_pack: &Value) -> Option<String> {
+    context_pack
+        .get("resolver")
+        .and_then(|resolver| resolver.get("question_frame"))
+        .and_then(|frame| frame.get("intent"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|intent| !intent.is_empty())
+        .map(ToString::to_string)
 }
 
 fn runtime_context_projection(projection: &ContextProjection) -> RuntimeContextProjection {
@@ -7350,6 +7361,14 @@ async fn chat_completions(
     apply_question_frame_required_evidence_types(&mut policy, &scoped_context.context_pack);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
+    let frame_intent = question_frame_intent(&scoped_context.context_pack);
+    let retriever_query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+        &scoped_context.resolved_question,
+        &policy.question_type,
+        &policy.required_evidence_types,
+        frame_intent.as_deref(),
+    );
+    let retriever_common_recall_kind = retriever_query_plan.common_recall_kind();
     let agent_runtime_plan_gate = match execute_agent_runtime_plan_gate(AgentRuntimePlanGateInput {
         trace_id: trace_id.clone(),
         question: scoped_context.resolved_question.clone(),
@@ -7388,6 +7407,8 @@ async fn chat_completions(
         &json!({
             "policy": &policy,
             "runtime_step_plan": &runtime_step_plan,
+            "retriever_query_plan": &retriever_query_plan,
+            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
             "agent_runtime_plan_gate": &agent_runtime_plan_gate,
         }),
     );
@@ -7405,6 +7426,8 @@ async fn chat_completions(
             "blocked_controls": &policy.blocked_controls,
             "runtime_step_plan": &runtime_step_plan,
             "agent_runtime_plan_gate": &agent_runtime_plan_gate,
+            "retriever_query_plan": &retriever_query_plan,
+            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
         }),
     );
     let _ = insert_audit_event(
@@ -7426,8 +7449,8 @@ async fn chat_completions(
         session_id: Some(scoped_context.user_session_id.clone()),
         caller: "tonglingyu-gateway".to_string(),
         graph_node: "chat_workflow".to_string(),
-        search_plan: RetrieverSearchPlan::for_workflow(
-            &scoped_context.resolved_question,
+        search_plan: RetrieverSearchPlan::for_query_planner(
+            &retriever_query_plan,
             state.max_evidence,
             state.retriever_rerank,
         ),
@@ -7441,6 +7464,9 @@ async fn chat_completions(
             "context_pack_ref": &scoped_context.context_pack_ref,
             "required_evidence_types": &policy.required_evidence_types,
             "question_type": &policy.question_type,
+            "question_frame_intent": &frame_intent,
+            "retriever_query_plan": &retriever_query_plan,
+            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
         }),
     };
     let retrieve_response = match state.retriever.retrieve(&retrieve_request).await {
