@@ -25,6 +25,98 @@ except ModuleNotFoundError:
         return default
 
 
+FORBIDDEN_GATEWAY_CONTROL_FIELDS = {
+    "agent",
+    "agent_id",
+    "agent_profile",
+    "agent_runtime",
+    "agent_runtime_plan_gate",
+    "agent_runtime_summary",
+    "profile",
+    "internal_agent",
+    "honglou_agent",
+    "runtime_profile",
+    "runtime_step_outputs",
+    "runtime_step_plan",
+    "reviewer",
+    "skip_reviewer",
+    "disable_reviewer",
+    "allowed_tools",
+    "required_evidence_types",
+    "trace_id",
+    "package_id",
+    "evidence_package_id",
+    "admin_trace",
+    "audit_events",
+    "internal_trace",
+    "runtime_tools_used",
+    "workflow_states",
+    "workflow_state",
+    "tools",
+    "tool_choice",
+    "functions",
+    "function_call",
+    "parallel_tool_calls",
+    "system_prompt",
+    "instructions",
+    "profile_config",
+    "internal_config",
+    "interaction_context_id",
+    "context_pack_id",
+    "context_pack_ref",
+    "context_projection",
+    "context_projection_id",
+    "context_projection_ref",
+    "context_projection_digest",
+    "consumer_type",
+    "consumer_name",
+    "runtime_adapter",
+    "context_scope_binding",
+    "scope_id",
+    "scope_graph",
+    "memory_read_scopes",
+    "memory_read_refs",
+    "memory_read_ref_digest",
+    "memory_read_policy_digest",
+    "memory_write_scopes",
+    "memory_scope",
+    "memory_summaries",
+    "memory_policy",
+    "memory_policy_digest",
+    "memory_usage_summary",
+    "memory_candidate",
+    "memory_candidate_id",
+    "memory_candidate_ref",
+    "memory_candidates",
+    "memory_card",
+    "memory_card_id",
+    "memory_card_ref",
+    "memory_cards",
+    "memory_policy_decision",
+    "memory_policy_decision_id",
+    "memory_policy_decision_ref",
+    "memory_policy_decisions",
+    "memory_transition_audit",
+    "memory_collector",
+    "llm_extraction",
+    "llm_filter",
+    "rule_filter",
+    "read_enabled",
+    "forbidden_tools",
+    "tool_policy_digest",
+    "output_contract_digest",
+    "session_journal",
+}
+RECURSIVE_GATEWAY_CONTROL_CONTAINERS = {
+    "metadata",
+    "extra_body",
+    "options",
+    "parameters",
+    "config",
+}
+SHALLOW_GATEWAY_CONTROL_CONTAINERS = {"user"}
+
+
 class Filter:
     class Valves(BaseModel):
         AGENT_BRIDGE_SECRET: str = Field(default="")
@@ -45,6 +137,8 @@ class Filter:
         model = str(body.get("model") or _get(__model__, "id") or "")
         if model not in _target_models(self.valves.TARGET_MODELS, self.valves.TARGET_MODEL):
             return body
+
+        _strip_gateway_control_fields(body)
 
         secret = self.valves.AGENT_BRIDGE_SECRET
         user_id = str(_get(__user__, "id") or "").strip()
@@ -91,6 +185,34 @@ class Filter:
         context["signature"] = _signature(secret, context)
         body["agent_bridge_context"] = context
         return body
+
+
+def _strip_gateway_control_fields(body: dict) -> None:
+    for key in list(body.keys()):
+        if key in FORBIDDEN_GATEWAY_CONTROL_FIELDS:
+            body.pop(key, None)
+
+    for key in RECURSIVE_GATEWAY_CONTROL_CONTAINERS:
+        _strip_control_fields_recursive(body.get(key))
+
+    for key in SHALLOW_GATEWAY_CONTROL_CONTAINERS:
+        value = body.get(key)
+        if isinstance(value, dict):
+            for child_key in list(value.keys()):
+                if child_key in FORBIDDEN_GATEWAY_CONTROL_FIELDS:
+                    value.pop(child_key, None)
+
+
+def _strip_control_fields_recursive(value: Any) -> None:
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            if key in FORBIDDEN_GATEWAY_CONTROL_FIELDS:
+                value.pop(key, None)
+                continue
+            _strip_control_fields_recursive(value.get(key))
+    elif isinstance(value, list):
+        for item in value:
+            _strip_control_fields_recursive(item)
 
 
 def _get(value: Any, key: str) -> Any:
