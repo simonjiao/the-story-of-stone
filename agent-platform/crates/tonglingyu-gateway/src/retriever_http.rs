@@ -372,6 +372,8 @@ pub(crate) struct RetrieverSearchPlan {
     pub(crate) structured_terms: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) expansion_terms: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) required_evidence_types: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub(crate) explicit_scope_allowed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -408,6 +410,7 @@ impl RetrieverSearchPlan {
             semantic_queries: domain_plan.semantic_queries.clone(),
             structured_terms: domain_plan.structured_terms.clone(),
             expansion_terms: domain_plan.expansion_terms.clone(),
+            required_evidence_types: domain_plan.required_evidence_types.clone(),
             explicit_scope_allowed: Some(domain_plan.explicit_scope_allowed),
             filters: domain_plan.filters.clone(),
             top_k,
@@ -723,6 +726,8 @@ pub(crate) struct RetrieverNormalizedSearchPlan {
     #[serde(default)]
     pub(crate) expansion_terms: Vec<String>,
     #[serde(default)]
+    pub(crate) required_evidence_types: Vec<String>,
+    #[serde(default)]
     pub(crate) filters: Option<Value>,
     pub(crate) explicit_scope_allowed: bool,
     pub(crate) top_k: usize,
@@ -757,6 +762,10 @@ impl RetrieverNormalizedSearchPlan {
         validate_unique_strings(&self.semantic_queries, "search_plan.semantic_queries")?;
         validate_unique_strings(&self.structured_terms, "search_plan.structured_terms")?;
         validate_unique_strings(&self.expansion_terms, "search_plan.expansion_terms")?;
+        validate_unique_strings(
+            &self.required_evidence_types,
+            "search_plan.required_evidence_types",
+        )?;
         if let Some(filters) = &self.filters {
             if !filters.is_object() {
                 return Err(anyhow!(
@@ -1171,8 +1180,19 @@ pub(crate) fn evidence_cards_from_pack(pack: &RetrieverEvidencePack) -> Vec<Evid
     pack.docs
         .iter()
         .enumerate()
+        .filter(|(_, doc)| doc_is_answer_basis(doc))
         .map(|(index, doc)| evidence_card_from_doc(pack, doc, index))
         .collect()
+}
+
+fn doc_is_answer_basis(doc: &RetrieverEvidenceDoc) -> bool {
+    doc_evidence_projection(doc) == Some("answer_basis")
+}
+
+fn doc_evidence_projection(doc: &RetrieverEvidenceDoc) -> Option<&str> {
+    doc.metadata
+        .get("evidence_projection")
+        .and_then(Value::as_str)
 }
 
 fn evidence_card_from_doc(
@@ -1258,6 +1278,7 @@ fn doc_chunk_kind(doc: &RetrieverEvidenceDoc) -> String {
 
 fn evidence_text_for_doc(doc: &RetrieverEvidenceDoc) -> String {
     let mut parts = Vec::new();
+    parts.extend(hydrated_text_for_doc(doc));
     for value in [
         doc.display.title.as_deref(),
         doc.display.quote_text.as_deref(),
@@ -1276,6 +1297,27 @@ fn evidence_text_for_doc(doc: &RetrieverEvidenceDoc) -> String {
     trim_chars(&parts.join("\n"), 1_200)
 }
 
+fn hydrated_text_for_doc(doc: &RetrieverEvidenceDoc) -> Vec<String> {
+    let mut texts = Vec::new();
+    let Some(card) = doc.evidence_card.as_ref() else {
+        return texts;
+    };
+    for key in ["hydrated_commentaries", "hydrated_segments"] {
+        let Some(items) = card.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() && !texts.iter().any(|existing| existing == trimmed) {
+                    texts.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    texts
+}
+
 fn support_scope_for_doc(pack: &RetrieverEvidencePack, doc: &RetrieverEvidenceDoc) -> String {
     let answer_policy = doc
         .usage_policy
@@ -1291,8 +1333,9 @@ fn support_scope_for_doc(pack: &RetrieverEvidencePack, doc: &RetrieverEvidenceDo
             .collect::<Vec<_>>()
             .join(",")
     };
+    let projection = doc_evidence_projection(doc).unwrap_or("unclassified");
     format!(
-        "knownledge retriever EvidencePack 命中；answer_policy={answer_policy}; route={route_summary}; score={:.4}; pack_sufficient={}",
+        "knownledge retriever EvidencePack 命中；projection={projection}; answer_policy={answer_policy}; route={route_summary}; score={:.4}; pack_sufficient={}",
         doc.score, pack.sufficiency.sufficient
     )
 }
