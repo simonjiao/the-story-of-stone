@@ -520,6 +520,15 @@ fn test_app_state(db_path: PathBuf) -> AppState {
     AppState {
         db: db_path.clone(),
         runtime_store: TonglingyuRuntimeStore::new(db_path),
+        response_store: Arc::new(Mutex::new(ResponseStoreBackend::InMemory(
+            InMemoryResponseEventStore::default(),
+        ))),
+        response_jobs: Arc::new(Mutex::new(ResponseJobQueueBackend::InMemory(
+            InMemoryResponseJobQueue::default(),
+        ))),
+        response_job_max_attempts: 3,
+        response_sync_wait_secs: 2,
+        realtime_max_buffer_chars: 4000,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -970,6 +979,935 @@ async fn response_text(response: Response) -> String {
         .await
         .expect("response body reads");
     String::from_utf8(bytes.to_vec()).expect("response body is utf-8")
+}
+
+async fn response_json(response: Response) -> Value {
+    serde_json::from_str(&response_text(response).await).expect("response json")
+}
+
+#[tokio::test]
+async fn responses_and_runs_share_identity_status_and_replay_events() {
+    let db_path = temp_gateway_db_path("gateway-response-run-projection");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("user-response-run");
+    headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    headers.insert("idempotency-key", "idem-response-run".parse().unwrap());
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "分析这批材料并给出结论",
+        "background": true,
+        "metadata": {"mode": "rag"}
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload.clone()))
+            .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    assert_eq!(created["object"], json!("response"));
+    assert_eq!(created["status"], json!("queued"));
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+
+    let idempotent =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(idempotent.status(), StatusCode::OK);
+    let idempotent = response_json(idempotent).await;
+    assert_eq!(idempotent["response_id"], json!(response_id));
+    assert_eq!(idempotent["run_id"], json!(run_id));
+
+    let run_status = get_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+    )
+    .await;
+    assert_eq!(run_status.status(), StatusCode::OK);
+    let run_status = response_json(run_status).await;
+    assert_eq!(run_status["object"], json!("run"));
+    assert_eq!(run_status["id"], json!(run_id));
+    assert_eq!(run_status["response_id"], json!(response_id));
+    assert_eq!(run_status["status"], json!("queued"));
+
+    let events = response_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(response_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("id: 1\n"));
+    assert!(events.contains("event: response.created"));
+    assert!(events.contains(&response_id));
+    assert!(!events.contains("trace_id"));
+    assert!(!events.contains("[DONE]"));
+
+    let mut resume_headers = headers.clone();
+    resume_headers.insert("last-event-id", "1".parse().unwrap());
+    let resumed = run_events_endpoint(
+        State(state),
+        resume_headers,
+        AxumPath(run_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    assert_eq!(response_text(resumed).await, "");
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_create_enqueues_job_only_for_new_identity() {
+    let db_path = temp_gateway_db_path("gateway-response-job-enqueue");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("enqueue-user");
+    headers.insert("idempotency-key", "enqueue-once".parse().unwrap());
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "分析这批材料",
+        "background": true,
+        "metadata": {"client_request_id": "enqueue-once"}
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload.clone()))
+            .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let idempotent = create_response_endpoint(State(state.clone()), headers, Json(payload)).await;
+    assert_eq!(idempotent.status(), StatusCode::OK);
+    let idempotent = response_json(idempotent).await;
+    assert_eq!(created["response_id"], idempotent["response_id"]);
+
+    let first = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("first job")
+    };
+    assert_eq!(json!(first.job.response_id), created["response_id"]);
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(first).expect("complete");
+        assert!(queue.claim_next("test-worker", 0).expect("claim").is_none());
+    }
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_worker_completes_empty_input_from_queued_job() {
+    let db_path = temp_gateway_db_path("gateway-response-worker-empty");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("worker-empty-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "background": true
+    });
+
+    let created =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"]
+        .as_str()
+        .expect("response id")
+        .to_string();
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued job")
+    };
+
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let final_state = get_response_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(final_state.status(), StatusCode::OK);
+    let final_state = response_json(final_state).await;
+    assert_eq!(final_state["status"], json!("completed"));
+
+    let events = response_events_endpoint(
+        State(state),
+        headers,
+        AxumPath(response_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    let events = response_text(events).await;
+    assert!(events.contains("event: output_text.delta"));
+    assert!(events.contains("event: response.completed"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_workflow_event_sink_maps_runtime_events_and_cancel_signal() {
+    let db_path = temp_gateway_db_path("gateway-response-workflow-event-sink");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("workflow-sink-user");
+    let created = create_response_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued job")
+    };
+    let job = lease.job.clone();
+    let sink = ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: job.clone(),
+    };
+    let started_event = RuntimeWorkflowStreamEvent {
+        sequence: 0,
+        event_type: "started".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: None,
+        output_ref: None,
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({"context_pack_id": "ctx-secret"}),
+    };
+    sink.emit(started_event.clone())
+        .await
+        .expect("started emit");
+    sink.emit(RuntimeWorkflowStreamEvent {
+        sequence: 1,
+        event_type: "content_delta".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: Some("公开增量".to_string()),
+        output_ref: None,
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({"trace_id": "trace-forged"}),
+    })
+    .await
+    .expect("delta emit");
+    sink.emit(RuntimeWorkflowStreamEvent {
+        sequence: 2,
+        event_type: "final_output".to_string(),
+        profile: "honglou-main".to_string(),
+        trace_id: job.trace_id.clone(),
+        content_delta: None,
+        output_ref: Some("output-secret".to_string()),
+        package_id: Some("pkg-workflow-sink".to_string()),
+        metadata: json!({}),
+    })
+    .await
+    .expect("final emit");
+
+    let events = response_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(job.response_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.status"));
+    assert!(events.contains("event: output_text.delta"));
+    assert!(events.contains("公开增量"));
+    assert!(!events.contains("ctx-secret"));
+    assert!(!events.contains("trace-forged"));
+    assert!(!events.contains(&job.trace_id));
+
+    let canceled = cancel_response_endpoint(
+        State(state.clone()),
+        headers,
+        AxumPath(job.response_id.clone()),
+    )
+    .await;
+    assert_eq!(canceled.status(), StatusCode::OK);
+    assert!(sink.cancel_requested().await.expect("cancel check"));
+
+    let mut missing_job = job.clone();
+    missing_job.response_id = "resp_missing_for_sink".to_string();
+    let missing_sink = ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: missing_job,
+    };
+    assert!(missing_sink.emit(started_event).await.is_err());
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn responses_stream_true_reads_same_response_events() {
+    let db_path = temp_gateway_db_path("gateway-response-stream-bridge");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("response-stream-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "stream": true
+    });
+
+    let response =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued response job")
+    };
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let body = response_text(response).await;
+    assert!(body.contains("event: response.created"));
+    assert!(body.contains("event: output_text.delta"));
+    assert!(body.contains("event: response.completed"));
+    assert!(body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("trace_id"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_background_false_waits_until_worker_terminal_state() {
+    let db_path = temp_gateway_db_path("gateway-response-sync-wait");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("response-sync-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "input": "",
+        "background": false
+    });
+
+    let create_future =
+        create_response_endpoint(State(state.clone()), headers.clone(), Json(payload));
+    let worker_future = async {
+        for _ in 0..40 {
+            let lease = {
+                let mut queue = state.response_jobs.lock().expect("queue");
+                queue.claim_next("test-worker", 0).expect("claim")
+            };
+            if let Some(lease) = lease {
+                execute_response_job(state.clone(), lease.job.clone())
+                    .await
+                    .expect("worker execution");
+                let mut queue = state.response_jobs.lock().expect("queue");
+                queue.complete(lease).expect("complete");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("response job was not queued before sync wait timeout");
+    };
+    let (created, _) = tokio::join!(create_future, worker_future);
+
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    assert_eq!(created["object"], json!("response"));
+    assert_eq!(created["status"], json!("completed"));
+    assert!(created["completed_at"].as_i64().is_some());
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn chat_stream_bridges_to_response_job_events() {
+    let db_path = temp_gateway_db_path("gateway-chat-stream-bridge");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("chat-stream-user");
+    let payload = json!({
+        "model": DEFAULT_MODEL_ID,
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": ""}
+        ]
+    });
+
+    let response = chat_completions(State(state.clone()), headers, Json(payload)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued chat job")
+    };
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let body = response_text(response).await;
+    assert!(body.contains("\"object\":\"chat.completion.chunk\""));
+    assert!(body.contains("\"delta\":{\"role\":\"assistant\"}"));
+    assert!(body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(body.contains("\"tonglingyu_event\""));
+    assert!(body.contains("\"type\":\"response.status\""));
+    assert!(body.contains("data: [DONE]"));
+    assert!(!body.contains("trace_id"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_owner_scope_requires_tenant_and_subject() {
+    let db_path = temp_gateway_db_path("gateway-response-owner");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut owner_headers = gateway_headers("owner-user");
+    owner_headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    let created = create_response_endpoint(
+        State(state.clone()),
+        owner_headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "分析材料",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    let mut wrong_tenant_headers = gateway_headers("owner-user");
+    wrong_tenant_headers.insert("x-tonglingyu-tenant-id", "tenant-b".parse().unwrap());
+    let wrong_tenant = get_response_endpoint(
+        State(state.clone()),
+        wrong_tenant_headers,
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(wrong_tenant.status(), StatusCode::NOT_FOUND);
+
+    let mut wrong_subject_headers = gateway_headers("other-user");
+    wrong_subject_headers.insert("x-tonglingyu-tenant-id", "tenant-a".parse().unwrap());
+    let wrong_subject = get_response_endpoint(
+        State(state.clone()),
+        wrong_subject_headers,
+        AxumPath(response_id.clone()),
+    )
+    .await;
+    assert_eq!(wrong_subject.status(), StatusCode::NOT_FOUND);
+
+    let owner = get_response_endpoint(State(state), owner_headers, AxumPath(response_id)).await;
+    assert_eq!(owner.status(), StatusCode::OK);
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn run_cancel_writes_terminal_events_and_rejects_late_action() {
+    let db_path = temp_gateway_db_path("gateway-run-cancel");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("cancel-user");
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "执行长时间研究任务",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+
+    let canceled = cancel_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+    )
+    .await;
+    assert_eq!(canceled.status(), StatusCode::OK);
+    let canceled = response_json(canceled).await;
+    assert_eq!(canceled["object"], json!("run"));
+    assert_eq!(canceled["status"], json!("canceled"));
+    assert_eq!(canceled["cancel_requested"], json!(true));
+
+    let events = run_events_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath(run_id.clone()),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.created"));
+    assert!(events.contains("event: response.status"));
+    assert!(events.contains("event: response.canceled"));
+    assert!(events.contains("data: [DONE]"));
+    assert!(!events.contains("trace_id"));
+
+    let action = submit_run_action_endpoint(
+        State(state),
+        headers,
+        AxumPath((run_id, "approval-test".to_string())),
+        Json(json!({})),
+    )
+    .await;
+    assert_eq!(action.status(), StatusCode::CONFLICT);
+    let action = response_json(action).await;
+    assert_eq!(action["error"]["code"], json!("run_terminal"));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn run_action_submit_restores_waiting_run_idempotently() {
+    let db_path = temp_gateway_db_path("gateway-run-action-submit");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let mut headers = gateway_headers("action-user");
+    headers.insert("idempotency-key", "submit-action-once".parse().unwrap());
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "等待人工审批",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let run_id = created["run_id"].as_str().unwrap().to_string();
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .expect("start response");
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseRequiresAction,
+        json!({
+            "action_id": "approval-1",
+            "action_type": "human_approval",
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        }),
+        Some(ResponseStatus::RequiresAction),
+        None,
+        None,
+        None,
+    )
+    .expect("require action");
+
+    let submitted = submit_run_action_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath((run_id.clone(), "approval-1".to_string())),
+        Json(json!({"approved": true})),
+    )
+    .await;
+    assert_eq!(submitted.status(), StatusCode::OK);
+    let submitted = response_json(submitted).await;
+    assert_eq!(submitted["status"], json!("in_progress"));
+    assert_eq!(submitted["requires_action_count"], json!(0));
+
+    let duplicate = submit_run_action_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        AxumPath((run_id.clone(), "approval-1".to_string())),
+        Json(json!({"approved": true})),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    let duplicate = response_json(duplicate).await;
+    assert_eq!(duplicate["status"], json!("in_progress"));
+
+    let events = run_events_endpoint(
+        State(state),
+        headers,
+        AxumPath(run_id),
+        Query(ResponseEventsQuery { after: None }),
+    )
+    .await;
+    assert_eq!(events.status(), StatusCode::OK);
+    let events = response_text(events).await;
+    assert!(events.contains("event: response.requires_action"));
+    assert_eq!(events.matches("\"action_status\":\"submitted\"").count(), 1);
+    assert!(!events.contains("trace_id"));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn realtime_rejects_audio_sequence_replay_and_forbidden_fields() {
+    let mut session = RealtimeSessionState::new(8);
+    let audio_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-audio",
+        "type": "input_audio.delta",
+        "sequence": 1,
+        "payload": {}
+    }))
+    .expect("audio event");
+    let audio_error = realtime_validate_client_event(&session, &audio_event).unwrap_err();
+    assert_eq!(audio_error.code, "audio_frame_rejected");
+
+    let valid_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-1",
+        "type": "input_text.delta",
+        "sequence": 1,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("valid event");
+    realtime_validate_client_event(&session, &valid_event).expect("valid");
+    realtime_record_client_event(&mut session, &valid_event);
+
+    let replay_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-2",
+        "type": "input_text.delta",
+        "sequence": 1,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("replay event");
+    let replay_error = realtime_validate_client_event(&session, &replay_event).unwrap_err();
+    assert_eq!(replay_error.code, "sequence_regressed");
+
+    let duplicate_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-1",
+        "type": "input_text.delta",
+        "sequence": 2,
+        "payload": {"text": "宝玉"}
+    }))
+    .expect("duplicate event");
+    let duplicate_error = realtime_validate_client_event(&session, &duplicate_event).unwrap_err();
+    assert_eq!(duplicate_error.code, "duplicate_event_id");
+
+    let forbidden_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-3",
+        "type": "input_text.commit",
+        "sequence": 3,
+        "payload": {"text": "宝玉", "trace_id": "client-forged"}
+    }))
+    .expect("forbidden event");
+    let forbidden_error = realtime_validate_client_event(&session, &forbidden_event).unwrap_err();
+    assert_eq!(forbidden_error.code, "forbidden_control_fields");
+
+    let oversized_event: RealtimeClientEvent = serde_json::from_value(json!({
+        "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+        "event_id": "cli-4",
+        "type": "input_text.commit",
+        "sequence": 4,
+        "payload": {"text": "一二三四五六七八九"}
+    }))
+    .expect("oversized event");
+    let oversized_error = realtime_validate_client_event(&session, &oversized_event).unwrap_err();
+    assert_eq!(oversized_error.code, "input_too_large");
+}
+
+#[tokio::test]
+async fn realtime_commit_create_resume_and_cancel_share_response_events() {
+    let db_path = temp_gateway_db_path("gateway-realtime-create");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("realtime-user");
+    let mut session = RealtimeSessionState::new(4000);
+    session.session_id = "session-realtime-test".to_string();
+
+    let delta_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-delta-1",
+            "type": "input_text.delta",
+            "sequence": 1,
+            "payload": {"text": "宝玉的玉"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(delta_frames.join("\n").contains("input_text.delta.ack"));
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        assert!(queue.claim_next("test-worker", 0).expect("claim").is_none());
+    }
+
+    let commit_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-commit-1",
+            "type": "input_text.commit",
+            "sequence": 2,
+            "payload": {"text": ""}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(commit_frames.join("\n").contains("input_text.committed"));
+
+    let create_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-create-1",
+            "type": "response.create",
+            "sequence": 3,
+            "payload": {"text": ""}
+        })
+        .to_string(),
+    )
+    .await;
+    let create_body = create_frames.join("\n");
+    assert!(create_body.contains("\"type\":\"response.created\""));
+    assert!(!create_body.contains("trace_id"));
+
+    let lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued realtime job")
+    };
+    let response_id = lease.job.response_id.clone();
+    execute_response_job(state.clone(), lease.job.clone())
+        .await
+        .expect("worker execution");
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue.complete(lease).expect("complete");
+    }
+
+    let fanout_frames = realtime_collect_subscription_frames(state.clone(), &mut session);
+    let fanout_body = fanout_frames.join("\n");
+    assert!(fanout_body.contains("\"type\":\"output_text.delta\""));
+    assert!(fanout_body.contains("\"type\":\"response.completed\""));
+    assert!(fanout_body.contains("请提出一个《红楼梦》相关问题。"));
+    assert!(!fanout_body.contains("trace_id"));
+
+    let resume_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-resume-1",
+            "type": "response.resume",
+            "response_id": response_id,
+            "sequence": 4,
+            "payload": {"after": 1}
+        })
+        .to_string(),
+    )
+    .await;
+    let resume_body = resume_frames.join("\n");
+    assert!(!resume_body.contains("\"type\":\"response.created\""));
+    assert!(resume_body.contains("\"type\":\"response.completed\""));
+
+    let cancel_create_frames = realtime_handle_text_frame(
+        state.clone(),
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-create-2",
+            "type": "response.create",
+            "sequence": 5,
+            "payload": {"text": "宝玉的玉第一次怎么来的？"}
+        })
+        .to_string(),
+    )
+    .await;
+    assert!(
+        cancel_create_frames
+            .join("\n")
+            .contains("\"type\":\"response.created\"")
+    );
+    let cancel_lease = {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .claim_next("test-worker", 0)
+            .expect("claim")
+            .expect("queued cancel job")
+    };
+    let cancel_response_id = cancel_lease.job.response_id.clone();
+    {
+        let mut queue = state.response_jobs.lock().expect("queue");
+        queue
+            .complete(cancel_lease)
+            .expect("discard queued cancel job");
+    }
+
+    let cancel_frames = realtime_handle_text_frame(
+        state,
+        &headers,
+        "realtime-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-cancel-1",
+            "type": "response.cancel",
+            "response_id": cancel_response_id,
+            "sequence": 6,
+            "payload": {}
+        })
+        .to_string(),
+    )
+    .await;
+    let cancel_body = cancel_frames.join("\n");
+    assert!(cancel_body.contains("\"type\":\"response.status\""));
+    assert!(cancel_body.contains("\"type\":\"response.canceled\""));
+
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn realtime_action_submit_restores_waiting_response() {
+    let db_path = temp_gateway_db_path("gateway-realtime-action");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let headers = gateway_headers("realtime-action-user");
+    let created = create_run_endpoint(
+        State(state.clone()),
+        headers.clone(),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "等待实时审批",
+            "background": true
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let response_id = created["response_id"].as_str().unwrap().to_string();
+
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .expect("start response");
+    append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseRequiresAction,
+        json!({
+            "action_id": "approval-ws-1",
+            "action_type": "human_approval",
+            "expires_at": OffsetDateTime::now_utc().unix_timestamp() + 3600,
+        }),
+        Some(ResponseStatus::RequiresAction),
+        None,
+        None,
+        None,
+    )
+    .expect("require action");
+
+    let mut session = RealtimeSessionState::new(4000);
+    session.session_id = "session-realtime-action-test".to_string();
+    let frames = realtime_handle_text_frame(
+        state,
+        &headers,
+        "realtime-action-user",
+        &mut session,
+        &json!({
+            "schema_version": REALTIME_CLIENT_EVENT_SCHEMA_VERSION,
+            "event_id": "cli-action-1",
+            "type": "response.action.submit",
+            "response_id": response_id,
+            "sequence": 1,
+            "payload": {
+                "action_id": "approval-ws-1",
+                "approved": true,
+                "idempotency_key": "approval-ws-1-once"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+
+    let body = frames.join("\n");
+    assert!(body.contains("\"type\":\"response.requires_action\""));
+    assert!(body.contains("\"action_status\":\"submitted\""));
+    assert!(!body.contains("trace_id"));
+    remove_sqlite_file_set(&db_path);
+}
+
+#[tokio::test]
+async fn response_create_rejects_metadata_scope_override_before_state_creation() {
+    let db_path = temp_gateway_db_path("gateway-response-metadata-override");
+    let state = Arc::new(test_app_state(db_path.clone()));
+    let response = create_response_endpoint(
+        State(state),
+        gateway_headers("metadata-user"),
+        Json(json!({
+            "model": DEFAULT_MODEL_ID,
+            "input": "分析材料",
+            "metadata": {
+                "tenant_id": "tenant-override"
+            }
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = response_json(response).await;
+    assert_eq!(response["error"]["code"], json!("metadata_overrides_auth"));
+
+    remove_sqlite_file_set(&db_path);
 }
 
 #[test]

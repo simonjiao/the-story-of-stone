@@ -32,7 +32,6 @@ enum ChapterLocationCandidateKind {
 #[derive(Debug, Clone)]
 struct ChapterLocationSelection<'a> {
     chapter_no: i64,
-    event_label: String,
     title: Option<String>,
     base: Option<ChapterLocationCandidate<'a>>,
     commentary: Option<ChapterLocationCandidate<'a>>,
@@ -40,6 +39,7 @@ struct ChapterLocationSelection<'a> {
     support_count: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn chapter_location_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -86,7 +86,11 @@ pub(crate) fn chapter_location_answer(
             &policy,
         ));
     }
-    Some(render_chapter_location_answer(selection, &policy))
+    Some(render_chapter_location_answer(
+        selection,
+        &event_label,
+        &policy,
+    ))
 }
 
 pub(crate) fn chapter_location_answer_requirement_value(
@@ -228,6 +232,7 @@ fn chapter_location_event_label(frame: &RuntimeQuestionFrame, terms: &[String]) 
     event
 }
 
+#[cfg(test)]
 fn ambiguous_chapter_location_answer(
     selections: &[ChapterLocationSelection<'_>],
     event_label: &str,
@@ -249,13 +254,15 @@ fn ambiguous_chapter_location_answer(
     )
 }
 
+#[cfg(test)]
 fn render_chapter_location_answer(
     selection: &ChapterLocationSelection<'_>,
+    event_label: &str,
     policy: &ChapterLocationPolicy,
 ) -> String {
     let mut sentences = vec![render_chapter_location_template(
         &policy.direct_answer_template,
-        &selection.event_label,
+        event_label,
         Some(selection.chapter_no),
         None,
         None,
@@ -264,7 +271,7 @@ fn render_chapter_location_answer(
     if let Some(title) = &selection.title {
         sentences.push(render_chapter_location_template(
             &policy.chapter_title_template,
-            &selection.event_label,
+            event_label,
             Some(selection.chapter_no),
             Some(title),
             None,
@@ -274,7 +281,7 @@ fn render_chapter_location_answer(
     if let Some(base) = &selection.base {
         sentences.push(render_chapter_location_template(
             &policy.base_evidence_template,
-            &selection.event_label,
+            event_label,
             Some(selection.chapter_no),
             selection.title.as_deref(),
             Some(&base.quote),
@@ -283,7 +290,7 @@ fn render_chapter_location_answer(
     } else if let Some(commentary) = &selection.commentary {
         sentences.push(render_chapter_location_template(
             &policy.commentary_evidence_template,
-            &selection.event_label,
+            event_label,
             Some(selection.chapter_no),
             selection.title.as_deref(),
             Some(&commentary.quote),
@@ -293,6 +300,7 @@ fn render_chapter_location_answer(
     sentences.join("")
 }
 
+#[cfg(test)]
 fn render_chapter_location_template(
     template: &str,
     event: &str,
@@ -312,6 +320,7 @@ fn render_chapter_location_template(
         .replace("{locations}", locations.unwrap_or(""))
 }
 
+#[cfg(test)]
 fn chapter_location_selection_label(selection: &ChapterLocationSelection<'_>) -> String {
     if let Some(title) = &selection.title {
         format!("第{}回（{}）", selection.chapter_no, title)
@@ -352,7 +361,7 @@ fn dominant_chapter_selection<'a>(
 
 fn ranked_chapter_location_selections<'a>(
     candidates: Vec<ChapterLocationCandidate<'a>>,
-    event_label: String,
+    _event_label: String,
 ) -> Vec<ChapterLocationSelection<'a>> {
     let mut grouped: BTreeMap<i64, Vec<ChapterLocationCandidate<'a>>> = BTreeMap::new();
     for candidate in candidates {
@@ -377,7 +386,6 @@ fn ranked_chapter_location_selections<'a>(
                 .cloned();
             Some(ChapterLocationSelection {
                 chapter_no,
-                event_label: event_label.clone(),
                 title,
                 base,
                 commentary,

@@ -5,7 +5,10 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::{Mutex, OnceLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Mutex, OnceLock},
+};
 
 const RETRIEVAL_RULES_SCHEMA_VERSION: &str = "tonglingyu.retrieval_rules.v1";
 const DEFAULT_RETRIEVAL_RULES_JSON: &str = include_str!("../resources/retrieval_rules.json");
@@ -166,10 +169,29 @@ fn parse_retrieval_rule_catalog(source: &str) -> Result<RetrievalRuleCatalog> {
             "retrieval rule catalog source_layer_labels require id and label"
         ));
     }
+    let answer_ranks = catalog
+        .source_layer_labels
+        .iter()
+        .map(|rule| rule.answer_rank)
+        .collect::<BTreeSet<_>>();
+    if answer_ranks.len() != catalog.source_layer_labels.len() {
+        return Err(anyhow!(
+            "retrieval rule catalog source_layer_labels require unique answer_rank"
+        ));
+    }
     require_non_empty_terms(
         "evidence_text_hygiene.broken_shell_suffixes",
         &catalog.evidence_text_hygiene.broken_shell_suffixes,
     )?;
+    if catalog
+        .evidence_text_hygiene
+        .broken_shell_max_substantive_chars
+        == 0
+    {
+        return Err(anyhow!(
+            "retrieval rule catalog evidence_text_hygiene.broken_shell_max_substantive_chars must be positive"
+        ));
+    }
     require_non_empty_terms("generic_question_terms", &catalog.generic_question_terms)?;
     require_non_empty_terms(
         "ranking.intro_question_terms",
@@ -249,6 +271,7 @@ pub(crate) fn source_layer_label(source_layer: &str) -> Result<String> {
         .unwrap_or_else(|| source_layer.to_string()))
 }
 
+#[cfg(test)]
 pub(crate) fn source_layer_answer_rank(source_layer: &str) -> Result<usize> {
     let catalog = retrieval_rule_catalog()?;
     Ok(catalog
@@ -265,6 +288,7 @@ pub(crate) fn source_layer_answer_rank(source_layer: &str) -> Result<usize> {
         .unwrap_or(usize::MAX))
 }
 
+#[cfg(test)]
 pub(crate) fn evidence_text_is_broken_shell(text: &str, substantive_count: usize) -> Result<bool> {
     let catalog = retrieval_rule_catalog()?;
     let trimmed = text.trim();

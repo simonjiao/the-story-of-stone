@@ -1,6 +1,8 @@
+#[cfg(test)]
+use crate::entity_intro_answer::compose_entity_intro_answer;
 use crate::{
-    EvidenceCard, RuntimeContextContract, entity_intro_answer::compose_entity_intro_answer,
-    normalize_text, ontology_aliases, query_expansion_search_terms,
+    EvidenceCard, RuntimeContextContract, normalize_text, ontology_aliases,
+    query_expansion_search_terms,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -241,6 +243,7 @@ pub(crate) fn relation_review_issues(
     Vec::new()
 }
 
+#[cfg(test)]
 pub(crate) fn relation_direct_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -271,6 +274,7 @@ pub(crate) fn attribute_card_support(
     attribute_answer::attribute_card_support(frame, card)
 }
 
+#[cfg(test)]
 pub(crate) fn question_frame_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -343,6 +347,7 @@ pub(crate) fn relation_open_object_draft_rejection_reason(
     None
 }
 
+#[cfg(test)]
 pub(crate) fn relation_boundary_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -364,6 +369,7 @@ pub(crate) fn relation_boundary_answer(
     Some(answer)
 }
 
+#[cfg(test)]
 pub(crate) fn relation_open_object_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],

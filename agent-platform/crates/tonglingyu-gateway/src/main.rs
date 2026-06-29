@@ -11,12 +11,17 @@ use agent_runtime::{
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
+    body::{Body, Bytes},
+    extract::{
+        DefaultBodyLimit, Path as AxumPath, Query, State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use futures_util::{SinkExt, StreamExt, stream};
 use reqwest::header;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -24,13 +29,16 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
+#[cfg(test)]
+use tonglingyu_runtime::OnlineEvidenceCardUpdateRequestInput;
 use tonglingyu_runtime::{
     AgentRuntimePlanGateInput, EvidenceCard, EvidencePackage, KNOWLEDGE_BASE_SCHEMA_VERSION,
     KNOWLEDGE_GOVERNANCE_TASK_SCHEMA_VERSION, KNOWLEDGE_ITEM_HUMAN_REVIEW_SCHEMA_VERSION,
@@ -47,13 +55,12 @@ use tonglingyu_runtime::{
     RetrievalEvidenceTypeCoverage, RetrievalFailureClusterInput, RetrievalFailureCreateInput,
     RetrievalFailureListInput, RetrievalFailureView, RetrievalQualityReport, RetrievalQuerySummary,
     RetrievalSourceCoverageBoundary, RuntimeContextContract, RuntimeContextProjection,
-    RuntimeWorkflowInput, RuntimeWorkflowProfiles, RuntimeWorkflowRetrievedEvidence,
-    TONGLINGYU_RUNTIME_ADAPTER, TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore,
-    agent_runtime_profile_contracts, append_rqa_lifecycle_tombstone, append_runtime_audit_event,
-    execute_agent_runtime_plan_gate, package_json,
+    RuntimeWorkflowEventSink, RuntimeWorkflowInput, RuntimeWorkflowProfiles,
+    RuntimeWorkflowRetrievedEvidence, RuntimeWorkflowStreamEvent, TONGLINGYU_RUNTIME_ADAPTER,
+    TonglingyuAgentRuntimeMode, TonglingyuRuntimeStore, agent_runtime_profile_contracts,
+    append_rqa_lifecycle_tombstone, append_runtime_audit_event, execute_agent_runtime_plan_gate,
+    package_json,
 };
-#[cfg(test)]
-use tonglingyu_runtime::{OnlineEvidenceCardUpdateRequestInput, RuntimeWorkflowStreamEvent};
 use tower_http::trace::TraceLayer;
 
 mod answer_quality;
@@ -74,10 +81,14 @@ mod llm_resolver;
 mod plan;
 mod question_frame;
 mod response;
+mod response_events;
+mod response_jobs;
+mod response_store;
 mod retrieval_suggestion;
 mod retriever_http;
 mod rqa_lifecycle;
 mod rule_candidates;
+mod run_manager;
 mod user_response_safety;
 
 use crate::answer_quality::{
@@ -120,9 +131,23 @@ use crate::plan::{
 #[cfg(test)]
 use crate::response::cached_runtime_stream_events;
 use crate::response::{
-    cache_completion_value, completion_value, public_completion_value,
+    cache_completion_value, completion_value, public_answer_content, public_completion_value,
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
+};
+use crate::response_events::response_event_from_runtime_stream_event;
+use crate::response_events::{ResponseEventType, ResponseStatus};
+#[cfg(test)]
+use crate::response_jobs::InMemoryResponseJobQueue;
+use crate::response_jobs::{
+    ResponseJob, ResponseJobLease, ResponseJobQueueBackend, ResponseJobQueueConfig,
+    ResponseJobQueueError, ResponseJobQueueHealth, RetryDecision,
+};
+#[cfg(test)]
+use crate::response_store::InMemoryResponseEventStore;
+use crate::response_store::{
+    AppendResponseEventInput, ResponseEventStore, ResponseStateRecord, ResponseStoreBackend,
+    ResponseStoreConfig, ResponseStoreError, ResponseStoreHealth,
 };
 use crate::retriever_http::{
     RETRIEVER_TOOL_NAME, RetrieverHttpClient, RetrieverRetrieveOptions, RetrieverRetrieveRequest,
@@ -134,6 +159,9 @@ use crate::rule_candidates::{
     RuleCandidateListInput, RuleCandidatePromotionInput, RuleCandidatePromotionPaths,
     RuleCandidateRegressionEvidenceInput, RuleCandidateReviewRunInput,
     RuleCandidateTransitionInput,
+};
+use crate::run_manager::{
+    RunApiType, RunIdentity, RunNormalizationError, RunNormalizationInput, normalize_run,
 };
 
 const DEFAULT_MODEL_ID: &str = "tonglingyu";
@@ -523,6 +551,84 @@ struct ServeArgs {
     rate_limit_per_minute: usize,
     #[arg(long, env = "TONGLINGYU_RETENTION_DAYS", default_value_t = 0)]
     retention_days: u32,
+    #[arg(long, env = "TONGLINGYU_REDIS_URL")]
+    redis_url: Option<String>,
+    #[arg(long, env = "TONGLINGYU_REDIS_REQUIRED", default_value_t = false)]
+    redis_required: bool,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_STREAM_PREFIX",
+        default_value = "tonglingyu"
+    )]
+    response_stream_prefix: String,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_EVENT_MAXLEN", default_value_t = 2000)]
+    response_event_maxlen: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_EVENT_TTL_SECS",
+        default_value_t = 86_400
+    )]
+    response_event_ttl_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_ENABLED",
+        default_value_t = true
+    )]
+    response_worker_enabled: bool,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_SYNC_WAIT_SECS", default_value_t = 30)]
+    response_sync_wait_secs: u64,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_WORKER_ID")]
+    response_worker_id: Option<String>,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_GROUP",
+        default_value = "tonglingyu-gateway-workers"
+    )]
+    response_job_group: String,
+    #[arg(long, env = "TONGLINGYU_RESPONSE_JOB_MAXLEN", default_value_t = 2000)]
+    response_job_maxlen: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_TTL_SECS",
+        default_value_t = 86_400
+    )]
+    response_job_ttl_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_JOB_MAX_ATTEMPTS",
+        default_value_t = 3
+    )]
+    response_job_max_attempts: u32,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_CLAIM_BLOCK_MS",
+        default_value_t = 1000
+    )]
+    response_worker_claim_block_ms: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_IDLE_SLEEP_MS",
+        default_value_t = 250
+    )]
+    response_worker_idle_sleep_ms: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_RECLAIM_IDLE_MS",
+        default_value_t = 30_000
+    )]
+    response_worker_reclaim_idle_ms: usize,
+    #[arg(
+        long,
+        env = "TONGLINGYU_RESPONSE_WORKER_RECLAIM_INTERVAL_SECS",
+        default_value_t = 30
+    )]
+    response_worker_reclaim_interval_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_REALTIME_MAX_BUFFER_CHARS",
+        default_value_t = 4000
+    )]
+    realtime_max_buffer_chars: usize,
     #[arg(
         long,
         env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
@@ -581,6 +687,11 @@ struct ServeArgs {
 struct AppState {
     db: PathBuf,
     runtime_store: TonglingyuRuntimeStore,
+    response_store: Arc<Mutex<ResponseStoreBackend>>,
+    response_jobs: Arc<Mutex<ResponseJobQueueBackend>>,
+    response_job_max_attempts: u32,
+    response_sync_wait_secs: u64,
+    realtime_max_buffer_chars: usize,
     model_id: String,
     model_name: String,
     upstream_base_url: Option<String>,
@@ -614,6 +725,158 @@ struct AppState {
     llm_agent_provider_profiles: Value,
     workflow_agent_provider_profiles: Value,
     started_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseWorkerConfig {
+    worker_id: String,
+    claim_block_ms: usize,
+    idle_sleep_ms: u64,
+    reclaim_idle_ms: usize,
+    reclaim_interval_secs: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ResponseJobExecutionError {
+    code: &'static str,
+    message: String,
+}
+
+impl ResponseJobExecutionError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ResponseWorkflowEventSink {
+    state: Arc<AppState>,
+    job: ResponseJob,
+}
+
+#[async_trait::async_trait]
+impl RuntimeWorkflowEventSink for ResponseWorkflowEventSink {
+    async fn emit(&self, event: RuntimeWorkflowStreamEvent) -> Result<()> {
+        append_runtime_workflow_event_for_job(&self.state, &self.job, &event)
+            .map(|_| ())
+            .map_err(|error| anyhow!("response event sink append failed: {}", error.message))
+    }
+
+    async fn cancel_requested(&self) -> Result<bool> {
+        let state_record =
+            response_state_record_for_job(&self.state, &self.job).map_err(|error| {
+                anyhow!("response event sink cancel check failed: {}", error.message)
+            })?;
+        Ok(state_record.cancel_requested || state_record.status == ResponseStatus::Canceling)
+    }
+}
+
+struct ChatCompletionSseState {
+    state: Arc<AppState>,
+    response_id: String,
+    completion_id: String,
+    model: String,
+    after_sequence: u64,
+    role_sent: bool,
+    emitted_text: String,
+    done: bool,
+}
+
+struct ResponseEventSseState {
+    state: Arc<AppState>,
+    response_id: String,
+    after_sequence: u64,
+    done: bool,
+}
+
+const REALTIME_CLIENT_EVENT_SCHEMA_VERSION: &str = "tonglingyu.realtime.client_event.v1";
+const REALTIME_SERVER_EVENT_SCHEMA_VERSION: &str = "tonglingyu.realtime.server_event.v1";
+
+const REALTIME_FORBIDDEN_CLIENT_KEYS: &[&str] = &[
+    "profile",
+    "profiles",
+    "agent",
+    "agents",
+    "tool",
+    "tools",
+    "tool_policy",
+    "tool_policy_digest",
+    "reviewer",
+    "skip_review",
+    "context_pack",
+    "context_projection",
+    "memory_card",
+    "memory_read_refs",
+    "runtime_adapter",
+    "trace_id",
+    "raw_prompt",
+    "raw_memory",
+    "provider_request",
+    "provider_response",
+];
+
+#[derive(Debug, Deserialize)]
+struct RealtimeClientEvent {
+    schema_version: Option<String>,
+    event_id: Option<String>,
+    #[serde(rename = "type")]
+    event_type: String,
+    session_id: Option<String>,
+    response_id: Option<String>,
+    sequence: Option<u64>,
+    payload: Option<Value>,
+}
+
+#[derive(Debug)]
+struct RealtimeSessionState {
+    session_id: String,
+    server_sequence: u64,
+    last_client_sequence: u64,
+    seen_client_event_ids: BTreeSet<String>,
+    buffer: String,
+    committed_text: Option<String>,
+    subscriptions: BTreeMap<String, u64>,
+    max_buffer_chars: usize,
+    closed: bool,
+}
+
+impl RealtimeSessionState {
+    fn new(max_buffer_chars: usize) -> Self {
+        Self {
+            session_id: format!("session_{}", uuid::Uuid::now_v7().simple()),
+            server_sequence: 0,
+            last_client_sequence: 0,
+            seen_client_event_ids: BTreeSet::new(),
+            buffer: String::new(),
+            committed_text: None,
+            subscriptions: BTreeMap::new(),
+            max_buffer_chars,
+            closed: false,
+        }
+    }
+
+    fn next_server_sequence(&mut self) -> u64 {
+        self.server_sequence += 1;
+        self.server_sequence
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RealtimeProtocolError {
+    code: &'static str,
+    message: String,
+}
+
+impl RealtimeProtocolError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1267,6 +1530,11 @@ struct MessagePart {
 struct SearchParams {
     q: String,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseEventsQuery {
+    after: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1959,9 +2227,41 @@ async fn serve(args: ServeArgs) -> Result<()> {
         retriever_version = %retriever_metadata.service.version,
         "tonglingyu retriever connected"
     );
+    let response_store = ResponseStoreBackend::from_config(ResponseStoreConfig {
+        redis_url: args.redis_url.clone(),
+        redis_required: args.redis_required,
+        stream_prefix: args.response_stream_prefix.clone(),
+        event_maxlen: args.response_event_maxlen,
+        event_ttl_secs: args.response_event_ttl_secs,
+    })
+    .map_err(|error| anyhow!("response store initialization failed: {error:?}"))?;
+    let response_jobs = ResponseJobQueueBackend::from_config(ResponseJobQueueConfig {
+        redis_url: args.redis_url.clone(),
+        redis_required: args.redis_required,
+        stream_prefix: args.response_stream_prefix.clone(),
+        group: args.response_job_group.clone(),
+        job_maxlen: args.response_job_maxlen,
+        job_ttl_secs: args.response_job_ttl_secs,
+    })
+    .map_err(|error| anyhow!("response job queue initialization failed: {error:?}"))?;
+    let response_worker_config = ResponseWorkerConfig {
+        worker_id: args
+            .response_worker_id
+            .clone()
+            .unwrap_or_else(|| format!("gateway-{}", uuid::Uuid::now_v7().simple())),
+        claim_block_ms: args.response_worker_claim_block_ms,
+        idle_sleep_ms: args.response_worker_idle_sleep_ms,
+        reclaim_idle_ms: args.response_worker_reclaim_idle_ms,
+        reclaim_interval_secs: args.response_worker_reclaim_interval_secs,
+    };
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
+        response_store: Arc::new(Mutex::new(response_store)),
+        response_jobs: Arc::new(Mutex::new(response_jobs)),
+        response_job_max_attempts: args.response_job_max_attempts,
+        response_sync_wait_secs: args.response_sync_wait_secs,
+        realtime_max_buffer_chars: args.realtime_max_buffer_chars,
         model_id: args.model_id,
         model_name: args.model_name,
         upstream_base_url: args
@@ -2014,10 +2314,32 @@ async fn serve(args: ServeArgs) -> Result<()> {
             args.online_evidence_card_worker_retrieval_limit,
         );
     }
+    if args.response_worker_enabled {
+        spawn_response_job_worker(state.clone(), response_worker_config);
+    }
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(create_response_endpoint))
+        .route("/v1/responses/{response_id}", get(get_response_endpoint))
+        .route("/v1/realtime/ws", get(realtime_ws_endpoint))
+        .route(
+            "/v1/responses/{response_id}/events",
+            get(response_events_endpoint),
+        )
+        .route(
+            "/v1/responses/{response_id}/cancel",
+            post(cancel_response_endpoint),
+        )
+        .route("/v1/runs", post(create_run_endpoint))
+        .route("/v1/runs/{run_id}", get(get_run_endpoint))
+        .route("/v1/runs/{run_id}/events", get(run_events_endpoint))
+        .route("/v1/runs/{run_id}/cancel", post(cancel_run_endpoint))
+        .route(
+            "/v1/runs/{run_id}/actions/{action_id}",
+            post(submit_run_action_endpoint),
+        )
         .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
         .route("/v1/evidence/packages/{package_id}", get(package_endpoint))
@@ -2287,6 +2609,847 @@ fn spawn_online_evidence_card_background_worker(
             }
         }
     });
+}
+
+fn spawn_response_job_worker(state: Arc<AppState>, config: ResponseWorkerConfig) {
+    let worker_id = config.worker_id.clone();
+    tracing::info!(
+        worker_id = %worker_id,
+        claim_block_ms = config.claim_block_ms,
+        reclaim_idle_ms = config.reclaim_idle_ms,
+        "response job worker started"
+    );
+    tokio::spawn(async move {
+        let mut last_reclaim = Instant::now()
+            .checked_sub(Duration::from_secs(config.reclaim_interval_secs.max(1)))
+            .unwrap_or_else(Instant::now);
+        loop {
+            if last_reclaim.elapsed() >= Duration::from_secs(config.reclaim_interval_secs.max(1)) {
+                let reclaimed = {
+                    match state.response_jobs.lock() {
+                        Ok(mut queue) => queue.reclaim_stale(
+                            &config.worker_id,
+                            config.reclaim_idle_ms.max(1),
+                            16,
+                        ),
+                        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                            "response job queue mutex poisoned".to_string(),
+                        )),
+                    }
+                };
+                match reclaimed {
+                    Ok(count) if count > 0 => {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            reclaimed_jobs = count,
+                            "response job worker reclaimed stale jobs"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            error = ?error,
+                            "response job reclaim failed"
+                        );
+                    }
+                }
+                last_reclaim = Instant::now();
+            }
+
+            let lease = {
+                match state.response_jobs.lock() {
+                    Ok(mut queue) => queue.claim_next(&config.worker_id, config.claim_block_ms),
+                    Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                        "response job queue mutex poisoned".to_string(),
+                    )),
+                }
+            };
+            let lease = match lease {
+                Ok(Some(lease)) => lease,
+                Ok(None) => {
+                    tokio::time::sleep(Duration::from_millis(config.idle_sleep_ms.max(10))).await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        worker_id = %config.worker_id,
+                        error = ?error,
+                        "response job claim failed"
+                    );
+                    tokio::time::sleep(Duration::from_millis(config.idle_sleep_ms.max(250))).await;
+                    continue;
+                }
+            };
+
+            let job = lease.job.clone();
+            let result = execute_response_job(state.clone(), job.clone()).await;
+            match result {
+                Ok(()) => {
+                    let complete = match state.response_jobs.lock() {
+                        Ok(mut queue) => queue.complete(lease),
+                        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+                            "response job queue mutex poisoned".to_string(),
+                        )),
+                    };
+                    if let Err(error) = complete {
+                        tracing::warn!(
+                            worker_id = %config.worker_id,
+                            response_id = %job.response_id,
+                            error = ?error,
+                            "response job ack failed after successful workflow"
+                        );
+                    }
+                }
+                Err(error) => {
+                    handle_response_job_failure(&state, lease, error);
+                }
+            }
+        }
+    });
+}
+
+fn handle_response_job_failure(
+    state: &AppState,
+    lease: ResponseJobLease,
+    error: ResponseJobExecutionError,
+) {
+    let job = lease.job.clone();
+    let decision = match state.response_jobs.lock() {
+        Ok(mut queue) => queue.retry_or_dead_letter(lease, error.code, &error.message),
+        Err(_) => Err(ResponseJobQueueError::BackendUnavailable(
+            "response job queue mutex poisoned".to_string(),
+        )),
+    };
+    match decision {
+        Ok(RetryDecision::Requeued) => {
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::WorkerRetryScheduled,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                    },
+                    "attempt": job.attempt,
+                    "max_attempts": job.max_attempts,
+                }),
+                None,
+                None,
+                None,
+                None,
+            );
+            tracing::warn!(
+                response_id = %job.response_id,
+                attempt = job.attempt,
+                max_attempts = job.max_attempts,
+                error_code = error.code,
+                "response job scheduled for retry"
+            );
+        }
+        Ok(RetryDecision::DeadLettered) => {
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::WorkerDeadLettered,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": error.message,
+                    },
+                    "attempt": job.attempt,
+                    "max_attempts": job.max_attempts,
+                }),
+                None,
+                None,
+                None,
+                None,
+            );
+            let _ = append_response_event_for_job(
+                state,
+                &job,
+                ResponseEventType::ResponseFailed,
+                json!({
+                    "error": {
+                        "code": error.code,
+                        "message": "response job failed after maximum retry attempts",
+                    }
+                }),
+                Some(ResponseStatus::Failed),
+                None,
+                None,
+                None,
+            );
+            tracing::error!(
+                response_id = %job.response_id,
+                attempt = job.attempt,
+                max_attempts = job.max_attempts,
+                error_code = error.code,
+                "response job dead-lettered"
+            );
+        }
+        Err(queue_error) => {
+            tracing::error!(
+                response_id = %job.response_id,
+                error = ?queue_error,
+                original_error_code = error.code,
+                "response job failure could not be recorded in queue"
+            );
+        }
+    }
+}
+
+async fn execute_response_job(
+    state: Arc<AppState>,
+    job: ResponseJob,
+) -> Result<(), ResponseJobExecutionError> {
+    let started = Instant::now();
+    let state_record = response_state_record_for_job(&state, &job)?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    if state_record.cancel_requested || state_record.status == ResponseStatus::Canceling {
+        return cancel_response_job_at_safe_point(&state, &job);
+    }
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ResponseStatus,
+        json!({"status": "in_progress", "worker": "response_job"}),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )?;
+
+    let input = response_job_input(&job)?;
+    if input.question.chars().count() > state.max_question_chars {
+        append_response_event_for_job(
+            &state,
+            &job,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "error": {
+                    "code": "request_too_large",
+                    "message": "request question is too large",
+                }
+            }),
+            Some(ResponseStatus::Failed),
+            None,
+            None,
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    tonglingyu_runtime::init_runtime_schema(&conn).map_err(|error| {
+        ResponseJobExecutionError::new("runtime_schema_unavailable", error.to_string())
+    })?;
+    let user_ref = job
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&job.subject);
+    let user_session_id = context_governance::get_or_create_user_session(
+        &conn,
+        user_ref,
+        &job.session_id,
+        &state.model_id,
+    )
+    .map_err(|error| ResponseJobExecutionError::new("session_mapping_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&user_session_id),
+        None,
+        "Response Job Claimed",
+        "ok",
+        &json!({
+            "response_id": &job.response_id,
+            "run_id": &job.run_id,
+            "attempt": job.attempt,
+            "max_attempts": job.max_attempts,
+        }),
+    );
+    drop(conn);
+
+    let scoped_context = create_context_for_request_with_agent_runtime(
+        &state.db,
+        ContextRequestInput {
+            trace_id: &job.trace_id,
+            model_id: &state.model_id,
+            external_user_ref: user_ref,
+            external_session_id: &job.session_id,
+            external_message_id: &job.response_id,
+            question: &input.question,
+            messages: &input.messages,
+            history_over_limit: false,
+            max_messages: state.max_messages,
+        },
+        state.llm_agent_runtime.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        ResponseJobExecutionError::new("context_governance_failed", error.to_string())
+    })?;
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ContextPackCreated,
+        json!({
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "context_pack_digest": &scoped_context.context_pack_digest,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+        }),
+        None,
+        None,
+        None,
+        None,
+    )?;
+
+    if input.question.trim().is_empty() {
+        complete_response_job_with_text(
+            &state,
+            &job,
+            &scoped_context,
+            None,
+            "请提出一个《红楼梦》相关问题。".to_string(),
+            started,
+        )?;
+        return Ok(());
+    }
+
+    if scoped_context.needs_clarification {
+        let content = scoped_context
+            .clarification_question
+            .clone()
+            .unwrap_or_else(|| "请补充明确的指代对象后再继续。".to_string());
+        complete_response_job_with_text(&state, &job, &scoped_context, None, content, started)?;
+        return Ok(());
+    }
+
+    if let Some(metadata_task) = detect_openwebui_metadata_task(&input.question) {
+        let content = openwebui_metadata_completion_content(metadata_task, &input.question);
+        complete_response_job_with_text(&state, &job, &scoped_context, None, content, started)?;
+        return Ok(());
+    }
+
+    if check_response_job_cancel(&state, &job)? {
+        return Ok(());
+    }
+
+    let mut policy = search_policy(&scoped_context.resolved_question);
+    apply_question_frame_required_evidence_types(&mut policy, &scoped_context.context_pack);
+    policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
+    let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
+    let runtime_context = runtime_context_contract(&scoped_context);
+    let frame_intent = question_frame_intent(&scoped_context.context_pack);
+    let retriever_query_plan = query_plan_from_gateway_policy(
+        &scoped_context.resolved_question,
+        &policy.question_type,
+        &policy.required_evidence_types,
+        frame_intent.as_deref(),
+    )
+    .map_err(|error| {
+        ResponseJobExecutionError::new("retriever_query_plan_failed", error.to_string())
+    })?;
+    let domain_retrieval_profile = retriever_query_plan.retrieval_profile.clone();
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        None,
+        "Response Job Planned",
+        "ok",
+        &json!({
+            "policy": &policy,
+            "runtime_step_plan": &runtime_step_plan,
+            "retriever_query_plan": &retriever_query_plan,
+            "domain_retrieval_profile": &domain_retrieval_profile,
+        }),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::RuntimePlanCreated,
+        json!({
+            "runtime_step_plan": &runtime_step_plan,
+            "planned_profiles": &policy.planned_profiles,
+        }),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::EvidenceSearching,
+        json!({
+            "required_evidence_types": &policy.required_evidence_types,
+        }),
+        Some(ResponseStatus::Retrieving),
+        None,
+        None,
+        None,
+    )?;
+
+    let retrieve_request = RetrieverRetrieveRequest {
+        request_id: job.trace_id.clone(),
+        session_id: Some(scoped_context.user_session_id.clone()),
+        caller: "tonglingyu-gateway".to_string(),
+        graph_node: retriever_query_plan.graph_node.clone(),
+        search_plan: RetrieverSearchPlan::for_domain_plan(
+            &retriever_query_plan,
+            state.max_evidence,
+            state.retriever_rerank,
+        ),
+        retrieve_options: RetrieverRetrieveOptions::workflow(state.max_evidence),
+        include_raw: false,
+        metadata: json!({
+            "trace_id": &job.trace_id,
+            "response_id": &job.response_id,
+            "run_id": &job.run_id,
+            "user_session_id": &scoped_context.user_session_id,
+            "interaction_context_id": &scoped_context.interaction_context_id,
+            "context_pack_id": &scoped_context.context_pack_id,
+            "context_pack_ref": &scoped_context.context_pack_ref,
+            "required_evidence_types": &policy.required_evidence_types,
+            "question_type": &policy.question_type,
+            "question_frame_intent": &frame_intent,
+            "retriever_query_plan": &retriever_query_plan,
+            "domain_retrieval_profile": &domain_retrieval_profile,
+        }),
+    };
+    let retrieve_response = state
+        .retriever
+        .retrieve(&retrieve_request)
+        .await
+        .map_err(|error| {
+            ResponseJobExecutionError::new("retriever_failed", format!("retriever failed: {error}"))
+        })?;
+    let retrieved_cards = evidence_cards_from_pack(&retrieve_response.evidence_pack);
+    let workflow_retrieval = workflow_retrieval_input(
+        &retrieve_response,
+        state.retriever.base_url(),
+        &retrieve_request,
+        &retrieved_cards,
+    );
+    let evidence_types = retrieved_cards
+        .iter()
+        .map(|card| card.evidence_type.clone())
+        .collect::<BTreeSet<_>>();
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::EvidenceFound,
+        json!({
+            "count": retrieved_cards.len(),
+            "evidence_types": evidence_types,
+        }),
+        Some(ResponseStatus::Composing),
+        None,
+        None,
+        None,
+    )?;
+
+    if check_response_job_cancel(&state, &job)? {
+        return Ok(());
+    }
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ReviewStarted,
+        json!({"source": "runtime_workflow"}),
+        Some(ResponseStatus::Reviewing),
+        None,
+        None,
+        None,
+    )?;
+
+    let event_sink = Arc::new(ResponseWorkflowEventSink {
+        state: state.clone(),
+        job: job.clone(),
+    });
+    let workflow = match state
+        .runtime_store
+        .execute_workflow_with_agent_runtime_client_and_event_sink(
+            RuntimeWorkflowInput {
+                trace_id: job.trace_id.clone(),
+                question: scoped_context.resolved_question.clone(),
+                limit: state.max_evidence,
+                required_evidence_types: policy.required_evidence_types.clone(),
+                retrieved_evidence: Some(RuntimeWorkflowRetrievedEvidence {
+                    schema_version: retriever_http::WORKFLOW_RETRIEVAL_INPUT_SCHEMA_VERSION
+                        .to_string(),
+                    source: "knownledge_http_retriever".to_string(),
+                    cards: retrieved_cards,
+                    retrieval: workflow_retrieval,
+                }),
+                profiles: runtime_workflow_profiles(&state.profiles),
+                context: runtime_context.clone(),
+            },
+            state.agent_runtime_mode,
+            state.agent_runtime.clone(),
+            event_sink,
+        )
+        .await
+    {
+        Ok(workflow) => workflow,
+        Err(error) => {
+            if check_response_job_cancel(&state, &job)? {
+                return Ok(());
+            }
+            return Err(ResponseJobExecutionError::new(
+                "runtime_workflow_failed",
+                error.to_string(),
+            ));
+        }
+    };
+
+    let agent_runtime_summary = workflow.agent_runtime_summary.clone();
+    let package = workflow.package.clone();
+    let package_id = package.package_id.clone();
+    let final_answer = workflow.final_answer.clone();
+    let value = completion_value(
+        &state.model_id,
+        final_answer.clone(),
+        Some(&package),
+        Some(&scoped_context.user_session_id),
+    );
+    let cached_value = cache_completion_value(&value, &workflow.stream_events);
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        Some(&package_id),
+        "Response Job Runtime Executed",
+        "ok",
+        &json!({
+            "runtime_step_outputs": &workflow.steps,
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    append_runtime_step_journal(
+        &conn,
+        &job.trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package_id),
+        json!({
+            "step_count": workflow.steps.len(),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    )
+    .map_err(|error| ResponseJobExecutionError::new("runtime_journal_failed", error.to_string()))?;
+    append_review_journal(
+        &conn,
+        &job.trace_id,
+        &scoped_context.user_session_id,
+        &scoped_context.interaction_context_id,
+        &scoped_context.context_pack_id,
+        Some(&package_id),
+        json!(&package.review),
+    )
+    .map_err(|error| ResponseJobExecutionError::new("review_journal_failed", error.to_string()))?;
+    append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &job.trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &job.response_id,
+            package_id: Some(&package_id),
+            response: &cached_value,
+        },
+    )
+    .map_err(|error| ResponseJobExecutionError::new("final_journal_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        Some(&package_id),
+        "Response Job Finalized",
+        "ok",
+        &json!({
+            "elapsed_ms": elapsed_ms(started),
+            "agent_runtime_summary": &agent_runtime_summary,
+        }),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ReviewCompleted,
+        json!({
+            "status": &package.review.status,
+            "package_id": &package_id,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        Some(package_id.clone()),
+        None,
+    )?;
+
+    append_response_event_for_job(
+        &state,
+        &job,
+        ResponseEventType::ResponseCompleted,
+        json!({
+            "response_id": &job.response_id,
+            "status": "completed",
+            "package_id": &package_id,
+        }),
+        Some(ResponseStatus::Completed),
+        None,
+        Some(package_id),
+        Some(format!("final_response:{}", job.response_id)),
+    )?;
+    Ok(())
+}
+
+struct ResponseJobInput {
+    question: String,
+    messages: Vec<ContextMessage>,
+}
+
+fn response_job_input(job: &ResponseJob) -> Result<ResponseJobInput, ResponseJobExecutionError> {
+    if job.api_type == "chat_completions" {
+        let request = serde_json::from_value::<ChatCompletionRequest>(job.request.clone())
+            .map_err(|error| {
+                ResponseJobExecutionError::new("invalid_request", error.to_string())
+            })?;
+        let question = last_user_message(&request.messages);
+        let messages = context_messages_from_chat(&request.messages);
+        return Ok(ResponseJobInput { question, messages });
+    }
+
+    if let Some(messages) = job.request.get("messages").and_then(Value::as_array) {
+        let messages = messages
+            .iter()
+            .map(context_message_from_value)
+            .collect::<Vec<_>>();
+        let question = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        return Ok(ResponseJobInput { question, messages });
+    }
+
+    let question = response_input_text(job.request.get("input")).unwrap_or_default();
+    Ok(ResponseJobInput {
+        question: question.clone(),
+        messages: vec![ContextMessage {
+            role: "user".to_string(),
+            content: question,
+        }],
+    })
+}
+
+fn context_message_from_value(value: &Value) -> ContextMessage {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user")
+        .to_string();
+    let content = response_input_text(value.get("content")).unwrap_or_default();
+    ContextMessage { role, content }
+}
+
+fn response_input_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .filter_map(|item| {
+                    if let Some(text) = item.as_str() {
+                        return Some(text.to_string());
+                    }
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.get("content").and_then(Value::as_str))
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>();
+            Some(parts.join("\n"))
+        }
+        Value::Object(object) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("content").and_then(Value::as_str))
+            .map(ToString::to_string),
+        other => Some(other.to_string()),
+    }
+}
+
+fn response_state_record_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let store = state.response_store.lock().map_err(|_| {
+        ResponseJobExecutionError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    store.state(&job.response_id).map_err(|error| {
+        ResponseJobExecutionError::new(
+            "response_state_unavailable",
+            format!("response state unavailable: {error:?}"),
+        )
+    })
+}
+
+fn check_response_job_cancel(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<bool, ResponseJobExecutionError> {
+    let state_record = response_state_record_for_job(state, job)?;
+    if state_record.status.is_terminal() {
+        return Ok(true);
+    }
+    if state_record.cancel_requested || state_record.status == ResponseStatus::Canceling {
+        cancel_response_job_at_safe_point(state, job)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn cancel_response_job_at_safe_point(
+    state: &AppState,
+    job: &ResponseJob,
+) -> Result<(), ResponseJobExecutionError> {
+    let state_record = response_state_record_for_job(state, job)?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    let response_id = job.response_id.clone();
+    let status = state_record.status;
+    if status != ResponseStatus::Canceling {
+        append_response_event_for_job(
+            state,
+            job,
+            ResponseEventType::ResponseStatus,
+            json!({"status": "canceling", "reason": "worker_safe_point"}),
+            Some(ResponseStatus::Canceling),
+            None,
+            None,
+            None,
+        )?;
+    }
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::ResponseCanceled,
+        json!({"status": "canceled", "reason": "worker_safe_point"}),
+        Some(ResponseStatus::Canceled),
+        None,
+        None,
+        None,
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        ResponseJobExecutionError::new(
+            "response_cancel_failed",
+            format!("cancel response {response_id} failed: {}", error.message),
+        )
+    })
+}
+
+fn complete_response_job_with_text(
+    state: &AppState,
+    job: &ResponseJob,
+    scoped_context: &ContextResolution,
+    package: Option<&EvidencePackage>,
+    content: String,
+    started: Instant,
+) -> Result<(), ResponseJobExecutionError> {
+    let package_id = package.map(|package| package.package_id.clone());
+    let value = completion_value(
+        &state.model_id,
+        content.clone(),
+        package,
+        Some(&scoped_context.user_session_id),
+    );
+    let conn = open_db(&state.db)
+        .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
+    append_final_response(
+        &conn,
+        FinalResponseJournalInput {
+            trace_id: &job.trace_id,
+            user_session_id: &scoped_context.user_session_id,
+            interaction_context_id: &scoped_context.interaction_context_id,
+            context_pack_id: &scoped_context.context_pack_id,
+            external_message_id: &job.response_id,
+            package_id: package_id.as_deref(),
+            response: &value,
+        },
+    )
+    .map_err(|error| ResponseJobExecutionError::new("final_journal_failed", error.to_string()))?;
+    let _ = record_workflow_state(
+        &conn,
+        &job.trace_id,
+        Some(&scoped_context.user_session_id),
+        package_id.as_deref(),
+        "Response Job Finalized",
+        "controlled_response",
+        &json!({"elapsed_ms": elapsed_ms(started)}),
+    );
+    drop(conn);
+
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::OutputTextDelta,
+        json!({"text": content}),
+        None,
+        None,
+        package_id.clone(),
+        None,
+    )?;
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::OutputTextDone,
+        json!({"char_count": value["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .count()}),
+        None,
+        None,
+        package_id.clone(),
+        None,
+    )?;
+    append_response_event_for_job(
+        state,
+        job,
+        ResponseEventType::ResponseCompleted,
+        json!({
+            "response_id": &job.response_id,
+            "status": "completed",
+        }),
+        Some(ResponseStatus::Completed),
+        None,
+        package_id,
+        Some(format!("final_response:{}", job.response_id)),
+    )?;
+    Ok(())
 }
 
 fn remove_sqlite_file_set(path: &Path) {
@@ -3215,6 +4378,16 @@ async fn runtime_dry_run(args: &RuntimeDryRunArgs) -> Result<Value> {
 
 async fn healthz(State(state): State<Arc<AppState>>) -> Response {
     let retriever_health = state.retriever.health().await;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     match (
         state.runtime_store.store_stats(),
         state.runtime_store.online_evidence_card_ingest_stats(),
@@ -3226,59 +4399,77 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
             Ok(online_evidence_card_ingest),
             Ok(runtime_rule_catalogs),
             Ok(retriever_health),
-        ) if retriever_health.ready => Json(json!({
-            "status": "ok",
-            "model": state.model_id,
-            "retriever": {
-                "base_url": &state.retriever_base_url,
-                "timeout_secs": state.retriever_timeout_secs,
-                "rerank": state.retriever_rerank,
-                "health": retriever_health,
-            },
-            "agent_runtime": {
-                "mode": state.agent_runtime_mode.as_str(),
-                "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
-                "provider_profiles": &state.workflow_agent_provider_profiles,
-            },
-            "llm_agent_runtime": {
-                "mode": &state.llm_agent_runtime_mode,
-                "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
-                "provider_profiles": &state.llm_agent_provider_profiles,
-            },
-            "rate_limit": {
-                "public_per_minute": state.rate_limit_per_minute,
-                "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
-                "disabled": state.rate_limit_per_minute == 0,
-            },
-            "request_limits": {
-                "max_messages": state.max_messages,
-                "max_question_chars": state.max_question_chars,
-                "max_body_bytes": state.max_body_bytes,
-            },
-            "online_evidence_card_ingest": {
-                "worker_enabled": state.online_evidence_card_worker_enabled,
-                "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
-                "worker_batch_size": state.online_evidence_card_worker_batch_size,
-                "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
-                "stats": online_evidence_card_ingest,
-            },
-            "runtime_rule_catalogs": runtime_rule_catalogs,
-            "sources": stats.sources,
-            "blocks": stats.blocks
-        }))
-        .into_response(),
-        (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
+        ) if retriever_health.ready
+            && response_store_health.status == "ok"
+            && response_jobs_health.status == "ok" =>
+        {
             Json(json!({
-                "status": "degraded",
-                "error": "retriever_unready",
+                "status": "ok",
+                "model": state.model_id,
                 "retriever": {
                     "base_url": &state.retriever_base_url,
+                    "timeout_secs": state.retriever_timeout_secs,
+                    "rerank": state.retriever_rerank,
                     "health": retriever_health,
                 },
-            })),
-        )
-            .into_response(),
+                "agent_runtime": {
+                    "mode": state.agent_runtime_mode.as_str(),
+                    "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
+                    "provider_profiles": &state.workflow_agent_provider_profiles,
+                },
+                "llm_agent_runtime": {
+                    "mode": &state.llm_agent_runtime_mode,
+                    "config_source": "TONGLINGYU_AGENT_ROLE_*_PROVIDER",
+                    "provider_profiles": &state.llm_agent_provider_profiles,
+                },
+                "rate_limit": {
+                    "public_per_minute": state.rate_limit_per_minute,
+                    "env": "TONGLINGYU_RATE_LIMIT_PER_MINUTE",
+                    "disabled": state.rate_limit_per_minute == 0,
+                },
+                "response_store": response_store_health,
+                "response_jobs": response_jobs_health,
+                "request_limits": {
+                    "max_messages": state.max_messages,
+                    "max_question_chars": state.max_question_chars,
+                    "max_body_bytes": state.max_body_bytes,
+                },
+                "online_evidence_card_ingest": {
+                    "worker_enabled": state.online_evidence_card_worker_enabled,
+                    "worker_interval_secs": state.online_evidence_card_worker_interval_secs,
+                    "worker_batch_size": state.online_evidence_card_worker_batch_size,
+                    "worker_retrieval_limit": state.online_evidence_card_worker_retrieval_limit,
+                    "stats": online_evidence_card_ingest,
+                },
+                "runtime_rule_catalogs": runtime_rule_catalogs,
+                "sources": stats.sources,
+                "blocks": stats.blocks
+            }))
+            .into_response()
+        }
+        (Ok(_), Ok(_), Ok(_), Ok(retriever_health)) => {
+            let error = if !retriever_health.ready {
+                "retriever_unready"
+            } else if response_store_health.status != "ok" {
+                "response_store_unavailable"
+            } else {
+                "response_jobs_unavailable"
+            };
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "degraded",
+                    "error": error,
+                    "retriever": {
+                        "base_url": &state.retriever_base_url,
+                        "health": retriever_health,
+                    },
+                    "response_store": response_store_health,
+                    "response_jobs": response_jobs_health,
+                })),
+            )
+                .into_response()
+        }
         (Err(error), _, _, _)
         | (_, Err(error), _, _)
         | (_, _, Err(error), _)
@@ -3288,9 +4479,34 @@ async fn healthz(State(state): State<Arc<AppState>>) -> Response {
                 "status": "degraded",
                 "error": "health_check_failed",
                 "detail": safe_error_detail(&error),
+                "response_store": response_store_health,
+                "response_jobs": response_jobs_health,
             })),
         )
             .into_response(),
+    }
+}
+
+fn response_store_unavailable_health() -> ResponseStoreHealth {
+    ResponseStoreHealth {
+        mode: "unknown",
+        required: true,
+        prefix: "unknown".to_string(),
+        event_maxlen: 0,
+        event_ttl_secs: 0,
+        status: "unavailable",
+        error: Some("response store mutex poisoned".to_string()),
+    }
+}
+
+fn response_jobs_unavailable_health() -> ResponseJobQueueHealth {
+    ResponseJobQueueHealth {
+        mode: "unknown",
+        required: true,
+        prefix: "unknown".to_string(),
+        group: "unknown".to_string(),
+        status: "unavailable",
+        error: Some("response job queue mutex poisoned".to_string()),
     }
 }
 
@@ -3309,6 +4525,2274 @@ async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
         }]
     }))
     .into_response()
+}
+
+async fn realtime_ws_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    ws.on_upgrade(move |socket| realtime_ws_session(state, headers, auth_subject, socket))
+}
+
+async fn realtime_ws_session(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    auth_subject: String,
+    socket: WebSocket,
+) {
+    let mut session = RealtimeSessionState::new(state.realtime_max_buffer_chars);
+    let (mut sender, mut receiver) = socket.split();
+    let session_id = session.session_id.clone();
+    let started = realtime_server_event_frame(
+        &mut session,
+        "session.started",
+        None,
+        json!({"session_id": session_id}),
+    );
+    if sender.send(WsMessage::Text(started.into())).await.is_err() {
+        return;
+    }
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            maybe_message = receiver.next() => {
+                let Some(message) = maybe_message else {
+                    break;
+                };
+                match message {
+                    Ok(WsMessage::Text(text)) => {
+                        let frames = realtime_handle_text_frame(
+                            state.clone(),
+                            &headers,
+                            &auth_subject,
+                            &mut session,
+                            text.as_str(),
+                        ).await;
+                        if realtime_send_frames(&mut sender, frames).await.is_err() {
+                            break;
+                        }
+                        if session.closed {
+                            let _ = sender.send(WsMessage::Close(None)).await;
+                            break;
+                        }
+                    }
+                    Ok(WsMessage::Binary(_)) => {
+                        let frame = realtime_error_frame(
+                            &mut session,
+                            "binary_frame_rejected",
+                            "binary realtime frames are not supported",
+                        );
+                        let _ = sender.send(WsMessage::Text(frame.into())).await;
+                        let _ = sender.send(WsMessage::Close(None)).await;
+                        break;
+                    }
+                    Ok(WsMessage::Ping(value)) => {
+                        let _ = sender.send(WsMessage::Pong(value)).await;
+                    }
+                    Ok(WsMessage::Pong(_)) => {}
+                    Ok(WsMessage::Close(_)) => break,
+                    Err(_) => break,
+                }
+            }
+            _ = ticker.tick() => {
+                let frames = realtime_collect_subscription_frames(state.clone(), &mut session);
+                if realtime_send_frames(&mut sender, frames).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn realtime_send_frames<S>(sender: &mut S, frames: Vec<String>) -> Result<(), axum::Error>
+where
+    S: futures_util::Sink<WsMessage, Error = axum::Error> + Unpin,
+{
+    for frame in frames {
+        sender.send(WsMessage::Text(frame.into())).await?;
+    }
+    Ok(())
+}
+
+async fn realtime_handle_text_frame(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &mut RealtimeSessionState,
+    text: &str,
+) -> Vec<String> {
+    let event = match serde_json::from_str::<RealtimeClientEvent>(text) {
+        Ok(event) => event,
+        Err(_) => {
+            return vec![realtime_error_frame(
+                session,
+                "invalid_json",
+                "realtime client event must be a JSON text frame",
+            )];
+        }
+    };
+    if let Err(error) = realtime_validate_client_event(session, &event) {
+        if matches!(
+            error.code,
+            "audio_frame_rejected" | "forbidden_control_fields" | "input_too_large"
+        ) {
+            session.closed = error.code == "audio_frame_rejected";
+        }
+        return vec![realtime_error_frame(session, error.code, &error.message)];
+    }
+    realtime_record_client_event(session, &event);
+    realtime_handle_client_event(state, headers, auth_subject, session, event).await
+}
+
+async fn realtime_handle_client_event(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &mut RealtimeSessionState,
+    event: RealtimeClientEvent,
+) -> Vec<String> {
+    match event.event_type.as_str() {
+        "session.start" => {
+            if let Some(session_id) = event
+                .session_id
+                .or_else(|| payload_string(event.payload.as_ref(), "session_id"))
+                .filter(|value| !value.trim().is_empty())
+            {
+                session.session_id = session_id;
+            }
+            vec![realtime_server_event_frame(
+                session,
+                "session.started",
+                None,
+                json!({"session_id": session.session_id}),
+            )]
+        }
+        "input_text.delta" => {
+            let text = payload_string(event.payload.as_ref(), "text").unwrap_or_default();
+            session.buffer = text;
+            vec![realtime_server_event_frame(
+                session,
+                "input_text.delta.ack",
+                None,
+                json!({"char_count": session.buffer.chars().count()}),
+            )]
+        }
+        "input_text.commit" => {
+            let text = payload_string(event.payload.as_ref(), "text")
+                .unwrap_or_else(|| session.buffer.clone());
+            session.committed_text = Some(text.clone());
+            session.buffer.clear();
+            vec![realtime_server_event_frame(
+                session,
+                "input_text.committed",
+                None,
+                json!({"char_count": text.chars().count()}),
+            )]
+        }
+        "response.create" => {
+            match realtime_create_response(state.clone(), headers, auth_subject, session, &event) {
+                Ok(response_id) => {
+                    session.subscriptions.insert(response_id.clone(), 0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "response.cancel" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.cancel requires response_id",
+                )];
+            };
+            match realtime_cancel_response(state.clone(), headers, auth_subject, &response_id) {
+                Ok(()) => {
+                    session
+                        .subscriptions
+                        .entry(response_id.clone())
+                        .or_insert(0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "response.resume" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.resume requires response_id",
+                )];
+            };
+            if let Err(error) =
+                realtime_authorize_response(&state, headers, auth_subject, &response_id)
+            {
+                return vec![realtime_error_frame(session, error.code, &error.message)];
+            }
+            let after = realtime_event_after_sequence(&event);
+            session.subscriptions.insert(response_id.clone(), after);
+            realtime_collect_response_frames(state, session, &response_id)
+        }
+        "response.action.submit" | "action.submit" => {
+            let Some(response_id) = realtime_event_response_id(&event) else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_response_id",
+                    "response.action.submit requires response_id",
+                )];
+            };
+            let payload = event.payload.clone().unwrap_or_else(|| json!({}));
+            let Some(action_id) = payload_string(Some(&payload), "action_id") else {
+                return vec![realtime_error_frame(
+                    session,
+                    "missing_action_id",
+                    "response.action.submit requires payload.action_id",
+                )];
+            };
+            match realtime_submit_action(
+                state.clone(),
+                headers,
+                auth_subject,
+                &response_id,
+                &action_id,
+                payload,
+            ) {
+                Ok(()) => {
+                    session
+                        .subscriptions
+                        .entry(response_id.clone())
+                        .or_insert(0);
+                    realtime_collect_response_frames(state, session, &response_id)
+                }
+                Err(error) => vec![realtime_error_frame(session, error.code, &error.message)],
+            }
+        }
+        "ping" => vec![realtime_server_event_frame(
+            session,
+            "pong",
+            None,
+            json!({"session_id": session.session_id}),
+        )],
+        "session.close" => {
+            session.closed = true;
+            vec![realtime_server_event_frame(
+                session,
+                "session.closed",
+                None,
+                json!({"session_id": session.session_id}),
+            )]
+        }
+        _ => vec![realtime_error_frame(
+            session,
+            "unsupported_event_type",
+            "realtime client event type is not supported",
+        )],
+    }
+}
+
+fn realtime_validate_client_event(
+    session: &RealtimeSessionState,
+    event: &RealtimeClientEvent,
+) -> Result<(), RealtimeProtocolError> {
+    if let Some(schema_version) = event.schema_version.as_deref() {
+        if schema_version != REALTIME_CLIENT_EVENT_SCHEMA_VERSION {
+            return Err(RealtimeProtocolError::new(
+                "invalid_schema_version",
+                "unsupported realtime client schema_version",
+            ));
+        }
+    }
+    if event.event_type.starts_with("input_audio.") || event.event_type.starts_with("output_audio.")
+    {
+        return Err(RealtimeProtocolError::new(
+            "audio_frame_rejected",
+            "audio realtime frames are not supported by gateway",
+        ));
+    }
+    if let Some(event_id) = event.event_id.as_deref() {
+        if session.seen_client_event_ids.contains(event_id) {
+            return Err(RealtimeProtocolError::new(
+                "duplicate_event_id",
+                "realtime client event_id was already processed",
+            ));
+        }
+    }
+    if let Some(sequence) = event.sequence {
+        if sequence <= session.last_client_sequence {
+            return Err(RealtimeProtocolError::new(
+                "sequence_regressed",
+                "realtime client sequence must strictly increase",
+            ));
+        }
+    }
+    if let Some(payload) = event.payload.as_ref() {
+        if realtime_contains_forbidden_client_key(payload) {
+            return Err(RealtimeProtocolError::new(
+                "forbidden_control_fields",
+                "realtime payload contains fields reserved for gateway control",
+            ));
+        }
+        if matches!(
+            event.event_type.as_str(),
+            "input_text.delta" | "input_text.commit"
+        ) {
+            let text_len = payload_string(Some(payload), "text")
+                .unwrap_or_default()
+                .chars()
+                .count();
+            if text_len > session.max_buffer_chars {
+                return Err(RealtimeProtocolError::new(
+                    "input_too_large",
+                    "realtime text input exceeds max buffer size",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn realtime_record_client_event(session: &mut RealtimeSessionState, event: &RealtimeClientEvent) {
+    if let Some(event_id) = event.event_id.as_ref() {
+        session.seen_client_event_ids.insert(event_id.clone());
+    }
+    if let Some(sequence) = event.sequence {
+        session.last_client_sequence = sequence;
+    }
+}
+
+fn realtime_create_response(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    session: &RealtimeSessionState,
+    event: &RealtimeClientEvent,
+) -> Result<String, RealtimeProtocolError> {
+    let text = payload_string(event.payload.as_ref(), "text")
+        .or_else(|| session.committed_text.clone())
+        .ok_or_else(|| {
+            RealtimeProtocolError::new(
+                "missing_input",
+                "response.create requires committed text or payload.text",
+            )
+        })?;
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.to_string());
+    let user_id = header_value(headers, "x-tonglingyu-user-id")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .or_else(|| header_value(headers, "x-user-id"));
+    let idempotency_key = payload_string(event.payload.as_ref(), "idempotency_key")
+        .or_else(|| event.event_id.clone());
+    let request = json!({
+        "model": state.model_id,
+        "input": text,
+        "background": true,
+        "stream": false,
+        "session_id": session.session_id,
+        "metadata": {"mode": "realtime_ws"}
+    });
+    let identity = normalize_run(RunNormalizationInput {
+        api_type: RunApiType::RealtimeWs,
+        model: state.model_id.clone(),
+        session_id: Some(session.session_id.clone()),
+        auth_subject: auth_subject.to_string(),
+        tenant_id,
+        user_id,
+        idempotency_key,
+        metadata: json!({"mode": "realtime_ws"}),
+        request: request.clone(),
+        stream: false,
+        background: true,
+    })
+    .map_err(|error| RealtimeProtocolError::new(error.code(), "response.create was rejected"))?;
+    let created = create_response_state(&state, &identity).map_err(|_| {
+        RealtimeProtocolError::new(
+            "response_create_failed",
+            "response state could not be created",
+        )
+    })?;
+    if created.should_enqueue {
+        enqueue_response_job(&state, &identity, request).map_err(|_| {
+            RealtimeProtocolError::new("response_job_enqueue_failed", "response job queue failed")
+        })?;
+    }
+    Ok(created.state_record.response_id)
+}
+
+fn realtime_cancel_response(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+) -> Result<(), RealtimeProtocolError> {
+    realtime_authorize_response(&state, headers, auth_subject, response_id)?;
+    let mut store = state.response_store.lock().map_err(|_| {
+        RealtimeProtocolError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    let state_record = store
+        .state(response_id)
+        .map_err(|_| RealtimeProtocolError::new("response_not_found", "response not found"))?;
+    if state_record.status.is_terminal() {
+        return Ok(());
+    }
+    store
+        .append_control_event(
+            response_id,
+            "cancel_requested",
+            json!({"reason": "client_cancelled"}),
+        )
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel control event failed"))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
+            event_type: ResponseEventType::ResponseStatus,
+            payload: json!({"status": "canceling", "reason": "client_cancelled"}),
+            status_update: Some(ResponseStatus::Canceling),
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel status event failed"))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
+            event_type: ResponseEventType::ResponseCanceled,
+            payload: json!({"status": "canceled", "reason": "client_cancelled"}),
+            status_update: Some(ResponseStatus::Canceled),
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|_| RealtimeProtocolError::new("cancel_failed", "cancel terminal event failed"))?;
+    Ok(())
+}
+
+fn realtime_submit_action(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+    action_id: &str,
+    payload: Value,
+) -> Result<(), RealtimeProtocolError> {
+    let state_record = realtime_authorize_response(&state, headers, auth_subject, response_id)?;
+    if state_record.status.is_terminal() {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_rejected",
+            json!({"reason": "run_terminal", "source": "realtime_ws"}),
+            None,
+        );
+        return Err(RealtimeProtocolError::new(
+            "run_terminal",
+            "terminal run cannot accept actions",
+        ));
+    }
+    let idempotency_digest = action_idempotency_digest(headers, &payload);
+    let events = response_events_for_id(&state, response_id).map_err(|_| {
+        RealtimeProtocolError::new("response_events_unavailable", "response events unavailable")
+    })?;
+    if let Some(digest) = idempotency_digest.as_deref() {
+        if action_submission_already_recorded(&events, action_id, digest) {
+            return Ok(());
+        }
+    }
+    let waiting_action = waiting_run_action(&events, action_id);
+    if state_record.status != ResponseStatus::RequiresAction || waiting_action.is_none() {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_rejected",
+            json!({"reason": "action_not_available", "source": "realtime_ws"}),
+            None,
+        );
+        return Err(RealtimeProtocolError::new(
+            "action_not_available",
+            "action is not waiting for input",
+        ));
+    }
+    let waiting_action = waiting_action.expect("checked waiting action");
+    if waiting_action_expired(&waiting_action) {
+        let _ = append_run_action_audit(
+            &state,
+            response_id,
+            action_id,
+            "action_submit_expired",
+            json!({"reason": "action_expired", "source": "realtime_ws"}),
+            None,
+        );
+        append_response_event_for_response_id(
+            &state,
+            response_id,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "status": "expired",
+                "error": {
+                    "code": "action_expired",
+                    "message": "waiting action expired before submission",
+                },
+                "action_id": action_id,
+            }),
+            Some(ResponseStatus::Expired),
+            None,
+            None,
+            None,
+        )
+        .map_err(|_| RealtimeProtocolError::new("action_expired", "waiting action expired"))?;
+        return Err(RealtimeProtocolError::new(
+            "action_expired",
+            "waiting action expired before submission",
+        ));
+    }
+    append_run_action_audit(
+        &state,
+        response_id,
+        action_id,
+        "action_submitted",
+        json!({
+            "payload": payload,
+            "idempotency_digest": idempotency_digest,
+            "waiting_event_sequence": waiting_action.sequence,
+            "source": "realtime_ws",
+        }),
+        None,
+    )
+    .map_err(|_| RealtimeProtocolError::new("action_submit_failed", "action audit failed"))?;
+    append_response_event_for_response_id(
+        &state,
+        response_id,
+        ResponseEventType::ResponseStatus,
+        json!({
+            "status": "in_progress",
+            "reason": "action_submitted",
+            "action_id": action_id,
+            "action_status": "submitted",
+            "idempotency_digest": idempotency_digest,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    )
+    .map_err(|_| {
+        RealtimeProtocolError::new("action_submit_failed", "action status update failed")
+    })?;
+    Ok(())
+}
+
+fn realtime_authorize_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_subject: &str,
+    response_id: &str,
+) -> Result<ResponseStateRecord, RealtimeProtocolError> {
+    let state_record = response_state_for_id(state, response_id)
+        .map_err(|_| RealtimeProtocolError::new("response_not_found", "response not found"))?;
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return Err(RealtimeProtocolError::new(
+            "response_not_found",
+            "response not found",
+        ));
+    }
+    Ok(state_record)
+}
+
+fn realtime_collect_subscription_frames(
+    state: Arc<AppState>,
+    session: &mut RealtimeSessionState,
+) -> Vec<String> {
+    let response_ids = session.subscriptions.keys().cloned().collect::<Vec<_>>();
+    response_ids
+        .into_iter()
+        .flat_map(|response_id| {
+            realtime_collect_response_frames(state.clone(), session, &response_id)
+        })
+        .collect()
+}
+
+fn realtime_collect_response_frames(
+    state: Arc<AppState>,
+    session: &mut RealtimeSessionState,
+    response_id: &str,
+) -> Vec<String> {
+    let after = session
+        .subscriptions
+        .get(response_id)
+        .copied()
+        .unwrap_or_default();
+    let (state_record, events) = {
+        let store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return vec![realtime_error_frame(
+                    session,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                )];
+            }
+        };
+        let state_record = match store.state(response_id) {
+            Ok(state_record) => state_record,
+            Err(_) => {
+                session.subscriptions.remove(response_id);
+                return vec![realtime_error_frame(
+                    session,
+                    "response_not_found",
+                    "response not found",
+                )];
+            }
+        };
+        let events = match store.read_after(response_id, Some(after)) {
+            Ok(events) => events,
+            Err(_) => {
+                return vec![realtime_error_frame(
+                    session,
+                    "response_events_unavailable",
+                    "response events unavailable",
+                )];
+            }
+        };
+        (state_record, events)
+    };
+    let mut frames = Vec::new();
+    let mut max_sequence = after;
+    for event in events {
+        max_sequence = max_sequence.max(event.sequence);
+        if let Some(frame) = realtime_response_event_frame(&event) {
+            frames.push(frame);
+        }
+    }
+    if state_record.status.is_terminal() {
+        session.subscriptions.remove(response_id);
+    } else {
+        session
+            .subscriptions
+            .insert(response_id.to_string(), max_sequence);
+    }
+    frames
+}
+
+fn realtime_response_event_frame(event: &response_events::ResponseEvent) -> Option<String> {
+    let public = event.public_projection()?;
+    let payload = public.get("payload").cloned().unwrap_or_else(|| json!({}));
+    let event_type = public
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    Some(
+        json!({
+            "schema_version": REALTIME_SERVER_EVENT_SCHEMA_VERSION,
+            "event_id": event.event_id,
+            "type": event_type,
+            "session_id": event.session_id,
+            "response_id": event.response_id,
+            "sequence": event.sequence,
+            "payload": payload,
+        })
+        .to_string(),
+    )
+}
+
+fn realtime_server_event_frame(
+    session: &mut RealtimeSessionState,
+    event_type: &str,
+    response_id: Option<&str>,
+    payload: Value,
+) -> String {
+    json!({
+        "schema_version": REALTIME_SERVER_EVENT_SCHEMA_VERSION,
+        "event_id": format!("rt_evt_{}", uuid::Uuid::now_v7().simple()),
+        "type": event_type,
+        "session_id": session.session_id,
+        "response_id": response_id,
+        "sequence": session.next_server_sequence(),
+        "payload": payload,
+    })
+    .to_string()
+}
+
+fn realtime_error_frame(
+    session: &mut RealtimeSessionState,
+    code: &'static str,
+    message: &str,
+) -> String {
+    realtime_server_event_frame(
+        session,
+        "error",
+        None,
+        json!({
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        }),
+    )
+}
+
+fn realtime_event_response_id(event: &RealtimeClientEvent) -> Option<String> {
+    event
+        .response_id
+        .clone()
+        .or_else(|| payload_string(event.payload.as_ref(), "response_id"))
+}
+
+fn realtime_event_after_sequence(event: &RealtimeClientEvent) -> u64 {
+    event
+        .payload
+        .as_ref()
+        .and_then(|payload| {
+            payload
+                .get("after")
+                .or_else(|| payload.get("last_event_id"))
+                .or_else(|| payload.get("sequence"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or_default()
+}
+
+fn payload_string(payload: Option<&Value>, key: &str) -> Option<String> {
+    payload?
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn realtime_contains_forbidden_client_key(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            REALTIME_FORBIDDEN_CLIENT_KEYS
+                .iter()
+                .any(|forbidden| key.eq_ignore_ascii_case(forbidden))
+                || realtime_contains_forbidden_client_key(value)
+        }),
+        Value::Array(values) => values.iter().any(realtime_contains_forbidden_client_key),
+        _ => false,
+    }
+}
+
+async fn create_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    create_run_projection(state, headers, payload, RunApiType::Responses, "response").await
+}
+
+async fn create_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    create_run_projection(state, headers, payload, RunApiType::Run, "run").await
+}
+
+async fn chat_completions_stream_bridge(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    mut payload: Value,
+    context: GatewayRequestContext,
+) -> Response {
+    if let Value::Object(object) = &mut payload {
+        object
+            .entry("session_id".to_string())
+            .or_insert_with(|| json!(&context.chat_ref));
+        object.insert("stream".to_string(), json!(true));
+    }
+    let input = match run_normalization_input(
+        &state,
+        headers,
+        &payload,
+        context.auth_subject.clone(),
+        RunApiType::ChatCompletions,
+    ) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = match normalize_run(input) {
+        Ok(identity) => identity,
+        Err(error) => return run_normalization_error_response(error, None),
+    };
+    let created = match create_response_state(&state, &identity) {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    if created.should_enqueue {
+        if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            return response;
+        }
+    }
+    chat_completion_sse_response(
+        state,
+        created.state_record.response_id,
+        identity
+            .chat_completion_id
+            .unwrap_or_else(|| format!("chatcmpl_{}", uuid::Uuid::now_v7().simple())),
+        identity.model,
+    )
+}
+
+fn chat_completion_sse_response(
+    state: Arc<AppState>,
+    response_id: String,
+    completion_id: String,
+    model: String,
+) -> Response {
+    let sse_state = ChatCompletionSseState {
+        state,
+        response_id,
+        completion_id,
+        model,
+        after_sequence: 0,
+        role_sent: false,
+        emitted_text: String::new(),
+        done: false,
+    };
+    let body_stream = stream::unfold(sse_state, |mut sse_state| async move {
+        chat_completion_sse_next(&mut sse_state)
+            .await
+            .map(|chunk| (Ok::<Bytes, Infallible>(Bytes::from(chunk)), sse_state))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream_build_failed",
+                "failed to build stream response",
+                None,
+            )
+        })
+}
+
+async fn chat_completion_sse_next(sse_state: &mut ChatCompletionSseState) -> Option<String> {
+    if sse_state.done {
+        return None;
+    }
+    if !sse_state.role_sent {
+        sse_state.role_sent = true;
+        return Some(chat_completion_chunk_sse(
+            &sse_state.completion_id,
+            &sse_state.model,
+            json!({"role": "assistant"}),
+            Value::Null,
+            None,
+        ));
+    }
+    loop {
+        match chat_completion_collect_events(sse_state) {
+            Ok((state_record, events)) => {
+                let mut body = String::new();
+                for event in events {
+                    sse_state.after_sequence = sse_state.after_sequence.max(event.sequence);
+                    let Some(public_event) = event.public_projection() else {
+                        continue;
+                    };
+                    if event.event_type == ResponseEventType::OutputTextDelta {
+                        let piece = public_event
+                            .pointer("/payload/text")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if piece.is_empty() {
+                            continue;
+                        }
+                        let next_text = format!("{}{}", sse_state.emitted_text, piece);
+                        let safe_text = public_answer_content(&next_text);
+                        if safe_text != next_text {
+                            let replacement = safe_text
+                                .strip_prefix(&sse_state.emitted_text)
+                                .unwrap_or(&safe_text);
+                            if !replacement.is_empty() {
+                                body.push_str(&chat_completion_chunk_sse(
+                                    &sse_state.completion_id,
+                                    &sse_state.model,
+                                    json!({"content": replacement}),
+                                    Value::Null,
+                                    None,
+                                ));
+                            }
+                            sse_state.emitted_text = safe_text;
+                            body.push_str(&chat_completion_final_sse(
+                                &sse_state.completion_id,
+                                &sse_state.model,
+                            ));
+                            sse_state.done = true;
+                            return Some(body);
+                        }
+                        sse_state.emitted_text = next_text;
+                        body.push_str(&chat_completion_chunk_sse(
+                            &sse_state.completion_id,
+                            &sse_state.model,
+                            json!({"content": piece}),
+                            Value::Null,
+                            None,
+                        ));
+                    } else if chat_completion_should_forward_event(&event.event_type) {
+                        body.push_str(&chat_completion_chunk_sse(
+                            &sse_state.completion_id,
+                            &sse_state.model,
+                            json!({}),
+                            Value::Null,
+                            Some(public_event),
+                        ));
+                    }
+                }
+                if state_record.status.is_terminal() {
+                    body.push_str(&chat_completion_final_sse(
+                        &sse_state.completion_id,
+                        &sse_state.model,
+                    ));
+                    sse_state.done = true;
+                }
+                if !body.is_empty() {
+                    return Some(body);
+                }
+            }
+            Err(error_event) => {
+                let mut body = chat_completion_chunk_sse(
+                    &sse_state.completion_id,
+                    &sse_state.model,
+                    json!({}),
+                    Value::Null,
+                    Some(error_event),
+                );
+                body.push_str(&chat_completion_final_sse(
+                    &sse_state.completion_id,
+                    &sse_state.model,
+                ));
+                sse_state.done = true;
+                return Some(body);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn chat_completion_collect_events(
+    sse_state: &ChatCompletionSseState,
+) -> Result<(ResponseStateRecord, Vec<response_events::ResponseEvent>), Value> {
+    let store = sse_state
+        .state
+        .response_store
+        .lock()
+        .map_err(|_| chat_completion_stream_error_event("response_store_unavailable"))?;
+    let state_record = store
+        .state(&sse_state.response_id)
+        .map_err(|_| chat_completion_stream_error_event("response_not_found"))?;
+    let events = store
+        .read_after(&sse_state.response_id, Some(sse_state.after_sequence))
+        .map_err(|_| chat_completion_stream_error_event("response_events_unavailable"))?;
+    Ok((state_record, events))
+}
+
+fn chat_completion_should_forward_event(event_type: &ResponseEventType) -> bool {
+    matches!(
+        event_type,
+        ResponseEventType::ResponseCreated
+            | ResponseEventType::ResponseStatus
+            | ResponseEventType::EvidenceSearching
+            | ResponseEventType::EvidenceFound
+            | ResponseEventType::ReviewStarted
+            | ResponseEventType::ReviewCompleted
+            | ResponseEventType::ResponseCompleted
+            | ResponseEventType::ResponseFailed
+            | ResponseEventType::ResponseCanceled
+    )
+}
+
+fn chat_completion_stream_error_event(code: &str) -> Value {
+    json!({
+        "type": "response.failed",
+        "payload": {
+            "error": {
+                "code": code,
+                "message": "chat completion stream could not read response events",
+            }
+        }
+    })
+}
+
+fn chat_completion_chunk_sse(
+    completion_id: &str,
+    model: &str,
+    delta: Value,
+    finish_reason: Value,
+    tonglingyu_event: Option<Value>,
+) -> String {
+    let mut chunk = json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason,
+        }]
+    });
+    if let Some(event) = tonglingyu_event {
+        chunk["tonglingyu_event"] = event;
+    }
+    format!("data: {chunk}\n\n")
+}
+
+fn chat_completion_final_sse(completion_id: &str, model: &str) -> String {
+    let mut body = chat_completion_chunk_sse(completion_id, model, json!({}), json!("stop"), None);
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+async fn get_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+) -> Response {
+    get_response_projection(state, headers, response_id, "response").await
+}
+
+async fn get_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    get_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn response_events_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+    Query(params): Query<ResponseEventsQuery>,
+) -> Response {
+    get_response_events_projection(state, headers, response_id, params.after).await
+}
+
+async fn run_events_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+    Query(params): Query<ResponseEventsQuery>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    get_response_events_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        params.after,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn cancel_response_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(response_id): AxumPath<String>,
+) -> Response {
+    cancel_response_projection(state, headers, response_id, "response").await
+}
+
+async fn cancel_run_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(run_id): AxumPath<String>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    cancel_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        "run",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+async fn submit_run_action_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((run_id, action_id)): AxumPath<(String, String)>,
+    Json(payload): Json<Value>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let response_id = match response_id_for_run(&state, &run_id) {
+        Ok(response_id) => response_id,
+        Err(response) => return response,
+    };
+    let state_record = match response_state_for_id(&state, &response_id) {
+        Ok(state_record) => state_record,
+        Err(response) => return response,
+    };
+    if !response_owned_by_request(&state_record, &headers, &auth_subject) {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            Some(&trace_id),
+        );
+    }
+    if state_record.status.is_terminal() {
+        if let Err(response) = append_run_action_audit(
+            &state,
+            &response_id,
+            &action_id,
+            "action_submit_rejected",
+            json!({"reason": "run_terminal"}),
+            Some(&trace_id),
+        ) {
+            return response;
+        }
+        return error_response(
+            StatusCode::CONFLICT,
+            "run_terminal",
+            "terminal run cannot accept actions",
+            Some(&trace_id),
+        );
+    }
+    let idempotency_digest = action_idempotency_digest(&headers, &payload);
+    if let Some(digest) = idempotency_digest.as_deref() {
+        let events = match response_events_for_id(&state, &response_id) {
+            Ok(events) => events,
+            Err(response) => return response,
+        };
+        if action_submission_already_recorded(&events, &action_id, digest) {
+            return Json(response_state_projection(&state_record, "run")).into_response();
+        }
+    }
+    let events = match response_events_for_id(&state, &response_id) {
+        Ok(events) => events,
+        Err(response) => return response,
+    };
+    let waiting_action = waiting_run_action(&events, &action_id);
+    if state_record.status != ResponseStatus::RequiresAction || waiting_action.is_none() {
+        if let Err(response) = append_run_action_audit(
+            &state,
+            &response_id,
+            &action_id,
+            "action_submit_rejected",
+            json!({"reason": "action_not_available"}),
+            Some(&trace_id),
+        ) {
+            return response;
+        }
+        return error_response(
+            StatusCode::CONFLICT,
+            "action_not_available",
+            &format!("action {action_id} is not waiting for input"),
+            Some(&trace_id),
+        );
+    }
+    let waiting_action = waiting_action.expect("checked waiting action");
+    if waiting_action_expired(&waiting_action) {
+        if let Err(response) = append_run_action_audit(
+            &state,
+            &response_id,
+            &action_id,
+            "action_submit_expired",
+            json!({"reason": "action_expired"}),
+            Some(&trace_id),
+        ) {
+            return response;
+        }
+        let expired = match append_response_event_for_response_id(
+            &state,
+            &response_id,
+            ResponseEventType::ResponseFailed,
+            json!({
+                "status": "expired",
+                "error": {
+                    "code": "action_expired",
+                    "message": "waiting action expired before submission",
+                },
+                "action_id": action_id,
+            }),
+            Some(ResponseStatus::Expired),
+            None,
+            None,
+            None,
+        ) {
+            Ok(state_record) => state_record,
+            Err(error) => return response_store_failure_response(error, Some(&trace_id)),
+        };
+        return (
+            StatusCode::CONFLICT,
+            Json(response_state_projection(&expired, "run")),
+        )
+            .into_response();
+    }
+    if let Err(response) = append_run_action_audit(
+        &state,
+        &response_id,
+        &action_id,
+        "action_submitted",
+        json!({
+            "payload": payload,
+            "idempotency_digest": idempotency_digest,
+            "waiting_event_sequence": waiting_action.sequence,
+        }),
+        Some(&trace_id),
+    ) {
+        return response;
+    }
+    let resumed = match append_response_event_for_response_id(
+        &state,
+        &response_id,
+        ResponseEventType::ResponseStatus,
+        json!({
+            "status": "in_progress",
+            "reason": "action_submitted",
+            "action_id": action_id,
+            "action_status": "submitted",
+            "idempotency_digest": idempotency_digest,
+        }),
+        Some(ResponseStatus::InProgress),
+        None,
+        None,
+        None,
+    ) {
+        Ok(state_record) => state_record,
+        Err(error) => return response_store_failure_response(error, Some(&trace_id)),
+    };
+    Json(response_state_projection(&resumed, "run")).into_response()
+}
+
+#[derive(Debug, Clone)]
+struct WaitingRunAction {
+    sequence: u64,
+    expires_at: Option<OffsetDateTime>,
+}
+
+fn action_idempotency_digest(headers: &HeaderMap, payload: &Value) -> Option<String> {
+    header_value(headers, "idempotency-key")
+        .or_else(|| header_value(headers, "x-idempotency-key"))
+        .or_else(|| {
+            payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| hash_text(value.trim()))
+}
+
+fn waiting_run_action(
+    events: &[response_events::ResponseEvent],
+    action_id: &str,
+) -> Option<WaitingRunAction> {
+    events
+        .iter()
+        .filter(|event| event.event_type == ResponseEventType::ResponseRequiresAction)
+        .filter_map(|event| {
+            let payload_action_id = event
+                .payload
+                .get("action_id")
+                .and_then(Value::as_str)
+                .filter(|value| *value == action_id)?;
+            let _ = payload_action_id;
+            Some(WaitingRunAction {
+                sequence: event.sequence,
+                expires_at: action_expires_at(&event.payload),
+            })
+        })
+        .max_by_key(|action| action.sequence)
+}
+
+fn action_expires_at(payload: &Value) -> Option<OffsetDateTime> {
+    let value = payload.get("expires_at")?;
+    if let Some(epoch) = value.as_i64() {
+        return OffsetDateTime::from_unix_timestamp(epoch).ok();
+    }
+    value.as_str().and_then(|text| {
+        OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()
+    })
+}
+
+fn waiting_action_expired(action: &WaitingRunAction) -> bool {
+    action
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= OffsetDateTime::now_utc())
+}
+
+fn action_submission_already_recorded(
+    events: &[response_events::ResponseEvent],
+    action_id: &str,
+    idempotency_digest: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.event_type == ResponseEventType::ResponseStatus
+            && event
+                .payload
+                .get("action_id")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == action_id)
+            && event
+                .payload
+                .get("action_status")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == "submitted")
+            && event
+                .payload
+                .get("idempotency_digest")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == idempotency_digest)
+    })
+}
+
+fn response_events_for_id(
+    state: &AppState,
+    response_id: &str,
+) -> Result<Vec<response_events::ResponseEvent>, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store
+        .read_after(response_id, None)
+        .map_err(|error| response_store_failure_response(error, None))
+}
+
+fn append_run_action_audit(
+    state: &AppState,
+    response_id: &str,
+    action_id: &str,
+    event_type: &str,
+    payload: Value,
+    trace_id: Option<&str>,
+) -> Result<String, Response> {
+    {
+        let mut store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                    trace_id,
+                ));
+            }
+        };
+        store
+            .append_action_event(response_id, action_id, event_type, payload)
+            .map_err(|error| response_store_failure_response(error, trace_id))
+    }
+}
+
+async fn create_run_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    payload: Value,
+    api_type: RunApiType,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    let input = match run_normalization_input(&state, &headers, &payload, auth_subject, api_type) {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+    let identity = match normalize_run(input) {
+        Ok(identity) => identity,
+        Err(error) => return run_normalization_error_response(error, Some(&trace_id)),
+    };
+    let created = match create_response_state(&state, &identity) {
+        Ok(outcome) => outcome,
+        Err(response) => return response,
+    };
+    if created.should_enqueue {
+        if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            return response;
+        }
+    }
+    let response_id = created.state_record.response_id.clone();
+    if identity.stream {
+        return response_event_sse_response(state, response_id, 0);
+    }
+    let state_record = if identity.background {
+        created.state_record
+    } else {
+        match wait_for_response_terminal(state.clone(), &response_id).await {
+            Ok(state_record) => state_record,
+            Err(error) => return response_store_failure_response(error, Some(&identity.trace_id)),
+        }
+    };
+    Json(response_state_projection(&state_record, object_type)).into_response()
+}
+
+async fn get_response_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    get_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        object_type,
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn get_response_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let state_record = match response_state_for_id(&state, &response_id) {
+        Ok(state_record) => state_record,
+        Err(response) => return response,
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    Json(response_state_projection(&state_record, object_type)).into_response()
+}
+
+async fn get_response_events_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    after: Option<u64>,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    get_response_events_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        after,
+        "response",
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn get_response_events_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    after: Option<u64>,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let after = after.or_else(|| {
+        header_value(headers, "last-event-id").and_then(|value| value.parse::<u64>().ok())
+    });
+    let (state_record, events) = {
+        let store = match state.response_store.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "response_store_unavailable",
+                    "response store unavailable",
+                    Some(trace_id),
+                );
+            }
+        };
+        let state_record = match store.state(&response_id) {
+            Ok(state_record) => state_record,
+            Err(error) => {
+                return match error {
+                    ResponseStoreError::UnknownResponseId(_) => {
+                        response_not_found_response(object_type, Some(trace_id))
+                    }
+                    other => response_store_failure_response(other, Some(trace_id)),
+                };
+            }
+        };
+        let events = match store.read_after(&response_id, after) {
+            Ok(events) => events,
+            Err(error) => {
+                return match error {
+                    ResponseStoreError::UnknownResponseId(_) => {
+                        response_not_found_response(object_type, Some(trace_id))
+                    }
+                    other => response_store_failure_response(other, Some(trace_id)),
+                };
+            }
+        };
+        (state_record, events)
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    let mut body = String::new();
+    for event in events {
+        if let Some(frame) = response_event_sse_frame(&event) {
+            body.push_str(&frame);
+        }
+    }
+    if state_record.status.is_terminal() {
+        body.push_str("data: [DONE]\n\n");
+    }
+    (
+        [(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn response_event_sse_response(
+    state: Arc<AppState>,
+    response_id: String,
+    after_sequence: u64,
+) -> Response {
+    let sse_state = ResponseEventSseState {
+        state,
+        response_id,
+        after_sequence,
+        done: false,
+    };
+    let body_stream = stream::unfold(sse_state, |mut sse_state| async move {
+        response_event_sse_next(&mut sse_state)
+            .await
+            .map(|chunk| (Ok::<Bytes, Infallible>(Bytes::from(chunk)), sse_state))
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream_build_failed",
+                "failed to build stream response",
+                None,
+            )
+        })
+}
+
+async fn response_event_sse_next(sse_state: &mut ResponseEventSseState) -> Option<String> {
+    if sse_state.done {
+        return None;
+    }
+    loop {
+        match response_event_collect_events(sse_state) {
+            Ok((state_record, events)) => {
+                let mut body = String::new();
+                for event in events {
+                    sse_state.after_sequence = sse_state.after_sequence.max(event.sequence);
+                    if let Some(frame) = response_event_sse_frame(&event) {
+                        body.push_str(&frame);
+                    }
+                }
+                if state_record.status.is_terminal() {
+                    body.push_str("data: [DONE]\n\n");
+                    sse_state.done = true;
+                }
+                if !body.is_empty() {
+                    return Some(body);
+                }
+            }
+            Err(error_event) => {
+                let data = serde_json::to_string(&error_event).unwrap_or_else(|_| "{}".to_string());
+                let mut body = String::new();
+                body.push_str("event: response.failed\n");
+                body.push_str(&format!("data: {data}\n\n"));
+                body.push_str("data: [DONE]\n\n");
+                sse_state.done = true;
+                return Some(body);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn response_event_collect_events(
+    sse_state: &ResponseEventSseState,
+) -> Result<(ResponseStateRecord, Vec<response_events::ResponseEvent>), Value> {
+    let store = sse_state
+        .state
+        .response_store
+        .lock()
+        .map_err(|_| response_event_stream_error_event("response_store_unavailable"))?;
+    let state_record = store
+        .state(&sse_state.response_id)
+        .map_err(|_| response_event_stream_error_event("response_not_found"))?;
+    let events = store
+        .read_after(&sse_state.response_id, Some(sse_state.after_sequence))
+        .map_err(|_| response_event_stream_error_event("response_events_unavailable"))?;
+    Ok((state_record, events))
+}
+
+fn response_event_sse_frame(event: &response_events::ResponseEvent) -> Option<String> {
+    let public = event.public_projection()?;
+    let event_name = public
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    let data = serde_json::to_string(&public).unwrap_or_else(|_| "{}".to_string());
+    Some(format!(
+        "id: {}\nevent: {event_name}\ndata: {data}\n\n",
+        event.sequence
+    ))
+}
+
+fn response_event_stream_error_event(code: &str) -> Value {
+    json!({
+        "type": "response.failed",
+        "payload": {
+            "error": {
+                "code": code,
+                "message": "response event stream could not read response events",
+            }
+        }
+    })
+}
+
+async fn wait_for_response_terminal(
+    state: Arc<AppState>,
+    response_id: &str,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let timeout = Duration::from_secs(state.response_sync_wait_secs);
+    let started = Instant::now();
+    loop {
+        let state_record = {
+            let store = state.response_store.lock().map_err(|_| {
+                ResponseStoreError::BackendUnavailable("response store unavailable".to_string())
+            })?;
+            store.state(response_id)?
+        };
+        if state_record.status.is_terminal() || timeout.is_zero() || started.elapsed() >= timeout {
+            return Ok(state_record);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn cancel_response_projection(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+) -> Response {
+    let trace_id = new_trace_id();
+    let auth_subject = match gateway_auth_and_rate_limit(&state, &headers, Some(&trace_id)) {
+        Ok(subject) => subject,
+        Err(response) => return *response,
+    };
+    cancel_response_projection_for_subject(
+        state,
+        &headers,
+        response_id,
+        object_type,
+        &auth_subject,
+        &trace_id,
+    )
+}
+
+fn cancel_response_projection_for_subject(
+    state: Arc<AppState>,
+    headers: &HeaderMap,
+    response_id: String,
+    object_type: &'static str,
+    auth_subject: &str,
+    trace_id: &str,
+) -> Response {
+    let mut store = match state.response_store.lock() {
+        Ok(store) => store,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_store_unavailable",
+                "response store unavailable",
+                Some(trace_id),
+            );
+        }
+    };
+    let state_record = match store.state(&response_id) {
+        Ok(state_record) => state_record,
+        Err(error) => {
+            return match error {
+                ResponseStoreError::UnknownResponseId(_) => {
+                    response_not_found_response(object_type, Some(trace_id))
+                }
+                other => response_store_failure_response(other, Some(trace_id)),
+            };
+        }
+    };
+    if !response_owned_by_request(&state_record, headers, auth_subject) {
+        return response_not_found_response(object_type, Some(trace_id));
+    }
+    if state_record.status.is_terminal() {
+        return Json(response_state_projection(&state_record, object_type)).into_response();
+    }
+    if let Err(error) = store.append_control_event(
+        &response_id,
+        "cancel_requested",
+        json!({"reason": "client_cancelled"}),
+    ) {
+        return response_store_failure_response(error, Some(trace_id));
+    }
+    let (_canceling, _) = match store.append_event(AppendResponseEventInput {
+        response_id: response_id.clone(),
+        event_type: ResponseEventType::ResponseStatus,
+        payload: json!({"status": "canceling", "reason": "client_cancelled"}),
+        status_update: Some(ResponseStatus::Canceling),
+        visibility: None,
+        package_id: None,
+        final_response_ref: None,
+    }) {
+        Ok(result) => result,
+        Err(error @ ResponseStoreError::InvalidStatusTransition { .. }) => {
+            return response_store_failure_response(error, Some(trace_id));
+        }
+        Err(error) => return response_store_failure_response(error, Some(trace_id)),
+    };
+    let (canceled, _) = match store.append_event(AppendResponseEventInput {
+        response_id,
+        event_type: ResponseEventType::ResponseCanceled,
+        payload: json!({"status": "canceled", "reason": "client_cancelled"}),
+        status_update: Some(ResponseStatus::Canceled),
+        visibility: None,
+        package_id: None,
+        final_response_ref: None,
+    }) {
+        Ok(result) => result,
+        Err(error) => return response_store_failure_response(error, Some(trace_id)),
+    };
+    Json(response_state_projection(&canceled, object_type)).into_response()
+}
+
+fn run_normalization_input(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: &Value,
+    auth_subject: String,
+    api_type: RunApiType,
+) -> Result<RunNormalizationInput, Response> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&state.model_id);
+    if model != state.model_id {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "requested model is not available",
+            None,
+        ));
+    }
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.clone());
+    let user_id = header_value(headers, "x-tonglingyu-user-id")
+        .or_else(|| header_value(headers, "x-open-webui-user-id"))
+        .or_else(|| header_value(headers, "x-user-id"));
+    let session_id = header_value(headers, "x-tonglingyu-session-id").or_else(|| {
+        payload
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let idempotency_key = header_value(headers, "idempotency-key")
+        .or_else(|| header_value(headers, "x-idempotency-key"))
+        .or_else(|| {
+            payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    Ok(RunNormalizationInput {
+        api_type,
+        model: model.to_string(),
+        session_id,
+        auth_subject,
+        tenant_id,
+        user_id,
+        idempotency_key,
+        metadata: payload
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        request: payload.clone(),
+        stream: payload
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        background: payload
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+struct CreateResponseStateOutcome {
+    state_record: ResponseStateRecord,
+    should_enqueue: bool,
+}
+
+fn create_response_state(
+    state: &AppState,
+    identity: &RunIdentity,
+) -> Result<CreateResponseStateOutcome, Response> {
+    let mut store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            Some(&identity.trace_id),
+        )
+    })?;
+    let created = match store.create_response(identity) {
+        Ok(created) => created,
+        Err(ResponseStoreError::DuplicateIdempotencyKey { response_id }) => {
+            return store
+                .state(&response_id)
+                .map(|state_record| CreateResponseStateOutcome {
+                    state_record,
+                    should_enqueue: false,
+                })
+                .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)));
+        }
+        Err(ResponseStoreError::DuplicateResponseId(_) | ResponseStoreError::DuplicateRunId(_)) => {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "response_create_conflict",
+                "response identity conflicts with existing state",
+                Some(&identity.trace_id),
+            ));
+        }
+        Err(error) => {
+            return Err(response_store_failure_response(
+                error,
+                Some(&identity.trace_id),
+            ));
+        }
+    };
+    let (state_record, _) = store
+        .append_event(AppendResponseEventInput {
+            response_id: identity.response_id.clone(),
+            event_type: ResponseEventType::ResponseCreated,
+            payload: json!({
+                "run_id": identity.run_id,
+                "response_id": identity.response_id,
+                "session_id": identity.session_id,
+                "status": "queued",
+            }),
+            status_update: None,
+            visibility: None,
+            package_id: None,
+            final_response_ref: None,
+        })
+        .map_err(|error| response_store_failure_response(error, Some(&identity.trace_id)))?;
+    debug_assert_eq!(created.response_id, state_record.response_id);
+    Ok(CreateResponseStateOutcome {
+        state_record,
+        should_enqueue: true,
+    })
+}
+
+fn enqueue_response_job(
+    state: &AppState,
+    identity: &RunIdentity,
+    payload: Value,
+) -> Result<String, Response> {
+    let job = ResponseJob::new(identity, payload, state.response_job_max_attempts);
+    let mut queue = state.response_jobs.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_jobs_unavailable",
+            "response job queue unavailable",
+            Some(&identity.trace_id),
+        )
+    })?;
+    match queue.enqueue(job) {
+        Ok(stream_id) => Ok(stream_id),
+        Err(error) => {
+            drop(queue);
+            let _ = append_response_event_for_identity(
+                state,
+                identity,
+                ResponseEventType::ResponseFailed,
+                json!({
+                    "error": {
+                        "code": "response_job_enqueue_failed",
+                        "message": "response job queue unavailable",
+                    }
+                }),
+                Some(ResponseStatus::Failed),
+                None,
+                None,
+                None,
+            );
+            Err(response_job_queue_failure_response(
+                error,
+                Some(&identity.trace_id),
+            ))
+        }
+    }
+}
+
+fn append_response_event_for_identity(
+    state: &AppState,
+    identity: &RunIdentity,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let mut store = state
+        .response_store
+        .lock()
+        .map_err(|_| ResponseStoreError::BackendUnavailable("response store unavailable".into()))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: identity.response_id.clone(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+}
+
+fn append_response_event_for_response_id(
+    state: &AppState,
+    response_id: &str,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseStoreError> {
+    let mut store = state
+        .response_store
+        .lock()
+        .map_err(|_| ResponseStoreError::BackendUnavailable("response store unavailable".into()))?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: response_id.to_string(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+}
+
+fn append_response_event_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+    event_type: ResponseEventType,
+    payload: Value,
+    status_update: Option<ResponseStatus>,
+    visibility: Option<response_events::ResponseVisibility>,
+    package_id: Option<String>,
+    final_response_ref: Option<String>,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let mut store = state.response_store.lock().map_err(|_| {
+        ResponseJobExecutionError::new("response_store_unavailable", "response store unavailable")
+    })?;
+    store
+        .append_event(AppendResponseEventInput {
+            response_id: job.response_id.clone(),
+            event_type,
+            payload,
+            status_update,
+            visibility,
+            package_id,
+            final_response_ref,
+        })
+        .map(|(state_record, _)| state_record)
+        .map_err(|error| {
+            ResponseJobExecutionError::new(
+                "response_event_append_failed",
+                format!("append response event failed: {error:?}"),
+            )
+        })
+}
+
+fn append_runtime_workflow_event_for_job(
+    state: &AppState,
+    job: &ResponseJob,
+    runtime_event: &RuntimeWorkflowStreamEvent,
+) -> Result<ResponseStateRecord, ResponseJobExecutionError> {
+    let mapped = response_event_from_runtime_stream_event(
+        &job.run_id,
+        &job.response_id,
+        &job.session_id,
+        runtime_event,
+    );
+    let status_update = match mapped.event_type {
+        ResponseEventType::ResponseStatus => Some(ResponseStatus::InProgress),
+        _ => None,
+    };
+    append_response_event_for_job(
+        state,
+        job,
+        mapped.event_type,
+        mapped.payload,
+        status_update,
+        Some(mapped.visibility),
+        runtime_event.package_id.clone(),
+        None,
+    )
+}
+
+fn response_state_for_id(
+    state: &AppState,
+    response_id: &str,
+) -> Result<ResponseStateRecord, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store
+        .state(response_id)
+        .map_err(|error| response_store_failure_response(error, None))
+}
+
+fn response_id_for_run(state: &AppState, run_id: &str) -> Result<String, Response> {
+    let store = state.response_store.lock().map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_store_unavailable",
+            "response store unavailable",
+            None,
+        )
+    })?;
+    store
+        .response_id_for_run(run_id)
+        .map_err(|error| match error {
+            ResponseStoreError::UnknownRunId(_) => error_response(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "run not found",
+                None,
+            ),
+            other => response_store_failure_response(other, None),
+        })
+}
+
+fn response_owned_by_request(
+    state: &ResponseStateRecord,
+    headers: &HeaderMap,
+    auth_subject: &str,
+) -> bool {
+    let tenant_id = header_value(headers, "x-tonglingyu-tenant-id")
+        .or_else(|| header_value(headers, "x-tenant-id"))
+        .unwrap_or_else(|| auth_subject.to_string());
+    state.subject == auth_subject && state.tenant_id == tenant_id
+}
+
+fn response_not_found_response(object_type: &str, trace_id: Option<&str>) -> Response {
+    if object_type == "run" {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            trace_id,
+        )
+    } else {
+        error_response(
+            StatusCode::NOT_FOUND,
+            "response_not_found",
+            "response not found",
+            trace_id,
+        )
+    }
+}
+
+fn response_store_failure_response(error: ResponseStoreError, trace_id: Option<&str>) -> Response {
+    match error {
+        ResponseStoreError::UnknownResponseId(_) => error_response(
+            StatusCode::NOT_FOUND,
+            "response_not_found",
+            "response not found",
+            trace_id,
+        ),
+        ResponseStoreError::UnknownRunId(_) => error_response(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "run not found",
+            trace_id,
+        ),
+        ResponseStoreError::InvalidStatusTransition { .. } => error_response(
+            StatusCode::CONFLICT,
+            "invalid_response_status_transition",
+            "response cannot transition from its current state",
+            trace_id,
+        ),
+        ResponseStoreError::StateConflict { .. } => error_response(
+            StatusCode::CONFLICT,
+            "response_store_state_conflict",
+            "response state changed while appending event",
+            trace_id,
+        ),
+        ResponseStoreError::BackendUnavailable(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_store_unavailable",
+            "response store unavailable",
+            trace_id,
+        ),
+        ResponseStoreError::CorruptState(_) | ResponseStoreError::CorruptEvent(_) => {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_store_corrupt",
+                "response store contains invalid state",
+                trace_id,
+            )
+        }
+        ResponseStoreError::DuplicateResponseId(_)
+        | ResponseStoreError::DuplicateRunId(_)
+        | ResponseStoreError::DuplicateIdempotencyKey { .. } => error_response(
+            StatusCode::CONFLICT,
+            "response_create_conflict",
+            "response identity conflicts with existing state",
+            trace_id,
+        ),
+    }
+}
+
+fn response_job_queue_failure_response(
+    error: ResponseJobQueueError,
+    trace_id: Option<&str>,
+) -> Response {
+    match error {
+        ResponseJobQueueError::BackendUnavailable(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_jobs_unavailable",
+            "response job queue unavailable",
+            trace_id,
+        ),
+        ResponseJobQueueError::CorruptJob(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response_job_corrupt",
+            "response job payload is invalid",
+            trace_id,
+        ),
+        ResponseJobQueueError::UnknownLease(_) => error_response(
+            StatusCode::CONFLICT,
+            "response_job_lease_unknown",
+            "response job lease is no longer active",
+            trace_id,
+        ),
+    }
+}
+
+fn response_state_projection(state: &ResponseStateRecord, object_type: &str) -> Value {
+    json!({
+        "id": if object_type == "run" { &state.run_id } else { &state.response_id },
+        "object": object_type,
+        "run_id": state.run_id,
+        "response_id": state.response_id,
+        "session_id": state.session_id,
+        "status": state.status,
+        "created_at": state.created_at.unix_timestamp(),
+        "updated_at": state.updated_at.unix_timestamp(),
+        "completed_at": state.completed_at.map(|value| value.unix_timestamp()),
+        "events_url": if object_type == "run" {
+            format!("/v1/runs/{}/events", state.run_id)
+        } else {
+            format!("/v1/responses/{}/events", state.response_id)
+        },
+        "cancel_requested": state.cancel_requested,
+        "requires_action_count": state.requires_action_count,
+        "evidence_package_id": state.package_id,
+        "final_response_ref": state.final_response_ref,
+    })
+}
+
+fn run_normalization_error_response(
+    error: RunNormalizationError,
+    trace_id: Option<&str>,
+) -> Response {
+    let message = match &error {
+        RunNormalizationError::ForbiddenControlFields(_) => {
+            "request contains fields reserved for gateway control"
+        }
+        RunNormalizationError::MetadataOverridesAuth(_) => {
+            "metadata cannot override authenticated scope or callback policy"
+        }
+        RunNormalizationError::EmptyAuthSubject => "authenticated subject is required",
+        RunNormalizationError::EmptyTenant => "tenant is required",
+        RunNormalizationError::EmptyModel => "model is required",
+    };
+    error_response(StatusCode::BAD_REQUEST, error.code(), message, trace_id)
 }
 
 async fn search_endpoint(
@@ -7016,6 +10500,9 @@ async fn chat_completions(
         );
     }
     let context = request_context(&headers, &payload, auth_subject);
+    if request.stream.unwrap_or(false) {
+        return chat_completions_stream_bridge(state, &headers, payload, context).await;
+    }
     let user_session_id = match context_governance::get_or_create_user_session(
         &conn,
         &context.user_ref,
@@ -8832,6 +12319,16 @@ fn load_metrics(state: &AppState) -> Result<Value> {
     let online_evidence_card_ingest = state.runtime_store.online_evidence_card_ingest_stats()?;
     let runtime_rule_catalogs = state.runtime_store.rule_catalog_metadata()?;
     let scoped_context_counts = context_table_counts(&conn)?;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     let workflow_status_counts = grouped_counts(
         &conn,
         "SELECT status, COUNT(*) FROM workflow_states GROUP BY status",
@@ -8847,6 +12344,8 @@ fn load_metrics(state: &AppState) -> Result<Value> {
             "upstream_model": &state.upstream_model,
             "upstream_api_key_configured": state.upstream_api_key.is_some(),
             "upstream_timeout_secs": state.upstream_timeout_secs,
+            "response_store": response_store_health,
+            "response_jobs": response_jobs_health,
             "agent_runtime": {
                 "mode": state.agent_runtime_mode.as_str(),
                 "config_source": "TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER",
@@ -8939,6 +12438,16 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
     let scoped_context_counts = context_table_counts(&conn)?;
     let answer_quality_observations = table_count(&conn, "answer_quality_observations")?;
     let answer_quality_actions = table_count(&conn, "answer_quality_action_items")?;
+    let response_store_health = state
+        .response_store
+        .lock()
+        .map(|store| store.health_snapshot())
+        .unwrap_or_else(|_| response_store_unavailable_health());
+    let response_jobs_health = state
+        .response_jobs
+        .lock()
+        .map(|jobs| jobs.health_snapshot())
+        .unwrap_or_else(|_| response_jobs_unavailable_health());
     let mut lines = Vec::new();
     lines.push("# HELP tonglingyu_gateway_info Gateway static configuration info.".to_string());
     lines.push("# TYPE tonglingyu_gateway_info gauge".to_string());
@@ -8954,6 +12463,37 @@ fn load_prometheus_metrics(state: &AppState) -> Result<String> {
         ),
         state.rate_limit_per_minute,
         state.max_body_bytes,
+    ));
+    lines.push(
+        "# HELP tonglingyu_response_store_up Response event store dependency status.".to_string(),
+    );
+    lines.push("# TYPE tonglingyu_response_store_up gauge".to_string());
+    lines.push(format!(
+        "tonglingyu_response_store_up{{mode=\"{}\",required=\"{}\",prefix=\"{}\"}} {}",
+        bounded_metric_label(response_store_health.mode, 32),
+        response_store_health.required,
+        bounded_metric_label(&response_store_health.prefix, 80),
+        if response_store_health.status == "ok" {
+            1
+        } else {
+            0
+        },
+    ));
+    lines.push(
+        "# HELP tonglingyu_response_jobs_up Response job queue dependency status.".to_string(),
+    );
+    lines.push("# TYPE tonglingyu_response_jobs_up gauge".to_string());
+    lines.push(format!(
+        "tonglingyu_response_jobs_up{{mode=\"{}\",required=\"{}\",prefix=\"{}\",group=\"{}\"}} {}",
+        bounded_metric_label(response_jobs_health.mode, 32),
+        response_jobs_health.required,
+        bounded_metric_label(&response_jobs_health.prefix, 80),
+        bounded_metric_label(&response_jobs_health.group, 80),
+        if response_jobs_health.status == "ok" {
+            1
+        } else {
+            0
+        },
     ));
     for (metric, count) in [
         ("tonglingyu_sources_total", runtime_stats.sources),
@@ -9164,6 +12704,16 @@ fn bounded_metric_enum_label(value: &str, allowed: &[&str]) -> String {
         escape_metric_label(value)
     } else {
         "other".to_string()
+    }
+}
+
+fn bounded_metric_label(value: &str, max_chars: usize) -> String {
+    let mut bounded = value.chars().take(max_chars).collect::<String>();
+    bounded.retain(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.'));
+    if bounded.is_empty() {
+        "unknown".to_string()
+    } else {
+        escape_metric_label(&bounded)
     }
 }
 

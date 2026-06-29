@@ -1,15 +1,19 @@
+#[cfg(test)]
 use crate::{
     EvidenceCard,
     answer_composer::public_quote_text,
-    answer_rules::{EntityIntroPolicy, entity_intro_policy},
+    answer_rules::EntityIntroPolicy,
     normalize_text,
-    question_frame::{RuntimeQuestionFrame, RuntimeQuestionFrameEntity},
+    question_frame::RuntimeQuestionFrameEntity,
     retrieval_rules,
     upstream_bundle::{evidence_card_is_later_forty, evidence_card_source_layer},
 };
+use crate::{answer_rules::entity_intro_policy, question_frame::RuntimeQuestionFrame};
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct EntityIntroCandidate<'a> {
     card: &'a EvidenceCard,
     quote: String,
@@ -22,6 +26,7 @@ struct EntityIntroCandidate<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct EntityFateCandidate<'a> {
     card: &'a EvidenceCard,
     quote: String,
@@ -30,6 +35,7 @@ struct EntityFateCandidate<'a> {
     index: usize,
 }
 
+#[cfg(test)]
 pub(crate) fn compose_entity_intro_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -100,6 +106,7 @@ pub(crate) fn compose_entity_intro_answer(
     ))
 }
 
+#[cfg(test)]
 fn compose_entity_fate_answer(
     frame: Option<&RuntimeQuestionFrame>,
     entity: &RuntimeQuestionFrameEntity,
@@ -162,6 +169,7 @@ fn compose_entity_fate_answer(
     Some(answer)
 }
 
+#[cfg(test)]
 fn render_entity_intro_template(template: &str, replacements: &[(&str, &str)]) -> String {
     let mut rendered = template.to_string();
     for (placeholder, value) in replacements {
@@ -170,6 +178,7 @@ fn render_entity_intro_template(template: &str, replacements: &[(&str, &str)]) -
     rendered
 }
 
+#[cfg(test)]
 fn entity_intro_blocked_by_question(question: &str, policy: &EntityIntroPolicy) -> bool {
     let normalized_question = normalize_text(question);
     policy.blocked_question_terms.iter().any(|term| {
@@ -179,6 +188,7 @@ fn entity_intro_blocked_by_question(question: &str, policy: &EntityIntroPolicy) 
     })
 }
 
+#[cfg(test)]
 fn entity_fate_candidates<'a>(
     entity: &RuntimeQuestionFrameEntity,
     cards: &'a [EvidenceCard],
@@ -236,6 +246,7 @@ fn entity_fate_candidates<'a>(
         .collect()
 }
 
+#[cfg(test)]
 fn entity_fate_excerpt(
     text: &str,
     raw_identity_terms: &[String],
@@ -263,6 +274,7 @@ fn entity_fate_excerpt(
     trim_chars(&clean, limit)
 }
 
+#[cfg(test)]
 fn quote_contains_identity_and_fate(
     quote: &str,
     identity_terms: &[String],
@@ -275,6 +287,7 @@ fn quote_contains_identity_and_fate(
         && matching_rule_term_count(quote, fate_terms) > 0
 }
 
+#[cfg(test)]
 fn fate_candidate_duplicate(left: &BTreeSet<String>, right: &BTreeSet<String>) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
@@ -284,6 +297,7 @@ fn fate_candidate_duplicate(left: &BTreeSet<String>, right: &BTreeSet<String>) -
     min_len >= 4 && common * 100 >= min_len * 60
 }
 
+#[cfg(test)]
 fn question_asks_for_fate(question: &str) -> bool {
     retrieval_rules::ranking_rules()
         .map(|ranking| retrieval_rules::contains_any_term(question, &ranking.fate_question_terms))
@@ -318,6 +332,7 @@ pub(crate) fn entity_intro_answer_policy_value(
     }))
 }
 
+#[cfg(test)]
 fn entity_intro_candidates<'a>(
     entity: &RuntimeQuestionFrameEntity,
     cards: &'a [EvidenceCard],
@@ -382,6 +397,7 @@ fn entity_intro_candidates<'a>(
     candidates
 }
 
+#[cfg(test)]
 fn normalized_identity_terms(entity: &RuntimeQuestionFrameEntity) -> Vec<String> {
     entity
         .identity_terms()
@@ -393,6 +409,7 @@ fn normalized_identity_terms(entity: &RuntimeQuestionFrameEntity) -> Vec<String>
         .collect()
 }
 
+#[cfg(test)]
 fn trim_chars(text: &str, limit: usize) -> String {
     let mut output = text.chars().take(limit).collect::<String>();
     if text.chars().count() > limit {
@@ -401,6 +418,7 @@ fn trim_chars(text: &str, limit: usize) -> String {
     output
 }
 
+#[cfg(test)]
 fn trim_chars_around(text: &str, term: &str, limit: usize) -> String {
     if limit == 0 {
         return text.to_string();
@@ -429,6 +447,7 @@ fn trim_chars_around(text: &str, term: &str, limit: usize) -> String {
     output
 }
 
+#[cfg(test)]
 fn quote_has_excluded_terms(text: &str, policy: &EntityIntroPolicy) -> bool {
     let normalized = normalize_text(text);
     policy.excluded_public_quote_terms.iter().any(|term| {
@@ -437,12 +456,14 @@ fn quote_has_excluded_terms(text: &str, policy: &EntityIntroPolicy) -> bool {
     })
 }
 
+#[cfg(test)]
 fn substantive_char_count(text: &str) -> usize {
     text.chars()
         .filter(|ch| !ch.is_whitespace() && !text_punctuation(*ch))
         .count()
 }
 
+#[cfg(test)]
 fn matching_rule_term_count(text: &str, terms: &[String]) -> usize {
     let normalized = normalize_text(text);
     terms
@@ -454,6 +475,7 @@ fn matching_rule_term_count(text: &str, terms: &[String]) -> usize {
         .count()
 }
 
+#[cfg(test)]
 fn compact_text_signature(text: &str) -> String {
     normalize_text(text)
         .chars()
@@ -461,6 +483,7 @@ fn compact_text_signature(text: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn text_shingles(text: &str, width: usize) -> BTreeSet<String> {
     let chars = text.chars().collect::<Vec<_>>();
     if width == 0 || chars.len() < width {
@@ -472,6 +495,7 @@ fn text_shingles(text: &str, width: usize) -> BTreeSet<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn text_punctuation(ch: char) -> bool {
     ch.is_ascii_punctuation()
         || matches!(

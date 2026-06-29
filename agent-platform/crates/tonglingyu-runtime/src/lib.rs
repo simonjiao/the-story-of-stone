@@ -60,6 +60,7 @@ use governance_rules::{
     triggered_review_rule_issues,
 };
 #[cfg(test)]
+#[cfg(test)]
 use question_frame::question_frame_answer;
 use question_frame::{
     RelationSupportTerms, attribute_card_support, chapter_location_answer_requirement_value,
@@ -1334,10 +1335,49 @@ impl TonglingyuRuntimeStore {
         mode: TonglingyuAgentRuntimeMode,
         runtime: Arc<dyn RuntimeClient>,
     ) -> Result<RuntimeWorkflowOutput> {
+        self.execute_workflow_with_agent_runtime_client_inner(input, mode, runtime, None)
+            .await
+    }
+
+    pub async fn execute_workflow_with_agent_runtime_client_and_event_sink(
+        &self,
+        input: RuntimeWorkflowInput,
+        mode: TonglingyuAgentRuntimeMode,
+        runtime: Arc<dyn RuntimeClient>,
+        event_sink: Arc<dyn RuntimeWorkflowEventSink>,
+    ) -> Result<RuntimeWorkflowOutput> {
+        self.execute_workflow_with_agent_runtime_client_inner(
+            input,
+            mode,
+            runtime,
+            Some(event_sink),
+        )
+        .await
+    }
+
+    async fn execute_workflow_with_agent_runtime_client_inner(
+        &self,
+        input: RuntimeWorkflowInput,
+        mode: TonglingyuAgentRuntimeMode,
+        runtime: Arc<dyn RuntimeClient>,
+        event_sink: Option<Arc<dyn RuntimeWorkflowEventSink>>,
+    ) -> Result<RuntimeWorkflowOutput> {
         let mut workflow = {
             let conn = self.open_connection()?;
             execute_runtime_workflow(&conn, input.clone())?
         };
+        if let Some(sink) = event_sink.as_ref() {
+            emit_runtime_workflow_events(
+                sink.as_ref(),
+                workflow
+                    .stream_events
+                    .iter()
+                    .filter(|event| event.event_type == "started")
+                    .cloned()
+                    .collect(),
+            )
+            .await?;
+        }
         if let Err(error) = attach_agent_runtime_step_execution(
             &mut workflow,
             &input.profiles,
@@ -1354,6 +1394,19 @@ impl TonglingyuRuntimeStore {
                 &error,
             );
             return Err(error);
+        }
+        if let Some(sink) = event_sink.as_ref() {
+            let step_events = workflow_stream_events(
+                &workflow.trace_id,
+                &input.profiles.main,
+                &workflow.package.package_id,
+                &workflow.final_answer,
+                &workflow.steps,
+            )
+            .into_iter()
+            .filter(|event| event.event_type == "step_completed")
+            .collect();
+            emit_runtime_workflow_events(sink.as_ref(), step_events).await?;
         }
         let agent_runtime_evidence_observations =
             apply_agent_runtime_evidence_outputs(&mut workflow, mode);
@@ -1399,6 +1452,20 @@ impl TonglingyuRuntimeStore {
             &workflow.final_answer,
             &workflow.steps,
         );
+        if let Some(sink) = event_sink.as_ref() {
+            emit_runtime_workflow_events(
+                sink.as_ref(),
+                workflow
+                    .stream_events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event.event_type.as_str(), "content_delta" | "final_output")
+                    })
+                    .cloned()
+                    .collect(),
+            )
+            .await?;
+        }
         let conn = self.open_connection()?;
         let retrieval_repair_search_request_count =
             record_agent_runtime_retrieval_repair_search_requests(&conn, &workflow)?;
@@ -2657,6 +2724,15 @@ pub struct RuntimeWorkflowStreamEvent {
     pub package_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
+}
+
+#[async_trait]
+pub trait RuntimeWorkflowEventSink: Send + Sync {
+    async fn emit(&self, event: RuntimeWorkflowStreamEvent) -> Result<()>;
+
+    async fn cancel_requested(&self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7458,6 +7534,19 @@ fn workflow_stream_events(
         metadata: json!({"runtime": "tonglingyu"}),
     });
     events
+}
+
+async fn emit_runtime_workflow_events(
+    sink: &dyn RuntimeWorkflowEventSink,
+    events: Vec<RuntimeWorkflowStreamEvent>,
+) -> Result<()> {
+    for event in events {
+        sink.emit(event).await?;
+        if sink.cancel_requested().await? {
+            return Err(anyhow!("runtime workflow canceled by event sink"));
+        }
+    }
+    Ok(())
 }
 
 fn text_stream_chunks(content: &str, max_chars: usize) -> Vec<String> {

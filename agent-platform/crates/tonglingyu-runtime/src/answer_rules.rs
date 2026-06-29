@@ -106,11 +106,17 @@ pub(crate) struct EntityIntroPolicy {
     pub(crate) max_quote_chars: usize,
     pub(crate) min_substantive_chars: usize,
     pub(crate) short_speech_shell_max_chars: usize,
+    #[cfg(test)]
     pub(crate) fate_default_opening: String,
+    #[cfg(test)]
     pub(crate) fate_later_forty_opening: String,
+    #[cfg(test)]
     pub(crate) fate_evidence_item_template: String,
+    #[cfg(test)]
     pub(crate) fate_default_boundary: String,
+    #[cfg(test)]
     pub(crate) fate_later_forty_boundary: String,
+    #[cfg(test)]
     pub(crate) blocked_question_terms: Vec<String>,
     pub(crate) excluded_public_quote_terms: Vec<String>,
     pub(crate) rule: String,
@@ -122,11 +128,17 @@ pub(crate) struct ChapterLocationPolicy {
     pub(crate) max_title_chars: usize,
     pub(crate) dominant_chapter_score_margin: i64,
     pub(crate) weak_mention_markers: Vec<String>,
+    #[cfg(test)]
     pub(crate) direct_answer_template: String,
+    #[cfg(test)]
     pub(crate) chapter_title_template: String,
+    #[cfg(test)]
     pub(crate) base_evidence_template: String,
+    #[cfg(test)]
     pub(crate) commentary_evidence_template: String,
+    #[cfg(test)]
     pub(crate) no_evidence_template: String,
+    #[cfg(test)]
     pub(crate) ambiguous_template: String,
     pub(crate) rule: String,
 }
@@ -138,6 +150,7 @@ pub(crate) struct AttributeAgePolicy {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct RationaleFollowupPolicy {
     pub(crate) applies: bool,
     pub(crate) rule: String,
@@ -173,11 +186,17 @@ pub(crate) fn entity_intro_policy() -> Result<EntityIntroPolicy> {
         max_quote_chars: rules.max_quote_chars,
         min_substantive_chars: rules.min_substantive_chars,
         short_speech_shell_max_chars: rules.short_speech_shell_max_chars,
+        #[cfg(test)]
         fate_default_opening: rules.fate_default_opening,
+        #[cfg(test)]
         fate_later_forty_opening: rules.fate_later_forty_opening,
+        #[cfg(test)]
         fate_evidence_item_template: rules.fate_evidence_item_template,
+        #[cfg(test)]
         fate_default_boundary: rules.fate_default_boundary,
+        #[cfg(test)]
         fate_later_forty_boundary: rules.fate_later_forty_boundary,
+        #[cfg(test)]
         blocked_question_terms: rules.blocked_question_terms,
         excluded_public_quote_terms: rules.excluded_public_quote_terms,
         rule: rules.rule,
@@ -192,11 +211,17 @@ pub(crate) fn chapter_location_policy() -> Result<ChapterLocationPolicy> {
         max_title_chars: rules.max_title_chars,
         dominant_chapter_score_margin: rules.dominant_chapter_score_margin,
         weak_mention_markers: rules.weak_mention_markers,
+        #[cfg(test)]
         direct_answer_template: rules.direct_answer_template,
+        #[cfg(test)]
         chapter_title_template: rules.chapter_title_template,
+        #[cfg(test)]
         base_evidence_template: rules.base_evidence_template,
+        #[cfg(test)]
         commentary_evidence_template: rules.commentary_evidence_template,
+        #[cfg(test)]
         no_evidence_template: rules.no_evidence_template,
+        #[cfg(test)]
         ambiguous_template: rules.ambiguous_template,
         rule: rules.rule,
     })
@@ -211,6 +236,7 @@ pub(crate) fn attribute_age_policy() -> Result<AttributeAgePolicy> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn rationale_followup_policy_for_question(
     question: &str,
 ) -> Result<RationaleFollowupPolicy> {

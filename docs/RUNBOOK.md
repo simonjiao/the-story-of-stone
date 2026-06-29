@@ -85,16 +85,28 @@ cargo run --manifest-path agent-platform/Cargo.toml -p tonglingyu-gateway -- \
   --url http://127.0.0.1:8090/healthz
 ```
 
-Gateway smoke 默认验证 schema、health、auth、models 和 metrics：
+Gateway smoke 默认验证 schema、retriever health/metadata contract、gateway health、
+auth、models、metrics、Response/Run 创建、事件 replay、取消和保留控制字段拒绝。默认
+关闭 response worker，且只启动 retriever health/metadata stub；如果默认 stub 收到
+`/retrieve`，smoke 会失败。因此该 smoke 只覆盖 gateway 协议和事件底座，不证明 RQA
+生产可用：
 
 ```bash
 agent-platform/scripts/tonglingyu-gateway-smoke.sh
 ```
 
-如需额外验证 RQA 查询和聊天链路，提供外部发布的 runtime DB：
+如需额外验证 DB search，提供外部发布的 runtime DB：
 
 ```bash
 TONGLINGYU_SMOKE_DB_PATH=/path/to/tonglingyu.db \
+  agent-platform/scripts/tonglingyu-gateway-smoke.sh
+```
+
+如需验证真实 RQA chat 链路，同时提供外部发布的 runtime DB 和真实 retriever：
+
+```bash
+TONGLINGYU_SMOKE_DB_PATH=/path/to/tonglingyu.db \
+TONGLINGYU_SMOKE_RETRIEVER_BASE_URL=http://127.0.0.1:18080 \
   agent-platform/scripts/tonglingyu-gateway-smoke.sh
 ```
 

@@ -184,9 +184,35 @@ Gateway 新增实时能力时仍不是第 5 个 Agent。目标边界是：
 10. 公开 SSE/WS/status 不能泄露 trace、context、memory、tool policy、raw provider
     output 或 reviewer 内部对象。
 
+结合 Agent Orchestrator 方案后，Gateway 扩展的不可折中原则是“先有 canonical
+Run/Response 执行对象，再有协议投影”：
+
+1. `run_id`、`response_id` 和 `chatcmpl_*` 必须在同一个归一化合同中分配；任何入口都
+   不能绕过该合同直接创建 workflow。
+2. `/v1/chat/completions`、`/v1/responses`、原生 `/v1/runs` 和 WebSocket 都只是同一
+   执行对象的外部投影，不能各自维护状态机、取消语义或事件流。
+3. 原生 Run 不是可后补能力；即使第一版不向普通客户端开放完整 `/v1/runs`，内部
+   `run_id -> response_id`、状态机、control/action 和 owner scope 也必须在 P0/P1
+   前置落入合同。
+4. Redis Streams 只承担 job、event、control、retry、DLQ 和在线 replay，不替代
+   Runtime/SQLite 中的 evidence package、reviewer、context、memory、audit、final
+   journal 和长期事件摘要。
+5. human-in-the-loop、外部工具回调和人工审批只能通过 action/control 事件恢复同一
+   执行对象，不能直接写 final answer，也不能绕过 evidence package、reviewer 和权限审计。
+6. callback/webhook 不属于 MVP 主路径；它只是 background run 完成后的可选通知通道，
+   必须由服务端租户配置或签名 policy 授权，不能把任意请求里的 `callback_url` 直接当作
+   可信出站目标。
+
+LangGraph 在这里只能作为 workflow 设计参考：可借鉴节点、条件边、checkpoint、
+interrupt/resume、event streaming 等概念。明确不采用 Python LangGraph runtime、
+LangGraph checkpointer、LangChain tool schema、动态 graph 修改、LangSmith 作为运行依赖，
+也不通过 FastAPI/LiteLLM 重写现有 Rust Gateway。当前项目的落点仍是
+`tonglingyu-runtime`、Runtime step plan、`RuntimeWorkflowEventSink`、Redis event
+store、SQLite 治理边界和现有 provider/runtime 边界。
+
 新增文档 `Gateway_Realtime_Redis_Architecture.md` 已把该能力拆到实施层：
-`ResponseEvent`、Redis key、状态机、`/v1/responses`、`/v1/realtime/ws`、
-chat SSE 桥接、worker、取消、恢复、部署配置和测试矩阵。
+`ResponseEvent`、Redis key、状态机、`/v1/responses`、原生 Run 控制面、
+`/v1/realtime/ws`、chat SSE 桥接、worker、取消、恢复、部署配置和测试矩阵。
 
 ## 完整产品 Gateway 覆盖状态
 
