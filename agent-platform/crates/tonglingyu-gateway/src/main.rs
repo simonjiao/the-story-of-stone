@@ -2948,13 +2948,16 @@ async fn execute_response_job(
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let runtime_context = runtime_context_contract(&scoped_context);
     let frame_intent = question_frame_intent(&scoped_context.context_pack);
-    let retriever_query_plan = RetrieverQueryPlannerPlan::from_gateway_policy(
+    let retriever_query_plan = query_plan_from_gateway_policy(
         &scoped_context.resolved_question,
         &policy.question_type,
         &policy.required_evidence_types,
         frame_intent.as_deref(),
-    );
-    let retriever_common_recall_kind = retriever_query_plan.common_recall_kind();
+    )
+    .map_err(|error| {
+        ResponseJobExecutionError::new("retriever_query_plan_failed", error.to_string())
+    })?;
+    let domain_retrieval_profile = retriever_query_plan.retrieval_profile.clone();
     let conn = open_db(&state.db)
         .map_err(|error| ResponseJobExecutionError::new("db_unavailable", error.to_string()))?;
     let _ = record_workflow_state(
@@ -2968,7 +2971,7 @@ async fn execute_response_job(
             "policy": &policy,
             "runtime_step_plan": &runtime_step_plan,
             "retriever_query_plan": &retriever_query_plan,
-            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+            "domain_retrieval_profile": &domain_retrieval_profile,
         }),
     );
     drop(conn);
@@ -3003,8 +3006,8 @@ async fn execute_response_job(
         request_id: job.trace_id.clone(),
         session_id: Some(scoped_context.user_session_id.clone()),
         caller: "tonglingyu-gateway".to_string(),
-        graph_node: "response_job_workflow".to_string(),
-        search_plan: RetrieverSearchPlan::for_query_planner(
+        graph_node: retriever_query_plan.graph_node.clone(),
+        search_plan: RetrieverSearchPlan::for_domain_plan(
             &retriever_query_plan,
             state.max_evidence,
             state.retriever_rerank,
@@ -3023,7 +3026,7 @@ async fn execute_response_job(
             "question_type": &policy.question_type,
             "question_frame_intent": &frame_intent,
             "retriever_query_plan": &retriever_query_plan,
-            "retriever_common_recall_kind": retriever_common_recall_kind.as_str(),
+            "domain_retrieval_profile": &domain_retrieval_profile,
         }),
     };
     let retrieve_response = state
