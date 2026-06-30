@@ -6768,7 +6768,7 @@ fn agent_runtime_draft_claim_evidence_support_rejection(
     }
     if let Some(draft_answer) = extraction.draft_answer.as_deref() {
         let all_cards = package.cards.iter().collect::<Vec<_>>();
-        if !draft_text_quoted_phrases_supported(draft_answer, &all_cards) {
+        if !draft_text_quoted_phrases_supported(draft_answer, &all_cards, 6) {
             return Some("draft_claim_ref_text_unsupported");
         }
     }
@@ -6921,7 +6921,7 @@ fn question_focus_term_is_substantive(term: &str, generic_terms: &[&str]) -> boo
 
 fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> bool {
     let evidence_text = normalize_text(&draft_claim_support_text(cards));
-    if !draft_text_quoted_phrases_supported_by_text(claim, &evidence_text) {
+    if !draft_text_quoted_phrases_supported_by_text(claim, &evidence_text, 3) {
         return false;
     }
     let claim_text = normalize_text(claim);
@@ -6943,18 +6943,26 @@ fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> b
     }
 }
 
-fn draft_text_quoted_phrases_supported(text: &str, cards: &[&EvidenceCard]) -> bool {
+fn draft_text_quoted_phrases_supported(
+    text: &str,
+    cards: &[&EvidenceCard],
+    min_cjk_count: usize,
+) -> bool {
     let evidence_text = normalize_text(&draft_claim_support_text(cards));
-    draft_text_quoted_phrases_supported_by_text(text, &evidence_text)
+    draft_text_quoted_phrases_supported_by_text(text, &evidence_text, min_cjk_count)
 }
 
-fn draft_text_quoted_phrases_supported_by_text(text: &str, evidence_text: &str) -> bool {
-    draft_text_quoted_phrases(text)
+fn draft_text_quoted_phrases_supported_by_text(
+    text: &str,
+    evidence_text: &str,
+    min_cjk_count: usize,
+) -> bool {
+    draft_text_quoted_phrases(text, min_cjk_count)
         .iter()
         .all(|phrase| evidence_text.contains(phrase))
 }
 
-fn draft_text_quoted_phrases(text: &str) -> Vec<String> {
+fn draft_text_quoted_phrases(text: &str, min_cjk_count: usize) -> Vec<String> {
     let pairs = [
         ('“', '”'),
         ('「', '」'),
@@ -6979,7 +6987,7 @@ fn draft_text_quoted_phrases(text: &str) -> Vec<String> {
         if end < chars.len() {
             let phrase = chars[start..end].iter().collect::<String>();
             let normalized = normalize_text(&phrase);
-            if draft_quoted_phrase_is_substantive(&normalized) {
+            if draft_quoted_phrase_is_substantive(&normalized, min_cjk_count) {
                 push_term(&mut phrases, &normalized);
             }
             index = end + 1;
@@ -6990,13 +6998,13 @@ fn draft_text_quoted_phrases(text: &str) -> Vec<String> {
     phrases
 }
 
-fn draft_quoted_phrase_is_substantive(phrase: &str) -> bool {
+fn draft_quoted_phrase_is_substantive(phrase: &str, min_cjk_count: usize) -> bool {
     let cjk_count = phrase.chars().filter(|ch| is_cjk(*ch)).count();
     let alnum_count = phrase
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
         .count();
-    cjk_count >= 3 || alnum_count >= 4
+    cjk_count >= min_cjk_count || alnum_count >= 4
 }
 
 fn draft_claim_support_text(cards: &[&EvidenceCard]) -> String {
