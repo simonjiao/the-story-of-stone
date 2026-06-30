@@ -2561,6 +2561,92 @@ fn upstream_draft_accepts_claim_ref_focus_from_retriever_provenance() {
     );
 }
 
+#[test]
+fn upstream_draft_rejects_unsupported_quoted_claim_phrase() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("commentary");
+    card.evidence_id = "ev-xiangyun-song-quote-boundary".to_string();
+    card.source_title = "乐中悲".to_string();
+    card.text = "第六支，樂中悲：終久是雲散高唐，水涸湘江。".to_string();
+    card.support_scope =
+        "knownledge retriever EvidencePack 命中; route_matched_terms=史湘云,湘云,乐中悲"
+            .to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-xiangyun-unsupported-quoted-claim",
+        "关于史湘云的结局，脂批中的证据呢？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("脂批写到“云散高唐，水涸湘江”。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["脂批批道：“此是湘云结局。”".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        Some("draft_claim_ref_text_unsupported")
+    );
+}
+
+#[test]
+fn upstream_draft_rejects_unsupported_quoted_answer_phrase() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("commentary");
+    card.evidence_id = "ev-xiangyun-song-answer-quote-boundary".to_string();
+    card.source_title = "乐中悲".to_string();
+    card.text = "第六支，樂中悲：終久是雲散高唐，水涸湘江。".to_string();
+    card.support_scope =
+        "knownledge retriever EvidencePack 命中; route_matched_terms=史湘云,湘云,乐中悲"
+            .to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-xiangyun-unsupported-quoted-answer",
+        "关于史湘云的结局，脂批中的证据呢？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("脂批批道：“此是湘云结局。”".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["《乐中悲》写“云散高唐，水涸湘江”。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        Some("draft_claim_ref_text_unsupported")
+    );
+}
+
 fn yousanjie_test_cards() -> Vec<EvidenceCard> {
     let mut vow = sample_card("base_text");
     vow.evidence_id = "ev-yousanjie-vow".to_string();
