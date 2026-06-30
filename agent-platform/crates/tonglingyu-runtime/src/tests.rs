@@ -12371,7 +12371,12 @@ fn domain_retrieval_plan_uses_loss_event_terms_for_count_frame() {
     assert!(
         plan.keyword_queries
             .iter()
-            .any(|query| query.contains("良儿偷玉") && query.contains("扫雪拾玉"))
+            .any(|query| query.contains("良儿偷玉"))
+    );
+    assert!(
+        plan.keyword_queries
+            .iter()
+            .any(|query| query.contains("扫雪拾玉"))
     );
     assert!(plan.routes.contains(&"event".to_string()));
 }

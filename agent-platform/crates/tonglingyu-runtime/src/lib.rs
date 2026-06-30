@@ -17998,6 +17998,17 @@ fn domain_planner_keyword_queries(
     terms: &[String],
 ) -> Vec<String> {
     let mut queries = vec![query.to_string()];
+    if domain_terms_include_loss_event(terms) {
+        queries.extend([
+            "良儿偷玉".to_string(),
+            "良兒偷玉".to_string(),
+            "鳳姐掃雪拾玉".to_string(),
+            "凤姐扫雪拾玉".to_string(),
+            "甄寶玉送玉".to_string(),
+            "甄宝玉送玉".to_string(),
+            "通灵宝玉 失玉 偷玉 拾玉 送玉".to_string(),
+        ]);
+    }
     if !terms.is_empty() {
         queries.push(terms.join(" "));
     }
@@ -18010,6 +18021,14 @@ fn domain_planner_keyword_queries(
         _ => {}
     }
     domain_dedupe_limited(queries, 8)
+}
+
+fn domain_terms_include_loss_event(terms: &[String]) -> bool {
+    terms.iter().any(|term| {
+        let normalized = term.trim().replace('-', "_");
+        normalized.eq_ignore_ascii_case("event_type:loss_or_theft")
+            || normalized.eq_ignore_ascii_case("evidence_focus:loss_event")
+    })
 }
 
 fn domain_planner_semantic_queries(

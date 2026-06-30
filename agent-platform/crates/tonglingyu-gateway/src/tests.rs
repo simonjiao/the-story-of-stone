@@ -2127,7 +2127,13 @@ fn query_planner_count_loss_question_uses_event_recall_terms() {
         search_plan
             .keyword_queries
             .iter()
-            .any(|query| query.contains("良儿偷玉") && query.contains("扫雪拾玉"))
+            .any(|query| query.contains("良儿偷玉"))
+    );
+    assert!(
+        search_plan
+            .keyword_queries
+            .iter()
+            .any(|query| query.contains("扫雪拾玉"))
     );
 }
 
