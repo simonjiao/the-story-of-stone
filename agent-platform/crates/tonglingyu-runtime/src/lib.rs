@@ -6821,13 +6821,20 @@ fn draft_claim_refs_match_question_focus(
     }
     let evidence_text = cards
         .iter()
-        .map(|card| format!("{}\n{}", card.source_title, card.text))
+        .map(|card| evidence_card_focus_text(card))
         .collect::<Vec<_>>()
         .join("\n");
     let evidence_text = normalize_text(&evidence_text);
     question_focus_terms
         .iter()
         .any(|term| evidence_text.contains(term))
+}
+
+fn evidence_card_focus_text(card: &EvidenceCard) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        card.source_title, card.source_id, card.block_id, card.support_scope, card.text
+    )
 }
 
 fn question_focus_terms_for_evidence_support(question: &str) -> Vec<String> {

@@ -1209,19 +1209,7 @@ fn evidence_card_from_doc(
     let block_id = first_non_empty(doc.refs.chunk_ids.iter().map(String::as_str))
         .unwrap_or(&doc.doc_id)
         .to_string();
-    let source_title = first_non_empty(
-        [
-            doc.display.source_label.as_deref(),
-            doc.source.source_label.as_deref(),
-            doc.display.title.as_deref(),
-            doc.source.citation_hint.as_deref(),
-            doc.source.work.as_deref(),
-        ]
-        .into_iter()
-        .flatten(),
-    )
-    .unwrap_or("knownledge retriever evidence")
-    .to_string();
+    let source_title = source_title_for_doc(doc);
     EvidenceCard {
         evidence_id: format!(
             "ev-ret-{}",
@@ -1348,20 +1336,42 @@ fn evidence_card_from_basis_span(
 }
 
 fn source_title_for_basis_span(doc: &RetrieverEvidenceDoc, span: &RetrieverBasisSpan) -> String {
-    let typed = match span.evidence_type.as_str() {
-        "commentary" => Some("commentary"),
-        "base_text" => Some("base_text"),
-        "version_note" => Some("version_note"),
-        _ => None,
-    };
     first_non_empty(
         [
-            typed,
-            span.source_category.as_deref(),
+            doc.display.title.as_deref(),
+            doc.display.citation_hint.as_deref(),
+            doc.source.citation_hint.as_deref(),
+            first_non_empty(
+                doc.routes
+                    .iter()
+                    .filter_map(|route| route.record_title.as_deref()),
+            ),
             doc.display.source_label.as_deref(),
             doc.source.source_label.as_deref(),
+            doc.source.work.as_deref(),
+            span.source_category.as_deref(),
+            evidence_type_label(span.evidence_type.as_str()),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+    .unwrap_or("knownledge retriever evidence")
+    .to_string()
+}
+
+fn source_title_for_doc(doc: &RetrieverEvidenceDoc) -> String {
+    first_non_empty(
+        [
             doc.display.title.as_deref(),
+            doc.display.citation_hint.as_deref(),
             doc.source.citation_hint.as_deref(),
+            first_non_empty(
+                doc.routes
+                    .iter()
+                    .filter_map(|route| route.record_title.as_deref()),
+            ),
+            doc.display.source_label.as_deref(),
+            doc.source.source_label.as_deref(),
             doc.source.work.as_deref(),
         ]
         .into_iter()
@@ -1369,6 +1379,15 @@ fn source_title_for_basis_span(doc: &RetrieverEvidenceDoc, span: &RetrieverBasis
     )
     .unwrap_or("knownledge retriever evidence")
     .to_string()
+}
+
+fn evidence_type_label(evidence_type: &str) -> Option<&'static str> {
+    match evidence_type {
+        "commentary" => Some("commentary"),
+        "base_text" => Some("base_text"),
+        "version_note" => Some("version_note"),
+        _ => None,
+    }
 }
 
 fn evidence_type_for_doc(doc: &RetrieverEvidenceDoc) -> String {
@@ -1482,10 +1501,24 @@ fn support_scope_for_doc(pack: &RetrieverEvidencePack, doc: &RetrieverEvidenceDo
             .join(",")
     };
     let projection = doc_evidence_projection(doc).unwrap_or("unclassified");
-    format!(
+    let mut scope = format!(
         "knownledge retriever EvidencePack 命中；projection={projection}; answer_policy={answer_policy}; route={route_summary}; score={:.4}; pack_sufficient={}",
         doc.score, pack.sufficiency.sufficient
-    )
+    );
+    append_support_scope_value(&mut scope, "doc_title", doc.display.title.as_deref());
+    append_support_scope_value(
+        &mut scope,
+        "citation",
+        doc.display
+            .citation_hint
+            .as_deref()
+            .or(doc.source.citation_hint.as_deref()),
+    );
+    let route_titles = unique_route_record_titles(doc);
+    append_support_scope_list(&mut scope, "route_record_titles", &route_titles);
+    append_support_scope_list(&mut scope, "entity_refs", &doc.refs.entity_ids);
+    append_support_scope_list(&mut scope, "text_entity_refs", &doc.refs.text_entity_ids);
+    scope
 }
 
 fn support_scope_for_doc_span(
@@ -1501,6 +1534,13 @@ fn support_scope_for_doc_span(
     ));
     if let Some(ref_id) = span.ref_id.as_deref() {
         scope.push_str(&format!("; basis_span_ref={ref_id}"));
+    }
+    if let Some(source_category) = span.source_category.as_deref() {
+        append_support_scope_value(
+            &mut scope,
+            "basis_span_source_category",
+            Some(source_category),
+        );
     }
     scope
 }
@@ -1558,6 +1598,53 @@ fn confidence_for_score(score: f64) -> String {
 
 fn first_non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
     values.map(str::trim).find(|value| !value.is_empty())
+}
+
+fn unique_route_record_titles(doc: &RetrieverEvidenceDoc) -> Vec<String> {
+    let mut titles = Vec::new();
+    for title in doc
+        .routes
+        .iter()
+        .filter_map(|route| route.record_title.as_deref())
+    {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() && !titles.iter().any(|existing| existing == trimmed) {
+            titles.push(trimmed.to_string());
+        }
+    }
+    titles
+}
+
+fn append_support_scope_value(scope: &mut String, key: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    scope.push_str(&format!("; {key}={}", support_scope_token(value)));
+}
+
+fn append_support_scope_list(scope: &mut String, key: &str, values: &[String]) {
+    let tokens = values
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(support_scope_token)
+        .collect::<Vec<_>>();
+    if !tokens.is_empty() {
+        scope.push_str(&format!("; {key}={}", tokens.join(",")));
+    }
+}
+
+fn support_scope_token(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            ';' | '\n' | '\r' | '\t' => ' ',
+            _ => ch,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
@@ -1673,8 +1760,19 @@ mod tests {
                 ]
             }),
             refs: RetrieverEvidenceRefs::default(),
-            routes: Vec::new(),
-            display: RetrieverEvidenceDisplay::default(),
+            routes: vec![RetrieverRouteHit {
+                route: "poem".to_string(),
+                record_id: Some("ent.text.le_zhong_bei".to_string()),
+                record_title: Some("乐中悲".to_string()),
+                record_rank: Some(1),
+                chunk_rank: Some(1),
+                surface_id: None,
+                extra: BTreeMap::new(),
+            }],
+            display: RetrieverEvidenceDisplay {
+                title: Some("乐中悲".to_string()),
+                ..RetrieverEvidenceDisplay::default()
+            },
             source_scope: json!({}),
             usage_policy: json!({"answer_policy": "dereference_required"}),
             evidence_card: None,
@@ -1696,6 +1794,12 @@ mod tests {
         assert!(evidence_types.contains("commentary"));
         assert!(cards.iter().any(|card| card.text.contains("雲散高唐")));
         assert!(cards.iter().any(|card| card.text.contains("第六支")));
+        assert!(cards.iter().all(|card| card.source_title == "乐中悲"));
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.support_scope.contains("route_record_titles=乐中悲"))
+        );
         assert!(
             cards
                 .iter()
