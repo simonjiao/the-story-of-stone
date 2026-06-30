@@ -1620,6 +1620,9 @@ fn question_frame_has_current_question_entity(frame: &QuestionFrame) -> bool {
 }
 
 fn should_bind_referent_from_context(question: &str, frame: &QuestionFrame) -> Result<bool> {
+    if question_frame_has_current_question_entity(frame) {
+        return Ok(false);
+    }
     if !contains_referential_pronoun(question)? {
         return Ok(false);
     }
@@ -7717,6 +7720,36 @@ mod tests {
                 .referent_bindings
                 .iter()
                 .any(|binding| binding == "史湘云")
+        );
+    }
+
+    #[test]
+    fn explicit_subject_question_does_not_bind_pronoun_to_prior_subject() {
+        let question = "史湘云的判词和红楼梦曲能说明她的结局吗？结合原文和脂批说明。";
+        let resolved = resolve_question(question, &[], Some("秦钟"), Some("秦钟是第几回死的？"))
+            .expect("resolves");
+
+        assert_eq!(resolved.resolved_question, question);
+        assert_eq!(resolved.used_context_refs, Vec::<String>::new());
+        assert!(
+            resolved
+                .referent_bindings
+                .iter()
+                .any(|binding| binding == "史湘云")
+        );
+        assert!(
+            !resolved
+                .referent_bindings
+                .iter()
+                .any(|binding| binding == "秦钟")
+        );
+        assert_eq!(
+            resolved
+                .question_frame
+                .subject
+                .as_ref()
+                .map(|entity| entity.canonical.as_str()),
+            Some("史湘云")
         );
     }
 
