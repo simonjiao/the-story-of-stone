@@ -2356,6 +2356,89 @@ fn upstream_draft_accepts_claim_ref_with_textual_support() {
 }
 
 #[test]
+fn upstream_draft_accepts_chapter_location_claim_with_block_id_chapter_cue() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-qinzhong-chapter-location".to_string();
+    card.source_title = "秦钟劝宝玉立志后萧然长逝".to_string();
+    card.block_id = "hlm120.c016.p0023.seg0003".to_string();
+    card.text = "秦鐘道：“并無別話。以前你我見識自為高過世人，我今日才知自誤了。以後還該立志功名，以榮耀顯達為是。”說畢，便長歎一聲，蕭然長逝了。"
+        .to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-qinzhong-chapter-location",
+        "秦钟是第几回死的？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("第十六回。秦钟在第十六回蕭然長逝。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["秦钟在第十六回蕭然長逝。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        None
+    );
+}
+
+#[test]
+fn upstream_draft_rejects_chapter_location_claim_without_event_cue() {
+    let conn = Connection::open_in_memory().expect("in-memory sqlite");
+    init_runtime_schema(&conn).expect("runtime schema");
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-qinzhong-chapter-only".to_string();
+    card.source_title = "第016回｜正文片段".to_string();
+    card.block_id = "hlm120.c016.p0023.seg0001".to_string();
+    card.text = "秦鐘道：“并無別話。”".to_string();
+    card.verification_status = "knownledge_retriever_source_backed".to_string();
+    let package = create_evidence_package(
+        &conn,
+        "trace-qinzhong-chapter-only",
+        "秦钟是第几回死的？",
+        vec![card],
+    )
+    .expect("package");
+    let extraction = upstream_bundle::UpstreamBundleDraftExtraction {
+        draft_answer: Some("第十六回。秦钟在第十六回蕭然長逝。".to_string()),
+        result_format: "json",
+        package_id: Some(package.package_id.clone()),
+        package_id_rebound: false,
+        observed_bundle_package_id: Some(package.package_id.clone()),
+        observed_candidate_package_id: Some(package.package_id.clone()),
+        claim_statement_count: Some(1),
+        claim_statements: vec!["秦钟在第十六回蕭然長逝。".to_string()],
+        claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
+        rejected_reason: None,
+        coverage_status: Some("passed".to_string()),
+        evidence_hint_count: Some(0),
+        retrieval_repair_recommended: Some(false),
+        retrieval_repair_queries: Vec::new(),
+        out_of_scope_hint_count: Some(0),
+    };
+
+    assert_eq!(
+        agent_runtime_draft_claim_evidence_support_rejection(&extraction, &package),
+        Some("draft_claim_ref_text_unsupported")
+    );
+}
+
+#[test]
 fn upstream_draft_rejects_claim_ref_that_misses_question_focus() {
     let conn = Connection::open_in_memory().expect("in-memory sqlite");
     init_runtime_schema(&conn).expect("runtime schema");

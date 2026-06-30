@@ -6914,12 +6914,7 @@ fn question_focus_term_is_substantive(term: &str, generic_terms: &[&str]) -> boo
 }
 
 fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> bool {
-    let evidence_text = cards
-        .iter()
-        .map(|card| format!("{}\n{}", card.source_title, card.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let evidence_text = normalize_text(&evidence_text);
+    let evidence_text = normalize_text(&draft_claim_support_text(cards));
     let claim_text = normalize_text(claim);
     if claim_text.chars().count() >= 8 && evidence_text.contains(&claim_text) {
         return true;
@@ -6937,6 +6932,79 @@ fn draft_claim_refs_textually_support(claim: &str, cards: &[&EvidenceCard]) -> b
     } else {
         supported >= 2 || supported * 2 > phrases.len()
     }
+}
+
+fn draft_claim_support_text(cards: &[&EvidenceCard]) -> String {
+    cards
+        .iter()
+        .map(|card| {
+            let mut parts = vec![card.source_title.clone(), card.text.clone()];
+            parts.extend(evidence_card_chapter_support_cues(card));
+            parts.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn evidence_card_chapter_support_cues(card: &EvidenceCard) -> Vec<String> {
+    let Some(chapter_no) = evidence_card_support_chapter_no(card) else {
+        return Vec::new();
+    };
+    let mut cues = vec![
+        format!("第{}回", chapter_no),
+        format!("第{:03}回", chapter_no),
+        chapter_no_to_chinese_cue(chapter_no),
+    ];
+    cues.sort();
+    cues.dedup();
+    cues
+}
+
+fn evidence_card_support_chapter_no(card: &EvidenceCard) -> Option<i64> {
+    extract_chapter_no(&card.source_title)
+        .or_else(|| extract_chapter_no(&card.text))
+        .or_else(|| chapter_no_from_record_code(&card.block_id))
+        .or_else(|| chapter_no_from_record_code(&card.source_id))
+}
+
+fn chapter_no_from_record_code(value: &str) -> Option<i64> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| {
+            let digits = part.strip_prefix('c').or_else(|| part.strip_prefix('C'))?;
+            if digits.is_empty()
+                || digits.len() > 3
+                || !digits.chars().all(|ch| ch.is_ascii_digit())
+            {
+                return None;
+            }
+            let chapter_no = digits.parse::<i64>().ok()?;
+            (1..=120).contains(&chapter_no).then_some(chapter_no)
+        })
+        .next()
+}
+
+fn chapter_no_to_chinese_cue(chapter_no: i64) -> String {
+    const DIGITS: [&str; 10] = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    if chapter_no <= 0 || chapter_no >= 100 {
+        return format!("第{}回", chapter_no);
+    }
+    let text = if chapter_no < 10 {
+        DIGITS[chapter_no as usize].to_string()
+    } else {
+        let tens = chapter_no / 10;
+        let ones = chapter_no % 10;
+        let mut value = String::new();
+        if tens > 1 {
+            value.push_str(DIGITS[tens as usize]);
+        }
+        value.push('十');
+        if ones > 0 {
+            value.push_str(DIGITS[ones as usize]);
+        }
+        value
+    };
+    format!("第{}回", text)
 }
 
 fn draft_claim_support_phrases(claim: &str) -> Vec<String> {
