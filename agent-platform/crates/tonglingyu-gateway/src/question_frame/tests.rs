@@ -256,6 +256,27 @@ fn evidence_followup_frame_preserves_subject_and_commentary_scope() {
 }
 
 #[test]
+fn evidence_frame_requires_base_text_when_user_asks_original_text_and_commentary() {
+    let frame = build_question_frame("史湘云的判词和红楼梦曲能说明她的结局吗？结合原文和脂批说明。")
+        .expect("frame");
+    let value = serde_json::to_value(&frame).expect("v2 frame json");
+
+    assert_eq!(frame.intent, "evidence_query");
+    assert_eq!(
+        value["evidence_contract"]["required_types"],
+        serde_json::json!(["base_text", "commentary"])
+    );
+    assert_eq!(
+        value["evidence_contract"]["supporting_types"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        value["evidence_contract"]["min_answer_basis"],
+        serde_json::json!(2)
+    );
+}
+
+#[test]
 fn character_fate_question_uses_dedicated_intent_and_default_scope() {
     let frame = build_question_frame("林黛玉结局如何").expect("frame");
 

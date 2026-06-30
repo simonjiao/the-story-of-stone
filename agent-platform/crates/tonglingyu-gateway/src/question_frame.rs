@@ -487,6 +487,10 @@ fn v2_evidence_contract_for_frame(frame: &QuestionFrame) -> QuestionFrameV2Evide
         &frame.canonical_question,
         &["脂批", "批语", "批語", "评语", "評語"],
     );
+    let asks_base_text = contains_any_local(
+        &frame.canonical_question,
+        &["原文", "正文", "本文", "文本", "原著"],
+    );
     let (required_types, supporting_types, min_answer_basis, require_per_case_evidence) =
         if is_analysis_composition_question(&frame.canonical_question) {
             (
@@ -494,6 +498,13 @@ fn v2_evidence_contract_for_frame(frame: &QuestionFrame) -> QuestionFrameV2Evide
                 vec!["commentary".to_string()],
                 4,
                 true,
+            )
+        } else if frame.intent == "evidence_query" && asks_commentary && asks_base_text {
+            (
+                vec!["base_text".to_string(), "commentary".to_string()],
+                Vec::new(),
+                2,
+                false,
             )
         } else if frame.intent == "evidence_query" && asks_commentary {
             (
