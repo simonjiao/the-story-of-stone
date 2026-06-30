@@ -6989,7 +6989,7 @@ fn draft_text_quoted_phrases(text: &str, min_cjk_count: usize) -> Vec<String> {
         }
         if end < chars.len() {
             let phrase = chars[start..end].iter().collect::<String>();
-            let normalized = normalize_text(&phrase);
+            let normalized = normalize_quoted_phrase_for_support(&phrase);
             if draft_quoted_phrase_is_substantive(&normalized, min_cjk_count) {
                 push_term(&mut phrases, &normalized);
             }
@@ -6999,6 +6999,37 @@ fn draft_text_quoted_phrases(text: &str, min_cjk_count: usize) -> Vec<String> {
         }
     }
     phrases
+}
+
+fn normalize_quoted_phrase_for_support(phrase: &str) -> String {
+    normalize_text(phrase)
+        .trim_matches(quoted_phrase_boundary_noise)
+        .to_string()
+}
+
+fn quoted_phrase_boundary_noise(ch: char) -> bool {
+    matches!(
+        ch,
+        ' ' | '\t'
+            | '\n'
+            | '\r'
+            | '\u{3000}'
+            | '.'
+            | '。'
+            | ','
+            | '，'
+            | '、'
+            | ':'
+            | '：'
+            | ';'
+            | '；'
+            | '!'
+            | '！'
+            | '?'
+            | '？'
+            | '…'
+            | '⋯'
+    )
 }
 
 fn draft_quoted_phrase_is_substantive(phrase: &str, min_cjk_count: usize) -> bool {
@@ -7127,6 +7158,15 @@ fn draft_claim_support_phrases(claim: &str) -> Vec<String> {
         "本地",
         "上游",
         "证据包",
+        "原文",
+        "正文",
+        "文本",
+        "写道",
+        "写到",
+        "描写",
+        "描述",
+        "记载",
+        "記載",
         "package",
         "profile",
         "hermes",
