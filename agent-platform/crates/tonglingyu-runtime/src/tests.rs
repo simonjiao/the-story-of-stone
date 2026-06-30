@@ -2444,7 +2444,7 @@ fn upstream_draft_accepts_claim_ref_focus_from_retriever_provenance() {
     card.source_title = "乐中悲".to_string();
     card.text = "第六支，樂中悲：終久是雲散高唐，水涸湘江。".to_string();
     card.support_scope =
-        "knownledge retriever EvidencePack 命中; route_record_titles=正册湘云判词,乐中悲"
+        "knownledge retriever EvidencePack 命中; route_record_titles=乐中悲; route_matched_terms=史湘云,湘云,乐中悲"
             .to_string();
     card.verification_status = "knownledge_retriever_source_backed".to_string();
     let package = create_evidence_package(

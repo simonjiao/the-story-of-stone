@@ -1516,6 +1516,8 @@ fn support_scope_for_doc(pack: &RetrieverEvidencePack, doc: &RetrieverEvidenceDo
     );
     let route_titles = unique_route_record_titles(doc);
     append_support_scope_list(&mut scope, "route_record_titles", &route_titles);
+    let route_matched_terms = unique_route_matched_terms(doc);
+    append_support_scope_list(&mut scope, "route_matched_terms", &route_matched_terms);
     append_support_scope_list(&mut scope, "entity_refs", &doc.refs.entity_ids);
     append_support_scope_list(&mut scope, "text_entity_refs", &doc.refs.text_entity_ids);
     scope
@@ -1613,6 +1615,38 @@ fn unique_route_record_titles(doc: &RetrieverEvidenceDoc) -> Vec<String> {
         }
     }
     titles
+}
+
+fn unique_route_matched_terms(doc: &RetrieverEvidenceDoc) -> Vec<String> {
+    let mut terms = Vec::new();
+    for route in &doc.routes {
+        append_route_matched_terms(&mut terms, route.extra.get("matched_terms"));
+    }
+    terms
+}
+
+fn append_route_matched_terms(terms: &mut Vec<String>, value: Option<&Value>) {
+    let Some(value) = value else {
+        return;
+    };
+    match value {
+        Value::String(term) => push_unique_trimmed(terms, term),
+        Value::Array(items) => {
+            for item in items {
+                if let Some(term) = item.as_str() {
+                    push_unique_trimmed(terms, term);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_unique_trimmed(values: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if !trimmed.is_empty() && !values.iter().any(|existing| existing == trimmed) {
+        values.push(trimmed.to_string());
+    }
 }
 
 fn append_support_scope_value(scope: &mut String, key: &str, value: Option<&str>) {
@@ -1767,7 +1801,10 @@ mod tests {
                 record_rank: Some(1),
                 chunk_rank: Some(1),
                 surface_id: None,
-                extra: BTreeMap::new(),
+                extra: BTreeMap::from([(
+                    "matched_terms".to_string(),
+                    json!(["史湘云", "湘云", "樂中悲"]),
+                )]),
             }],
             display: RetrieverEvidenceDisplay {
                 title: Some("乐中悲".to_string()),
@@ -1800,6 +1837,10 @@ mod tests {
                 .iter()
                 .all(|card| card.support_scope.contains("route_record_titles=乐中悲"))
         );
+        assert!(cards.iter().all(|card| {
+            card.support_scope
+                .contains("route_matched_terms=史湘云,湘云,樂中悲")
+        }));
         assert!(
             cards
                 .iter()
