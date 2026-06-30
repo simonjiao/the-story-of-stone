@@ -6,6 +6,7 @@ The initial version is `0.1.0`.
 ## Format
 
 - Use numeric `MAJOR.MINOR.PATCH`, for example `0.1.0`.
+- `PATCH` is capped at `15`; versions such as `0.1.16` are invalid.
 - Do not add `v` prefixes, release suffixes, build metadata, or leading zeroes.
 - Keep `MAJOR` manual while the project is in `0.x`. Use `set` for a reviewed
   first-position change only when the public product contract is being reset.
@@ -27,6 +28,8 @@ runtime, local compose behavior, deployable assets, or release evidence.
 
 When a change is both a bugfix and a broad refactor, use `MINOR`. Do not split a
 single coherent feature into several patch bumps just to avoid a minor version.
+When `PATCH` is already `15`, `bump patch` carries to the next minor version and
+resets patch to `0`, for example `0.44.15 -> 0.45.0`.
 
 ## Managed Surfaces
 

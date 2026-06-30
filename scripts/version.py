@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 PROJECT_VERSION_FALLBACK = "latest"
+MAX_PATCH_VERSION = 15
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 CRATES = (
     "agent-core",
@@ -40,6 +41,11 @@ def validate_version(value: str) -> str:
         raise VersionError(
             f"invalid version {value!r}; expected numeric MAJOR.MINOR.PATCH"
         )
+    patch = int(value.rsplit(".", 1)[1])
+    if patch > MAX_PATCH_VERSION:
+        raise VersionError(
+            f"invalid version {value!r}; PATCH must be <= {MAX_PATCH_VERSION}"
+        )
     return value
 
 
@@ -60,6 +66,8 @@ def parse_version(version: str) -> tuple[int, int, int]:
 def bump_version(version: str, part: str) -> str:
     major, minor, patch = parse_version(version)
     if part == "patch":
+        if patch >= MAX_PATCH_VERSION:
+            return f"{major}.{minor + 1}.0"
         return f"{major}.{minor}.{patch + 1}"
     if part == "minor":
         return f"{major}.{minor + 1}.0"
