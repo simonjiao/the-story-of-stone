@@ -1181,7 +1181,7 @@ pub(crate) fn evidence_cards_from_pack(pack: &RetrieverEvidencePack) -> Vec<Evid
         .iter()
         .enumerate()
         .filter(|(_, doc)| doc_is_answer_basis(doc))
-        .map(|(index, doc)| evidence_card_from_doc(pack, doc, index))
+        .flat_map(|(index, doc)| evidence_cards_from_doc(pack, doc, index))
         .collect()
 }
 
@@ -1242,7 +1242,142 @@ fn evidence_card_from_doc(
     }
 }
 
+fn evidence_cards_from_doc(
+    pack: &RetrieverEvidencePack,
+    doc: &RetrieverEvidenceDoc,
+    index: usize,
+) -> Vec<EvidenceCard> {
+    let span_cards = evidence_cards_from_basis_spans(pack, doc, index);
+    if span_cards.is_empty() {
+        vec![evidence_card_from_doc(pack, doc, index)]
+    } else {
+        span_cards
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RetrieverBasisSpan {
+    evidence_type: String,
+    ref_id: Option<String>,
+    source_id: Option<String>,
+    source_category: Option<String>,
+    text: String,
+}
+
+fn evidence_cards_from_basis_spans(
+    pack: &RetrieverEvidencePack,
+    doc: &RetrieverEvidenceDoc,
+    index: usize,
+) -> Vec<EvidenceCard> {
+    basis_spans_for_doc(doc)
+        .into_iter()
+        .enumerate()
+        .map(|(span_index, span)| evidence_card_from_basis_span(pack, doc, index, span_index, span))
+        .collect()
+}
+
+fn basis_spans_for_doc(doc: &RetrieverEvidenceDoc) -> Vec<RetrieverBasisSpan> {
+    let Some(spans) = doc.metadata.get("basis_spans").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    spans
+        .iter()
+        .filter_map(|span| {
+            let evidence_type = span
+                .get("evidence_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let text = span
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            Some(RetrieverBasisSpan {
+                evidence_type: evidence_type.to_string(),
+                ref_id: optional_trimmed_string(span.get("ref_id")),
+                source_id: optional_trimmed_string(span.get("source_id")),
+                source_category: optional_trimmed_string(span.get("source_category")),
+                text: text.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn evidence_card_from_basis_span(
+    pack: &RetrieverEvidencePack,
+    doc: &RetrieverEvidenceDoc,
+    index: usize,
+    span_index: usize,
+    span: RetrieverBasisSpan,
+) -> EvidenceCard {
+    let fallback_source_id = first_non_empty(doc.source.source_ids.iter().map(String::as_str))
+        .or_else(|| doc.source.route_view.as_deref())
+        .or_else(|| first_non_empty(doc.refs.chunk_ids.iter().map(String::as_str)))
+        .unwrap_or(&doc.doc_id)
+        .to_string();
+    let fallback_block_id = first_non_empty(doc.refs.chunk_ids.iter().map(String::as_str))
+        .unwrap_or(&doc.doc_id)
+        .to_string();
+    let source_title = source_title_for_basis_span(doc, &span);
+    let span_ref = span.ref_id.as_deref().unwrap_or("");
+    let evidence_type = span.evidence_type.clone();
+    let source_id = span.source_id.clone().unwrap_or(fallback_source_id);
+    let block_id = span.ref_id.clone().unwrap_or(fallback_block_id);
+    EvidenceCard {
+        evidence_id: format!(
+            "ev-ret-{}",
+            &hash_text(&format!(
+                "{}:{index}:{span_index}:{}:{}",
+                doc.doc_id, evidence_type, span_ref
+            ))[..32]
+        ),
+        evidence_type,
+        source_id,
+        source_title,
+        source_url: String::new(),
+        revision_id: None,
+        block_id,
+        text: trim_chars(&span.text, 1_200),
+        support_scope: support_scope_for_doc_span(pack, doc, &span, span_index),
+        unsupported_scope: unsupported_scope_for_doc(doc),
+        evidence_level: evidence_level_for_doc(doc),
+        confidence: confidence_for_score(doc.score),
+        verification_status: "knownledge_retriever_source_backed".to_string(),
+    }
+}
+
+fn source_title_for_basis_span(doc: &RetrieverEvidenceDoc, span: &RetrieverBasisSpan) -> String {
+    let typed = match span.evidence_type.as_str() {
+        "commentary" => Some("commentary"),
+        "base_text" => Some("base_text"),
+        "version_note" => Some("version_note"),
+        _ => None,
+    };
+    first_non_empty(
+        [
+            typed,
+            span.source_category.as_deref(),
+            doc.display.source_label.as_deref(),
+            doc.source.source_label.as_deref(),
+            doc.display.title.as_deref(),
+            doc.source.citation_hint.as_deref(),
+            doc.source.work.as_deref(),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+    .unwrap_or("knownledge retriever evidence")
+    .to_string()
+}
+
 fn evidence_type_for_doc(doc: &RetrieverEvidenceDoc) -> String {
+    let metadata_types = metadata_evidence_types(doc);
+    for preferred in ["commentary", "base_text", "version_note"] {
+        if metadata_types.iter().any(|value| value == preferred) {
+            return preferred.to_string();
+        }
+    }
     let kind = doc_chunk_kind(doc);
     if doc.route == "commentary"
         || !doc.refs.commentary_ids.is_empty()
@@ -1255,11 +1390,24 @@ fn evidence_type_for_doc(doc: &RetrieverEvidenceDoc) -> String {
             .source
             .version_scope
             .as_deref()
-            .is_some_and(|v| v != "default")
+            .is_some_and(|v| !matches!(v, "" | "default" | "metadata_only"))
     {
         return "version_note".to_string();
     }
     "base_text".to_string()
+}
+
+fn metadata_evidence_types(doc: &RetrieverEvidenceDoc) -> Vec<String> {
+    doc.metadata
+        .get("evidence_types")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn doc_chunk_kind(doc: &RetrieverEvidenceDoc) -> String {
@@ -1340,6 +1488,23 @@ fn support_scope_for_doc(pack: &RetrieverEvidencePack, doc: &RetrieverEvidenceDo
     )
 }
 
+fn support_scope_for_doc_span(
+    pack: &RetrieverEvidencePack,
+    doc: &RetrieverEvidenceDoc,
+    span: &RetrieverBasisSpan,
+    span_index: usize,
+) -> String {
+    let mut scope = support_scope_for_doc(pack, doc);
+    scope.push_str(&format!(
+        "; basis_span_index={span_index}; basis_span_type={}",
+        span.evidence_type
+    ));
+    if let Some(ref_id) = span.ref_id.as_deref() {
+        scope.push_str(&format!("; basis_span_ref={ref_id}"));
+    }
+    scope
+}
+
 fn unsupported_scope_for_doc(doc: &RetrieverEvidenceDoc) -> String {
     let mut limits = Vec::new();
     if let Some(scope) = doc.source.version_scope.as_deref() {
@@ -1395,6 +1560,14 @@ fn first_non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str>
     values.map(str::trim).find(|value| !value.is_empty())
 }
 
+fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn trim_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -1404,6 +1577,138 @@ fn trim_chars(value: &str, max_chars: usize) -> String {
         .take(max_chars.saturating_sub(3))
         .collect::<String>()
         + "..."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pack(doc: RetrieverEvidenceDoc) -> RetrieverEvidencePack {
+        RetrieverEvidencePack {
+            schema_version: EVIDENCE_PACK_SCHEMA_VERSION.to_string(),
+            query: "史湘云的结局，脂批中的证据呢？".to_string(),
+            search_plan: RetrieverNormalizedSearchPlan {
+                schema_version: SEARCH_PLAN_SCHEMA_VERSION.to_string(),
+                query: "史湘云的结局，脂批中的证据呢？".to_string(),
+                routes: vec!["poem".to_string(), "commentary".to_string()],
+                route_weights: BTreeMap::new(),
+                queries: BTreeMap::new(),
+                keyword_queries: vec!["史湘云 结局 脂批".to_string()],
+                semantic_queries: vec!["史湘云 结局 脂批".to_string()],
+                structured_terms: Vec::new(),
+                expansion_terms: Vec::new(),
+                required_evidence_types: vec!["base_text".to_string(), "commentary".to_string()],
+                filters: None,
+                explicit_scope_allowed: false,
+                top_k: 8,
+                candidate_limit: 20,
+                route_record_limit: 10,
+                route_doc_limit: 4,
+                vector_top_k: 10,
+                include_cards: true,
+                rerank: false,
+                rerank_top_k: 8,
+                raw_plan: json!({"test": true}),
+            },
+            docs: vec![doc],
+            diagnostics: RetrieverPackDiagnostics {
+                index_path: "/tmp/retrieval.sqlite".to_string(),
+                route_errors: BTreeMap::new(),
+                routes: BTreeMap::new(),
+                fusion: RetrieverFusionDiagnostics {
+                    route_counts: BTreeMap::new(),
+                    fused_count: 1,
+                    rerank: RetrieverRerankDiagnostics {
+                        enabled: false,
+                        applied: false,
+                        error: None,
+                        extra: BTreeMap::new(),
+                    },
+                    extra: BTreeMap::new(),
+                },
+                extra: BTreeMap::new(),
+            },
+            sufficiency: RetrieverSufficiency {
+                sufficient: true,
+                top_score: 12.0,
+                doc_count: 1,
+                direct_evidence_doc_count: 0,
+                route_coverage: vec!["poem".to_string()],
+                reasons: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn answer_basis_doc() -> RetrieverEvidenceDoc {
+        RetrieverEvidenceDoc {
+            schema_version: EVIDENCE_DOC_SCHEMA_VERSION.to_string(),
+            doc_id: "rch.text.ent.text.le_zhong_bei".to_string(),
+            route: "bm25_fts".to_string(),
+            content: "乐中悲 text_work".to_string(),
+            score: 12.0,
+            source: RetrieverEvidenceSource {
+                version_scope: Some("metadata_only".to_string()),
+                source_ids: vec!["hongloumeng-wikisource-120".to_string()],
+                ..RetrieverEvidenceSource::default()
+            },
+            metadata: json!({
+                "evidence_projection": "answer_basis",
+                "evidence_types": ["base_text", "commentary"],
+                "basis_spans": [
+                    {
+                        "evidence_type": "base_text",
+                        "ref_id": "hlm120.c005.p0069.song_title_unit0001",
+                        "source_id": "hongloumeng-wikisource-120",
+                        "source_category": "base_text",
+                        "text": "終久是雲散高唐，水涸湘江。"
+                    },
+                    {
+                        "evidence_type": "commentary",
+                        "ref_id": "zhipi.c005.p0057.song_title_unit0001",
+                        "source_id": "zhipi",
+                        "source_category": "commentary_material",
+                        "text": "第六支，樂中悲。"
+                    }
+                ]
+            }),
+            refs: RetrieverEvidenceRefs::default(),
+            routes: Vec::new(),
+            display: RetrieverEvidenceDisplay::default(),
+            source_scope: json!({}),
+            usage_policy: json!({"answer_policy": "dereference_required"}),
+            evidence_card: None,
+            raw_candidate: None,
+        }
+    }
+
+    #[test]
+    fn evidence_cards_split_retriever_basis_spans() {
+        let pack = test_pack(answer_basis_doc());
+        let cards = evidence_cards_from_pack(&pack);
+        let evidence_types = cards
+            .iter()
+            .map(|card| card.evidence_type.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(cards.len(), 2);
+        assert!(evidence_types.contains("base_text"));
+        assert!(evidence_types.contains("commentary"));
+        assert!(cards.iter().any(|card| card.text.contains("雲散高唐")));
+        assert!(cards.iter().any(|card| card.text.contains("第六支")));
+        assert!(
+            cards
+                .iter()
+                .all(|card| card.evidence_type != "version_note")
+        );
+    }
+
+    #[test]
+    fn evidence_type_uses_retriever_metadata_before_version_scope() {
+        let doc = answer_basis_doc();
+
+        assert_eq!(evidence_type_for_doc(&doc), "commentary");
+    }
 }
 
 fn hash_text(value: &str) -> String {

@@ -5582,7 +5582,8 @@ fn resolve_question(
             )?,
         });
     }
-    let current_has_subject = latest_subject_in_text(question)?.is_some();
+    let current_subject = latest_subject_in_text(question)?;
+    let current_has_subject = current_subject.is_some() || !base_frame.entities().is_empty();
     if !current_has_subject && context_rules::is_contextual_continuation_question(question)? {
         let anchor = latest_prior_topic_question(messages, question)
             .map(|value| (value, "current_window"))
@@ -5784,7 +5785,7 @@ fn resolve_question(
             )?,
         });
     }
-    if context_rules::is_elliptical_followup_question(question)? {
+    if !current_has_subject && context_rules::is_elliptical_followup_question(question)? {
         let anchor = latest_prior_user_question(messages, question)
             .map(|value| (value, "session_history"))
             .or_else(|| {
@@ -5846,7 +5847,6 @@ fn resolve_question(
             question_frame: base_frame,
         });
     }
-    let current_subject = latest_subject_in_text(question)?;
     if let Some(subject) = current_subject {
         return Ok(ResolverOutput {
             resolved_question: question.to_string(),
@@ -7698,6 +7698,26 @@ mod tests {
             json!("deterministic_scope_or_evidence_followup")
         );
         remove_file_db(&db_path);
+    }
+
+    #[test]
+    fn explicit_subject_evidence_followup_does_not_merge_prior_question() {
+        let question = "关于史湘云的结局，脂批中的证据呢？";
+        assert_eq!(
+            latest_subject_in_text(question).expect("subject lookup"),
+            Some("史湘云".to_string())
+        );
+        let resolved =
+            resolve_question(question, &[], None, Some("通灵宝玉丢了几次？")).expect("resolves");
+
+        assert_eq!(resolved.resolved_question, question);
+        assert_eq!(resolved.used_context_refs, Vec::<String>::new());
+        assert!(
+            resolved
+                .referent_bindings
+                .iter()
+                .any(|binding| binding == "史湘云")
+        );
     }
 
     #[tokio::test]
