@@ -207,7 +207,8 @@ pub(crate) fn chapter_location_focus_terms(frame: &RuntimeQuestionFrame) -> Vec<
 }
 
 fn chapter_location_answer_terms(frame: &RuntimeQuestionFrame) -> Vec<String> {
-    let mut terms = chapter_location_focus_terms(frame);
+    let mut terms = chapter_location_event_cue_terms(frame);
+    extend_unique(&mut terms, &chapter_location_focus_terms(frame));
     if let Ok(expanded) = query_expansion_search_terms(&frame.canonical_question) {
         extend_unique(&mut terms, &expanded);
     }
@@ -215,6 +216,30 @@ fn chapter_location_answer_terms(frame: &RuntimeQuestionFrame) -> Vec<String> {
         .into_iter()
         .filter(|term| term.chars().count() >= 2)
         .collect()
+}
+
+fn chapter_location_event_cue_terms(frame: &RuntimeQuestionFrame) -> Vec<String> {
+    let normalized = normalize_text(&frame.canonical_question);
+    if !["死", "去世", "亡故", "病逝", "夭逝", "长逝", "長逝"]
+        .iter()
+        .any(|term| normalized.contains(&normalize_text(term)))
+    {
+        return Vec::new();
+    }
+    [
+        "蕭然長逝",
+        "萧然长逝",
+        "長逝",
+        "长逝",
+        "夭逝",
+        "病逝",
+        "亡故",
+        "去世",
+        "死",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect()
 }
 
 fn chapter_location_event_label(frame: &RuntimeQuestionFrame, terms: &[String]) -> String {
