@@ -2057,6 +2057,7 @@ fn upstream_draft_using_only_supplemental_evidence_is_rejected() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["林黛玉进贾府时尚幼。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2100,6 +2101,7 @@ fn upstream_draft_accepts_knownledge_retriever_source_backed_evidence() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["判词写到“湘江水逝楚雲飛”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2148,6 +2150,7 @@ fn upstream_draft_accepts_package_evidence_without_tier_binding() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["判词写到“湘江水逝楚雲飛”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![unbound_retriever_card.evidence_id]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2188,6 +2191,7 @@ fn upstream_draft_rejects_claim_ref_without_textual_support() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["通灵宝玉在第八回丢失过一次，袭人发现后找回。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2230,6 +2234,7 @@ fn upstream_draft_accepts_claim_ref_with_textual_support() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["第五十二回良儿偷玉。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2272,6 +2277,7 @@ fn upstream_draft_accepts_chapter_location_claim_with_block_id_chapter_cue() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["秦钟在第十六回蕭然長逝。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2320,6 +2326,7 @@ fn upstream_draft_accepts_truncated_answer_quote_when_remainder_is_supported() {
             "秦钟在第十六回萧然长逝。".to_string(),
             "原文有“蕭然長逝了”的描写。".to_string(),
         ],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![
             vec![package.cards[0].evidence_id.clone()],
             vec![package.cards[0].evidence_id.clone()],
@@ -2364,6 +2371,7 @@ fn upstream_draft_rejects_chapter_location_claim_without_event_cue() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["秦钟在第十六回蕭然長逝。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2404,6 +2412,7 @@ fn upstream_draft_rejects_claim_ref_that_misses_question_focus() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["第十五回脂批指出“总写阿凤聪明中的痴人”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2444,6 +2453,7 @@ fn upstream_draft_accepts_claim_ref_that_matches_question_focus() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["正册湘云判词写“几缕飞云，一湾逝水”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2487,6 +2497,7 @@ fn upstream_draft_accepts_claim_ref_focus_from_retriever_provenance() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["《乐中悲》写“云散高唐，水涸湘江”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2530,6 +2541,7 @@ fn upstream_draft_rejects_unsupported_quoted_claim_phrase() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["脂批批道：“此是湘云结局。”".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2573,6 +2585,7 @@ fn upstream_draft_rejects_unsupported_quoted_answer_phrase() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["《乐中悲》写“云散高唐，水涸湘江”。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -2614,6 +2627,7 @@ fn upstream_draft_allows_short_visible_answer_quote_when_claim_is_supported() {
         observed_candidate_package_id: Some(package.package_id.clone()),
         claim_statement_count: Some(1),
         claim_statements: vec!["秦钟在第十六回蕭然長逝。".to_string()],
+        claim_stances: Vec::new(),
         claim_evidence_refs: vec![vec![package.cards[0].evidence_id.clone()]],
         rejected_reason: None,
         coverage_status: Some("passed".to_string()),
@@ -10310,6 +10324,71 @@ fn openai_compatible_mode_allows_partial_coverage_count_draft_with_supported_cla
         Value::Null
     );
     assert!(workflow.final_answer.contains("良儿偷玉"));
+}
+
+#[test]
+fn openai_compatible_mode_allows_not_found_in_scope_count_claim() {
+    let mut cards = in_scope_lost_jade_event_cards();
+    for card in &mut cards {
+        card.verification_status = "verified".to_string();
+    }
+    let mut workflow = runtime_draft_workflow(
+        cards,
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "通灵宝玉丢了几次？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
+            "draft_candidate": {
+                "draft_answer": "根据前八十回正文，通灵宝玉明确丢失过一次。第五十二回平儿提到“那一年有一个良儿偷玉”，这是当前证据包内唯一一次直接记载的丢失事件。",
+                "package_id": package_id,
+                "claim_statements": [
+                    {
+                        "text": "那一年有一个良儿偷玉",
+                        "stance": "explicit_supported",
+                        "certainty": "certain",
+                        "evidence_refs": ["ev-lianger-stole-jade"],
+                    },
+                    {
+                        "text": "当前前八十回正文仅见良儿偷玉这一次丢失记载",
+                        "stance": "not_found_in_scope",
+                        "certainty": "certain",
+                        "evidence_refs": ["ev-lianger-stole-jade"],
+                    }
+                ],
+            },
+            "coverage_assessment": {
+                "status": "passed",
+                "missing_in_scope_slots": [],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {
+                "recommended": false,
+                "queries": [],
+            },
+            "out_of_scope_hints": [],
+        }))
+        .expect("not_found_in_scope bundle serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+            .expect("scope absence claim should be accepted when refs are in package");
+
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
+    assert!(workflow.final_answer.contains("唯一一次直接记载"));
 }
 
 #[test]

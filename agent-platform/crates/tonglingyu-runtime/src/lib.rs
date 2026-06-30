@@ -3101,7 +3101,13 @@ pub fn profile_catalog() -> Vec<ProfileDescriptor> {
                 "package_id_source": "current_evidence_package",
                 "source_scope_policy_source": "step_output_json.source_scope_policy",
                 "draft_candidate_required": ["draft_answer", "package_id", "claim_statements"],
-                "claim_statement_required": ["text", "evidence_refs"],
+                "claim_statement_required": ["text", "stance", "certainty", "evidence_refs"],
+                "claim_statement_stance_enum": [
+                    "explicit_supported",
+                    "inferential_supported",
+                    "not_found_in_scope",
+                    "directly_denied"
+                ],
                 "evidence_refs_source": "current_evidence_package_only",
                 "must_include": ["support_scope", "unsupported_scope"]
             }),
@@ -6509,6 +6515,14 @@ fn agent_runtime_draft_claim_evidence_support_rejection(
         if referenced_cards.is_empty() {
             return Some("draft_claim_ref_text_unsupported");
         }
+        if extraction
+            .claim_stances
+            .get(index)
+            .and_then(Option::as_deref)
+            .is_some_and(scope_absence_claim_stance)
+        {
+            continue;
+        }
         #[cfg(test)]
         if referenced_cards
             .iter()
@@ -6524,6 +6538,10 @@ fn agent_runtime_draft_claim_evidence_support_rejection(
         }
     }
     None
+}
+
+fn scope_absence_claim_stance(stance: &str) -> bool {
+    stance == "not_found_in_scope"
 }
 
 fn draft_claim_refs_match_question_focus(
