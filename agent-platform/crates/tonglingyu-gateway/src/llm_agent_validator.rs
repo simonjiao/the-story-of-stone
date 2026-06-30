@@ -657,7 +657,6 @@ fn conversation_state_audit(
 fn runtime_adapter_from_output_ref(output_ref: Option<&str>) -> &'static str {
     match output_ref.unwrap_or_default() {
         value if value.starts_with("openai-compatible-network://") => "openai-compatible-network",
-        value if value.starts_with("hermes://") => "hermes",
         value if value.starts_with("result://") => "minimal",
         _ => "unknown",
     }
@@ -1058,7 +1057,7 @@ mod tests {
             "prior_subject_needed",
             &envelope(QUESTION_NORMALIZER_PROFILE_ID),
             &output.to_string(),
-            Some("hermes://profiles/test"),
+            Some("openai-compatible-network://profiles/test"),
             None,
             &["晴雯".to_string()],
         );
@@ -1153,7 +1152,7 @@ mod tests {
             "prior_subject_needed",
             &envelope(QUESTION_NORMALIZER_PROFILE_ID),
             &raw_output,
-            Some("hermes://profiles/test"),
+            Some("openai-compatible-network://profiles/test"),
             None,
             &["晴雯".to_string()],
         );

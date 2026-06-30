@@ -101,15 +101,6 @@ Runtime Adapter 是 AgentRequest 的执行边界，不是 Gateway 内部 helper�
 普通 answer upstream 的同义词。生产配置必须显式声明 adapter 类型，并由
 gatekeeper 按类型验证。
 
-### `hermes`
-
-`hermes` 是可选的 tool-capable Runtime Adapter。它通过 Hermes Agent API
-server 执行 profile，可承载工具调用、profile workflow、Hermes transcript 和
-Runtime tool audit。当前 hhost 默认生产 workflow 不通过 Gateway 主路径选择该
-adapter；启用它必须是显式配置和显式验证结果。`HermesRuntimeClient` 作为可选能力和
-回归测试能力保留，但当前默认生产入口由 role provider profile 解析为
-`openai-compatible-network`。
-
 ### `openai-compatible-network`
 
 `openai-compatible-network` 是网络型 Runtime Adapter，通过 OpenAI-compatible
@@ -121,13 +112,13 @@ writer，均应通过 role provider profile 绑定到对应的 OpenAI-compatible
 后续 provider 应通过新的 provider family / adapter 扩展，而不是把 provider 专名作为
 runtime backend。
 
-该 adapter 只能提供“受控 JSON 候选生成/观察”能力，不能等价替代 Hermes 的工具执行、
-skill 调用、browser workflow、profile tool loop 或 Hermes transcript。当前 workflow
+该 adapter 只提供“受控 JSON 候选生成/观察”能力，不提供工具执行、skill 调用、
+browser workflow、profile tool loop 或私有 transcript。当前 workflow
 证据检索、证据包创建和 reviewer 裁决仍由 `tonglingyu-runtime` 本地确定性步骤执行；
 上游 profile step 只能返回受 schema 约束的 observation 或 draft candidate，并由本地
 治理决定是否消费。若后续某个 profile 确实需要 read-only tool call、output_ref 绑定或
-Runtime tool audit，必须显式启用 tool-capable adapter，不能从当前
-`openai-compatible-network` 主流程隐式进入 Hermes Agent。
+Runtime tool audit，必须新增明确的 tool-capable adapter contract；不能从当前
+`openai-compatible-network` 主流程隐式切换到其它 provider。
 
 `openai-compatible-network` 必须满足：
 
@@ -158,7 +149,7 @@ Runtime tool audit，必须显式启用 tool-capable adapter，不能从当前
 Gateway 普通回答的 `TONGLINGYU_UPSTREAM_BASE_URL` 可以直连 OpenAI-compatible
 上游模型；这只影响最终 chat completion 的生成后端，不等于 question normalizer /
 conversation state writer 或四个 workflow profile step 已经有真实 Agent Runtime。当前
-“不使用 Hermes Agent”的生产口径必须同时满足：
+“使用受控 OpenAI-compatible Agent Runtime”的生产口径必须同时满足：
 
 1. 普通 answer upstream 可独立使用 direct provider key；
 2. workflow roles 通过 `TONGLINGYU_AGENT_ROLE_TEXT/PACKAGE/DRAFT/REVIEW_PROVIDER`
@@ -166,8 +157,8 @@ conversation state writer 或四个 workflow profile step 已经有真实 Agent 
 3. question normalizer / conversation state writer 通过独立 role provider profile
    指向受控 provider；
 4. gatekeeper runtime config validator 拒绝非 role provider profile 的
-   `TONGLINGYU_AGENT_RUNTIME_MODE`、
-   `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 和 `AGENT_RUNTIME_HERMES_*`；
+   `TONGLINGYU_AGENT_RUNTIME_MODE`、`TONGLINGYU_LLM_AGENT_RUNTIME_MODE`，
+   并拒绝任何非 `openai-compatible-network` workflow backend；
 5. release live gates 证明 direct mode 的 AgentRequest、validator、ContextPackBuilder
    闭环真实执行。
 
@@ -322,12 +313,10 @@ Gateway 新请求和 `runtime-dry-run` 现在也会让 `tonglingyu-runtime` 为�
 `agent_runtime` envelope 写入 step report、stream event metadata 和
 `agent_runtime_profile_step_executed` audit event。该 envelope 明确标记
 `content_source=tonglingyu-deterministic-workflow` 且
-`content_used_for_final_answer=false`，避免把执行壳误判为 Hermes 内容执行。
-`tonglingyu-runtime` 保留 `TonglingyuRuntimeToolExecutor`，实现
-`agent_core::RuntimeToolExecutor`，可在可选 tool-capable adapter 中把 tool call
-转成 store-backed `TonglingyuToolCall`，覆盖 text search、package create/read
-等本地证据工具。当前 Gateway 主流程不依赖该 Hermes tool loop；workflow profile
-step 由 role provider profile 构建 `openai-compatible-network` runtime client。
+`content_used_for_final_answer=false`，避免把执行壳误判为上游生成内容。
+workflow profile step 由 role provider profile 构建
+`openai-compatible-network` runtime client；本地证据工具仍由
+`tonglingyu-runtime` 确定性执行，不暴露为 provider tool loop。
 在 `openai-compatible-network` 模式下，`draft_answer` profile 的 runtime output
 可以成为 workflow 草稿候选，并由本地 reviewer enforcement 重新生成最终回答；Runtime 会记录
 `agent_runtime_profile_draft_consumed` audit event，并区分
@@ -347,7 +336,7 @@ Runtime step report、SQLite audit 和 streaming step summary 已透出
 profile step 观测信息，包括 `tool_rounds`、tool result count 和 tool audit event
 count；完整 tool result/audit event 保留在 step report/audit payload 中，stream 只暴露
 计数级摘要。当前 `openai-compatible-network` 主流程不要求上游执行 Tonglingyu
-read-only tools；tool-capable 约束只适用于显式启用的 Hermes mode。
+read-only tools；provider 只返回 schema-bound JSON candidate。
 `draft_answer` profile output 已支持结构化 JSON 候选；JSON 候选必须带
 当前 evidence package 的 `package_id` 和非空 `draft_answer`，package 不匹配或
 缺少草稿时只写 rejected audit，不进入本地草稿或最终回答。纯文本
@@ -376,8 +365,9 @@ events，会 fallback 到 cached completion stream。
 
 当前 R5D 的生产接入口径是：Gateway workflow roles 通过 role provider profile
 进入 `openai-compatible-network` profile step execution；事实源、证据包和最终
-reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes tool-capable
-路径作为可选项保留在 runtime crate 和回归测试中，但不是当前 hhost 默认主流程。
+reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。当前 contract 不提供
+tool-capable provider fallback；非 `openai-compatible-network` workflow backend
+必须 fail-closed。
 
 ### R5C 四 Profile 编排
 
@@ -406,8 +396,8 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
 - [x] 每个确定性 profile step 先接入 `agent-runtime`
   `execute_profile_step` envelope，并记录 `agent_runtime_profile_step_executed`
   audit event。
-- [x] 提供 store-backed `TonglingyuRuntimeToolExecutor`，为可选 tool-capable
-  adapter 调用本地证据工具保留执行边界。
+- [x] 本地证据工具由 `tonglingyu-runtime` 确定性执行；当前 provider contract 不暴露
+  tool-capable adapter。
 - [x] Gateway 主流程通过 role provider profile 构建
   `openai-compatible-network` runtime client；`TONGLINGYU_AGENT_RUNTIME_MODE`
   不再作为默认生产 workflow 路由入口。
@@ -419,12 +409,8 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
   smoke 覆盖 role provider profile 模式。
 - [x] step report、audit 和 streaming step summary 暴露 profile step 观测信息，
   避免生产排障时看不到上游 profile 是否真实执行。
-- [x] 显式启用 Hermes mode 时，required profile step 必须产生匹配 allowed tools 的
-  runtime tool result；缺少必需工具结果时 workflow fail-closed。当前
-  `openai-compatible-network` 主流程不把 read-only tool loop 交给上游执行。
-- [x] 显式启用 Hermes mode 时，runtime tool result 必须携带 Tonglingyu runtime
-  output_ref；package tool 的 output_ref 必须绑定当前 evidence package，
-  text/commentary search tool 的 output_ref 必须绑定当前本地 evidence set。
+- [x] `openai-compatible-network` 主流程不把 read-only tool loop 交给上游执行；
+  上游只能返回 schema-bound JSON candidate，证据和 package 绑定由本地治理校验。
 - [x] `draft_answer` 结构化 JSON 候选必须校验 `package_id`，
   错误 package 或缺少草稿时拒绝消费并写入 rejected audit。
 - [x] `review_answer` 结构化 JSON 输出进入 review observation，
@@ -448,7 +434,7 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
   admin/gateway key 隔离和 provider key 不含 admin credential。
 - [x] 生产 compose 显式设置 workflow role provider profile，并拒绝
   `TONGLINGYU_AGENT_RUNTIME_MODE`、`TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 和
-  `AGENT_RUNTIME_HERMES_*` 等非默认 runtime keys。
+  legacy runtime adapter keys 等非默认 runtime 配置。
 - [x] 增加 `<deployment>/scripts/verify-tonglingyu-strict-gateway.sh`，运行态检查
   Gateway health/models/admin metrics/Prometheus，确认 `openai-compatible-network`
   runtime、单可见模型、隐藏内部 profile、KB 非空、rate limit 和 admin key 隔离。
@@ -465,12 +451,9 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
   live gate 会要求 summary 显示 OpenAI-compatible observation + local governance 闭环。
 - [x] admin trace 顶层透出最新 `agent_runtime_summary`；strict live gate 会校验
   summary 的 step/tool 计数与详细 runtime step audit event 一致。
-- [x] Runtime summary 和 strict Gateway gate 已增加 `tool_audit_event_count`
-  交叉校验；显式启用 Hermes mode 时，tool result 没有被 tool audit event 覆盖会
-  fail-closed，避免只验证工具结果字段、不验证工具执行审计。
-- [x] strict Gateway gate 会要求 tool result 与 `runtime_tool_result` audit
-  event 按 `tool_name` / `output_ref` 绑定，避免 audit 数量正确但具体工具输出
-  无法审计归因。
+- [x] Runtime summary 和 strict Gateway gate 保留 `tool_audit_event_count`
+  可观测字段；当前 `openai-compatible-network` 主流程不把 tool result 作为 provider
+  contract 的必需输出。
 - [x] strict Gateway gate 会校验 admin trace 顶层 `agent_runtime_summary`
   与最新 runtime summary audit event 完全一致，避免 Gateway 管理入口展示陈旧或
   缺失 summary 仍被误判为通过。
@@ -605,17 +588,16 @@ reviewer 裁决仍由 `tonglingyu-runtime` 本地治理强制约束。Hermes too
   Gateway service key；contract smoke 覆盖 check/apply/idempotent/重叠 key
   拒绝、provider key 边界残留引号清理和输出不泄露生成值。
 - [x] 远程 `hhost` 已用当前 compose 和 Gateway 镜像重建，`verify-tonglingyu-runtime-config.sh`
-  通过，Gateway health/metrics 报告 `agent_runtime.mode=hermes`。
+  通过，Gateway health/metrics 应报告 `agent_runtime.mode=openai-compatible-network`。
 - [x] 远程 `hhost` Open WebUI Bridge Function 和 Gateway Admin Action 已通过
   DB installer 更新；对应 verify gate 均通过。
 - [x] release readiness live mode 已加入 `model_upstream_network` gate，
-  在 strict Gateway 之前从 `sub2api`/Hermes 容器内探测模型上游 DNS、fake-IP
+  在 strict Gateway 之前从 `sub2api`/Gateway 运行环境探测模型上游 DNS、fake-IP
   和 TLS 握手状态，并对每个 URL 做有界重试，避免把上游不可达或瞬时 TLS
   reset 折叠成普通 Gateway `500` 或单次抖动造成的假 release blocker。
-- [x] Runtime Agent 工具执行契约已从“等待模型自发 tool call”收敛为
-  host-enforced 只读工具观察：Hermes 未返回必需 tool result 时，通灵玉 Runtime
-  使用已执行的确定性本地 step 输出补齐绑定 trace/evidence/package 的
-  tool result 和审计事件，再由本地 reviewer/治理层决定是否消费内容。
+- [x] Runtime Agent 契约已从“等待模型自发 tool call”收敛为
+  draft-only schema candidate：通灵玉 Runtime 使用已执行的确定性本地 step 输出构造
+  evidence package，再由本地 reviewer/治理层决定是否消费上游 draft。
 - [x] 远程 `hhost` strict Gateway live gate 通过；chat、stream、admin trace、
   metrics、Prometheus 和 Open WebUI -> Gateway 模型面均已纳入 gate。
 - [x] 增加 Gateway 不重新持有领域 loader、FTS 和 reviewer 领域函数的

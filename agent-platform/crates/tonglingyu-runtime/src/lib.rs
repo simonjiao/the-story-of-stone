@@ -6,9 +6,8 @@ use agent_core::{
     RuntimeToolResult, RuntimeToolSpec,
 };
 use agent_runtime::{
-    HermesRuntimeClient, HermesRuntimeConfig, MinimalRuntimeClient,
-    OpenAiCompatibleNetworkRuntimeClient, OpenAiCompatibleNetworkRuntimeConfig,
-    RuntimeProfileRegistry,
+    MinimalRuntimeClient, OpenAiCompatibleNetworkRuntimeClient,
+    OpenAiCompatibleNetworkRuntimeConfig, RuntimeProfileRegistry,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -2156,7 +2155,6 @@ impl RuntimeToolExecutor for TonglingyuRuntimeToolExecutor {
 pub enum TonglingyuAgentRuntimeMode {
     #[default]
     Minimal,
-    Hermes,
     OpenAiCompatibleNetwork,
 }
 
@@ -2165,23 +2163,15 @@ impl TonglingyuAgentRuntimeMode {
         if let Some(mode) = workflow_agent_runtime_mode_from_role_provider_source(&env_nonempty)? {
             return Ok(mode);
         }
-        let value = std::env::var("TONGLINGYU_AGENT_RUNTIME_MODE").unwrap_or_default();
-        match value.trim() {
-            "" => Err(anyhow!(
-                "workflow agent role provider config is required: {}",
-                WORKFLOW_AGENT_ROLE_PROVIDER_ENVS.join(",")
-            )),
-            "openai-compatible-network" => Ok(Self::OpenAiCompatibleNetwork),
-            other => Err(anyhow!(
-                "TONGLINGYU_AGENT_RUNTIME_MODE={other} is not supported for workflow runtime; configure role provider backend openai-compatible-network"
-            )),
-        }
+        Err(anyhow!(
+            "workflow agent role provider config is required: {}; TONGLINGYU_AGENT_RUNTIME_MODE is not a workflow routing fallback",
+            WORKFLOW_AGENT_ROLE_PROVIDER_ENVS.join(",")
+        ))
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Minimal => "minimal",
-            Self::Hermes => "hermes",
             Self::OpenAiCompatibleNetwork => "openai-compatible-network",
         }
     }
@@ -2234,10 +2224,6 @@ fn agent_provider_env_prefix(profile: &str) -> Result<String> {
         "TONGLINGYU_AGENT_PROVIDER_{}",
         provider_profile_env_suffix(profile)?
     ))
-}
-
-fn required_agent_provider_env(profile: &str, field: &str) -> Result<String> {
-    required_agent_provider_env_from(profile, field, &env_nonempty)
 }
 
 fn required_agent_provider_env_from(
@@ -4000,16 +3986,14 @@ async fn attach_agent_runtime_step_execution(
 fn agent_runtime_profile_step_enabled(mode: TonglingyuAgentRuntimeMode, operation: &str) -> bool {
     match mode {
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => operation == "draft_answer",
-        TonglingyuAgentRuntimeMode::Hermes | TonglingyuAgentRuntimeMode::Minimal => true,
+        TonglingyuAgentRuntimeMode::Minimal => true,
     }
 }
 
 fn agent_runtime_profile_step_max_attempts(mode: TonglingyuAgentRuntimeMode) -> usize {
     match mode {
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => 1,
-        TonglingyuAgentRuntimeMode::Hermes | TonglingyuAgentRuntimeMode::Minimal => {
-            AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS
-        }
+        TonglingyuAgentRuntimeMode::Minimal => AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS,
     }
 }
 
@@ -4026,13 +4010,8 @@ fn agent_runtime_profile_step_local_governance_skip(
 fn agent_runtime_sync_execution_policy(mode: TonglingyuAgentRuntimeMode) -> &'static str {
     match mode {
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "draft_only",
-        TonglingyuAgentRuntimeMode::Hermes => "full_observation",
         TonglingyuAgentRuntimeMode::Minimal => "minimal_envelope",
     }
-}
-
-fn agent_runtime_full_observation_required(mode: TonglingyuAgentRuntimeMode) -> bool {
-    matches!(mode, TonglingyuAgentRuntimeMode::Hermes)
 }
 
 struct AgentRuntimeStepExecution {
@@ -4101,28 +4080,21 @@ async fn execute_agent_runtime_profile_step(
 fn agent_runtime_step_execution_from_run(
     index: usize,
     mode: TonglingyuAgentRuntimeMode,
-    step: &RuntimeWorkflowStepReport,
+    _step: &RuntimeWorkflowStepReport,
     result_summary_contract: String,
     execution: AgentRuntimeProfileStepRun,
 ) -> Result<AgentRuntimeStepExecution> {
     let output = execution.output;
-    let mut tool_results = output
+    let tool_results = output
         .metadata
         .get("tool_results")
         .cloned()
         .unwrap_or_else(|| json!([]));
-    let mut tool_audit_events = output
+    let tool_audit_events = output
         .metadata
         .get("tool_audit_events")
         .cloned()
         .unwrap_or_else(|| json!([]));
-    host_enforce_missing_required_tool_results(
-        mode,
-        step,
-        &mut tool_results,
-        &mut tool_audit_events,
-    )?;
-    validate_agent_runtime_required_tools(mode, step, &tool_results)?;
     let tool_result_count = tool_results.as_array().map_or(0, Vec::len);
     let tool_audit_event_count = tool_audit_events.as_array().map_or(0, Vec::len);
     Ok(AgentRuntimeStepExecution {
@@ -4288,302 +4260,9 @@ fn runtime_profile_input_for_attempt(
     }
 }
 
-fn host_enforce_missing_required_tool_results(
-    mode: TonglingyuAgentRuntimeMode,
-    step: &RuntimeWorkflowStepReport,
-    tool_results: &mut Value,
-    tool_audit_events: &mut Value,
-) -> Result<()> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes || !step.required || step.allowed_tools.is_empty()
-    {
-        return Ok(());
-    }
-
-    if !tool_results.is_array() {
-        *tool_results = json!([]);
-    }
-    if !tool_audit_events.is_array() {
-        *tool_audit_events = json!([]);
-    }
-
-    let executed_tools = tool_results
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("tool_name").and_then(Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
-    let missing_tools = step
-        .allowed_tools
-        .iter()
-        .filter(|tool| !executed_tools.contains(tool.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if missing_tools.is_empty() {
-        return Ok(());
-    }
-
-    let descriptors = tool_catalog()
-        .into_iter()
-        .map(|descriptor| (descriptor.name.clone(), descriptor))
-        .collect::<BTreeMap<_, _>>();
-    for tool_name in missing_tools {
-        let output_ref = host_enforced_tool_output_ref(step, &tool_name)?;
-        let output_schema = descriptors
-            .get(&tool_name)
-            .map(|descriptor| descriptor.output_contract.clone())
-            .unwrap_or_else(|| json!({}));
-        let call_id = format!(
-            "host-required-{}-{}",
-            step.step_id,
-            tool_name.replace('.', "-")
-        );
-        let result = json!({
-            "call_id": &call_id,
-            "profile_id": &step.profile,
-            "tool_name": &tool_name,
-            "output_schema": &output_schema,
-            "output_ref": &output_ref,
-            "output_summary": summarize_runtime_step_output(&step.output),
-            "trace_id": &step.trace_id,
-            "host_enforced": true,
-            "source": "tonglingyu-deterministic-workflow",
-        });
-        let call_event = json!({
-            "event": "runtime_tool_call",
-            "call_id": &call_id,
-            "call_id_status": "validated",
-            "profile_id": &step.profile,
-            "tool_name": &tool_name,
-            "tool_name_status": "validated",
-            "trace_id": &step.trace_id,
-            "host_enforced": true,
-            "source": "tonglingyu-deterministic-workflow",
-        });
-        let result_event = json!({
-            "event": "runtime_tool_result",
-            "call_id": &call_id,
-            "profile_id": &step.profile,
-            "tool_name": &tool_name,
-            "output_schema": &output_schema,
-            "output_ref": &output_ref,
-            "output_summary": summarize_runtime_step_output(&step.output),
-            "trace_id": &step.trace_id,
-            "host_enforced": true,
-            "source": "tonglingyu-deterministic-workflow",
-        });
-        if let Some(items) = tool_results.as_array_mut() {
-            items.push(result);
-        }
-        if let Some(items) = tool_audit_events.as_array_mut() {
-            items.push(call_event);
-            items.push(result_event);
-        }
-    }
-    Ok(())
-}
-
-fn host_enforced_tool_output_ref(
-    step: &RuntimeWorkflowStepReport,
-    tool_name: &str,
-) -> Result<String> {
-    if matches!(
-        tool_name,
-        "tonglingyu.text.search" | "tonglingyu.commentary.search"
-    ) {
-        return evidence_tool_expected_output_ref(step);
-    }
-    if matches!(
-        tool_name,
-        "tonglingyu.evidence.package.create"
-            | "tonglingyu.evidence.package.read"
-            | "tonglingyu.evidence.package.replay"
-    ) {
-        let Some(package_id) = step
-            .output
-            .get("package_id")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-        else {
-            return Err(anyhow!(
-                "Hermes runtime step {} ({}) package tool {} cannot be host-enforced without package_id",
-                step.step_id,
-                step.operation,
-                tool_name
-            ));
-        };
-        return Ok(format!(
-            "runtime://tonglingyu/{}/packages/{package_id}",
-            step.trace_id
-        ));
-    }
-    Ok(format!(
-        "runtime://tonglingyu/{}/tools/host-required-{}-{}",
-        step.trace_id,
-        step.step_id,
-        tool_name.replace('.', "-")
-    ))
-}
-
-fn summarize_runtime_step_output(value: &Value) -> String {
-    match value {
-        Value::Object(map) => format!("object_keys_len:{}", map.len()),
-        Value::Array(items) => format!("array_len:{}", items.len()),
-        Value::String(value) => format!("string_len:{}", value.chars().count()),
-        Value::Null => "null".to_string(),
-        Value::Bool(_) => "bool".to_string(),
-        Value::Number(_) => "number".to_string(),
-    }
-}
-
-fn validate_agent_runtime_required_tools(
-    mode: TonglingyuAgentRuntimeMode,
-    step: &RuntimeWorkflowStepReport,
-    tool_results: &Value,
-) -> Result<()> {
-    if mode != TonglingyuAgentRuntimeMode::Hermes || !step.required || step.allowed_tools.is_empty()
-    {
-        return Ok(());
-    }
-    let executed_tools = tool_results
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("tool_name").and_then(Value::as_str))
-        .collect::<BTreeSet<_>>();
-    let missing_tools = step
-        .allowed_tools
-        .iter()
-        .filter(|tool| !executed_tools.contains(tool.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing_tools.is_empty() {
-        return Err(anyhow!(
-            "Hermes runtime step {} ({}) did not execute required tool(s): {}",
-            step.step_id,
-            step.operation,
-            missing_tools.join(",")
-        ));
-    }
-
-    let result_items = tool_results
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    for tool_name in &step.allowed_tools {
-        let Some(result) = result_items
-            .iter()
-            .find(|item| item.get("tool_name").and_then(Value::as_str) == Some(tool_name.as_str()))
-        else {
-            continue;
-        };
-        let Some(output_ref) = result.get("output_ref").and_then(Value::as_str) else {
-            return Err(anyhow!(
-                "Hermes runtime step {} ({}) required tool {} did not return output_ref",
-                step.step_id,
-                step.operation,
-                tool_name
-            ));
-        };
-        validate_agent_runtime_tool_output_ref(step, tool_name, output_ref)?;
-    }
-    Ok(())
-}
-
-fn validate_agent_runtime_tool_output_ref(
-    step: &RuntimeWorkflowStepReport,
-    tool_name: &str,
-    output_ref: &str,
-) -> Result<()> {
-    let trace_prefix = format!("runtime://tonglingyu/{}/", step.trace_id);
-    if !output_ref.starts_with(&trace_prefix) {
-        return Err(anyhow!(
-            "Hermes runtime step {} ({}) tool {} returned invalid output_ref",
-            step.step_id,
-            step.operation,
-            tool_name
-        ));
-    }
-    if matches!(
-        tool_name,
-        "tonglingyu.text.search" | "tonglingyu.commentary.search"
-    ) {
-        let expected_ref = evidence_tool_expected_output_ref(step)?;
-        if output_ref != expected_ref {
-            return Err(anyhow!(
-                "Hermes runtime step {} ({}) evidence tool {} returned mismatched output_ref",
-                step.step_id,
-                step.operation,
-                tool_name
-            ));
-        }
-        return Ok(());
-    }
-    if !matches!(
-        tool_name,
-        "tonglingyu.evidence.package.create"
-            | "tonglingyu.evidence.package.read"
-            | "tonglingyu.evidence.package.replay"
-    ) {
-        return Ok(());
-    }
-    let Some(package_id) = step
-        .output
-        .get("package_id")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    else {
-        return Err(anyhow!(
-            "Hermes runtime step {} ({}) package tool {} cannot be bound without package_id",
-            step.step_id,
-            step.operation,
-            tool_name
-        ));
-    };
-    let expected_ref = format!(
-        "runtime://tonglingyu/{}/packages/{package_id}",
-        step.trace_id
-    );
-    if output_ref != expected_ref {
-        return Err(anyhow!(
-            "Hermes runtime step {} ({}) package tool {} returned mismatched output_ref",
-            step.step_id,
-            step.operation,
-            tool_name
-        ));
-    }
-    Ok(())
-}
-
-fn evidence_tool_expected_output_ref(step: &RuntimeWorkflowStepReport) -> Result<String> {
-    let evidence_ids = step
-        .output
-        .get("evidence_ids")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            anyhow!(
-                "Hermes runtime step {} ({}) evidence tool cannot be bound without evidence_ids",
-                step.step_id,
-                step.operation
-            )
-        })?
-        .iter()
-        .map(|value| {
-            value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                anyhow!(
-                    "Hermes runtime step {} ({}) evidence_ids must be strings",
-                    step.step_id,
-                    step.operation
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(evidence_set_output_ref(&step.trace_id, &evidence_ids))
-}
-
 fn tonglingyu_agent_runtime_client(
     mode: TonglingyuAgentRuntimeMode,
-    store: TonglingyuRuntimeStore,
+    _store: TonglingyuRuntimeStore,
     registry: RuntimeProfileRegistry,
     profiles: &RuntimeWorkflowProfiles,
 ) -> Result<Arc<dyn RuntimeClient>> {
@@ -4596,20 +4275,6 @@ fn tonglingyu_agent_runtime_client(
         TonglingyuAgentRuntimeMode::Minimal => Ok(Arc::new(
             MinimalRuntimeClient::default().with_profile_registry(registry),
         )),
-        TonglingyuAgentRuntimeMode::Hermes => {
-            let client = match workflow_agent_provider_profile_from_env()? {
-                Some(profile) => HermesRuntimeClient::new(hermes_config_from_provider_profile(
-                    &profile,
-                    &runtime_profile_ids,
-                )?)?,
-                None => HermesRuntimeClient::from_env()?,
-            };
-            Ok(Arc::new(
-                client
-                    .with_profile_registry(registry)
-                    .with_tool_executor(Arc::new(TonglingyuRuntimeToolExecutor::new(store))),
-            ))
-        }
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
             let client = match workflow_agent_provider_profile_from_env()? {
                 Some(profile) => OpenAiCompatibleNetworkRuntimeClient::new(
@@ -4620,24 +4285,6 @@ fn tonglingyu_agent_runtime_client(
             Ok(Arc::new(client.with_profile_registry(registry)))
         }
     }
-}
-
-fn hermes_config_from_provider_profile(
-    profile: &str,
-    runtime_profiles: &[&str],
-) -> Result<HermesRuntimeConfig> {
-    let base_url = required_agent_provider_env(profile, "BASE_URL")?;
-    let model = required_agent_provider_env(profile, "MODEL")?;
-    let api_key_env = required_agent_provider_env(profile, "API_KEY_ENV")?;
-    let api_key = env_nonempty(&api_key_env)
-        .ok_or_else(|| anyhow!("{api_key_env} must be configured for {profile}"))?;
-    let mut config = HermesRuntimeConfig::new(base_url, model.clone());
-    config.api_key = Some(api_key);
-    config.profile_models = runtime_profiles
-        .iter()
-        .map(|runtime_profile| ((*runtime_profile).to_string(), model.clone()))
-        .collect();
-    Ok(config)
 }
 
 fn openai_compatible_config_from_provider_profile(
@@ -5621,15 +5268,11 @@ fn deterministic_agent_runtime_summary(profile_step_count: usize) -> Value {
 }
 
 fn agent_runtime_profile_observation_mode(mode: TonglingyuAgentRuntimeMode) -> bool {
-    matches!(
-        mode,
-        TonglingyuAgentRuntimeMode::Hermes | TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork
-    )
+    matches!(mode, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
 }
 
 fn agent_runtime_profile_content_source(mode: TonglingyuAgentRuntimeMode, suffix: &str) -> String {
     let source = match mode {
-        TonglingyuAgentRuntimeMode::Hermes => "hermes",
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai-compatible",
         TonglingyuAgentRuntimeMode::Minimal => "minimal",
     };
@@ -5638,7 +5281,6 @@ fn agent_runtime_profile_content_source(mode: TonglingyuAgentRuntimeMode, suffix
 
 fn agent_runtime_profile_answer_source(mode: TonglingyuAgentRuntimeMode, suffix: &str) -> String {
     let source = match mode {
-        TonglingyuAgentRuntimeMode::Hermes => "hermes",
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai_compatible",
         TonglingyuAgentRuntimeMode::Minimal => "minimal",
     };
@@ -5647,7 +5289,6 @@ fn agent_runtime_profile_answer_source(mode: TonglingyuAgentRuntimeMode, suffix:
 
 fn agent_runtime_profile_draft_source(mode: TonglingyuAgentRuntimeMode) -> String {
     let source = match mode {
-        TonglingyuAgentRuntimeMode::Hermes => "hermes",
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => "openai_compatible",
         TonglingyuAgentRuntimeMode::Minimal => "minimal",
     };
@@ -5962,8 +5603,7 @@ fn agent_runtime_llm_call_budget_audit(
         .max()
         .unwrap_or(0);
     let sync_llm_call_count = match mode {
-        TonglingyuAgentRuntimeMode::Hermes
-        | TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => executed_profile_step_count,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => executed_profile_step_count,
         TonglingyuAgentRuntimeMode::Minimal => 0,
     };
     let skipped_profile_operations = workflow
@@ -6125,22 +5765,9 @@ fn agent_runtime_execution_summary(
     let content_used_for_final_answer =
         application.is_some_and(|value| value.content_used_for_final_answer);
     let draft_governance_completed = draft_governance_decided;
-    let full_observation_required = agent_runtime_full_observation_required(mode);
-    let evidence_governance_completed = if full_observation_required {
-        evidence_matches_local
-    } else {
-        true
-    };
-    let package_governance_completed = if full_observation_required {
-        package_matches_local
-    } else {
-        true
-    };
-    let reviewer_governance_completed = if full_observation_required {
-        review_local_enforced
-    } else {
-        true
-    };
+    let evidence_governance_completed = true;
+    let package_governance_completed = true;
+    let reviewer_governance_completed = true;
     let profile_observation_complete = agent_runtime_profile_observation_mode(mode)
         && evidence_governance_completed
         && package_governance_completed
@@ -6165,13 +5792,6 @@ fn agent_runtime_execution_summary(
         TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork => {
             "openai_compatible_profile_incomplete_local_governance"
         }
-        TonglingyuAgentRuntimeMode::Hermes if profile_observation_complete => {
-            "hermes_profile_observed_with_local_governance"
-        }
-        TonglingyuAgentRuntimeMode::Hermes if draft_consumed => {
-            "hermes_profile_partial_with_local_governance"
-        }
-        TonglingyuAgentRuntimeMode::Hermes => "hermes_profile_incomplete_local_governance",
     };
 
     json!({
@@ -6227,32 +5847,7 @@ fn validate_agent_runtime_execution_summary(
             "OpenAI-compatible runtime profile observation incomplete: {status}"
         ));
     }
-    if mode != TonglingyuAgentRuntimeMode::Hermes {
-        return Ok(());
-    }
-    let complete = summary
-        .get("profile_content_execution_complete")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let tool_result_count = summary
-        .get("tool_result_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let tool_audit_event_count = summary
-        .get("tool_audit_event_count")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if complete && status == "hermes_profile_observed_with_local_governance" {
-        if tool_result_count > 0 && tool_audit_event_count < tool_result_count {
-            return Err(anyhow!(
-                "Hermes runtime profile execution missing tool audit events: {tool_audit_event_count}/{tool_result_count}"
-            ));
-        }
-        return Ok(());
-    }
-    Err(anyhow!(
-        "Hermes runtime profile execution incomplete: {status}"
-    ))
+    Ok(())
 }
 
 fn apply_agent_runtime_evidence_outputs(
@@ -7175,7 +6770,6 @@ fn draft_claim_support_phrases(claim: &str) -> Vec<String> {
         "記載",
         "package",
         "profile",
-        "hermes",
         "claim",
         "在",
         "中",

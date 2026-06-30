@@ -81,8 +81,8 @@ fn latest_agent_runtime_summary_uses_last_summary_event() {
         json!({
             "event_type": "agent_runtime_profile_execution_summarized",
             "payload": {
-                "profile_execution_status": "hermes_profile_observed_with_local_governance",
-                "tool_result_count": 4,
+                "profile_execution_status": "openai_compatible_draft_with_local_governance",
+                "tool_result_count": 1,
             },
         }),
     ];
@@ -91,9 +91,9 @@ fn latest_agent_runtime_summary_uses_last_summary_event() {
 
     assert_eq!(
         summary["profile_execution_status"],
-        "hermes_profile_observed_with_local_governance"
+        "openai_compatible_draft_with_local_governance"
     );
-    assert_eq!(summary["tool_result_count"], json!(4));
+    assert_eq!(summary["tool_result_count"], json!(1));
     assert!(latest_agent_runtime_summary(&[]).is_null());
 }
 

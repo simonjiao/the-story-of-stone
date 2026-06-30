@@ -1,5 +1,5 @@
 use agent_core::{RuntimeClient, RuntimeRunInput, RuntimeSessionInput};
-use agent_runtime::{HermesRuntimeClient, MinimalRuntimeClient};
+use agent_runtime::MinimalRuntimeClient;
 use axum::{
     Json, Router,
     http::StatusCode,
@@ -35,7 +35,6 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let runtime: Arc<dyn RuntimeClient> = match args.mode.as_str() {
         "minimal" => Arc::new(MinimalRuntimeClient::new(args.profile)),
-        "hermes" => Arc::new(HermesRuntimeClient::from_env()?),
         other => anyhow::bail!("unsupported AGENT_RUNTIME_MODE={other}"),
     };
     let app =

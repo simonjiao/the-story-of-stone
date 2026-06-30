@@ -28,16 +28,7 @@ struct EvidenceBoundaryDraftRuntimeClient;
 struct ProviderRequestRuntimeClient;
 
 #[derive(Debug, Default)]
-struct BadOutputRefRuntimeClient;
-
-#[derive(Debug, Default)]
-struct IncompleteHermesContentRuntimeClient;
-
-#[derive(Debug, Default)]
-struct MissingToolAuditRuntimeClient;
-
-#[derive(Debug, Default)]
-struct WrongEvidenceOutputRefRuntimeClient;
+struct IncompleteContentRuntimeClient;
 
 #[derive(Debug, Default)]
 struct FailingProfileRuntimeClient;
@@ -901,7 +892,7 @@ impl RuntimeClient for DraftRuntimeClient {
                     "text_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "evidence_refs": evidence_ids_from_step_message(&message),
-                            "evidence_analysis": "Hermes observed text evidence refs",
+                            "evidence_analysis": "OpenAI-compatible observed text evidence refs",
                             "unsupported_scope": "observation only; local runtime evidence is enforced",
                         }
                     }))
@@ -909,7 +900,7 @@ impl RuntimeClient for DraftRuntimeClient {
                     "commentary_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "commentary_refs": evidence_ids_from_step_message(&message),
-                            "commentary_analysis": "Hermes observed commentary evidence refs",
+                            "commentary_analysis": "OpenAI-compatible observed commentary evidence refs",
                             "scope_notes": "commentary is first-class evidence within the default pre-80 scope",
                         }
                     }))
@@ -928,7 +919,7 @@ impl RuntimeClient for DraftRuntimeClient {
                         "package_observation": {
                             "package_id": package_id_from_step_message(&message)
                                 .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                            "summary": "Hermes observed runtime package ref",
+                            "summary": "OpenAI-compatible observed runtime package ref",
                         }
                     }))
                     .expect("package output serializes"),
@@ -941,7 +932,7 @@ impl RuntimeClient for DraftRuntimeClient {
                         }
                     }))
                     .expect("review output serializes"),
-                    _ => format!("Hermes full workflow step {operation}. context={message}"),
+                    _ => format!("OpenAI-compatible profile step {operation}. context={message}"),
                 },
                 result_ref: Some(format!(
                     "result://draft-runtime/{}/{}",
@@ -995,7 +986,7 @@ impl RuntimeClient for NoToolRuntimeClient {
                     "text_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "evidence_refs": evidence_ids_from_step_message(&message),
-                            "evidence_analysis": "Hermes observed text evidence refs without model tool calls",
+                            "evidence_analysis": "OpenAI-compatible observed text evidence refs without model tool calls",
                             "unsupported_scope": "observation only; local runtime evidence is enforced",
                         }
                     }))
@@ -1003,7 +994,7 @@ impl RuntimeClient for NoToolRuntimeClient {
                     "commentary_evidence_search" => serde_json::to_string(&json!({
                         "evidence_observation": {
                             "commentary_refs": evidence_ids_from_step_message(&message),
-                            "commentary_analysis": "Hermes observed commentary evidence refs without model tool calls",
+                            "commentary_analysis": "OpenAI-compatible observed commentary evidence refs without model tool calls",
                             "scope_notes": "commentary is first-class evidence within the default pre-80 scope",
                         }
                     }))
@@ -1022,7 +1013,7 @@ impl RuntimeClient for NoToolRuntimeClient {
                         "package_observation": {
                             "package_id": package_id_from_step_message(&message)
                                 .unwrap_or_else(|| "pkg-missing-from-step-output".to_string()),
-                            "summary": "Hermes observed runtime package ref without model tool calls",
+                            "summary": "OpenAI-compatible observed runtime package ref without model tool calls",
                         }
                     }))
                     .expect("package output serializes"),
@@ -1035,7 +1026,7 @@ impl RuntimeClient for NoToolRuntimeClient {
                         }
                     }))
                     .expect("review output serializes"),
-                    _ => format!("Hermes full workflow step {operation}. context={message}"),
+                    _ => format!("OpenAI-compatible profile step {operation}. context={message}"),
                 },
                 result_ref: Some(format!("result://no-tool-runtime/{}", input.profile_id)),
                 messages: Vec::new(),
@@ -1247,68 +1238,18 @@ impl RuntimeClient for ProviderRequestRuntimeClient {
 }
 
 #[async_trait]
-impl RuntimeClient for BadOutputRefRuntimeClient {
+impl RuntimeClient for IncompleteContentRuntimeClient {
     async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
         Err(AgentCoreError::coded(
             ErrorCode::Conflict,
-            "bad-output-ref runtime only supports profile steps",
+            "incomplete-content runtime only supports profile steps",
         ))
     }
 
     async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
         Err(AgentCoreError::coded(
             ErrorCode::Conflict,
-            "bad-output-ref runtime only supports profile steps",
-        ))
-    }
-
-    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
-        let tool_results = Value::Array(
-            input
-                .requested_tools
-                .iter()
-                .enumerate()
-                .map(|(index, tool_name)| {
-                    json!({
-                        "call_id": format!("call-bad-output-ref-{index}"),
-                        "profile_id": input.profile_id,
-                        "tool_name": tool_name,
-                        "output_ref": format!("runtime://tool-results/{index}"),
-                    })
-                })
-                .collect(),
-        );
-        Ok(RuntimeOutput {
-            result_summary: "{}".to_string(),
-            result_ref: Some(format!(
-                "result://bad-output-ref-runtime/{}",
-                input.profile_id
-            )),
-            messages: Vec::new(),
-            metadata: json!({
-                "runtime_profile": input.profile_id,
-                "trace_id": input.trace_id,
-                "tool_rounds": 1,
-                "tool_results": tool_results,
-                "tool_audit_events": [],
-            }),
-        })
-    }
-}
-
-#[async_trait]
-impl RuntimeClient for IncompleteHermesContentRuntimeClient {
-    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "incomplete-hermes-content runtime only supports profile steps",
-        ))
-    }
-
-    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "incomplete-hermes-content runtime only supports profile steps",
+            "incomplete-content runtime only supports profile steps",
         ))
     }
 
@@ -1368,7 +1309,7 @@ impl RuntimeClient for IncompleteHermesContentRuntimeClient {
                         )
                     };
                     json!({
-                        "call_id": format!("call-incomplete-hermes-{operation}-{index}"),
+                        "call_id": format!("call-incomplete-content-{operation}-{index}"),
                         "profile_id": input.profile_id,
                         "tool_name": tool_name,
                         "output_ref": output_ref,
@@ -1379,7 +1320,7 @@ impl RuntimeClient for IncompleteHermesContentRuntimeClient {
         Ok(RuntimeOutput {
             result_summary: "{}".to_string(),
             result_ref: Some(format!(
-                "result://incomplete-hermes-content/{}",
+                "result://incomplete-content/{}",
                 input.profile_id
             )),
             messages: Vec::new(),
@@ -1388,81 +1329,6 @@ impl RuntimeClient for IncompleteHermesContentRuntimeClient {
                 "trace_id": input.trace_id,
                 "operation": operation,
                 "tool_rounds": if input.requested_tools.is_empty() { 0 } else { 1 },
-                "tool_results": tool_results,
-                "tool_audit_events": [],
-            }),
-        })
-    }
-}
-
-#[async_trait]
-impl RuntimeClient for MissingToolAuditRuntimeClient {
-    async fn execute_run(&self, input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
-        DraftRuntimeClient.execute_run(input).await
-    }
-
-    async fn send_session_message(&self, input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
-        DraftRuntimeClient.send_session_message(input).await
-    }
-
-    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
-        let mut output = DraftRuntimeClient.execute_profile_step(input).await?;
-        output.metadata["tool_audit_events"] = json!([]);
-        Ok(output)
-    }
-}
-
-#[async_trait]
-impl RuntimeClient for WrongEvidenceOutputRefRuntimeClient {
-    async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "wrong-evidence-output-ref runtime only supports profile steps",
-        ))
-    }
-
-    async fn send_session_message(&self, _input: RuntimeSessionInput) -> CoreResult<RuntimeOutput> {
-        Err(AgentCoreError::coded(
-            ErrorCode::Conflict,
-            "wrong-evidence-output-ref runtime only supports profile steps",
-        ))
-    }
-
-    async fn execute_profile_step(&self, input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
-        let tool_results = Value::Array(
-            input
-                .requested_tools
-                .iter()
-                .enumerate()
-                .map(|(index, tool_name)| {
-                    let output_ref = if matches!(
-                        tool_name.as_str(),
-                        "tonglingyu.text.search" | "tonglingyu.commentary.search"
-                    ) {
-                        format!("runtime://tonglingyu/{}/evidence/wrong-set", input.trace_id)
-                    } else {
-                        format!("runtime://tonglingyu/{}/tools/{index}", input.trace_id)
-                    };
-                    json!({
-                        "call_id": format!("call-wrong-evidence-output-ref-{index}"),
-                        "profile_id": input.profile_id,
-                        "tool_name": tool_name,
-                        "output_ref": output_ref,
-                    })
-                })
-                .collect(),
-        );
-        Ok(RuntimeOutput {
-            result_summary: "{}".to_string(),
-            result_ref: Some(format!(
-                "result://wrong-evidence-output-ref-runtime/{}",
-                input.profile_id
-            )),
-            messages: Vec::new(),
-            metadata: json!({
-                "runtime_profile": input.profile_id,
-                "trace_id": input.trace_id,
-                "tool_rounds": 1,
                 "tool_results": tool_results,
                 "tool_audit_events": [],
             }),
@@ -1554,7 +1420,7 @@ impl RuntimeClient for TimeoutProfileRuntimeClient {
     async fn execute_profile_step(&self, _input: RuntimeProfileInput) -> CoreResult<RuntimeOutput> {
         Err(AgentCoreError::coded(
             ErrorCode::InternalError,
-            "Hermes Runtime timed out",
+            "OpenAI-compatible Runtime timed out",
         ))
     }
 }
@@ -3227,7 +3093,7 @@ fn local_answer_lists_character_intro_evidence_without_synthesizing_profile() {
 }
 
 #[test]
-fn hermes_draft_rejects_unsupported_interpretive_terms() {
+fn upstream_draft_rejects_unsupported_interpretive_terms() {
     let cards = yousanjie_test_cards();
 
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
@@ -6069,11 +5935,11 @@ fn valid_calibration_env() -> BTreeMap<String, String> {
         ),
         (
             "TONGLINGYU_KNOWLEDGE_CALIBRATION_MODEL".to_string(),
-            "hermes-calibration-frontier".to_string(),
+            "calibration-frontier".to_string(),
         ),
         (
             "TONGLINGYU_KNOWLEDGE_CALIBRATION_UPSTREAM_ID".to_string(),
-            "runtime-hermes-internal".to_string(),
+            "runtime-openai-compatible-internal".to_string(),
         ),
         (
             "TONGLINGYU_KNOWLEDGE_CALIBRATION_PROMPT_DIGEST".to_string(),
@@ -9119,7 +8985,7 @@ fn runtime_workflow_promotes_attribute_support_cards() {
 }
 
 #[test]
-fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
+fn openai_compatible_mode_applies_runtime_draft_when_local_review_passes() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -9131,15 +8997,15 @@ fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("runtime draft consumed");
     assert!(application.draft_consumed);
     assert!(application.content_used_for_final_answer);
-    assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
+    assert!(workflow.draft_answer.contains("OpenAI-compatible profile 草稿"));
     assert_eq!(workflow.final_answer, workflow.draft_answer);
     assert_eq!(
         workflow.answer_source,
-        "agent_runtime_hermes_profile_with_local_review"
+        "agent_runtime_openai_compatible_profile_with_local_review"
     );
     assert_eq!(
         workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
@@ -9147,7 +9013,7 @@ fn hermes_mode_applies_runtime_draft_when_local_review_passes() {
     );
     assert_eq!(
         workflow.steps[1].output["draft_source"],
-        "agent_runtime_hermes_profile"
+        "agent_runtime_openai_compatible_profile"
     );
 }
 
@@ -9205,7 +9071,7 @@ fn agent_runtime_retrieval_repair_queries_enqueue_search_requests() {
         .insert("result_summary".to_string(), json!(upstream_bundle));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("runtime draft consumed");
     assert!(application.draft_consumed);
     assert_eq!(
@@ -9336,7 +9202,7 @@ fn openai_compatible_relation_question_accepts_predicate_preserving_draft() {
 }
 
 #[test]
-fn hermes_mode_does_not_use_loss_count_oracle_to_reject_multiple_count_draft() {
+fn openai_compatible_mode_does_not_use_loss_count_oracle_to_reject_multiple_count_draft() {
     let mut workflow = runtime_draft_workflow(
         lost_jade_test_cards(),
         ReviewRecord {
@@ -9362,7 +9228,7 @@ fn hermes_mode_does_not_use_loss_count_oracle_to_reject_multiple_count_draft() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("runtime draft applied");
 
     assert!(application.draft_consumed);
@@ -9786,7 +9652,7 @@ fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_
 }
 
 #[test]
-fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowing() {
+fn openai_compatible_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowing() {
     let mut workflow = runtime_draft_workflow(
         in_scope_lost_jade_event_cards(),
         ReviewRecord {
@@ -9810,7 +9676,7 @@ fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowi
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("commentary foreshadowing draft consumed");
 
     assert!(application.draft_consumed);
@@ -9820,7 +9686,7 @@ fn hermes_mode_accepts_default_scope_draft_using_in_scope_commentary_foreshadowi
 }
 
 #[test]
-fn hermes_mode_rejects_user_opt_in_continuation_draft() {
+fn openai_compatible_mode_rejects_user_opt_in_continuation_draft() {
     let mut workflow = runtime_draft_workflow(
         lost_jade_test_cards(),
         ReviewRecord {
@@ -9847,7 +9713,7 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("runtime draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10038,7 +9904,7 @@ async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
 }
 
 #[test]
-fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
+fn openai_compatible_mode_rejects_runtime_draft_when_local_review_downgrades() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10054,21 +9920,21 @@ fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
         json!(upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
-            "Hermes profile 草稿绑定本地证据包。",
+            "OpenAI-compatible profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "OpenAI-compatible profile 草稿绑定本地证据包。",
             evidence_ids(&workflow.package.cards),
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("runtime draft consumed");
     assert!(application.draft_consumed);
     assert!(!application.content_used_for_final_answer);
-    assert!(workflow.draft_answer.contains("Hermes profile 草稿"));
-    assert!(!workflow.final_answer.contains("Hermes profile 草稿"));
+    assert!(workflow.draft_answer.contains("OpenAI-compatible profile 草稿"));
+    assert!(!workflow.final_answer.contains("OpenAI-compatible profile 草稿"));
     assert_eq!(
         workflow.answer_source,
-        "agent_runtime_hermes_profile_rejected_by_local_review"
+        "agent_runtime_openai_compatible_profile_rejected_by_local_review"
     );
     assert_eq!(
         workflow.steps[0].agent_runtime.as_ref().unwrap()["content_used_for_final_answer"],
@@ -10076,12 +9942,12 @@ fn hermes_mode_rejects_runtime_draft_when_local_review_downgrades() {
     );
     assert_eq!(
         workflow.steps[1].output["final_answer_source"],
-        "agent_runtime_hermes_profile_rejected_by_local_review"
+        "agent_runtime_openai_compatible_profile_rejected_by_local_review"
     );
 }
 
 #[test]
-fn hermes_mode_accepts_structured_draft_with_matching_package() {
+fn openai_compatible_mode_accepts_structured_draft_with_matching_package() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10096,13 +9962,13 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
         json!(upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "结构化上游草稿：必须引用证据包 pkg-runtime-draft-test。",
             "结构化 claim",
             evidence_ids(&workflow.package.cards),
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("structured runtime draft consumed");
 
     assert!(application.draft_consumed);
@@ -10110,7 +9976,7 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
     assert!(application.rejected_reason.is_none());
     assert_eq!(
         workflow.draft_answer,
-        "结构化 Hermes 草稿：必须引用证据包 pkg-runtime-draft-test。"
+        "结构化上游草稿：必须引用证据包 pkg-runtime-draft-test。"
     );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_result_format"],
@@ -10123,7 +9989,7 @@ fn hermes_mode_accepts_structured_draft_with_matching_package() {
 }
 
 #[test]
-fn hermes_mode_rejects_bare_draft_candidate_without_upstream_bundle() {
+fn openai_compatible_mode_rejects_bare_draft_candidate_without_upstream_bundle() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10149,7 +10015,7 @@ fn hermes_mode_rejects_bare_draft_candidate_without_upstream_bundle() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("bare draft candidate rejected");
 
     assert!(!application.draft_consumed);
@@ -10162,7 +10028,7 @@ fn hermes_mode_rejects_bare_draft_candidate_without_upstream_bundle() {
 }
 
 #[test]
-fn hermes_mode_rejects_plain_text_draft_summary() {
+fn openai_compatible_mode_rejects_plain_text_draft_summary() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10175,10 +10041,10 @@ fn hermes_mode_rejects_plain_text_draft_summary() {
     let original_draft = workflow.draft_answer.clone();
     let original_final = workflow.final_answer.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
-        json!("Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。");
+        json!("OpenAI-compatible profile 草稿：必须引用证据包 pkg-runtime-draft-test。");
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("plain text runtime draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10198,7 +10064,7 @@ fn hermes_mode_rejects_plain_text_draft_summary() {
 }
 
 #[test]
-fn hermes_mode_rejects_upstream_bundle_with_scope_policy_mismatch() {
+fn openai_compatible_mode_rejects_upstream_bundle_with_scope_policy_mismatch() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10222,7 +10088,7 @@ fn hermes_mode_rejects_upstream_bundle_with_scope_policy_mismatch() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("scope policy mismatch rejected");
 
     assert!(!application.draft_consumed);
@@ -10237,7 +10103,7 @@ fn hermes_mode_rejects_upstream_bundle_with_scope_policy_mismatch() {
 }
 
 #[test]
-fn hermes_mode_rejects_default_scope_draft_using_later_forty_material() {
+fn openai_compatible_mode_rejects_default_scope_draft_using_later_forty_material() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10258,7 +10124,7 @@ fn hermes_mode_rejects_default_scope_draft_using_later_forty_material() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("unscoped later-forty draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10273,7 +10139,7 @@ fn hermes_mode_rejects_default_scope_draft_using_later_forty_material() {
 }
 
 #[test]
-fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
+fn openai_compatible_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10294,7 +10160,7 @@ fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("generic unscoped later-forty draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10309,7 +10175,7 @@ fn hermes_mode_rejects_default_scope_draft_with_generic_later_forty_leak() {
 }
 
 #[test]
-fn hermes_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary() {
+fn openai_compatible_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary() {
     let base = sample_card("base_text");
     let mut commentary = sample_card("commentary");
     commentary.source_title = "脂硯齋重評石頭記/第五回".to_string();
@@ -10337,7 +10203,7 @@ fn hermes_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary(
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("boundary-only later-forty mention is allowed");
 
     assert!(application.draft_consumed);
@@ -10346,7 +10212,7 @@ fn hermes_mode_allows_default_scope_draft_that_excludes_later_forty_as_boundary(
 }
 
 #[test]
-fn hermes_mode_allows_later_forty_style_boundary_without_using_later_forty_evidence() {
+fn openai_compatible_mode_allows_later_forty_style_boundary_without_using_later_forty_evidence() {
     let base = sample_card("base_text");
     let mut commentary = sample_card("commentary");
     commentary.source_title = "脂硯齋重評石頭記/第五回".to_string();
@@ -10375,7 +10241,7 @@ fn hermes_mode_allows_later_forty_style_boundary_without_using_later_forty_evide
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("later-forty boundary phrasing is not source use");
 
     assert!(application.draft_consumed);
@@ -10388,7 +10254,7 @@ fn hermes_mode_allows_later_forty_style_boundary_without_using_later_forty_evide
 }
 
 #[test]
-fn hermes_mode_rejects_partial_coverage_count_draft() {
+fn openai_compatible_mode_rejects_partial_coverage_count_draft() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text"), sample_card("commentary")],
         ReviewRecord {
@@ -10428,7 +10294,7 @@ fn hermes_mode_rejects_partial_coverage_count_draft() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("partial coverage draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10447,7 +10313,7 @@ fn hermes_mode_rejects_partial_coverage_count_draft() {
 }
 
 #[test]
-fn hermes_mode_rejects_partial_coverage_before_claim_ref_validation() {
+fn openai_compatible_mode_rejects_partial_coverage_before_claim_ref_validation() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text"), sample_card("commentary")],
         ReviewRecord {
@@ -10489,7 +10355,7 @@ fn hermes_mode_rejects_partial_coverage_before_claim_ref_validation() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("partial coverage rejected before refs");
 
     assert!(!application.draft_consumed);
@@ -10504,7 +10370,7 @@ fn hermes_mode_rejects_partial_coverage_before_claim_ref_validation() {
 }
 
 #[test]
-fn hermes_mode_allows_default_scope_pre80_chengjia_source_label() {
+fn openai_compatible_mode_allows_default_scope_pre80_chengjia_source_label() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10525,7 +10391,7 @@ fn hermes_mode_allows_default_scope_pre80_chengjia_source_label() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("pre-80 Chengjia source label accepted");
 
     assert!(application.draft_consumed);
@@ -10537,7 +10403,7 @@ fn hermes_mode_allows_default_scope_pre80_chengjia_source_label() {
 }
 
 #[test]
-fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
+fn openai_compatible_mode_rejects_direct_draft_object_without_candidate_wrapper() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10558,7 +10424,7 @@ fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("direct object runtime draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10571,7 +10437,7 @@ fn hermes_mode_rejects_direct_draft_object_without_candidate_wrapper() {
 }
 
 #[test]
-fn hermes_mode_rejects_draft_candidate_without_claim_statements() {
+fn openai_compatible_mode_rejects_draft_candidate_without_claim_statements() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10607,7 +10473,7 @@ fn hermes_mode_rejects_draft_candidate_without_claim_statements() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("draft candidate without claims rejected");
 
     assert!(!application.draft_consumed);
@@ -10618,7 +10484,7 @@ fn hermes_mode_rejects_draft_candidate_without_claim_statements() {
 }
 
 #[test]
-fn hermes_mode_rejects_draft_candidate_answer_alias() {
+fn openai_compatible_mode_rejects_draft_candidate_answer_alias() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10658,7 +10524,7 @@ fn hermes_mode_rejects_draft_candidate_answer_alias() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("draft candidate answer alias rejected");
 
     assert!(!application.draft_consumed);
@@ -10666,7 +10532,7 @@ fn hermes_mode_rejects_draft_candidate_answer_alias() {
 }
 
 #[test]
-fn hermes_mode_rejects_nested_result_summary_draft() {
+fn openai_compatible_mode_rejects_nested_result_summary_draft() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10681,7 +10547,7 @@ fn hermes_mode_rejects_nested_result_summary_draft() {
         serde_json::to_string(&json!({
             "result_summary": serde_json::to_string(&json!({
                 "draft_candidate": {
-                    "draft_answer": "嵌套 Hermes 草稿：必须引用本地证据包。",
+                    "draft_answer": "嵌套上游草稿：必须引用本地证据包。",
                     "package_id": package_id,
                     "claim_statements": ["nested claim"],
                 }
@@ -10692,7 +10558,7 @@ fn hermes_mode_rejects_nested_result_summary_draft() {
     );
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("nested structured runtime draft rejected");
 
     assert!(!application.draft_consumed);
@@ -10727,7 +10593,7 @@ fn runtime_rebinds_structured_draft_package_id_to_local_package() {
         ));
 
     let application =
-        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("structured runtime draft applied");
 
     assert!(application.draft_consumed);
@@ -10762,7 +10628,7 @@ fn runtime_rebinds_structured_draft_package_id_to_local_package() {
 }
 
 #[test]
-fn hermes_mode_observes_structured_reviewer_agreement() {
+fn openai_compatible_mode_observes_structured_reviewer_agreement() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10783,7 +10649,7 @@ fn hermes_mode_observes_structured_reviewer_agreement() {
     );
 
     let observation =
-        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("reviewer observation is recorded");
 
     assert_eq!(observation.result_format, "json");
@@ -10801,7 +10667,7 @@ fn hermes_mode_observes_structured_reviewer_agreement() {
 }
 
 #[test]
-fn hermes_mode_observes_nested_result_summary_reviewer_agreement() {
+fn openai_compatible_mode_observes_nested_result_summary_reviewer_agreement() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text")],
         ReviewRecord {
@@ -10827,7 +10693,7 @@ fn hermes_mode_observes_nested_result_summary_reviewer_agreement() {
     );
 
     let observation =
-        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("nested reviewer observation is recorded");
 
     assert_eq!(observation.result_format, "json");
@@ -10837,7 +10703,7 @@ fn hermes_mode_observes_nested_result_summary_reviewer_agreement() {
 }
 
 #[test]
-fn hermes_mode_marks_reviewer_disagreement_as_local_override() {
+fn openai_compatible_mode_marks_reviewer_disagreement_as_local_override() {
     let mut workflow = runtime_draft_workflow(
         Vec::new(),
         ReviewRecord {
@@ -10858,7 +10724,7 @@ fn hermes_mode_marks_reviewer_disagreement_as_local_override() {
     );
 
     let observation =
-        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::Hermes)
+        apply_agent_runtime_reviewer_output(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
             .expect("reviewer observation is recorded");
 
     assert_eq!(observation.review_status.as_deref(), Some("passed"));
@@ -10972,7 +10838,7 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
         trace_id: "trace-runtime-draft-test".to_string(),
         question: "通灵玉是什么？".to_string(),
         cards,
-        claims: vec!["Hermes 草稿候选需要保留证据边界。".to_string()],
+        claims: vec!["上游草稿候选需要保留证据边界。".to_string()],
         claim_evidence_map: vec![],
         knowledge_state_summary: KnowledgeStateSummary::default(),
         question_frame: None,
@@ -10983,8 +10849,8 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
     let default_draft_summary = upstream_bundle_summary(
         &package.question,
         &package.package_id,
-        "Hermes profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
-        "Hermes profile 草稿绑定本地证据包。",
+        "OpenAI-compatible profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+        "OpenAI-compatible profile 草稿绑定本地证据包。",
         evidence_ids(&package.cards),
     );
     RuntimeWorkflowOutput {
@@ -11012,7 +10878,7 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
                 trace_id: "trace-runtime-draft-test".to_string(),
                 output: json!({"object": "tonglingyu.draft_answer"}),
                 agent_runtime: Some(json!({
-                    "client": "hermes",
+                    "client": "openai-compatible-network",
                     "status": "executed",
                     "content_used_for_final_answer": false,
                     "result_summary": default_draft_summary,
@@ -11037,10 +10903,10 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
                 trace_id: "trace-runtime-draft-test".to_string(),
                 output: json!({"object": "tonglingyu.review_result"}),
                 agent_runtime: Some(json!({
-                    "client": "hermes",
+                    "client": "openai-compatible-network",
                     "status": "executed",
                     "content_used_for_final_answer": false,
-                    "result_summary": "Hermes reviewer envelope",
+                    "result_summary": "OpenAI-compatible reviewer envelope",
                 })),
             },
         ],
@@ -11219,9 +11085,9 @@ async fn runtime_store_executes_workflow_step_envelopes_through_agent_runtime() 
 }
 
 #[tokio::test]
-async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
+async fn runtime_store_consumes_openai_compatible_upstream_bundle_draft() {
     let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-draft-{}.db",
+        "tonglingyu-runtime-openai-compatible-draft-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
     let store = TonglingyuRuntimeStore::new(db_path.clone());
@@ -11243,12 +11109,12 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     let workflow = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(
-                "trace-hermes-draft-workflow-test",
+                "trace-openai-compatible-draft-workflow-test",
                 "通灵玉是什么？",
                 2,
                 vec!["base_text".to_string()],
             ),
-            TonglingyuAgentRuntimeMode::Hermes,
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
             Arc::new(DraftRuntimeClient),
         )
         .await
@@ -11259,7 +11125,7 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     assert!(workflow.final_answer.contains("当前材料"));
     assert_eq!(
         workflow.answer_source,
-        "agent_runtime_hermes_profile_with_local_review"
+        "agent_runtime_openai_compatible_profile_with_local_review"
     );
     let draft_step = workflow
         .steps
@@ -11273,7 +11139,7 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     let draft_agent_runtime = draft_step.agent_runtime.as_ref().unwrap();
     assert_eq!(
         draft_agent_runtime["content_source"],
-        json!("agent-runtime-hermes-profile")
+        json!("agent-runtime-openai-compatible-profile")
     );
     assert_eq!(draft_agent_runtime["tool_rounds"], json!(1));
     assert_eq!(draft_agent_runtime["tool_result_count"], json!(1));
@@ -11282,69 +11148,18 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
         draft_agent_runtime["tool_results"][0]["tool_name"],
         "tonglingyu.evidence.package.read"
     );
-    let text_step = workflow
-        .steps
-        .iter()
-        .find(|step| step.operation == "text_evidence_search")
-        .expect("text evidence step");
-    assert_eq!(
-        text_step.agent_runtime.as_ref().unwrap()["content_source"],
-        json!("agent-runtime-hermes-evidence-observation")
-    );
-    assert_eq!(
-        text_step.agent_runtime.as_ref().unwrap()["evidence_observation"]["matches_runtime_evidence"],
-        json!(true)
-    );
-    let package_step = workflow
-        .steps
-        .iter()
-        .find(|step| step.operation == "evidence_package_create")
-        .expect("package step");
-    assert_eq!(
-        package_step.agent_runtime.as_ref().unwrap()["content_source"],
-        json!("agent-runtime-hermes-package-observation")
-    );
-    assert_eq!(
-        package_step.agent_runtime.as_ref().unwrap()["package_observation"]["matches_runtime_package"],
-        json!(true)
-    );
-    let review_step = workflow
-        .steps
-        .iter()
-        .find(|step| step.operation == "review_answer")
-        .expect("review step");
-    assert_eq!(
-        review_step.agent_runtime.as_ref().unwrap()["content_source"],
-        json!("agent-runtime-hermes-review-observation")
-    );
-    assert_eq!(
-        review_step.agent_runtime.as_ref().unwrap()["review_observation"]["local_reviewer_override"],
-        json!(false)
-    );
+    assert!(workflow.steps.iter().all(|step| {
+        step.operation == "draft_answer" || step.agent_runtime.is_none()
+    }));
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "step_completed"
             && event.metadata["operation"] == json!("draft_answer")
             && event.metadata["agent_runtime"]["content_source"]
-                == json!("agent-runtime-hermes-profile")
+                == json!("agent-runtime-openai-compatible-profile")
     }));
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "step_completed"
             && event.metadata["agent_runtime"]["tool_result_count"] == json!(1)
-    }));
-    assert!(workflow.stream_events.iter().any(|event| {
-        event.event_type == "step_completed"
-            && event.metadata["agent_runtime"]["evidence_observation"]["matches_runtime_evidence"]
-                == json!(true)
-    }));
-    assert!(workflow.stream_events.iter().any(|event| {
-        event.event_type == "step_completed"
-            && event.metadata["agent_runtime"]["package_observation"]["matches_runtime_package"]
-                == json!(true)
-    }));
-    assert!(workflow.stream_events.iter().any(|event| {
-        event.event_type == "step_completed"
-            && event.metadata["agent_runtime"]["review_observation"]["local_reviewer_override"]
-                == json!(false)
     }));
     assert!(workflow.stream_events.iter().any(|event| {
         event.event_type == "content_delta"
@@ -11355,7 +11170,7 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     }));
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
-        "hermes_profile_observed_with_local_governance"
+        "openai_compatible_draft_with_local_governance"
     );
     assert_eq!(
         workflow.agent_runtime_summary["profile_content_execution_complete"],
@@ -11371,23 +11186,23 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
     );
     assert_eq!(
         workflow.agent_runtime_summary["tool_result_count"],
-        json!(4)
+        json!(1)
     );
     assert_eq!(
         workflow.agent_runtime_summary["tool_audit_event_count"],
-        json!(4)
+        json!(1)
     );
     assert_eq!(
         workflow.agent_runtime_summary["llm_call_budget"]["sync_llm_call_count"],
-        json!(workflow.steps.len())
+        json!(1)
     );
     assert_eq!(
         workflow.agent_runtime_summary["llm_call_budget"]["call_budget_exceeded"],
-        json!(true)
+        json!(false)
     );
     assert_eq!(
         workflow.agent_runtime_summary["llm_call_budget"]["latency_regression"],
-        json!(true)
+        json!(false)
     );
     let events = store
         .audit_events_for_trace(&workflow.trace_id)
@@ -11400,25 +11215,22 @@ async fn runtime_store_consumes_upstream_bundle_draft_through_full_workflow() {
         event["event_type"] == "agent_runtime_profile_step_executed"
             && event["payload"]["agent_runtime"]["tool_result_count"] == json!(1)
     }));
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_evidence_observed"
-            && event["payload"]["matches_runtime_evidence"] == json!(true)
-    }));
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_package_observed"
-            && event["payload"]["matches_runtime_package"] == json!(true)
-    }));
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_review_observed"
-            && event["payload"]["local_reviewer_override"] == json!(false)
-    }));
+    assert!(!events
+        .iter()
+        .any(|event| event["event_type"] == "agent_runtime_profile_evidence_observed"));
+    assert!(!events
+        .iter()
+        .any(|event| event["event_type"] == "agent_runtime_profile_package_observed"));
+    assert!(!events
+        .iter()
+        .any(|event| event["event_type"] == "agent_runtime_profile_review_observed"));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_summarized"
             && event["payload"]["profile_execution_status"]
-                == json!("hermes_profile_observed_with_local_governance")
+                == json!("openai_compatible_draft_with_local_governance")
             && event["payload"]["profile_content_execution_complete"] == json!(true)
-            && event["payload"]["tool_result_count"] == json!(4)
-            && event["payload"]["tool_audit_event_count"] == json!(4)
+            && event["payload"]["tool_result_count"] == json!(1)
+            && event["payload"]["tool_audit_event_count"] == json!(1)
     }));
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -11945,165 +11757,9 @@ async fn runtime_store_audits_openai_compatible_provider_request_payload() {
 }
 
 #[tokio::test]
-async fn hermes_workflow_host_enforces_missing_runtime_tool_results() {
+async fn openai_compatible_workflow_rejects_incomplete_profile_content_execution() {
     let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-required-tools-{}.db",
-        uuid::Uuid::now_v7().simple()
-    ));
-    let store = TonglingyuRuntimeStore::new(db_path.clone());
-    {
-        let conn = store.open_connection().expect("runtime conn");
-        init_knowledge_base_schema(&conn).expect("kb schema");
-        seed_retrieval_quality_source(
-            &conn,
-            json!({
-                "license": "CC-BY-SA-4.0",
-                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
-                "attribution": "Wikisource contributors",
-                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
-            }),
-        );
-        seed_basic_tonglingyu_runtime_block(&conn);
-    }
-    let workflow = store
-        .execute_workflow_with_agent_runtime_client(
-            test_workflow_input(
-                "trace-hermes-required-tools-test",
-                "通灵玉是什么？",
-                2,
-                vec!["base_text".to_string()],
-            ),
-            TonglingyuAgentRuntimeMode::Hermes,
-            Arc::new(NoToolRuntimeClient),
-        )
-        .await
-        .expect("Hermes profile steps should host-enforce required tool observations");
-
-    assert_eq!(
-        workflow.agent_runtime_summary["profile_execution_status"],
-        json!("hermes_profile_observed_with_local_governance")
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["tool_result_count"],
-        json!(4)
-    );
-    assert_eq!(
-        workflow.agent_runtime_summary["tool_audit_event_count"],
-        json!(8)
-    );
-    assert!(workflow.steps.iter().all(|step| {
-        step.agent_runtime
-            .as_ref()
-            .and_then(|value| value.get("tool_results"))
-            .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("host_enforced") == Some(&json!(true))
-                        && item.get("tool_name").and_then(Value::as_str).is_some()
-                })
-            })
-    }));
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-}
-
-#[tokio::test]
-async fn hermes_workflow_rejects_unbound_runtime_tool_output_refs() {
-    let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-output-ref-{}.db",
-        uuid::Uuid::now_v7().simple()
-    ));
-    let store = TonglingyuRuntimeStore::new(db_path.clone());
-    {
-        let conn = store.open_connection().expect("runtime conn");
-        init_knowledge_base_schema(&conn).expect("kb schema");
-        seed_retrieval_quality_source(
-            &conn,
-            json!({
-                "license": "CC-BY-SA-4.0",
-                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
-                "attribution": "Wikisource contributors",
-                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
-            }),
-        );
-        seed_basic_tonglingyu_runtime_block(&conn);
-    }
-    let error = store
-        .execute_workflow_with_agent_runtime_client(
-            test_workflow_input(
-                "trace-hermes-output-ref-test",
-                "通灵玉是什么？",
-                2,
-                vec!["base_text".to_string()],
-            ),
-            TonglingyuAgentRuntimeMode::Hermes,
-            Arc::new(BadOutputRefRuntimeClient),
-        )
-        .await
-        .expect_err("Hermes runtime tool output refs must bind to Tonglingyu runtime refs");
-
-    let message = error.to_string();
-    assert!(message.contains("invalid output_ref"));
-    assert!(message.contains("text_evidence_search"));
-    assert!(message.contains("tonglingyu.text.search"));
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-}
-
-#[tokio::test]
-async fn hermes_workflow_rejects_mismatched_evidence_tool_output_refs() {
-    let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-evidence-output-ref-{}.db",
-        uuid::Uuid::now_v7().simple()
-    ));
-    let store = TonglingyuRuntimeStore::new(db_path.clone());
-    {
-        let conn = store.open_connection().expect("runtime conn");
-        init_knowledge_base_schema(&conn).expect("kb schema");
-        seed_retrieval_quality_source(
-            &conn,
-            json!({
-                "license": "CC-BY-SA-4.0",
-                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
-                "attribution": "Wikisource contributors",
-                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
-            }),
-        );
-        seed_basic_tonglingyu_runtime_block(&conn);
-    }
-    let error = store
-        .execute_workflow_with_agent_runtime_client(
-            test_workflow_input(
-                "trace-hermes-evidence-output-ref-test",
-                "通灵玉是什么？",
-                2,
-                vec!["base_text".to_string()],
-            ),
-            TonglingyuAgentRuntimeMode::Hermes,
-            Arc::new(WrongEvidenceOutputRefRuntimeClient),
-        )
-        .await
-        .expect_err("Hermes evidence tool output refs must bind to exact runtime evidence set");
-
-    let message = error.to_string();
-    assert!(message.contains("evidence tool"));
-    assert!(message.contains("mismatched output_ref"));
-    assert!(message.contains("text_evidence_search"));
-    assert!(message.contains("tonglingyu.text.search"));
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-}
-
-#[tokio::test]
-async fn hermes_workflow_rejects_incomplete_profile_content_execution() {
-    let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-incomplete-content-{}.db",
+        "tonglingyu-runtime-openai-compatible-incomplete-content-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
     let store = TonglingyuRuntimeStore::new(db_path.clone());
@@ -12111,32 +11767,32 @@ async fn hermes_workflow_rejects_incomplete_profile_content_execution() {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
     }
-    let trace_id = "trace-hermes-incomplete-content-test";
+    let trace_id = "trace-openai-compatible-incomplete-content-test";
     let error = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
-            TonglingyuAgentRuntimeMode::Hermes,
-            Arc::new(IncompleteHermesContentRuntimeClient),
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+            Arc::new(IncompleteContentRuntimeClient),
         )
         .await
-        .expect_err("Hermes mode must fail closed when profile content execution is incomplete");
+        .expect_err("OpenAI-compatible mode must fail closed when profile content is incomplete");
 
     let message = error.to_string();
-    assert!(message.contains("Hermes runtime profile execution incomplete"));
-    assert!(message.contains("hermes_profile_incomplete_local_governance"));
+    assert!(message.contains("OpenAI-compatible runtime profile observation incomplete"));
+    assert!(message.contains("openai_compatible_profile_incomplete_local_governance"));
     let events = store
         .audit_events_for_trace(trace_id)
         .expect("audit events");
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_summarized"
             && event["payload"]["profile_execution_status"]
-                == json!("hermes_profile_incomplete_local_governance")
+                == json!("openai_compatible_profile_incomplete_local_governance")
             && event["payload"]["profile_content_execution_complete"] == json!(false)
     }));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_rejected"
             && event["payload"]["summary"]["profile_execution_status"]
-                == json!("hermes_profile_incomplete_local_governance")
+                == json!("openai_compatible_profile_incomplete_local_governance")
     }));
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_draft_rejected"
@@ -12148,9 +11804,9 @@ async fn hermes_workflow_rejects_incomplete_profile_content_execution() {
 }
 
 #[tokio::test]
-async fn hermes_workflow_audits_profile_backend_failure() {
+async fn openai_compatible_workflow_audits_profile_backend_failure() {
     let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-profile-failure-{}.db",
+        "tonglingyu-runtime-openai-compatible-profile-failure-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
     let store = TonglingyuRuntimeStore::new(db_path.clone());
@@ -12158,15 +11814,15 @@ async fn hermes_workflow_audits_profile_backend_failure() {
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
     }
-    let trace_id = "trace-hermes-profile-failure-test";
+    let trace_id = "trace-openai-compatible-profile-failure-test";
     let error = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
-            TonglingyuAgentRuntimeMode::Hermes,
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
             Arc::new(FailingProfileRuntimeClient),
         )
         .await
-        .expect_err("Hermes mode must fail closed when a profile backend fails");
+        .expect_err("OpenAI-compatible mode must fail closed when a profile backend fails");
 
     assert!(error.to_string().contains("backend unavailable"));
     let events = store
@@ -12175,7 +11831,7 @@ async fn hermes_workflow_audits_profile_backend_failure() {
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_rejected"
             && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
-            && event["payload"]["runtime_mode"] == json!("hermes")
+            && event["payload"]["runtime_mode"] == json!("openai-compatible-network")
             && event["payload"]["profile_step_count"].as_u64().unwrap_or(0) > 0
             && event["payload"]["executed_profile_step_count"] == json!(0)
     }));
@@ -12238,9 +11894,9 @@ async fn openai_compatible_workflow_audits_provider_diagnostic_on_profile_failur
 }
 
 #[tokio::test]
-async fn hermes_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
+async fn openai_compatible_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
     let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-timeout-local-loss-answer-{}.db",
+        "tonglingyu-runtime-openai-compatible-timeout-local-loss-answer-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
     let store = TonglingyuRuntimeStore::new(db_path.clone());
@@ -12250,7 +11906,7 @@ async fn hermes_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
         init_knowledge_base_schema(&conn).expect("kb schema");
         seed_lost_jade_runtime_blocks(&conn);
     }
-    let trace_id = "trace-hermes-timeout-local-loss-answer-test";
+    let trace_id = "trace-openai-compatible-timeout-local-loss-answer-test";
     let error = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(
@@ -12259,20 +11915,20 @@ async fn hermes_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
                 4,
                 vec!["base_text".to_string()],
             ),
-            TonglingyuAgentRuntimeMode::Hermes,
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
             Arc::new(TimeoutProfileRuntimeClient),
         )
         .await
-        .expect_err("Hermes timeout must fail closed even when local evidence is answerable");
+        .expect_err("OpenAI-compatible timeout must fail closed even when local evidence is answerable");
 
-    assert!(error.to_string().contains("Hermes Runtime timed out"));
+    assert!(error.to_string().contains("OpenAI-compatible Runtime timed out"));
     let events = store
         .audit_events_for_trace(trace_id)
         .expect("audit events");
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_rejected"
             && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
-            && event["payload"]["runtime_mode"] == json!("hermes")
+            && event["payload"]["runtime_mode"] == json!("openai-compatible-network")
     }));
     assert!(
         !events
@@ -12285,9 +11941,9 @@ async fn hermes_workflow_fails_closed_on_timeout_even_with_local_loss_answer() {
 }
 
 #[tokio::test]
-async fn hermes_workflow_still_fails_closed_on_timeout_without_local_loss_answer() {
+async fn openai_compatible_workflow_still_fails_closed_on_timeout_without_local_loss_answer() {
     let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-timeout-no-local-answer-{}.db",
+        "tonglingyu-runtime-openai-compatible-timeout-no-local-answer-{}.db",
         uuid::Uuid::now_v7().simple()
     ));
     let store = TonglingyuRuntimeStore::new(db_path.clone());
@@ -12295,79 +11951,23 @@ async fn hermes_workflow_still_fails_closed_on_timeout_without_local_loss_answer
         let conn = store.open_connection().expect("runtime conn");
         init_knowledge_base_schema(&conn).expect("kb schema");
     }
-    let trace_id = "trace-hermes-timeout-no-local-answer-test";
+    let trace_id = "trace-openai-compatible-timeout-no-local-answer-test";
     let error = store
         .execute_workflow_with_agent_runtime_client(
             test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
-            TonglingyuAgentRuntimeMode::Hermes,
+            TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
             Arc::new(TimeoutProfileRuntimeClient),
         )
         .await
-        .expect_err("Hermes timeout should fail closed without a deterministic local answer");
+        .expect_err("OpenAI-compatible timeout should fail closed without a deterministic local answer");
 
-    assert!(error.to_string().contains("Hermes Runtime timed out"));
+    assert!(error.to_string().contains("OpenAI-compatible Runtime timed out"));
     let events = store
         .audit_events_for_trace(trace_id)
         .expect("audit events");
     assert!(events.iter().any(|event| {
         event["event_type"] == "agent_runtime_profile_execution_rejected"
             && event["payload"]["failure_stage"] == json!("agent_runtime_step_execution")
-    }));
-    let _ = std::fs::remove_file(&db_path);
-    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
-    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
-}
-
-#[tokio::test]
-async fn hermes_workflow_rejects_missing_tool_audit_events() {
-    let db_path = std::env::temp_dir().join(format!(
-        "tonglingyu-runtime-hermes-missing-tool-audit-{}.db",
-        uuid::Uuid::now_v7().simple()
-    ));
-    let store = TonglingyuRuntimeStore::new(db_path.clone());
-    {
-        let conn = store.open_connection().expect("runtime conn");
-        init_knowledge_base_schema(&conn).expect("kb schema");
-        seed_retrieval_quality_source(
-            &conn,
-            json!({
-                "license": "CC-BY-SA-4.0",
-                "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
-                "license_source_url": "https://wikisource.org/wiki/Wikisource:Copyright_policy",
-                "attribution": "Wikisource contributors",
-                "usage_boundary": "可作为正文或版本对照证据候选；不声明完成学术校勘。",
-            }),
-        );
-        seed_basic_tonglingyu_runtime_block(&conn);
-    }
-    let trace_id = "trace-hermes-missing-tool-audit-test";
-    let error = store
-        .execute_workflow_with_agent_runtime_client(
-            test_workflow_input(trace_id, "通灵玉是什么？", 2, vec!["base_text".to_string()]),
-            TonglingyuAgentRuntimeMode::Hermes,
-            Arc::new(MissingToolAuditRuntimeClient),
-        )
-        .await
-        .expect_err("Hermes mode must fail closed when tool results are not audited");
-
-    let message = error.to_string();
-    assert!(message.contains("missing tool audit events"));
-    assert!(message.contains("0/4"));
-    let events = store
-        .audit_events_for_trace(trace_id)
-        .expect("audit events");
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_execution_summarized"
-            && event["payload"]["profile_execution_status"]
-                == json!("hermes_profile_observed_with_local_governance")
-            && event["payload"]["profile_content_execution_complete"] == json!(true)
-            && event["payload"]["tool_result_count"] == json!(4)
-            && event["payload"]["tool_audit_event_count"] == json!(0)
-    }));
-    assert!(events.iter().any(|event| {
-        event["event_type"] == "agent_runtime_profile_execution_rejected"
-            && event["payload"]["error"]
-                == json!("Hermes runtime profile execution missing tool audit events: 0/4")
     }));
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -12411,7 +12011,7 @@ async fn agent_runtime_profile_steps_execute_concurrently_and_preserve_step_orde
         &mut workflow,
         &profiles,
         &context,
-        TonglingyuAgentRuntimeMode::Hermes,
+        TonglingyuAgentRuntimeMode::Minimal,
         Arc::new(SlowDraftRuntimeClient::new(
             Arc::clone(&active),
             Arc::clone(&max_active),
@@ -12449,7 +12049,7 @@ async fn agent_runtime_profile_steps_execute_concurrently_and_preserve_step_orde
             agent_runtime["runtime_step"]["metadata"]["workflow_step_id"].as_str(),
             Some(step.step_id.as_str())
         );
-        assert_eq!(agent_runtime["client"].as_str(), Some("hermes"));
+        assert_eq!(agent_runtime["client"].as_str(), Some("minimal"));
     }
 
     let _ = std::fs::remove_file(&db_path);

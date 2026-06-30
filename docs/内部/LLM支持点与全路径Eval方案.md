@@ -33,7 +33,7 @@
 5. `docs/子模块/Scoped_Context与受控Memory.md`
 6. `docs/PROGRESS.md`
 
-外部实现只能作为工程模式参考。OpenAI、Anthropic、LangGraph、Hermes/AiBot 等不能作为本仓库当前实现事实。
+外部实现只能作为工程模式参考。OpenAI、Anthropic、LangGraph 等不能作为本仓库当前实现事实。
 
 可借鉴的只是模式：
 
@@ -42,7 +42,6 @@
 | OpenAI / Agents | structured output、tool call、trace、eval、single entry orchestration | schema、policy、audit、eval、release gate |
 | Anthropic / MCP / Skills | 最小工具权限、上下文隔离、能力包版本化 | context projection、tool policy、能力版本、权限审计 |
 | LangGraph / LangSmith | state graph、节点 I/O、replay、失败归因 | request -> response 全路径节点级 eval |
-| Hermes / AiBot | profile 隔离、runtime client、tool registry、session/runtime audit | Runtime/Gateway contract、output_ref、hhost gate |
 
 ## 2. 不可变设计原则
 
@@ -163,7 +162,7 @@ Provider adapter 是技术边界，不是业务决策点。所有 LLM 能力必�
 
 Provider adapter 必须做到：
 
-1. 隐藏具体 OpenAI/Anthropic/Hermes/AiBot runtime 差异。
+1. 隐藏具体 OpenAI-compatible provider/runtime 差异。
 2. 统一 timeout、错误枚举、usage、latency、model id 和 finish reason。
 3. 只接受已经 projection 过的 `input_json`，不得自己拼接 raw memory、完整历史或未授权 tool payload。
 4. 只执行一次 schema repair；repair 输入只能包含原 projection、目标 schema 和 schema error summary，不能扩大上下文。
@@ -913,7 +912,7 @@ Runner 规则：
 | S0 口径冻结 | 固定事实口径、目标增强和落地细节 | 只整理文档、确认 P0-P6 边界、确认 P6 为横切门禁 | I1-I10、D1-D12、U1-U16 设计结论、S0-S7 均完成审阅；文档检查通过 | 不能写“基本完成”；不能把目标写成实现 |
 | S1 评测与用户响应安全基线 | 先建立最小 gate，再接 LLM | P6 最小回归、P5 最小 runner、`request_safety.jsonl`、`streaming_dedupe.jsonl` | 内部字段扫描、stream replay、缓存复用、request safety 能自动跑 | 不能引入新的 LLM 调用 |
 | S2 Question Resolver contract | 只做 resolver 输出约束，不接生产 LLM | P0 schema、字段白名单、context refs 白名单、confidence gate、audit、fixture；包含 `authorized_memory_summary` 输入 contract | 规则 resolver 行为不变；contract tests 通过 | LLM 不能决定事实、scope、tool、memory ACL、reviewer、package |
-| S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | runtime/Hermes 调用、schema repair、shadow audit、fail-closed | 只在 deterministic 需要澄清时调用；RAG 不被未校验输出驱动 | LLM resolver 不能读取 raw memory 或完整 history |
+| S3 Resolver LLM shadow/受控接入 | 在规则 resolver 不足时受控试用 LLM | OpenAI-compatible runtime 调用、schema repair、shadow audit、fail-closed | 只在 deterministic 需要澄清时调用；RAG 不被未校验输出驱动 | LLM resolver 不能读取 raw memory 或完整 history |
 | S4 Conversation State Summary | 新增受控状态摘要节点 | P1 writer/loader/schema、可见范围、anti-hallucination eval | summary 不引入事实；只进入授权 projection；不进 evidence package | 不能把 summary 当证据源 |
 | S5 Retrieval Policy schema 化 | 引入 LLM suggested retrieval policy | P2 suggested policy schema、deterministic patch、required evidence eval | 高风险问题必需证据不被降级 | LLM 不能决定最终证据类型和工具权限 |
 | S6 Profile observation 与 draft/reviewer eval | 评估 LLM profile 输出质量和边界 | P3 datasets、P4 claim-first draft、reviewer false-pass eval、draft candidate schema、review override schema | refs 全部来自本地 evidence ids；override 可审计；高风险 LLM reviewer issue 触发 revision gate | observation/candidate 不能成为最终事实或最终裁决 |
@@ -1067,8 +1066,8 @@ Provider adapter 测试要求：
 ### 10.1.1 OpenAI-compatible Network Agent Runtime Contract
 
 `LlmProviderClient` 只是底层网络 provider 客户端；它不能直接被 Gateway 业务路径调用。
-若要不依赖 Hermes Agent，必须新增 `openai-compatible-network` Runtime Adapter，并把它作为
-`RuntimeClient` 的一种实现接入 `AgentRequest -> Runtime Adapter -> validator` 链路。
+当前 workflow runtime 只接受 `openai-compatible-network` Runtime Adapter，并把它作为
+`RuntimeClient` 的实现接入 `AgentRequest -> Runtime Adapter -> validator` 链路。
 
 该 adapter 的请求对象必须包含：
 
@@ -1129,30 +1128,34 @@ Provider adapter 测试要求：
 配置要求：
 
 ```env
-TONGLINGYU_AGENT_RUNTIME_MODE=openai-compatible-network
-TONGLINGYU_LLM_AGENT_RUNTIME_MODE=openai-compatible-network
-AGENT_RUNTIME_OPENAI_BASE_URL=https://api.deepseek.com
-AGENT_RUNTIME_OPENAI_API_KEY=<secret>
-AGENT_RUNTIME_OPENAI_MODEL=deepseek-v4-flash
-AGENT_RUNTIME_OPENAI_API_FAMILY=deepseek-chat
-AGENT_RUNTIME_OPENAI_THINKING_TYPE=disabled
-AGENT_RUNTIME_OPENAI_REASONING_EFFORT=
-AGENT_RUNTIME_OPENAI_PROFILE_MODELS=tonglingyu-question-normalizer=deepseek-v4-flash,tonglingyu-conversation-state-writer=deepseek-v4-flash
-AGENT_RUNTIME_OPENAI_CONNECT_TIMEOUT_MS=1500
-AGENT_RUNTIME_OPENAI_READ_TIMEOUT_MS=60000
-AGENT_RUNTIME_OPENAI_TOTAL_DEADLINE_MS=90000
-AGENT_RUNTIME_OPENAI_MAX_TOKENS=768
-AGENT_RUNTIME_OPENAI_MAX_CONCURRENCY=2
-AGENT_RUNTIME_OPENAI_RESPONSE_FORMAT_JSON=true
+TONGLINGYU_AGENT_ROLE_TEXT_PROVIDER=deepseek_flash
+TONGLINGYU_AGENT_ROLE_PACKAGE_PROVIDER=deepseek_flash
+TONGLINGYU_AGENT_ROLE_DRAFT_PROVIDER=deepseek_pro
+TONGLINGYU_AGENT_ROLE_REVIEW_PROVIDER=deepseek_pro
+TONGLINGYU_AGENT_ROLE_QUESTION_NORMALIZER_PROVIDER=deepseek_flash
+TONGLINGYU_AGENT_ROLE_CONVERSATION_STATE_PROVIDER=deepseek_flash
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BACKEND=openai-compatible-network
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_BASE_URL=https://api.deepseek.com
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_API_KEY_ENV=DEEPSEEK_API_KEY
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_MODEL=deepseek-v4-flash
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_API_FAMILY=deepseek-chat
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_THINKING_TYPE=disabled
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_FLASH_RESPONSE_FORMAT_JSON=true
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_BACKEND=openai-compatible-network
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_BASE_URL=https://api.deepseek.com
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_API_KEY_ENV=DEEPSEEK_API_KEY
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_MODEL=deepseek-v4-pro
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_API_FAMILY=deepseek-chat
+TONGLINGYU_AGENT_PROVIDER_DEEPSEEK_PRO_RESPONSE_FORMAT_JSON=true
 TONGLINGYU_AGENT_RUNTIME_PROFILE_MAX_SECONDS=90
 ```
 
-这些配置不得复用 `HERMES_API_KEY` 语义；也不得要求 Hermes service、Hermes config 或
-`AGENT_RUNTIME_HERMES_*` 存在。Gateway 的 question normalizer / conversation state
-writer 以 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 为一等 mode，并在未显式设置时才从
-`TONGLINGYU_AGENT_RUNTIME_MODE` fallback。gatekeeper 必须分别验证 workflow runtime mode
-和 LLM Agent runtime mode：`hermes` 验证 Hermes，`openai-compatible-network`
-验证 direct network agent，`minimal` 在 production enforced 中 fail。
+这些配置不得复用 legacy runtime provider key 语义，也不得要求 legacy runtime
+service/config/env 存在。Gateway 的 question normalizer / conversation state writer 和 workflow profiles
+都通过 role provider profile 绑定 provider；不得从 `TONGLINGYU_AGENT_RUNTIME_MODE`
+或 `TONGLINGYU_LLM_AGENT_RUNTIME_MODE` 推导 workflow provider。gatekeeper 必须分别验证
+workflow roles 和 LLM Agent roles：provider backend 只允许 `openai-compatible-network`，
+`minimal` 在 production enforced 中 fail。
 
 ### 10.2 Provider / Runtime Failure Policy
 

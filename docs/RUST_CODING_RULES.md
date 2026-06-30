@@ -21,8 +21,8 @@ are implementation constraints, not general style preferences.
 
 - `agent-core` owns shared models, typed IDs, policy, errors, and public API
   contracts.
-- `agent-runtime` owns reusable Runtime client behavior and minimal/Hermes
-  Runtime adapters used by Tonglingyu.
+- `agent-runtime` owns reusable Runtime client behavior and the minimal runtime
+  adapter used by Tonglingyu tests.
 - `tonglingyu-runtime` owns runtime schema, SQLite/FTS query behavior, evidence,
   reviewer, RQA, governance, memory, and Tonglingyu Runtime workflow behavior.
 - `tonglingyu-gateway` owns OpenAI-compatible HTTP, auth, model hiding, rate

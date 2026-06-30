@@ -1289,7 +1289,6 @@ fn required_agent_provider_env_from(
 
 fn normalized_agent_provider_backend(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
-        "hermes_agent" | "hermes-agent" => "hermes-agent".to_string(),
         "openai_compatible_network" | "openai-compatible-network" => {
             "openai-compatible-network".to_string()
         }
