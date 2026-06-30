@@ -96,7 +96,28 @@ impl ResponseStatus {
                 | Self::Timeout,
             ) => true,
             (
-                Self::Retrieving | Self::Composing | Self::Reviewing,
+                Self::Retrieving,
+                Self::Composing
+                | Self::Reviewing
+                | Self::InProgress
+                | Self::RequiresAction
+                | Self::Canceling
+                | Self::Completed
+                | Self::Failed
+                | Self::Timeout,
+            ) => true,
+            (
+                Self::Composing,
+                Self::Reviewing
+                | Self::InProgress
+                | Self::RequiresAction
+                | Self::Canceling
+                | Self::Completed
+                | Self::Failed
+                | Self::Timeout,
+            ) => true,
+            (
+                Self::Reviewing,
                 Self::InProgress
                 | Self::RequiresAction
                 | Self::Canceling
@@ -342,6 +363,17 @@ mod tests {
         assert!(ResponseStatus::Canceling.can_transition_to(&ResponseStatus::Completed));
         assert!(ResponseStatus::Canceling.can_transition_to(&ResponseStatus::Failed));
         assert!(!ResponseStatus::Canceling.can_transition_to(&ResponseStatus::Retrieving));
+    }
+
+    #[test]
+    fn streaming_response_status_can_advance_through_workflow_phases() {
+        assert!(ResponseStatus::Queued.can_transition_to(&ResponseStatus::InProgress));
+        assert!(ResponseStatus::InProgress.can_transition_to(&ResponseStatus::Retrieving));
+        assert!(ResponseStatus::Retrieving.can_transition_to(&ResponseStatus::Composing));
+        assert!(ResponseStatus::Composing.can_transition_to(&ResponseStatus::Reviewing));
+        assert!(ResponseStatus::Reviewing.can_transition_to(&ResponseStatus::Completed));
+        assert!(!ResponseStatus::Composing.can_transition_to(&ResponseStatus::Retrieving));
+        assert!(!ResponseStatus::Reviewing.can_transition_to(&ResponseStatus::Composing));
     }
 
     #[test]
