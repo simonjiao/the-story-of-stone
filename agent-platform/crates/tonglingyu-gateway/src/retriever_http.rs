@@ -1186,7 +1186,11 @@ pub(crate) fn evidence_cards_from_pack(pack: &RetrieverEvidencePack) -> Vec<Evid
 }
 
 fn doc_is_answer_basis(doc: &RetrieverEvidenceDoc) -> bool {
-    doc_evidence_projection(doc) == Some("answer_basis")
+    match doc_evidence_projection(doc) {
+        Some("answer_basis") => true,
+        Some("navigation_hint") => doc_has_direct_basis_span(doc),
+        _ => false,
+    }
 }
 
 fn doc_evidence_projection(doc: &RetrieverEvidenceDoc) -> Option<&str> {
@@ -1290,6 +1294,27 @@ fn basis_spans_for_doc(doc: &RetrieverEvidenceDoc) -> Vec<RetrieverBasisSpan> {
             })
         })
         .collect()
+}
+
+fn doc_has_direct_basis_span(doc: &RetrieverEvidenceDoc) -> bool {
+    doc.metadata
+        .get("basis_spans")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|span| {
+            let evidence_type = span
+                .get("evidence_type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            let has_text = span
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+            has_text && matches!(evidence_type, "base_text" | "commentary" | "version_note")
+        })
 }
 
 fn evidence_card_from_basis_span(
@@ -1853,6 +1878,27 @@ mod tests {
         let doc = answer_basis_doc();
 
         assert_eq!(evidence_type_for_doc(&doc), "commentary");
+    }
+
+    #[test]
+    fn navigation_hint_with_dereferenced_basis_spans_yields_cards() {
+        let mut doc = answer_basis_doc();
+        doc.metadata["evidence_projection"] = json!("navigation_hint");
+        let pack = test_pack(doc);
+        let cards = evidence_cards_from_pack(&pack);
+
+        assert_eq!(cards.len(), 2);
+        assert!(cards.iter().any(|card| card.text.contains("雲散高唐")));
+        assert!(cards.iter().any(|card| card.evidence_type == "commentary"));
+    }
+
+    #[test]
+    fn debug_candidate_with_basis_spans_stays_out_of_answer_basis() {
+        let mut doc = answer_basis_doc();
+        doc.metadata["evidence_projection"] = json!("debug_candidate");
+        let pack = test_pack(doc);
+
+        assert!(evidence_cards_from_pack(&pack).is_empty());
     }
 }
 
