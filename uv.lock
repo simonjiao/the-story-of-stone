@@ -4,5 +4,5 @@ requires-python = ">=3.11"
 
 [[package]]
 name = "the-story-of-stone"
-version = "0.44.12"
+version = "0.44.13"
 source = { virtual = "." }

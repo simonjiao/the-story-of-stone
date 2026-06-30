@@ -192,7 +192,8 @@ pub const RUNTIME_PROMPT_CATALOG_PATH_ENV: &str = "TONGLINGYU_RUNTIME_PROMPT_CAT
 
 const QUERY_EXPANSIONS_SCHEMA_VERSION: &str = "tonglingyu.query_expansions.v1";
 const DEFAULT_QUERY_EXPANSIONS_JSON: &str = include_str!("../resources/query_expansions.json");
-const AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES: usize = 8192;
+const AGENT_RUNTIME_PROFILE_MESSAGE_TARGET_BYTES: usize = 8192;
+const AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES: usize = 12_288;
 const AGENT_RUNTIME_PROFILE_STEP_MAX_ATTEMPTS: usize = 2;
 const AGENT_RUNTIME_SYNC_LLM_CALL_BUDGET: usize = 1;
 const AGENT_RUNTIME_SYNC_LATENCY_BUDGET_MS: u64 = 3_000;
@@ -4330,7 +4331,7 @@ fn agent_runtime_profile_step_message(
             result_summary_contract,
             compaction_level,
         )?;
-        if selected_content.len() <= AGENT_RUNTIME_PROFILE_MESSAGE_MAX_BYTES {
+        if selected_content.len() <= AGENT_RUNTIME_PROFILE_MESSAGE_TARGET_BYTES {
             break;
         }
     }
@@ -4339,7 +4340,7 @@ fn agent_runtime_profile_step_message(
 
 fn agent_runtime_profile_message_max_compaction_level(step: &RuntimeWorkflowStepReport) -> usize {
     if step.operation == "draft_answer" {
-        5
+        6
     } else {
         0
     }
@@ -4379,9 +4380,11 @@ fn agent_runtime_profile_step_message_content(
         operation = &step.operation,
         context_projection_ref = &projection.context_projection_ref,
         context_projection_digest = &projection.context_projection_digest,
-        context_projection_payload =
-            serde_json::to_string(&context_projection_message_payload(projection))
-                .unwrap_or_else(|_| "{}".to_string()),
+        context_projection_payload = serde_json::to_string(&context_projection_message_payload(
+            projection,
+            compaction_level,
+        ))
+        .unwrap_or_else(|_| "{}".to_string()),
         input_ref = step.input_ref.as_deref().unwrap_or("none"),
         output_ref = &step.output_ref,
         allowed_tools = step.allowed_tools.join(","),
@@ -4401,9 +4404,32 @@ fn agent_runtime_result_summary_contract_for_message(
     Ok(result_summary_contract.to_string())
 }
 
-fn context_projection_message_payload(projection: &RuntimeContextProjection) -> Value {
+fn context_projection_message_payload(
+    projection: &RuntimeContextProjection,
+    compaction_level: usize,
+) -> Value {
     let payload = &projection.projection_payload;
     let resolver = payload.get("resolver").unwrap_or(&Value::Null);
+    let question_frame = payload
+        .get("question_frame")
+        .map(|frame| compact_question_frame_for_message(frame, compaction_level))
+        .unwrap_or(Value::Null);
+    let memory_usage_summary = if compaction_level >= 4 {
+        Value::Null
+    } else {
+        payload
+            .get("memory_usage_summary")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let referent_bindings = compact_context_projection_array_field(
+        resolver.get("referent_bindings").unwrap_or(&Value::Null),
+        compaction_level,
+    );
+    let used_context_refs = compact_context_projection_array_field(
+        resolver.get("used_context_refs").unwrap_or(&Value::Null),
+        compaction_level,
+    );
     json!({
         "object": "tonglingyu.context_projection_message_payload",
         "context_projection_ref": &projection.context_projection_ref,
@@ -4411,36 +4437,99 @@ fn context_projection_message_payload(projection: &RuntimeContextProjection) -> 
         "projection_payload_sha256": hash_json(payload),
         "consumer_name": &projection.consumer_name,
         "visible_question": json_trimmed_string(payload, "visible_question", 512),
-        "question_frame": payload
-            .get("question_frame")
-            .cloned()
-            .unwrap_or(Value::Null),
+        "question_frame": question_frame,
         "resolved_question": resolver
             .get("resolved_question")
             .and_then(Value::as_str)
             .map(|value| trim_text(value, 512)),
         "session_summary": json_trimmed_string(payload, "session_summary", 512),
-        "memory_usage_summary": payload
-            .get("memory_usage_summary")
-            .cloned()
-            .unwrap_or(Value::Null),
+        "memory_usage_summary": memory_usage_summary,
         "resolver": json!({
             "strategy": resolver.get("strategy").cloned().unwrap_or(Value::Null),
             "needs_clarification": resolver
                 .get("needs_clarification")
                 .cloned()
                 .unwrap_or(Value::Null),
-            "referent_bindings": resolver
-                .get("referent_bindings")
-                .cloned()
-                .unwrap_or_else(|| json!([])),
-            "used_context_refs": resolver
-                .get("used_context_refs")
-                .cloned()
-                .unwrap_or_else(|| json!([])),
+            "referent_bindings": referent_bindings,
+            "used_context_refs": used_context_refs,
         }),
         "tool_policy_digest": &projection.tool_policy_digest,
     })
+}
+
+fn compact_context_projection_array_field(value: &Value, compaction_level: usize) -> Value {
+    let Some(items) = value.as_array() else {
+        return json!([]);
+    };
+    if compaction_level < 4 {
+        return Value::Array(items.clone());
+    }
+    Value::Array(
+        items
+            .iter()
+            .take(4)
+            .map(|item| {
+                item.as_str()
+                    .map(|text| Value::String(trim_text(text, 80)))
+                    .unwrap_or_else(|| item.clone())
+            })
+            .collect(),
+    )
+}
+
+fn compact_question_frame_for_message(frame: &Value, compaction_level: usize) -> Value {
+    if compaction_level < 4 {
+        return frame.clone();
+    }
+    let Some(frame) = frame.as_object() else {
+        return frame.clone();
+    };
+    let mut compact = Map::new();
+    for key in [
+        "schema_version",
+        "frame_id",
+        "normalized_question",
+        "original_question",
+        "confidence",
+        "answer_target",
+    ] {
+        insert_existing_value(&mut compact, frame, key);
+    }
+    if let Some(slots) = frame.get("slots").and_then(Value::as_object) {
+        let mut compact_slots = Map::new();
+        for key in [
+            "subject",
+            "object",
+            "relation",
+            "attribute",
+            "event",
+            "evidence_focus",
+            "source_scope",
+        ] {
+            insert_existing_value(&mut compact_slots, slots, key);
+        }
+        compact.insert("slots".to_string(), Value::Object(compact_slots));
+    }
+    if let Some(contract) = frame.get("evidence_contract").and_then(Value::as_object) {
+        let mut compact_contract = Map::new();
+        for key in [
+            "required_types",
+            "supporting_types",
+            "unsupported_behavior",
+            "min_answer_basis",
+            "citation_granularity",
+        ] {
+            insert_existing_value(&mut compact_contract, contract, key);
+        }
+        compact.insert(
+            "evidence_contract".to_string(),
+            Value::Object(compact_contract),
+        );
+    }
+    if compaction_level < 6 {
+        insert_existing_value(&mut compact, frame, "task");
+    }
+    Value::Object(compact)
 }
 
 fn json_trimmed_string(value: &Value, key: &str, max_chars: usize) -> Option<String> {
@@ -4602,6 +4691,34 @@ fn compact_answer_requirements_for_message(
             Value::Object(compact_anchor)
         })
         .collect::<Vec<_>>();
+    let required_cue_policy = if compaction_level >= 4 {
+        answer_requirements
+            .get("required_cue_policy")
+            .and_then(Value::as_object)
+            .map(|policy| {
+                let mut compact_policy = Map::new();
+                for key in [
+                    "object",
+                    "schema_version",
+                    "status",
+                    "min_answer_basis",
+                    "require_requested_anchor",
+                ] {
+                    insert_existing_value(&mut compact_policy, policy, key);
+                }
+                compact_policy.insert(
+                    "rule_id".to_string(),
+                    json!("answer_requirements.anchor_cues_required"),
+                );
+                Value::Object(compact_policy)
+            })
+            .unwrap_or_else(|| json!({"rule_id": "answer_requirements.anchor_cues_required"}))
+    } else {
+        answer_requirements
+            .get("required_cue_policy")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    };
     json!({
         "object": answer_requirements
             .get("object")
@@ -4615,10 +4732,7 @@ fn compact_answer_requirements_for_message(
             .get("evidence_request")
             .cloned()
             .unwrap_or(Value::Null),
-        "required_cue_policy": answer_requirements
-            .get("required_cue_policy")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+        "required_cue_policy": required_cue_policy,
         "requested_evidence_type_anchors": compact_anchors,
         "rule_id": "answer_requirements.anchor_cues_required",
     })
