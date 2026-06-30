@@ -283,6 +283,80 @@ fn chapter_location_accepts_quoted_title_cue_from_commentary_anchor() {
 }
 
 #[test]
+fn v2_locate_event_chapter_target_is_chapter_location() {
+    let frame = parse_runtime_question_frame(&json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "task": "locate_event",
+        "normalized_question": "秦钟是第几回死的？",
+        "answer_target": {"type": "chapter_no"},
+        "slots": {
+            "subject": {"name": "秦钟", "aliases": ["秦钟", "秦鐘"]},
+            "event": {"type": "death", "trigger": "死的"},
+            "object": null,
+            "relation": null,
+            "attribute": null
+        },
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"]
+        }
+    }))
+    .expect("v2 frame");
+
+    assert_eq!(frame.intent, "character_fate_query");
+    assert_eq!(frame.task.as_deref(), Some("locate_event"));
+    assert_eq!(frame.answer_target.as_deref(), Some("chapter_no"));
+    assert!(frame.is_chapter_location());
+}
+
+#[test]
+fn v2_chapter_location_requirements_use_block_id_chapter_no() {
+    let frame = parse_runtime_question_frame(&json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "task": "locate_event",
+        "normalized_question": "秦钟是第几回死的？",
+        "answer_target": {"type": "chapter_no"},
+        "slots": {
+            "subject": {"name": "秦钟", "aliases": ["秦钟", "秦鐘"]},
+            "event": {"type": "death", "trigger": "死的"},
+            "object": null,
+            "relation": null,
+            "attribute": null
+        },
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": []
+        }
+    }))
+    .expect("v2 frame");
+    let mut card = card_with_source_text(
+        "秦钟劝宝玉立志后萧然长逝",
+        "眾鬼聽說，只得將秦魂放回，哼了一聲，微開雙目，見寶玉在側，乃勉強歎道：“怎麼不肯早來？”秦鐘道：“并無別話。”說畢，便長歎一聲，蕭然長逝了。",
+    );
+    card.evidence_id = "ev-c16-death".to_string();
+    card.block_id = "hlm120.c016.p0023.seg0003".to_string();
+
+    let requirements = chapter_location_answer_requirement_value(Some(&frame), &[card.clone()])
+        .expect("requirements");
+
+    assert_eq!(requirements["must_answer_chapter_no"], json!(16));
+    assert_eq!(requirements["primary_evidence_id"], json!("ev-c16-death"));
+    assert!(
+        requirements["primary_text_cue"]
+            .as_str()
+            .is_some_and(|cue| cue.contains("蕭然長逝"))
+    );
+    assert_eq!(
+        chapter_location_draft_rejection_reason(
+            Some(&frame),
+            &[card],
+            "秦钟死在第十六回；证据写他“說畢，便長歎一聲，蕭然長逝了”。",
+        ),
+        None
+    );
+}
+
+#[test]
 fn entity_query_misclassification_for_chapter_location_only_clarifies() {
     let frame: RuntimeQuestionFrame = serde_json::from_value(json!({
         "intent": "entity_query",

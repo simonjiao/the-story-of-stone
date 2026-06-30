@@ -44,6 +44,10 @@ pub(crate) struct AttributeCardSupport {
 pub(crate) struct RuntimeQuestionFrame {
     pub(crate) intent: String,
     pub(crate) canonical_question: String,
+    #[serde(default)]
+    pub(crate) task: Option<String>,
+    #[serde(default)]
+    pub(crate) answer_target: Option<String>,
     pub(crate) subject: Option<RuntimeQuestionFrameEntity>,
     pub(crate) predicate: Option<RuntimeQuestionFramePredicate>,
     pub(crate) object: Option<RuntimeQuestionFrameEntity>,
@@ -93,6 +97,15 @@ impl RuntimeQuestionFrame {
         self.intent == "character_fate_query" && self.character_fate_entity().is_some()
     }
 
+    pub(crate) fn is_chapter_location(&self) -> bool {
+        self.intent == "chapter_location_query"
+            || (self.task.as_deref() == Some("locate_event")
+                && matches!(
+                    self.answer_target.as_deref(),
+                    Some("chapter_no" | "chapter_or_time")
+                ))
+    }
+
     pub(crate) fn character_fate_entity(&self) -> Option<&RuntimeQuestionFrameEntity> {
         self.subject.as_ref().or(self.object.as_ref())
     }
@@ -126,7 +139,7 @@ pub(crate) fn frame_focus_terms(frame: Option<&RuntimeQuestionFrame>) -> Vec<Str
         return Vec::new();
     };
     let mut terms = Vec::new();
-    if frame.intent == "chapter_location_query" {
+    if frame.is_chapter_location() {
         extend_terms(
             &mut terms,
             &chapter_location::chapter_location_focus_terms(frame),
@@ -186,7 +199,7 @@ pub(crate) fn frame_search_query(question: &str, frame: Option<&RuntimeQuestionF
         return relation_search_query(question, Some(frame));
     }
     let mut terms = Vec::new();
-    if frame.intent == "chapter_location_query" {
+    if frame.is_chapter_location() {
         extend_terms(
             &mut terms,
             &chapter_location::chapter_location_focus_terms(frame),
@@ -644,6 +657,13 @@ pub(crate) fn parse_runtime_question_frame(value: &Value) -> Option<RuntimeQuest
         .get("task")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let answer_target = value
+        .get("answer_target")
+        .and_then(|target| target.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .map(ToString::to_string);
     let slots = value.get("slots")?;
     let event_type = slots
         .get("event")
@@ -696,6 +716,8 @@ pub(crate) fn parse_runtime_question_frame(value: &Value) -> Option<RuntimeQuest
             .or_else(|| value.get("original_question").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string(),
+        task: (!task.is_empty()).then(|| task.to_string()),
+        answer_target,
         subject: slots.get("subject").and_then(runtime_entity_from_v2_slot),
         predicate,
         object: slots.get("object").and_then(runtime_entity_from_v2_slot),

@@ -44,7 +44,7 @@ pub(crate) fn chapter_location_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
 ) -> Option<String> {
-    let frame = frame.filter(|frame| frame.intent == "chapter_location_query")?;
+    let frame = frame.filter(|frame| frame.is_chapter_location())?;
     let policy = match chapter_location_policy() {
         Ok(policy) => policy,
         Err(_) => {
@@ -97,7 +97,7 @@ pub(crate) fn chapter_location_answer_requirement_value(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
 ) -> Option<Value> {
-    let frame = frame.filter(|frame| frame.intent == "chapter_location_query")?;
+    let frame = frame.filter(|frame| frame.is_chapter_location())?;
     let policy = chapter_location_policy().ok()?;
     let terms = chapter_location_answer_terms(frame);
     if terms.is_empty() {
@@ -140,7 +140,7 @@ pub(crate) fn chapter_location_draft_rejection_reason(
     cards: &[EvidenceCard],
     draft: &str,
 ) -> Option<&'static str> {
-    let frame = frame.filter(|frame| frame.intent == "chapter_location_query")?;
+    let frame = frame.filter(|frame| frame.is_chapter_location())?;
     let policy = chapter_location_policy().ok()?;
     let terms = chapter_location_answer_terms(frame);
     if terms.is_empty() {
@@ -424,8 +424,7 @@ fn chapter_location_candidates<'a>(
         .iter()
         .enumerate()
         .filter_map(|(index, card)| {
-            let chapter_no = extract_chapter_no(&card.source_title)
-                .or_else(|| extract_chapter_no(&card.text))?;
+            let chapter_no = chapter_no_for_card(card)?;
             let chapter_title = chapter_location_title(card, chapter_no, terms, policy);
             let weak_mention = chapter_location_weak_mention(card, policy);
             let kind = if chapter_title.is_some() {
@@ -456,6 +455,31 @@ fn chapter_location_candidates<'a>(
             })
         })
         .collect()
+}
+
+fn chapter_no_for_card(card: &EvidenceCard) -> Option<i64> {
+    extract_chapter_no(&card.source_title)
+        .or_else(|| extract_chapter_no(&card.text))
+        .or_else(|| chapter_no_from_record_code(&card.block_id))
+        .or_else(|| chapter_no_from_record_code(&card.source_id))
+        .or_else(|| chapter_no_from_record_code(&card.support_scope))
+}
+
+fn chapter_no_from_record_code(value: &str) -> Option<i64> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| {
+            let digits = part.strip_prefix('c').or_else(|| part.strip_prefix('C'))?;
+            if digits.is_empty()
+                || digits.len() > 3
+                || !digits.chars().all(|ch| ch.is_ascii_digit())
+            {
+                return None;
+            }
+            let chapter_no = digits.parse::<i64>().ok()?;
+            (1..=120).contains(&chapter_no).then_some(chapter_no)
+        })
+        .next()
 }
 
 fn chapter_location_card_score(
