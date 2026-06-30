@@ -17621,20 +17621,32 @@ fn domain_route_queries(
 ) -> BTreeMap<String, Vec<String>> {
     let mut queries = profile.queries(query);
     if !keyword_queries.is_empty() {
-        queries.insert("bm25".to_string(), keyword_queries.to_vec());
+        queries.insert(
+            "bm25".to_string(),
+            domain_limit_route_queries(keyword_queries.iter().cloned()),
+        );
         for route in ["entity", "event", "poem", "commentary"] {
             if let Some(existing) = queries.remove(route) {
                 queries.insert(
                     route.to_string(),
-                    domain_merge_terms(keyword_queries, &existing),
+                    domain_limit_route_queries(
+                        keyword_queries.iter().chain(existing.iter()).cloned(),
+                    ),
                 );
             }
         }
     }
     if !semantic_queries.is_empty() {
-        queries.insert("vector".to_string(), semantic_queries.to_vec());
+        queries.insert(
+            "vector".to_string(),
+            domain_limit_route_queries(semantic_queries.iter().cloned()),
+        );
     }
     queries
+}
+
+fn domain_limit_route_queries(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    domain_dedupe_limited(values, DOMAIN_MAX_ROUTE_QUERY_REWRITES)
 }
 
 fn domain_query_rewrites(query: &str, suffixes: &[&str]) -> Vec<String> {

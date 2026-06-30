@@ -2135,6 +2135,9 @@ fn query_planner_count_loss_question_uses_event_recall_terms() {
             .iter()
             .any(|query| query.contains("扫雪拾玉"))
     );
+    for queries in search_plan.queries.values() {
+        assert!(queries.len() <= 8);
+    }
 }
 
 #[test]

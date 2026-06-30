@@ -12378,5 +12378,8 @@ fn domain_retrieval_plan_uses_loss_event_terms_for_count_frame() {
             .iter()
             .any(|query| query.contains("扫雪拾玉"))
     );
+    for queries in plan.queries.values() {
+        assert!(queries.len() <= 8);
+    }
     assert!(plan.routes.contains(&"event".to_string()));
 }
