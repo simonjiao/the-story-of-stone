@@ -5708,7 +5708,6 @@ fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
     matches!(
         reason,
         "coverage_assessment_not_passed"
-            | "coverage_assessment_status_missing"
             | "claim_evidence_ref_outside_package"
             | "claim_evidence_refs_unavailable"
             | "draft_claim_exceeds_evidence_boundary"

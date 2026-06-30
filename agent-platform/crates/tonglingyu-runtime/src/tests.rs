@@ -9432,6 +9432,21 @@ fn hard_evidence_rejections_skip_draft_repair() {
     }
 }
 
+#[test]
+fn structural_draft_rejections_trigger_draft_repair() {
+    let application = AgentRuntimeContentApplication {
+        draft_consumed: false,
+        content_used_for_final_answer: false,
+        result_format: "json",
+        rejected_reason: Some("coverage_assessment_status_missing"),
+    };
+
+    assert!(should_repair_agent_runtime_draft(
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+        Some(&application),
+    ));
+}
+
 #[tokio::test]
 async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
     let question = "袭人先后服侍过哪些人？";
