@@ -5112,11 +5112,36 @@ fn domain_query_expansion_returns_recall_hints_for_character_fate() {
 
 #[test]
 fn domain_retrieval_plan_selects_judgement_profile_for_xiangyun_fate_evidence() {
+    let frame = json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "frame_id": "qf_primary",
+        "original_question": "关于史湘云的结局，脂批中的证据呢？",
+        "normalized_question": "关于史湘云的结局，脂批中的证据呢？",
+        "task": "extract_evidence",
+        "slots": {
+            "subject": {"type": "character", "name": "史湘云", "aliases": [], "source": "current_question"},
+            "event": {"type": "fate", "trigger": "结局"},
+            "evidence_focus": "character_fate",
+            "source_scope": {"work": "hongloumeng", "range": "pre_80_base_text_and_commentary"}
+        },
+        "answer_target": {"type": "evidence_list"},
+        "evidence_contract": {
+            "required_types": ["commentary"],
+            "supporting_types": ["base_text"],
+            "min_answer_basis": 1,
+            "require_claim_evidence_map": true,
+            "allow_navigation_hint_as_answer_basis": false,
+            "citation_granularity": "chapter_or_span",
+            "unsupported_behavior": "fail_closed"
+        },
+        "subquestions": [],
+        "clarification": {"needed": false, "open_slots": [], "question": null}
+    });
     let plan = domain_retrieval_plan(
         "关于史湘云的结局，脂批中的证据呢？",
         "evidence",
         &["base_text".to_string(), "commentary".to_string()],
-        Some("evidence_query"),
+        Some(&frame),
     )
     .expect("domain retrieval plan");
 
@@ -12194,4 +12219,53 @@ async fn agent_runtime_plan_gate_rejects_tools_outside_projection() {
             .to_string()
             .contains("requested tool outside context projection")
     );
+}
+
+#[test]
+fn domain_retrieval_plan_uses_v2_frame_for_death_chapter_location() {
+    let frame = json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "frame_id": "qf_primary",
+        "original_question": "秦钟是第几回死的",
+        "normalized_question": "秦钟是第几回死的",
+        "task": "locate_event",
+        "slots": {
+            "subject": {"type": "character", "name": "秦钟", "aliases": [], "source": "current_question"},
+            "event": {"type": "death", "trigger": "死"},
+            "source_scope": {"work": "hongloumeng", "range": "pre_80_base_text_and_commentary"}
+        },
+        "answer_target": {"type": "chapter_no"},
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"],
+            "min_answer_basis": 1,
+            "require_claim_evidence_map": true,
+            "allow_navigation_hint_as_answer_basis": false,
+            "citation_granularity": "chapter_or_span",
+            "unsupported_behavior": "fail_closed"
+        },
+        "subquestions": [],
+        "clarification": {"needed": false, "open_slots": [], "question": null}
+    });
+    let plan = domain_retrieval_plan(
+        "秦钟是第几回死的",
+        "base_text",
+        &["base_text".to_string()],
+        Some(&frame),
+    )
+    .expect("domain retrieval plan");
+
+    assert_eq!(plan.primary_intent, "event_lookup");
+    assert_eq!(plan.retrieval_profile, "event");
+    assert!(plan.routes.contains(&"event".to_string()));
+    assert!(plan.structured_terms.contains(&"秦钟".to_string()));
+    assert!(
+        plan.structured_terms
+            .contains(&"event_type:death".to_string())
+    );
+    assert!(
+        plan.structured_terms
+            .contains(&"answer_target:chapter_no".to_string())
+    );
+    assert_ne!(plan.retrieval_profile, "commentary");
 }

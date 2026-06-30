@@ -210,26 +210,90 @@ fn provider_output_contract(role: LlmAgentPromptRole) -> Value {
                     "needs_clarification": {"type": "boolean"},
                     "clarification_question": {"type": ["string", "null"]},
                     "unsupported_reason": {"type": ["string", "null"]},
-                    "question_frame_candidate": {
-                        "type": ["object", "null"],
-                        "description": "Optional structural candidate only. It must use schema_version tonglingyu.question_frame.v1 and must not include answer or evidence claims.",
-                        "additionalProperties": false,
-                        "properties": {
-                            "schema_version": {"const": QUESTION_FRAME_SCHEMA_VERSION},
-                            "intent": {"type": "string"},
-                            "canonical_question": {"type": "string"},
-                            "subject": {"type": ["object", "null"]},
-                            "predicate": {"type": ["object", "null"]},
-                            "object": {"type": ["object", "null"]},
-                            "source_scope": {"type": "string"},
-                            "required_evidence_types": {"type": "array", "items": {"type": "string"}},
-                            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                            "needs_clarification": {"type": "boolean"},
-                            "clarification_question": {"type": ["string", "null"]},
-                            "open_slot": {"type": ["string", "null"]},
-                            "context_binding": {"type": ["object", "null"]}
-                        }
-                    },
+                        "question_frame_candidate": {
+                            "type": ["object", "null"],
+                            "description": "Optional structural candidate only. It must use schema_version tonglingyu.question_frame.v2 with task, slots, answer_target, and evidence_contract; it must not include answer or evidence claims.",
+                            "additionalProperties": false,
+                            "required": [
+                                "schema_version",
+                                "frame_id",
+                                "original_question",
+                                "normalized_question",
+                                "task",
+                                "slots",
+                                "answer_target",
+                                "evidence_contract",
+                                "clarification"
+                            ],
+                            "properties": {
+                                "schema_version": {"const": QUESTION_FRAME_SCHEMA_VERSION},
+                                "frame_id": {"type": "string"},
+                                "original_question": {"type": "string"},
+                                "normalized_question": {"type": "string"},
+                                "task": {"enum": ["locate_event", "answer_fact", "verify_relation", "find_entities", "collect_entity_fates", "extract_evidence", "compose_analysis", "compare", "count_occurrences", "summarize_entity", "clarify"]},
+                                "slots": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["source_scope"],
+                                    "properties": {
+                                        "subject": {"type": ["object", "null"]},
+                                        "object": {"type": ["object", "null"]},
+                                        "relation": {"type": ["object", "null"]},
+                                        "attribute": {"type": ["object", "null"]},
+                                        "event": {"type": ["object", "null"]},
+                                        "entity_group": {"type": ["object", "null"]},
+                                        "topic": {"type": ["string", "null"]},
+                                        "evidence_focus": {"type": ["string", "null"]},
+                                        "source_scope": {
+                                            "type": "object",
+                                            "additionalProperties": false,
+                                            "required": ["work", "range"],
+                                            "properties": {
+                                                "work": {"const": "hongloumeng"},
+                                                "range": {"type": "string"}
+                                            }
+                                        }
+                                    }
+                                },
+                                "answer_target": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["type"],
+                                    "properties": {
+                                        "type": {"enum": ["chapter_no", "chapter_or_time", "yes_no", "count", "entity_set", "evidence_table", "evidence_list", "original_text_span", "explanation", "essay", "comparison", "fact_value", "entity_summary"]},
+                                        "approx_chars": {"type": ["integer", "null"], "minimum": 1}
+                                    }
+                                },
+                                "evidence_contract": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["required_types", "supporting_types", "min_answer_basis", "require_claim_evidence_map", "allow_navigation_hint_as_answer_basis", "citation_granularity", "unsupported_behavior"],
+                                    "properties": {
+                                        "required_types": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+                                        "supporting_types": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+                                        "min_answer_basis": {"type": "integer", "minimum": 0},
+                                        "require_claim_evidence_map": {"type": "boolean"},
+                                        "allow_navigation_hint_as_answer_basis": {"const": false},
+                                        "citation_granularity": {"type": "string"},
+                                        "unsupported_behavior": {"const": "fail_closed"},
+                                        "require_per_case_evidence": {"type": "boolean"}
+                                    }
+                                },
+                                "subquestions": {"type": "array", "items": {"type": "object"}},
+                                "clarification": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["needed", "open_slots", "question"],
+                                    "properties": {
+                                        "needed": {"type": "boolean"},
+                                        "open_slots": {"type": "array", "items": {"type": "string"}},
+                                        "question": {"type": ["string", "null"]}
+                                    }
+                                },
+                                "confidence": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0},
+                                "context_binding": {"type": ["object", "null"]}
+                            }
+                        },
                     "rule_candidates": {
                         "type": "array",
                         "maxItems": 8,

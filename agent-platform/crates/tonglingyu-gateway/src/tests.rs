@@ -1970,7 +1970,7 @@ fn query_planner_adapter_preserves_planner_shape_and_selects_judgement_recall() 
         "宝钗判词",
         "poem_or_judgement",
         &["base_text".to_string()],
-        Some("base_text_query"),
+        None,
     )
     .expect("query plan");
     let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 6, false);
@@ -2010,11 +2010,36 @@ fn query_planner_adapter_preserves_planner_shape_and_selects_judgement_recall() 
 #[test]
 fn query_planner_xiangyun_fate_evidence_uses_runtime_catalog_judgement_recall() {
     let query = "关于史湘云的结局，脂批中的证据呢？";
+    let frame = json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "frame_id": "qf_primary",
+        "original_question": query,
+        "normalized_question": query,
+        "task": "extract_evidence",
+        "slots": {
+            "subject": {"type": "character", "name": "史湘云", "aliases": [], "source": "current_question"},
+            "event": {"type": "fate", "trigger": "结局"},
+            "evidence_focus": "character_fate",
+            "source_scope": {"work": "hongloumeng", "range": "pre_80_base_text_and_commentary"}
+        },
+        "answer_target": {"type": "evidence_list"},
+        "evidence_contract": {
+            "required_types": ["commentary"],
+            "supporting_types": ["base_text"],
+            "min_answer_basis": 1,
+            "require_claim_evidence_map": true,
+            "allow_navigation_hint_as_answer_basis": false,
+            "citation_granularity": "chapter_or_span",
+            "unsupported_behavior": "fail_closed"
+        },
+        "subquestions": [],
+        "clarification": {"needed": false, "open_slots": [], "question": null}
+    });
     let query_plan = query_plan_from_gateway_policy(
         query,
         "evidence",
         &["base_text".to_string(), "commentary".to_string()],
-        Some("evidence_query"),
+        Some(&frame),
     )
     .expect("query plan");
     let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 8, false);
@@ -2051,13 +2076,9 @@ fn query_planner_xiangyun_fate_evidence_uses_runtime_catalog_judgement_recall() 
 
 #[test]
 fn query_planner_adapter_maps_person_intro_to_person_recall() {
-    let query_plan = query_plan_from_gateway_policy(
-        "介绍尤三姐",
-        "base_text",
-        &["base_text".to_string()],
-        Some("base_text_query"),
-    )
-    .expect("query plan");
+    let query_plan =
+        query_plan_from_gateway_policy("介绍尤三姐", "base_text", &["base_text".to_string()], None)
+            .expect("query plan");
     let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 8, false);
 
     assert_eq!(query_plan.retrieval_profile, "person");

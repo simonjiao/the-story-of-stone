@@ -1,13 +1,12 @@
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 
 use crate::context_rules;
 
-pub(crate) const QUESTION_FRAME_SCHEMA_VERSION: &str = "tonglingyu.question_frame.v1";
+pub(crate) const QUESTION_FRAME_SCHEMA_VERSION: &str = "tonglingyu.question_frame.v2";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct QuestionFrame {
     pub(crate) schema_version: String,
     pub(crate) intent: String,
@@ -20,9 +19,7 @@ pub(crate) struct QuestionFrame {
     pub(crate) confidence: f64,
     pub(crate) needs_clarification: bool,
     pub(crate) clarification_question: Option<String>,
-    #[serde(default)]
     pub(crate) open_slot: Option<String>,
-    #[serde(default)]
     pub(crate) context_binding: Option<QuestionFrameContextBinding>,
 }
 
@@ -52,6 +49,128 @@ pub(crate) struct QuestionFrameContextBinding {
     pub(crate) binding_reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2Wire {
+    schema_version: String,
+    frame_id: String,
+    original_question: String,
+    normalized_question: String,
+    task: String,
+    slots: QuestionFrameV2Slots,
+    answer_target: QuestionFrameV2AnswerTarget,
+    evidence_contract: QuestionFrameV2EvidenceContract,
+    #[serde(default)]
+    subquestions: Vec<QuestionFrameV2Wire>,
+    clarification: QuestionFrameV2Clarification,
+    #[serde(default)]
+    confidence: Option<f64>,
+    #[serde(default)]
+    context_binding: Option<QuestionFrameContextBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2Slots {
+    #[serde(default)]
+    subject: Option<QuestionFrameV2EntitySlot>,
+    #[serde(default)]
+    object: Option<QuestionFrameV2EntitySlot>,
+    #[serde(default)]
+    relation: Option<QuestionFrameV2RelationSlot>,
+    #[serde(default)]
+    attribute: Option<QuestionFrameV2RelationSlot>,
+    #[serde(default)]
+    event: Option<QuestionFrameV2EventSlot>,
+    #[serde(default)]
+    entity_group: Option<QuestionFrameV2EntityGroupSlot>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    evidence_focus: Option<String>,
+    source_scope: QuestionFrameV2SourceScope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2EntitySlot {
+    #[serde(rename = "type")]
+    entity_type: String,
+    name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2EntityGroupSlot {
+    #[serde(rename = "type")]
+    group_type: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2RelationSlot {
+    id: String,
+    label: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    evidence_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2EventSlot {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    trigger: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2SourceScope {
+    work: String,
+    range: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2AnswerTarget {
+    #[serde(rename = "type")]
+    target_type: String,
+    #[serde(default)]
+    approx_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2EvidenceContract {
+    required_types: Vec<String>,
+    #[serde(default)]
+    supporting_types: Vec<String>,
+    min_answer_basis: usize,
+    require_claim_evidence_map: bool,
+    allow_navigation_hint_as_answer_basis: bool,
+    citation_granularity: String,
+    unsupported_behavior: String,
+    #[serde(default)]
+    require_per_case_evidence: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct QuestionFrameV2Clarification {
+    needed: bool,
+    #[serde(default)]
+    open_slots: Vec<String>,
+    #[serde(default)]
+    question: Option<String>,
+}
+
 impl QuestionFrame {
     pub(crate) fn audit_json(&self) -> Value {
         json!(self)
@@ -75,6 +194,498 @@ impl QuestionFrame {
             binding_reason: binding_reason.into(),
         });
         self
+    }
+
+    fn to_v2_wire(&self) -> QuestionFrameV2Wire {
+        QuestionFrameV2Wire {
+            schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
+            frame_id: "qf_primary".to_string(),
+            original_question: self.canonical_question.clone(),
+            normalized_question: self.canonical_question.clone(),
+            task: v2_task_for_frame(self),
+            slots: v2_slots_for_frame(self),
+            answer_target: v2_answer_target_for_frame(self),
+            evidence_contract: v2_evidence_contract_for_frame(self),
+            subquestions: v2_subquestions_for_frame(self),
+            clarification: QuestionFrameV2Clarification {
+                needed: self.needs_clarification,
+                open_slots: self.open_slot.clone().into_iter().collect(),
+                question: self.clarification_question.clone(),
+            },
+            confidence: Some(self.confidence),
+            context_binding: self.context_binding.clone(),
+        }
+    }
+
+    fn from_v2_wire(wire: QuestionFrameV2Wire) -> Result<Self> {
+        if wire.schema_version != QUESTION_FRAME_SCHEMA_VERSION {
+            return Err(anyhow!(
+                "question_frame_candidate_schema_version_mismatch: {}",
+                wire.schema_version
+            ));
+        }
+        let predicate = wire
+            .slots
+            .relation
+            .as_ref()
+            .or(wire.slots.attribute.as_ref())
+            .map(|slot| QuestionFramePredicate {
+                id: slot.id.clone(),
+                label: slot.label.clone(),
+                aliases: slot.aliases.clone(),
+                evidence_terms: slot.evidence_terms.clone(),
+            });
+        let subject = wire.slots.subject.as_ref().map(v2_entity_to_frame_entity);
+        let object = wire.slots.object.as_ref().map(v2_entity_to_frame_entity);
+        let mut required_evidence_types = wire.evidence_contract.required_types.clone();
+        for item in &wire.evidence_contract.supporting_types {
+            if !required_evidence_types
+                .iter()
+                .any(|existing| existing == item)
+            {
+                required_evidence_types.push(item.clone());
+            }
+        }
+        let intent = v2_intent_for_wire(&wire);
+        Ok(Self {
+            schema_version: wire.schema_version,
+            intent,
+            canonical_question: wire.normalized_question,
+            subject,
+            predicate,
+            object,
+            source_scope: wire.slots.source_scope.range,
+            required_evidence_types,
+            confidence: wire.confidence.unwrap_or(1.0),
+            needs_clarification: wire.clarification.needed,
+            clarification_question: wire.clarification.question,
+            open_slot: wire.clarification.open_slots.first().cloned(),
+            context_binding: wire.context_binding,
+        })
+    }
+}
+
+impl Serialize for QuestionFrame {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.to_v2_wire().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for QuestionFrame {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = QuestionFrameV2Wire::deserialize(deserializer)?;
+        Self::from_v2_wire(wire).map_err(serde::de::Error::custom)
+    }
+}
+
+fn v2_entity_to_frame_entity(slot: &QuestionFrameV2EntitySlot) -> QuestionFrameEntity {
+    QuestionFrameEntity {
+        canonical: slot.name.clone(),
+        aliases: slot.aliases.clone(),
+        source: slot.source.clone(),
+    }
+}
+
+fn v2_intent_for_wire(wire: &QuestionFrameV2Wire) -> String {
+    match wire.task.as_str() {
+        "verify_relation" => "relation_query".to_string(),
+        "compare" => "attribute_compare".to_string(),
+        "locate_event" => {
+            if wire
+                .slots
+                .event
+                .as_ref()
+                .is_some_and(|event| event.event_type == "death")
+            {
+                "character_fate_query".to_string()
+            } else {
+                "chapter_location_query".to_string()
+            }
+        }
+        "count_occurrences" => "count_query".to_string(),
+        "extract_evidence" => "evidence_query".to_string(),
+        "summarize_entity" => "entity_query".to_string(),
+        "clarify" => "unknown_relation_predicate".to_string(),
+        _ if wire.slots.relation.is_some() => "relation_query".to_string(),
+        _ if wire.slots.attribute.is_some() => "attribute_query".to_string(),
+        _ if wire
+            .slots
+            .event
+            .as_ref()
+            .is_some_and(|event| event.event_type == "death") =>
+        {
+            "character_fate_query".to_string()
+        }
+        _ => "general_query".to_string(),
+    }
+}
+
+fn v2_task_for_frame(frame: &QuestionFrame) -> String {
+    if is_analysis_composition_question(&frame.canonical_question) {
+        return "compose_analysis".to_string();
+    }
+    if frame.intent == "character_fate_query" && asks_event_location(&frame.canonical_question) {
+        return "locate_event".to_string();
+    }
+    match frame.intent.as_str() {
+        "relation_query" => "verify_relation".to_string(),
+        "unknown_relation_predicate" => "clarify".to_string(),
+        "attribute_compare" => "compare".to_string(),
+        "attribute_query" | "attribute_at_event" => "answer_fact".to_string(),
+        "chapter_location_query" => "locate_event".to_string(),
+        "character_fate_query" => "answer_fact".to_string(),
+        "evidence_query" => "extract_evidence".to_string(),
+        "count_query" => "count_occurrences".to_string(),
+        "entity_query" => "summarize_entity".to_string(),
+        _ => "answer_fact".to_string(),
+    }
+}
+
+fn v2_slots_for_frame(frame: &QuestionFrame) -> QuestionFrameV2Slots {
+    let relation = (frame.intent == "relation_query")
+        .then(|| frame.predicate.as_ref())
+        .flatten()
+        .map(v2_relation_slot);
+    let attribute = matches!(
+        frame.intent.as_str(),
+        "attribute_query" | "attribute_at_event" | "attribute_compare"
+    )
+    .then(|| frame.predicate.as_ref())
+    .flatten()
+    .map(v2_relation_slot);
+    QuestionFrameV2Slots {
+        subject: frame.subject.as_ref().map(v2_entity_slot),
+        object: frame.object.as_ref().map(v2_entity_slot),
+        relation,
+        attribute,
+        event: v2_event_slot_for_frame(frame),
+        entity_group: v2_entity_group_for_frame(frame),
+        topic: v2_topic_for_frame(frame),
+        evidence_focus: v2_evidence_focus_for_frame(frame),
+        source_scope: QuestionFrameV2SourceScope {
+            work: "hongloumeng".to_string(),
+            range: frame.source_scope.clone(),
+        },
+    }
+}
+
+fn v2_entity_slot(entity: &QuestionFrameEntity) -> QuestionFrameV2EntitySlot {
+    QuestionFrameV2EntitySlot {
+        entity_type: "character".to_string(),
+        name: entity.canonical.clone(),
+        aliases: entity.aliases.clone(),
+        source: entity.source.clone(),
+    }
+}
+
+fn v2_relation_slot(predicate: &QuestionFramePredicate) -> QuestionFrameV2RelationSlot {
+    QuestionFrameV2RelationSlot {
+        id: predicate.id.clone(),
+        label: predicate.label.clone(),
+        aliases: predicate.aliases.clone(),
+        evidence_terms: predicate.evidence_terms.clone(),
+    }
+}
+
+fn v2_event_slot_for_frame(frame: &QuestionFrame) -> Option<QuestionFrameV2EventSlot> {
+    let question = frame.canonical_question.as_str();
+    if contains_any_local(question, &["死", "去世", "亡故", "病逝", "夭亡"]) {
+        return Some(QuestionFrameV2EventSlot {
+            event_type: "death".to_string(),
+            trigger: first_matching_term(question, &["死的", "死", "去世", "亡故", "病逝", "夭亡"]),
+        });
+    }
+    if contains_any_local(question, &["进贾府", "進賈府", "进府", "進府"]) {
+        return Some(QuestionFrameV2EventSlot {
+            event_type: "enter_jia_household".to_string(),
+            trigger: first_matching_term(question, &["进贾府", "進賈府", "进府", "進府"]),
+        });
+    }
+    if contains_any_local(question, &["葬花"]) {
+        return Some(QuestionFrameV2EventSlot {
+            event_type: "bury_flowers".to_string(),
+            trigger: Some("葬花".to_string()),
+        });
+    }
+    (frame.intent == "chapter_location_query").then(|| QuestionFrameV2EventSlot {
+        event_type: "located_event".to_string(),
+        trigger: None,
+    })
+}
+
+fn v2_entity_group_for_frame(frame: &QuestionFrame) -> Option<QuestionFrameV2EntityGroupSlot> {
+    if frame.canonical_question.contains("大观园") && frame.canonical_question.contains("丫鬟")
+    {
+        Some(QuestionFrameV2EntityGroupSlot {
+            group_type: "character_group".to_string(),
+            name: "大观园丫鬟".to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+fn v2_topic_for_frame(frame: &QuestionFrame) -> Option<String> {
+    if frame.canonical_question.contains("下层女性") && frame.canonical_question.contains("命运")
+    {
+        Some("古代下层女性的命运".to_string())
+    } else {
+        None
+    }
+}
+
+fn v2_evidence_focus_for_frame(frame: &QuestionFrame) -> Option<String> {
+    if frame.intent == "character_fate_query" || frame.canonical_question.contains("结局") {
+        Some("character_fate".to_string())
+    } else {
+        None
+    }
+}
+
+fn v2_answer_target_for_frame(frame: &QuestionFrame) -> QuestionFrameV2AnswerTarget {
+    if is_analysis_composition_question(&frame.canonical_question) {
+        return QuestionFrameV2AnswerTarget {
+            target_type: "essay".to_string(),
+            approx_chars: approx_chars_from_question(&frame.canonical_question),
+        };
+    }
+    let target_type = if contains_any_local(
+        &frame.canonical_question,
+        &["第几回", "第幾回", "哪一回", "那一回"],
+    ) {
+        "chapter_no"
+    } else if contains_any_local(
+        &frame.canonical_question,
+        &["什么时候", "什麼時候", "何时", "何時"],
+    ) {
+        "chapter_or_time"
+    } else {
+        match frame.intent.as_str() {
+            "relation_query" => "yes_no",
+            "attribute_compare" => "comparison",
+            "count_query" => "count",
+            "evidence_query" => "evidence_list",
+            "chapter_location_query" => "chapter_no",
+            "entity_query" => "entity_summary",
+            _ => "explanation",
+        }
+    };
+    QuestionFrameV2AnswerTarget {
+        target_type: target_type.to_string(),
+        approx_chars: None,
+    }
+}
+
+fn v2_evidence_contract_for_frame(frame: &QuestionFrame) -> QuestionFrameV2EvidenceContract {
+    let asks_commentary = contains_any_local(
+        &frame.canonical_question,
+        &["脂批", "批语", "批語", "评语", "評語"],
+    );
+    let (required_types, supporting_types, min_answer_basis, require_per_case_evidence) =
+        if is_analysis_composition_question(&frame.canonical_question) {
+            (
+                vec!["base_text".to_string()],
+                vec!["commentary".to_string()],
+                4,
+                true,
+            )
+        } else if frame.intent == "evidence_query" && asks_commentary {
+            (
+                vec!["commentary".to_string()],
+                vec!["base_text".to_string()],
+                1,
+                false,
+            )
+        } else if matches!(
+            frame.intent.as_str(),
+            "character_fate_query" | "chapter_location_query" | "count_query"
+        ) {
+            (
+                vec!["base_text".to_string()],
+                vec!["commentary".to_string()],
+                1,
+                false,
+            )
+        } else {
+            (frame.required_evidence_types.clone(), Vec::new(), 1, false)
+        };
+    QuestionFrameV2EvidenceContract {
+        required_types,
+        supporting_types,
+        min_answer_basis,
+        require_claim_evidence_map: true,
+        allow_navigation_hint_as_answer_basis: false,
+        citation_granularity: "chapter_or_span".to_string(),
+        unsupported_behavior: "fail_closed".to_string(),
+        require_per_case_evidence,
+    }
+}
+
+fn v2_subquestions_for_frame(frame: &QuestionFrame) -> Vec<QuestionFrameV2Wire> {
+    if !is_analysis_composition_question(&frame.canonical_question) {
+        return Vec::new();
+    }
+    let scope = QuestionFrameV2SourceScope {
+        work: "hongloumeng".to_string(),
+        range: frame.source_scope.clone(),
+    };
+    let base_contract = QuestionFrameV2EvidenceContract {
+        required_types: vec!["base_text".to_string()],
+        supporting_types: vec!["commentary".to_string()],
+        min_answer_basis: 1,
+        require_claim_evidence_map: true,
+        allow_navigation_hint_as_answer_basis: false,
+        citation_granularity: "chapter_or_span".to_string(),
+        unsupported_behavior: "fail_closed".to_string(),
+        require_per_case_evidence: true,
+    };
+    vec![
+        QuestionFrameV2Wire {
+            schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
+            frame_id: "qf_identify_group".to_string(),
+            original_question: frame.canonical_question.clone(),
+            normalized_question: "识别大观园丫鬟人物集合".to_string(),
+            task: "find_entities".to_string(),
+            slots: QuestionFrameV2Slots {
+                subject: None,
+                object: None,
+                relation: None,
+                attribute: None,
+                event: None,
+                entity_group: v2_entity_group_for_frame(frame),
+                topic: None,
+                evidence_focus: None,
+                source_scope: scope.clone(),
+            },
+            answer_target: QuestionFrameV2AnswerTarget {
+                target_type: "entity_set".to_string(),
+                approx_chars: None,
+            },
+            evidence_contract: base_contract.clone(),
+            subquestions: Vec::new(),
+            clarification: QuestionFrameV2Clarification {
+                needed: false,
+                open_slots: Vec::new(),
+                question: None,
+            },
+            confidence: Some(frame.confidence),
+            context_binding: None,
+        },
+        QuestionFrameV2Wire {
+            schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
+            frame_id: "qf_collect_fates".to_string(),
+            original_question: frame.canonical_question.clone(),
+            normalized_question: "收集大观园丫鬟结局证据".to_string(),
+            task: "collect_entity_fates".to_string(),
+            slots: QuestionFrameV2Slots {
+                subject: None,
+                object: None,
+                relation: None,
+                attribute: None,
+                event: Some(QuestionFrameV2EventSlot {
+                    event_type: "fate".to_string(),
+                    trigger: Some("结局".to_string()),
+                }),
+                entity_group: v2_entity_group_for_frame(frame),
+                topic: None,
+                evidence_focus: Some("character_fate".to_string()),
+                source_scope: scope.clone(),
+            },
+            answer_target: QuestionFrameV2AnswerTarget {
+                target_type: "evidence_table".to_string(),
+                approx_chars: None,
+            },
+            evidence_contract: base_contract.clone(),
+            subquestions: Vec::new(),
+            clarification: QuestionFrameV2Clarification {
+                needed: false,
+                open_slots: Vec::new(),
+                question: None,
+            },
+            confidence: Some(frame.confidence),
+            context_binding: None,
+        },
+        QuestionFrameV2Wire {
+            schema_version: QUESTION_FRAME_SCHEMA_VERSION.to_string(),
+            frame_id: "qf_compose".to_string(),
+            original_question: frame.canonical_question.clone(),
+            normalized_question: "写古代下层女性命运分析文章".to_string(),
+            task: "compose_analysis".to_string(),
+            slots: QuestionFrameV2Slots {
+                subject: None,
+                object: None,
+                relation: None,
+                attribute: None,
+                event: None,
+                entity_group: v2_entity_group_for_frame(frame),
+                topic: v2_topic_for_frame(frame),
+                evidence_focus: Some("character_fate".to_string()),
+                source_scope: scope,
+            },
+            answer_target: QuestionFrameV2AnswerTarget {
+                target_type: "essay".to_string(),
+                approx_chars: approx_chars_from_question(&frame.canonical_question),
+            },
+            evidence_contract: QuestionFrameV2EvidenceContract {
+                min_answer_basis: 4,
+                ..base_contract
+            },
+            subquestions: Vec::new(),
+            clarification: QuestionFrameV2Clarification {
+                needed: false,
+                open_slots: Vec::new(),
+                question: None,
+            },
+            confidence: Some(frame.confidence),
+            context_binding: None,
+        },
+    ]
+}
+
+fn is_analysis_composition_question(question: &str) -> bool {
+    question.contains("写")
+        && question.contains("分析")
+        && (question.contains("文章") || question.contains("字"))
+}
+
+fn asks_event_location(question: &str) -> bool {
+    contains_any_local(
+        question,
+        &[
+            "第几回",
+            "第幾回",
+            "哪一回",
+            "那一回",
+            "什么时候",
+            "什麼時候",
+            "何时",
+            "何時",
+        ],
+    )
+}
+
+fn contains_any_local(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn first_matching_term(text: &str, terms: &[&str]) -> Option<String> {
+    terms
+        .iter()
+        .find(|term| text.contains(**term))
+        .map(|term| (*term).to_string())
+}
+
+fn approx_chars_from_question(question: &str) -> Option<usize> {
+    if question.contains("1000") || question.contains("一千") {
+        Some(1000)
+    } else {
+        None
     }
 }
 
@@ -228,12 +839,12 @@ pub(crate) fn build_question_frame(question: &str) -> Result<QuestionFrame> {
     }
 
     let needs_character_fate_clarification = is_character_fate_query && subject.is_none();
-    let intent = if is_count_query {
-        "count_query".to_string()
-    } else if is_evidence_query {
+    let intent = if is_evidence_query {
         "evidence_query".to_string()
     } else if is_character_fate_query {
         "character_fate_query".to_string()
+    } else if is_count_query {
+        "count_query".to_string()
     } else if subject.is_some() {
         "entity_query".to_string()
     } else {
@@ -247,12 +858,12 @@ pub(crate) fn build_question_frame(question: &str) -> Result<QuestionFrame> {
         predicate: None,
         object: None,
         source_scope: source_scope.clone(),
-        required_evidence_types: if is_count_query {
-            context_rules::count_question_required_evidence_types()?
-        } else if is_evidence_query {
+        required_evidence_types: if is_evidence_query {
             context_rules::evidence_followup_required_evidence_types()?
         } else if is_character_fate_query {
             context_rules::character_fate_required_evidence_types(&source_scope)?
+        } else if is_count_query {
+            context_rules::count_question_required_evidence_types()?
         } else {
             Vec::new()
         },

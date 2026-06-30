@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use agent_core::{
     AgentCoreError, CoreResult, ErrorCode, RuntimeClient, RuntimeOutput, RuntimeProfileInput,
     RuntimeRunInput, RuntimeSessionInput,
@@ -1336,7 +1338,8 @@ fn apply_question_frame_required_evidence_types(policy: &mut SearchPolicy, conte
     let Some(items) = context_pack
         .get("resolver")
         .and_then(|resolver| resolver.get("question_frame"))
-        .and_then(|frame| frame.get("required_evidence_types"))
+        .and_then(|frame| frame.get("evidence_contract"))
+        .and_then(|contract| contract.get("required_types"))
         .and_then(Value::as_array)
     else {
         return;
@@ -1355,15 +1358,17 @@ fn apply_question_frame_required_evidence_types(policy: &mut SearchPolicy, conte
     policy.required_evidence_types = required.into_iter().collect();
 }
 
-fn question_frame_intent(context_pack: &Value) -> Option<String> {
+fn question_frame_contract(context_pack: &Value) -> Option<Value> {
     context_pack
         .get("resolver")
         .and_then(|resolver| resolver.get("question_frame"))
-        .and_then(|frame| frame.get("intent"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|intent| !intent.is_empty())
-        .map(ToString::to_string)
+        .filter(|frame| {
+            frame
+                .get("schema_version")
+                .and_then(Value::as_str)
+                .is_some_and(|version| version == question_frame::QUESTION_FRAME_SCHEMA_VERSION)
+        })
+        .cloned()
 }
 
 fn runtime_context_projection(projection: &ContextProjection) -> RuntimeContextProjection {
@@ -2947,12 +2952,12 @@ async fn execute_response_job(
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
     let runtime_context = runtime_context_contract(&scoped_context);
-    let frame_intent = question_frame_intent(&scoped_context.context_pack);
+    let question_frame = question_frame_contract(&scoped_context.context_pack);
     let retriever_query_plan = query_plan_from_gateway_policy(
         &scoped_context.resolved_question,
         &policy.question_type,
         &policy.required_evidence_types,
-        frame_intent.as_deref(),
+        question_frame.as_ref(),
     )
     .map_err(|error| {
         ResponseJobExecutionError::new("retriever_query_plan_failed", error.to_string())
@@ -3024,7 +3029,7 @@ async fn execute_response_job(
             "context_pack_ref": &scoped_context.context_pack_ref,
             "required_evidence_types": &policy.required_evidence_types,
             "question_type": &policy.question_type,
-            "question_frame_intent": &frame_intent,
+            "question_frame": &question_frame,
             "retriever_query_plan": &retriever_query_plan,
             "domain_retrieval_profile": &domain_retrieval_profile,
         }),
@@ -10861,12 +10866,12 @@ async fn chat_completions(
     apply_question_frame_required_evidence_types(&mut policy, &scoped_context.context_pack);
     policy.planned_profiles = planned_profiles_for_policy(&state.profiles, &policy);
     let runtime_step_plan = RuntimeStepPlan::from_policy(&state.profiles, &policy);
-    let frame_intent = question_frame_intent(&scoped_context.context_pack);
+    let question_frame = question_frame_contract(&scoped_context.context_pack);
     let retriever_query_plan = query_plan_from_gateway_policy(
         &scoped_context.resolved_question,
         &policy.question_type,
         &policy.required_evidence_types,
-        frame_intent.as_deref(),
+        question_frame.as_ref(),
     )
     .map_err(|error| {
         tracing::error!(%trace_id, error = %error, "retriever query plan failed");
@@ -10988,7 +10993,7 @@ async fn chat_completions(
             "context_pack_ref": &scoped_context.context_pack_ref,
             "required_evidence_types": &policy.required_evidence_types,
             "question_type": &policy.question_type,
-            "question_frame_intent": &frame_intent,
+            "question_frame": &question_frame,
             "retriever_query_plan": &retriever_query_plan,
             "domain_retrieval_profile": &domain_retrieval_profile,
         }),

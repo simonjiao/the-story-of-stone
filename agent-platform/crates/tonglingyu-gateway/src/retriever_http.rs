@@ -438,13 +438,13 @@ pub(crate) fn query_plan_from_gateway_policy(
     query: &str,
     question_type: &str,
     required_evidence_types: &[String],
-    question_frame_intent: Option<&str>,
+    question_frame: Option<&Value>,
 ) -> Result<DomainRetrievalPlan> {
     domain_retrieval_plan(
         query,
         question_type,
         required_evidence_types,
-        question_frame_intent,
+        question_frame,
     )
     .context("build runtime domain retrieval plan")
 }

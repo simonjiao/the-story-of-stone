@@ -504,3 +504,33 @@ fn attribute_compare_followup_fills_prior_topic_subject() {
         Some("filled_prior_attribute_compare_subject")
     );
 }
+
+#[test]
+fn death_chapter_question_serializes_as_v2_locate_event_frame() {
+    let frame = build_question_frame("秦钟是第几回死的").expect("frame");
+
+    assert_eq!(frame.intent, "character_fate_query");
+    let value = serde_json::to_value(&frame).expect("v2 frame json");
+
+    assert_eq!(
+        value["schema_version"],
+        serde_json::json!(QUESTION_FRAME_SCHEMA_VERSION)
+    );
+    assert!(value.get("intent").is_none());
+    assert!(value.get("required_evidence_types").is_none());
+    assert_eq!(value["task"], serde_json::json!("locate_event"));
+    assert_eq!(value["slots"]["subject"]["name"], serde_json::json!("秦钟"));
+    assert_eq!(value["slots"]["event"]["type"], serde_json::json!("death"));
+    assert_eq!(
+        value["answer_target"]["type"],
+        serde_json::json!("chapter_no")
+    );
+    assert_eq!(
+        value["evidence_contract"]["required_types"],
+        serde_json::json!(["base_text"])
+    );
+    assert_eq!(
+        value["evidence_contract"]["supporting_types"],
+        serde_json::json!(["commentary"])
+    );
+}

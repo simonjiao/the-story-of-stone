@@ -17125,24 +17125,27 @@ pub fn domain_retrieval_plan(
     question: &str,
     question_type: &str,
     required_evidence_types: &[String],
-    question_frame_intent: Option<&str>,
+    question_frame: Option<&Value>,
 ) -> Result<DomainRetrievalPlan> {
     let domain_expansion = domain_query_expansion(question)?;
     let primary_intent = domain_primary_intent(
         question,
         question_type,
         required_evidence_types,
-        question_frame_intent,
+        question_frame,
     );
     let secondary_intents = domain_secondary_intents(
         question,
         &primary_intent,
         required_evidence_types,
-        question_frame_intent,
+        question_frame,
     );
     let retrieval_routes = domain_planner_routes_for_intents(&primary_intent, &secondary_intents);
     let route_weights = domain_planner_route_weights(&primary_intent, &secondary_intents);
-    let query_terms = domain_query_terms(question);
+    let query_terms = domain_merge_terms(
+        &domain_query_terms(question),
+        &domain_frame_structured_terms(question_frame),
+    );
     let keyword_queries = domain_planner_keyword_queries(question, &primary_intent, &query_terms);
     let semantic_queries = domain_planner_semantic_queries(question, &primary_intent, &query_terms);
     let profile = domain_profile_for_plan(
@@ -17167,7 +17170,7 @@ pub fn domain_retrieval_plan(
             "planner_kind": "runtime_domain_retrieval_plan",
             "question_type": question_type,
             "required_evidence_types": required_evidence_types,
-            "question_frame_intent": question_frame_intent,
+            "question_frame": question_frame,
         }),
     )
 }
@@ -17377,19 +17380,148 @@ fn domain_merge_route_lists(primary: &[&str], secondary: &[String]) -> Vec<Strin
     routes
 }
 
+fn domain_frame_task(question_frame: Option<&Value>) -> Option<String> {
+    question_frame?
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn domain_frame_answer_target(question_frame: Option<&Value>) -> Option<String> {
+    question_frame?
+        .get("answer_target")
+        .and_then(|target| target.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn domain_frame_event_type(question_frame: Option<&Value>) -> Option<String> {
+    question_frame?
+        .get("slots")
+        .and_then(|slots| slots.get("event"))
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn domain_frame_required_type(question_frame: Option<&Value>, expected: &str) -> bool {
+    domain_frame_contract_type(question_frame, "required_types", expected)
+}
+
+fn domain_frame_supporting_type(question_frame: Option<&Value>, expected: &str) -> bool {
+    domain_frame_contract_type(question_frame, "supporting_types", expected)
+}
+
+fn domain_frame_contract_type(question_frame: Option<&Value>, field: &str, expected: &str) -> bool {
+    question_frame
+        .and_then(|frame| frame.get("evidence_contract"))
+        .and_then(|contract| contract.get(field))
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|item| item.trim() == expected)
+        })
+}
+
+fn domain_frame_structured_terms(question_frame: Option<&Value>) -> Vec<String> {
+    let Some(frame) = question_frame else {
+        return Vec::new();
+    };
+    let mut terms = Vec::new();
+    if let Some(slots) = frame.get("slots") {
+        for key in ["subject", "object"] {
+            if let Some(name) = slots
+                .get(key)
+                .and_then(|slot| slot.get("name"))
+                .and_then(Value::as_str)
+            {
+                terms.push(name.to_string());
+            }
+        }
+        if let Some(event_type) = slots
+            .get("event")
+            .and_then(|event| event.get("type"))
+            .and_then(Value::as_str)
+        {
+            terms.push(format!("event_type:{event_type}"));
+            if event_type == "death" {
+                terms.extend(
+                    ["死亡", "病逝", "去世", "亡故", "夭亡"]
+                        .iter()
+                        .map(|term| (*term).to_string()),
+                );
+            }
+        }
+        if let Some(group_name) = slots
+            .get("entity_group")
+            .and_then(|group| group.get("name"))
+            .and_then(Value::as_str)
+        {
+            terms.push(group_name.to_string());
+        }
+        if let Some(focus) = slots.get("evidence_focus").and_then(Value::as_str) {
+            terms.push(format!("evidence_focus:{focus}"));
+        }
+    }
+    if let Some(answer_target) = domain_frame_answer_target(question_frame) {
+        terms.push(format!("answer_target:{answer_target}"));
+        if answer_target == "chapter_no" {
+            terms.push("所在章节".to_string());
+            terms.push("回目".to_string());
+        }
+    }
+    if let Some(task) = domain_frame_task(question_frame) {
+        terms.push(format!("task:{task}"));
+    }
+    domain_dedupe_limited(terms, DOMAIN_MAX_PLAN_TERMS)
+}
+
 fn domain_primary_intent(
     query: &str,
     question_type: &str,
     required_evidence_types: &[String],
-    question_frame_intent: Option<&str>,
+    question_frame: Option<&Value>,
 ) -> String {
     let question_type = question_type.trim();
-    let frame = question_frame_intent.unwrap_or_default();
+    let frame_task = domain_frame_task(question_frame);
+    let answer_target = domain_frame_answer_target(question_frame);
+    let event_type = domain_frame_event_type(question_frame);
+    if matches!(
+        frame_task.as_deref(),
+        Some("locate_event" | "collect_entity_fates")
+    ) || matches!(
+        answer_target.as_deref(),
+        Some("chapter_no" | "chapter_or_time")
+    ) || event_type.as_deref() == Some("death")
+    {
+        return "event_lookup".to_string();
+    }
+    if matches!(frame_task.as_deref(), Some("verify_relation" | "compare"))
+        || domain_contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"])
+    {
+        return "relation_lookup".to_string();
+    }
+    if matches!(frame_task.as_deref(), Some("compose_analysis")) {
+        return "explanation_lookup".to_string();
+    }
+    if matches!(frame_task.as_deref(), Some("extract_evidence"))
+        && (domain_frame_required_type(question_frame, "commentary")
+            || domain_contains_any(query, &["脂批", "批语", "評語", "评语"]))
+    {
+        return "commentary_lookup".to_string();
+    }
     if required_evidence_types
         .iter()
         .any(|item| item == "commentary")
         || question_type == "commentary"
-        || frame.contains("commentary")
         || domain_contains_any(query, &["脂批", "批语", "評語", "评语"])
     {
         return "commentary_lookup".to_string();
@@ -17399,15 +17531,7 @@ fn domain_primary_intent(
     {
         return "text_lookup".to_string();
     }
-    if frame.contains("relation")
-        || frame.contains("attribute")
-        || domain_contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"])
-    {
-        return "relation_lookup".to_string();
-    }
-    if frame.contains("chapter_location")
-        || frame.contains("character_fate")
-        || question_type == "character_fate"
+    if question_type == "character_fate"
         || domain_contains_any(query, &["情节", "事件", "哪一回", "第几回", "发生", "经过"])
     {
         return "event_lookup".to_string();
@@ -17427,12 +17551,24 @@ fn domain_secondary_intents(
     query: &str,
     primary_intent: &str,
     required_evidence_types: &[String],
-    question_frame_intent: Option<&str>,
+    question_frame: Option<&Value>,
 ) -> Vec<String> {
     let mut intents = Vec::new();
+    let frame_task = domain_frame_task(question_frame);
+    if matches!(
+        frame_task.as_deref(),
+        Some("locate_event" | "collect_entity_fates")
+    ) {
+        intents.push("event_lookup".to_string());
+        intents.push("text_lookup".to_string());
+    }
+    if matches!(frame_task.as_deref(), Some("verify_relation" | "compare")) {
+        intents.push("relation_lookup".to_string());
+    }
     if required_evidence_types
         .iter()
         .any(|item| item == "commentary")
+        || domain_frame_supporting_type(question_frame, "commentary")
     {
         intents.push("commentary_lookup".to_string());
     }
@@ -17441,12 +17577,6 @@ fn domain_secondary_intents(
         .any(|item| item == "base_text" || item == "direct_text")
     {
         intents.push("text_lookup".to_string());
-    }
-    if question_frame_intent
-        .unwrap_or_default()
-        .contains("character_fate")
-    {
-        intents.push("event_lookup".to_string());
     }
     if domain_contains_any(query, &["关系", "是谁", "是誰", "介绍", "人物", "身份"]) {
         intents.push("relation_lookup".to_string());

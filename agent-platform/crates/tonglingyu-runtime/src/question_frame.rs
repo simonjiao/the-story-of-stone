@@ -637,7 +637,107 @@ pub(crate) fn relation_support_terms(frame: &RuntimeQuestionFrame) -> Option<Rel
 }
 
 pub(crate) fn parse_runtime_question_frame(value: &Value) -> Option<RuntimeQuestionFrame> {
-    serde_json::from_value(value.clone()).ok()
+    if value.get("schema_version").and_then(Value::as_str)? != "tonglingyu.question_frame.v2" {
+        return None;
+    }
+    let task = value
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let slots = value.get("slots")?;
+    let event_type = slots
+        .get("event")
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str);
+    let intent = match task {
+        "verify_relation" => "relation_query",
+        "compare" => "attribute_compare",
+        "locate_event" => {
+            if event_type == Some("death") {
+                "character_fate_query"
+            } else {
+                "chapter_location_query"
+            }
+        }
+        "count_occurrences" => "count_query",
+        "extract_evidence" => "evidence_query",
+        "summarize_entity" => "entity_query",
+        _ if slots.get("relation").is_some() => "relation_query",
+        _ if slots.get("attribute").is_some() => "attribute_query",
+        _ if event_type == Some("death") => "character_fate_query",
+        _ => "general_query",
+    };
+    let predicate = slots
+        .get("relation")
+        .or_else(|| slots.get("attribute"))
+        .and_then(runtime_predicate_from_v2_slot);
+    let mut required_evidence_types = runtime_string_array(
+        value
+            .get("evidence_contract")
+            .and_then(|contract| contract.get("required_types")),
+    );
+    for item in runtime_string_array(
+        value
+            .get("evidence_contract")
+            .and_then(|contract| contract.get("supporting_types")),
+    ) {
+        if !required_evidence_types
+            .iter()
+            .any(|existing| existing == &item)
+        {
+            required_evidence_types.push(item);
+        }
+    }
+    Some(RuntimeQuestionFrame {
+        intent: intent.to_string(),
+        canonical_question: value
+            .get("normalized_question")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("original_question").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string(),
+        subject: slots.get("subject").and_then(runtime_entity_from_v2_slot),
+        predicate,
+        object: slots.get("object").and_then(runtime_entity_from_v2_slot),
+        required_evidence_types,
+    })
+}
+
+fn runtime_entity_from_v2_slot(value: &Value) -> Option<RuntimeQuestionFrameEntity> {
+    if value.is_null() {
+        return None;
+    }
+    Some(RuntimeQuestionFrameEntity {
+        canonical: value.get("name").and_then(Value::as_str)?.to_string(),
+        aliases: runtime_string_array(value.get("aliases")),
+    })
+}
+
+fn runtime_predicate_from_v2_slot(value: &Value) -> Option<RuntimeQuestionFramePredicate> {
+    if value.is_null() {
+        return None;
+    }
+    Some(RuntimeQuestionFramePredicate {
+        id: value.get("id").and_then(Value::as_str)?.to_string(),
+        label: value.get("label").and_then(Value::as_str)?.to_string(),
+        aliases: runtime_string_array(value.get("aliases")),
+        evidence_terms: runtime_string_array(value.get("evidence_terms")),
+    })
+}
+
+fn runtime_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn predicate_terms(predicate: &RuntimeQuestionFramePredicate) -> Vec<String> {
