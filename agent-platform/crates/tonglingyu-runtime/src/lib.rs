@@ -43,14 +43,12 @@ mod rule_catalog;
 mod runtime_rule_candidates;
 mod upstream_bundle;
 
-#[cfg(test)]
 use answer_composer::public_quote_text;
 use answer_requirements::{
     answer_requirements_for_message, draft_lacks_requested_evidence_type_anchor,
     public_source_cues_for_title,
 };
 use entity_intro_answer::entity_intro_answer_policy_value;
-#[cfg(test)]
 use governance_rules::preferred_answer_evidence_types;
 use governance_rules::{
     blocked_prompt_control_issues, claim_evidence_types_for_claim, claim_rules,
@@ -59,7 +57,6 @@ use governance_rules::{
     later_forty_boundary_missing_from_claims, later_forty_boundary_review_issue,
     triggered_review_rule_issues,
 };
-#[cfg(test)]
 #[cfg(test)]
 use question_frame::question_frame_answer;
 use question_frame::{
@@ -3574,7 +3571,7 @@ pub fn execute_runtime_workflow(
     validate_runtime_context_pack_digest(conn, &input.context)?;
     let question_frame_value = question_frame
         .as_ref()
-        .and_then(|frame| serde_json::to_value(frame).ok());
+        .and_then(|_| question_frame_value_from_context(&input.context));
     let mut steps = Vec::new();
     let mut retrieval_failure_candidates = Vec::<(RetrievalQualityReport, Vec<String>)>::new();
     let cards = if let Some(retrieved) = input.retrieved_evidence.as_ref() {
@@ -3936,6 +3933,16 @@ pub fn execute_runtime_workflow(
         steps,
         stream_events,
     })
+}
+
+fn question_frame_value_from_context(context: &RuntimeContextContract) -> Option<Value> {
+    context
+        .projections
+        .iter()
+        .find(|projection| projection.consumer_name == "honglou-main")
+        .or_else(|| context.projections.first())
+        .and_then(|projection| projection.projection_payload.get("question_frame"))
+        .cloned()
 }
 
 async fn attach_agent_runtime_step_execution(
@@ -5469,7 +5476,8 @@ fn reject_agent_runtime_draft_application(
     reason: &'static str,
     content_source_suffix: &'static str,
 ) -> AgentRuntimeContentApplication {
-    workflow.final_answer = evidence_based_draft_rejected_answer(&workflow.package);
+    workflow.final_answer =
+        evidence_based_draft_rejected_answer_for_reason(&workflow.package, reason);
     workflow.answer_source =
         agent_runtime_profile_answer_source(mode, "rejected_by_local_governance");
     if let Some(step) = workflow.steps.get_mut(draft_step_index) {
@@ -5719,8 +5727,6 @@ fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
             | "claim_evidence_refs_unavailable"
             | "draft_claim_ref_focus_mismatch"
             | "draft_claim_uses_only_supplemental_evidence"
-            | "draft_missing_later_forty_boundary"
-            | "draft_uses_unscoped_later_forty"
     )
 }
 
@@ -16485,6 +16491,418 @@ fn evidence_based_draft_rejected_answer(package: &EvidencePackage) -> String {
         return evidence_based_draft_unavailable_answer(package);
     }
     "基于检索证据的 draft 未通过本地证据边界检查，未形成最终回答。".to_string()
+}
+
+fn evidence_based_draft_rejected_answer_for_reason(
+    package: &EvidencePackage,
+    reason: &str,
+) -> String {
+    if !agent_runtime_rejection_allows_evidence_only_answer(reason) {
+        return evidence_based_draft_rejected_answer(package);
+    }
+    evidence_only_answer_from_package(package)
+        .unwrap_or_else(|| evidence_based_draft_rejected_answer(package))
+}
+
+fn agent_runtime_rejection_allows_evidence_only_answer(reason: &str) -> bool {
+    matches!(
+        reason,
+        "draft_claim_exceeds_evidence_boundary"
+            | "draft_claim_ref_text_unsupported"
+            | "draft_exposes_internal_public_term"
+            | "draft_missing_requested_evidence_type_anchor"
+            | "draft_stops_for_user_opt_in"
+    )
+}
+
+fn evidence_only_answer_from_package(package: &EvidencePackage) -> Option<String> {
+    let display_cards = evidence_only_answer_cards(package, 4);
+    if display_cards.is_empty() {
+        return None;
+    }
+    let stance = evidence_only_answer_stance(package, &display_cards);
+    let mut answer = String::new();
+    answer.push_str(&evidence_only_answer_intro(package, &display_cards, stance));
+    for (index, card) in display_cards.iter().enumerate() {
+        let excerpt = evidence_only_answer_excerpt(&package.question, card);
+        if excerpt.trim().is_empty() {
+            continue;
+        }
+        answer.push_str(&format!(
+            "\n{}. {}：{}",
+            index + 1,
+            evidence_only_answer_source_label(card),
+            quoted_evidence_only_excerpt(&excerpt)
+        ));
+    }
+    if answer.lines().count() <= 1 {
+        return None;
+    }
+    answer.push_str("\n\n");
+    answer.push_str(&evidence_only_answer_conclusion(package, stance));
+    Some(answer)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceOnlyAnswerStance {
+    ExplicitSupported,
+    DirectlyDenied,
+    InferentialSupported,
+    NotFoundInScope,
+}
+
+fn evidence_only_answer_stance(
+    package: &EvidencePackage,
+    cards: &[&EvidenceCard],
+) -> EvidenceOnlyAnswerStance {
+    let question = normalize_text(&package.question);
+    let evidence_text = cards
+        .iter()
+        .map(|card| normalize_text(&card.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(family) = requested_concrete_fate_family(&question) {
+        if evidence_directly_denies_any(&evidence_text, family.support_terms) {
+            EvidenceOnlyAnswerStance::DirectlyDenied
+        } else if evidence_contains_any(&evidence_text, family.support_terms) {
+            EvidenceOnlyAnswerStance::ExplicitSupported
+        } else {
+            EvidenceOnlyAnswerStance::NotFoundInScope
+        }
+    } else if evidence_only_answer_is_fate_question(&package.question) {
+        EvidenceOnlyAnswerStance::InferentialSupported
+    } else {
+        EvidenceOnlyAnswerStance::ExplicitSupported
+    }
+}
+
+struct ConcreteFateFamily {
+    question_terms: &'static [&'static str],
+    support_terms: &'static [&'static str],
+}
+
+const CONCRETE_FATE_FAMILIES: &[ConcreteFateFamily] = &[ConcreteFateFamily {
+    question_terms: &[
+        "喪夫",
+        "丧夫",
+        "守寡",
+        "早寡",
+        "夫婿早逝",
+        "亡夫",
+        "夫亡",
+        "寡居",
+    ],
+    support_terms: &[
+        "喪夫",
+        "丧夫",
+        "守寡",
+        "早寡",
+        "夫婿早逝",
+        "亡夫",
+        "夫亡",
+        "寡居",
+        "姑爺癆病死",
+        "姑爷痨病死",
+        "姑爷病死",
+        "丈夫死",
+        "夫婿病死",
+    ],
+}];
+
+fn requested_concrete_fate_family(question: &str) -> Option<&'static ConcreteFateFamily> {
+    CONCRETE_FATE_FAMILIES
+        .iter()
+        .find(|family| evidence_contains_any(question, family.question_terms))
+}
+
+fn evidence_contains_any(text: &str, terms: &[&str]) -> bool {
+    terms
+        .iter()
+        .any(|term| text.contains(&normalize_text(term)))
+}
+
+fn evidence_directly_denies_any(text: &str, terms: &[&str]) -> bool {
+    let prefixes = [
+        "不", "未", "没有", "沒有", "无", "無", "不曾", "并未", "並未",
+    ];
+    terms.iter().any(|term| {
+        let term = normalize_text(term);
+        prefixes
+            .iter()
+            .map(|prefix| format!("{}{term}", normalize_text(prefix)))
+            .any(|pattern| text.contains(&pattern))
+    })
+}
+
+fn evidence_only_answer_cards(package: &EvidencePackage, limit: usize) -> Vec<&EvidenceCard> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let basis_ids = evidence_only_answer_basis_ids(package);
+    let preferred_types = preferred_answer_evidence_types(&package.question).unwrap_or_default();
+    let preferred_available = !preferred_types.is_empty()
+        && package.cards.iter().any(|card| {
+            evidence_only_answer_card_allowed(card, &basis_ids)
+                && preferred_types
+                    .iter()
+                    .any(|evidence_type| evidence_type == &card.evidence_type)
+        });
+    let focus_terms = upstream_evidence_focus_terms(&package.question);
+    let mut signatures = BTreeSet::new();
+    let mut ranked = package
+        .cards
+        .iter()
+        .filter(|card| evidence_only_answer_card_allowed(card, &basis_ids))
+        .filter(|card| {
+            !preferred_available
+                || preferred_types
+                    .iter()
+                    .any(|evidence_type| evidence_type == &card.evidence_type)
+        })
+        .filter(|card| evidence_only_answer_card_presentable(card))
+        .enumerate()
+        .map(|(index, card)| {
+            (
+                evidence_only_answer_card_rank(card, &focus_terms, &preferred_types),
+                index,
+                card,
+            )
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(rank, index, _)| (std::cmp::Reverse(*rank), *index));
+    let mut cards = Vec::new();
+    for (_, _, card) in ranked {
+        let signature = evidence_only_answer_card_signature(card);
+        if !signatures.insert(signature) {
+            continue;
+        }
+        cards.push(card);
+        if cards.len() >= limit {
+            break;
+        }
+    }
+    cards
+}
+
+fn evidence_only_answer_basis_ids(package: &EvidencePackage) -> BTreeSet<String> {
+    let tiered_ids = package
+        .tiered_evidence_bindings
+        .iter()
+        .filter(|binding| evidence_binding_is_answer_basis(binding))
+        .map(|binding| binding.evidence_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !tiered_ids.is_empty() {
+        return tiered_ids;
+    }
+    let scoped_ids = package
+        .cards
+        .iter()
+        .filter(|card| card.support_scope.contains("projection=answer_basis"))
+        .map(|card| card.evidence_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !scoped_ids.is_empty() {
+        return scoped_ids;
+    }
+    package
+        .cards
+        .iter()
+        .filter(|card| !card.support_scope.contains("projection=navigation_hint"))
+        .map(|card| card.evidence_id.clone())
+        .collect()
+}
+
+fn evidence_only_answer_card_allowed(card: &EvidenceCard, basis_ids: &BTreeSet<String>) -> bool {
+    if basis_ids.is_empty() {
+        return true;
+    }
+    basis_ids.contains(&card.evidence_id)
+}
+
+fn evidence_only_answer_card_presentable(card: &EvidenceCard) -> bool {
+    let cleaned = public_quote_text(&card.text);
+    cleaned
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !text_punctuation_like(*ch))
+        .count()
+        >= 6
+}
+
+fn evidence_only_answer_card_rank(
+    card: &EvidenceCard,
+    focus_terms: &[String],
+    preferred_types: &[String],
+) -> i64 {
+    let mut score = 0;
+    if preferred_types
+        .iter()
+        .any(|evidence_type| evidence_type == &card.evidence_type)
+    {
+        score += 50;
+    }
+    if card.support_scope.contains("projection=answer_basis") {
+        score += 30;
+    }
+    if card.evidence_type == "commentary" {
+        score += 8;
+    }
+    let normalized_text = normalize_text(&card.text);
+    let normalized_title = normalize_text(&card.source_title);
+    for term in focus_terms {
+        let term = normalize_text(term);
+        if term.trim().is_empty() {
+            continue;
+        }
+        if normalized_text.contains(&term) {
+            score += 12 + term.chars().count() as i64;
+        }
+        if normalized_title.contains(&term) {
+            score += 8 + term.chars().count() as i64;
+        }
+    }
+    score
+}
+
+fn evidence_only_answer_card_signature(card: &EvidenceCard) -> String {
+    let compact_text = normalize_text(&public_quote_text(&card.text))
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !text_punctuation_like(*ch))
+        .take(80)
+        .collect::<String>();
+    format!("{}:{compact_text}", card.evidence_type)
+}
+
+fn evidence_only_answer_intro(
+    package: &EvidencePackage,
+    cards: &[&EvidenceCard],
+    stance: EvidenceOnlyAnswerStance,
+) -> String {
+    let has_base = cards.iter().any(|card| card.evidence_type == "base_text");
+    let has_commentary = cards.iter().any(|card| card.evidence_type == "commentary");
+    if stance == EvidenceOnlyAnswerStance::NotFoundInScope {
+        if has_commentary {
+            "当前检索到的脂批来源证据未明写问题中的具体说法；可见的相关线索如下：".to_string()
+        } else {
+            "当前检索到的证据未明写问题中的具体说法；可见的相关线索如下：".to_string()
+        }
+    } else if stance == EvidenceOnlyAnswerStance::DirectlyDenied {
+        "当前检索证据直接否定问题中的具体说法；相关证据如下：".to_string()
+    } else if has_base && has_commentary {
+        "可以。当前检索到的正文和脂批来源证据如下：".to_string()
+    } else if has_commentary {
+        if stance == EvidenceOnlyAnswerStance::InferentialSupported {
+            "当前检索到的脂批来源线索如下：".to_string()
+        } else {
+            "有。当前检索到的脂批来源证据如下：".to_string()
+        }
+    } else if evidence_only_answer_is_fate_question(&package.question) {
+        "当前检索到的可追溯命运线索如下：".to_string()
+    } else {
+        "当前检索到的可追溯证据如下：".to_string()
+    }
+}
+
+fn evidence_only_answer_conclusion(
+    package: &EvidencePackage,
+    stance: EvidenceOnlyAnswerStance,
+) -> String {
+    match stance {
+        EvidenceOnlyAnswerStance::ExplicitSupported => {
+            "结论只限于上述检索证据直接能支持的范围。".to_string()
+        }
+        EvidenceOnlyAnswerStance::DirectlyDenied => {
+            "因此，当前证据范围内应按证据中的否定表述作答，不能改写成相反结论。".to_string()
+        }
+        EvidenceOnlyAnswerStance::NotFoundInScope => {
+            "因此，在当前检索证据范围内，不能确认问题中的具体说法；只能把上述文本作为相关线索，不能改写成证据未明写的后续情节。"
+                .to_string()
+        }
+        EvidenceOnlyAnswerStance::InferentialSupported => {
+            if evidence_only_answer_is_fate_question(&package.question) {
+                "据此只能说明这些文本提供了悲剧、离散或命运转折的线索；未在证据中明写的具体后续情节不能确认。"
+                    .to_string()
+            } else {
+                "结论只限于上述检索证据直接能支持的范围。".to_string()
+            }
+        }
+    }
+}
+
+fn evidence_only_answer_excerpt(question: &str, card: &EvidenceCard) -> String {
+    let focus_terms = upstream_evidence_focus_terms(question);
+    let raw_excerpt = upstream_evidence_text_excerpt(card, &focus_terms);
+    let cleaned = public_quote_text(&raw_excerpt);
+    trim_text(&cleaned, 160)
+}
+
+fn evidence_only_answer_source_label(card: &EvidenceCard) -> String {
+    let title = if card.source_title.trim().is_empty() {
+        card.source_id.trim()
+    } else {
+        card.source_title.trim()
+    };
+    let title = if title.is_empty() {
+        card.block_id.trim()
+    } else {
+        title
+    };
+    match card.evidence_type.as_str() {
+        "commentary" => format!("脂批来源《{title}》"),
+        "base_text" => format!("正文《{title}》"),
+        "version_note" => format!("版本说明《{title}》"),
+        _ => title.to_string(),
+    }
+}
+
+fn quoted_evidence_only_excerpt(text: &str) -> String {
+    format!(
+        "“{}”",
+        text.trim()
+            .trim_end_matches(['。', '；', ';', '.', '！', '!', '？', '?'])
+    )
+}
+
+fn evidence_only_answer_is_fate_question(question: &str) -> bool {
+    let normalized = normalize_text(question);
+    [
+        "结局",
+        "命运",
+        "命運",
+        "判词",
+        "判詞",
+        "红楼梦曲",
+        "紅樓夢曲",
+    ]
+    .iter()
+    .any(|term| normalized.contains(&normalize_text(term)))
+}
+
+fn text_punctuation_like(ch: char) -> bool {
+    ch.is_ascii_punctuation()
+        || matches!(
+            ch,
+            '，' | '。'
+                | '：'
+                | '；'
+                | '、'
+                | '？'
+                | '！'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '《'
+                | '》'
+                | '【'
+                | '】'
+                | '…'
+                | '⋯'
+        )
 }
 
 struct RuntimeKnowledgePolicyIndex {

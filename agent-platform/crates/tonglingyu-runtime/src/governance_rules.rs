@@ -271,14 +271,100 @@ pub(crate) fn draft_has_unsupported_term_without_evidence(
     evidence_text: &str,
 ) -> Result<bool> {
     let catalog = governance_rule_catalog()?;
+    let normalized_draft = normalize_text(draft_text);
+    let normalized_evidence = normalize_text(evidence_text);
     Ok(catalog
         .draft_boundary
         .unsupported_terms_without_evidence
         .iter()
         .any(|term| {
-            term_matches(draft_text, &normalize_text(draft_text), term)
-                && !term_matches(evidence_text, &normalize_text(evidence_text), term)
+            term_matches(draft_text, &normalized_draft, term)
+                && !term_matches(evidence_text, &normalized_evidence, term)
+                && unsupported_term_usage_requires_evidence(&normalized_draft, term)
         }))
+}
+
+fn unsupported_term_usage_requires_evidence(normalized_draft: &str, term: &str) -> bool {
+    let term = normalize_text(term);
+    if term.trim().is_empty() {
+        return false;
+    }
+    let mut matched_with_position = false;
+    for (index, _) in normalized_draft.match_indices(&term) {
+        matched_with_position = true;
+        let clause = unsupported_term_context_clause(normalized_draft, index);
+        if !unsupported_term_clause_is_boundary(&clause) {
+            return true;
+        }
+    }
+    if matched_with_position {
+        return false;
+    }
+    let compact = normalized_draft.split_whitespace().collect::<String>();
+    compact.contains(&term.split_whitespace().collect::<String>())
+}
+
+fn unsupported_term_context_clause(normalized: &str, term_index: usize) -> String {
+    let start = normalized[..term_index]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| {
+            if is_later_forty_clause_boundary(ch) {
+                Some(index + ch.len_utf8())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let end = normalized[term_index..]
+        .char_indices()
+        .find_map(|(offset, ch)| {
+            if is_later_forty_clause_boundary(ch) {
+                Some(term_index + offset)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(normalized.len());
+    normalized[start..end].trim().to_string()
+}
+
+fn unsupported_term_clause_is_boundary(clause: &str) -> bool {
+    const BOUNDARY_TERMS: &[&str] = &[
+        "未明写",
+        "未明寫",
+        "没有明写",
+        "沒有明寫",
+        "未明确",
+        "未明確",
+        "没有明确",
+        "沒有明確",
+        "未说明",
+        "未說明",
+        "没有说明",
+        "沒有說明",
+        "未提到",
+        "没有提到",
+        "未见",
+        "未見",
+        "不能确认",
+        "不能確認",
+        "无法确认",
+        "無法確認",
+        "不能确定",
+        "不能確定",
+        "不能证明",
+        "不能證明",
+        "证据不足",
+        "證據不足",
+        "不作定论",
+        "不作定論",
+    ];
+    let compact = clause.split_whitespace().collect::<String>();
+    BOUNDARY_TERMS
+        .iter()
+        .map(|term| normalize_text(term))
+        .any(|term| clause.contains(&term) || compact.contains(&term))
 }
 
 pub(crate) fn draft_has_public_forbidden_term(draft_text: &str) -> Result<bool> {

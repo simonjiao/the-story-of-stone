@@ -562,25 +562,29 @@ fn test_workflow_input_with_question_frame(
 
 fn relation_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "relation_query",
-        "canonical_question": "紫鹃服侍过史湘云吗？",
-        "subject": {
-            "canonical": "紫鹃",
-            "aliases": ["紫鹃", "紫鵑", "鹦哥"]
-        },
-        "predicate": {
-            "id": "serve",
-            "label": "服侍",
-            "aliases": ["服侍", "伏侍", "侍候"],
-            "evidence_terms": ["丫鬟", "丫头", "跟着"]
-        },
-        "object": {
-            "canonical": "史湘云",
-            "aliases": ["史湘云", "史湘雲", "湘云"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "紫鹃服侍过史湘云吗？",
+        "normalized_question": "紫鹃服侍过史湘云吗？",
+        "task": "verify_relation",
+        "answer_target": {"type": "boolean_relation"},
+        "slots": {
+            "subject": {
+                "name": "紫鹃",
+                "aliases": ["紫鹃", "紫鵑", "鹦哥"]
+            },
+            "relation": {
+                "id": "serve",
+                "label": "服侍",
+                "aliases": ["服侍", "伏侍", "侍候"],
+                "evidence_terms": ["丫鬟", "丫头", "跟着"]
+            },
+            "object": {
+                "name": "史湘云",
+                "aliases": ["史湘云", "史湘雲", "湘云"]
+            }
         },
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -589,25 +593,29 @@ fn relation_question_frame_value() -> Value {
 
 fn xiren_jiamu_relation_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "relation_query",
-        "canonical_question": "袭人服侍过贾母吗？",
-        "subject": {
-            "canonical": "袭人",
-            "aliases": ["袭人", "襲人", "珍珠"]
-        },
-        "predicate": {
-            "id": "serve",
-            "label": "服侍",
-            "aliases": ["服侍", "伏侍", "侍候"],
-            "evidence_terms": ["丫鬟", "丫头", "跟着"]
-        },
-        "object": {
-            "canonical": "贾母",
-            "aliases": ["贾母", "賈母", "老太太"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "袭人服侍过贾母吗？",
+        "normalized_question": "袭人服侍过贾母吗？",
+        "task": "verify_relation",
+        "answer_target": {"type": "boolean_relation"},
+        "slots": {
+            "subject": {
+                "name": "袭人",
+                "aliases": ["袭人", "襲人", "珍珠"]
+            },
+            "relation": {
+                "id": "serve",
+                "label": "服侍",
+                "aliases": ["服侍", "伏侍", "侍候"],
+                "evidence_terms": ["丫鬟", "丫头", "跟着"]
+            },
+            "object": {
+                "name": "贾母",
+                "aliases": ["贾母", "賈母", "老太太"]
+            }
         },
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -616,22 +624,26 @@ fn xiren_jiamu_relation_question_frame_value() -> Value {
 
 fn xiren_open_object_relation_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "relation_query",
-        "canonical_question": "袭人服侍过谁？",
-        "subject": {
-            "canonical": "袭人",
-            "aliases": ["袭人", "襲人", "珍珠"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "袭人服侍过谁？",
+        "normalized_question": "袭人服侍过谁？",
+        "task": "verify_relation",
+        "answer_target": {"type": "relation_object_list"},
+        "slots": {
+            "subject": {
+                "name": "袭人",
+                "aliases": ["袭人", "襲人", "珍珠"]
+            },
+            "relation": {
+                "id": "serve",
+                "label": "服侍",
+                "aliases": ["服侍", "伏侍", "侍候", "陪侍"],
+                "evidence_terms": ["丫鬟", "丫头", "跟着"]
+            },
+            "object": null
         },
-        "predicate": {
-            "id": "serve",
-            "label": "服侍",
-            "aliases": ["服侍", "伏侍", "侍候", "陪侍"],
-            "evidence_terms": ["丫鬟", "丫头", "跟着"]
-        },
-        "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -640,17 +652,21 @@ fn xiren_open_object_relation_question_frame_value() -> Value {
 
 fn zijuan_entity_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "entity_query",
-        "canonical_question": "紫鹃在《红楼梦》里是什么样的人？",
-        "subject": {
-            "canonical": "紫鹃",
-            "aliases": ["紫鹃", "紫鵑", "鹦哥", "鸚哥"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "紫鹃在《红楼梦》里是什么样的人？",
+        "normalized_question": "紫鹃在《红楼梦》里是什么样的人？",
+        "task": "summarize_entity",
+        "answer_target": {"type": "entity_summary"},
+        "slots": {
+            "subject": {
+                "name": "紫鹃",
+                "aliases": ["紫鹃", "紫鵑", "鹦哥", "鸚哥"]
+            },
+            "relation": null,
+            "object": null
         },
-        "predicate": null,
-        "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -659,22 +675,26 @@ fn zijuan_entity_question_frame_value() -> Value {
 
 fn lindaiyu_age_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "attribute_at_event",
-        "canonical_question": "林黛玉进贾府时多大了",
-        "subject": {
-            "canonical": "林黛玉",
-            "aliases": ["林黛玉", "黛玉", "林姑娘"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "林黛玉进贾府时多大了",
+        "normalized_question": "林黛玉进贾府时多大了",
+        "task": "extract_attribute",
+        "answer_target": {"type": "attribute_value"},
+        "slots": {
+            "subject": {
+                "name": "林黛玉",
+                "aliases": ["林黛玉", "黛玉", "林姑娘"]
+            },
+            "attribute": {
+                "id": "age",
+                "label": "年龄",
+                "aliases": ["年龄", "几岁", "多大"],
+                "evidence_terms": ["岁", "歲", "年纪", "年紀", "年方"]
+            },
+            "object": null
         },
-        "predicate": {
-            "id": "age",
-            "label": "年龄",
-            "aliases": ["年龄", "几岁", "多大"],
-            "evidence_terms": ["岁", "歲", "年纪", "年紀", "年方"]
-        },
-        "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -683,17 +703,21 @@ fn lindaiyu_age_question_frame_value() -> Value {
 
 fn lindaiyu_character_fate_question_frame_value() -> Value {
     json!({
-        "schema_version": "tonglingyu.question_frame.v1",
-        "intent": "character_fate_query",
-        "canonical_question": "林黛玉结局如何",
-        "subject": {
-            "canonical": "林黛玉",
-            "aliases": ["林黛玉", "黛玉", "林姑娘"]
+        "schema_version": "tonglingyu.question_frame.v2",
+        "original_question": "林黛玉结局如何",
+        "normalized_question": "林黛玉结局如何",
+        "task": "locate_event",
+        "answer_target": {"type": "character_fate"},
+        "slots": {
+            "subject": {
+                "name": "林黛玉",
+                "aliases": ["林黛玉", "黛玉", "林姑娘"]
+            },
+            "event": {"type": "death"},
+            "object": null
         },
-        "predicate": null,
-        "object": null,
         "source_scope": "pre_80_base_text_and_commentary",
-        "required_evidence_types": ["base_text"],
+        "evidence_contract": {"required_types": ["base_text"], "supporting_types": []},
         "confidence": 0.91,
         "needs_clarification": false,
         "clarification_question": null
@@ -5150,9 +5174,10 @@ fn agent_runtime_draft_repair_message_uses_minimal_payload_under_budget() {
 #[test]
 fn agent_runtime_open_object_draft_repair_message_stays_under_budget() {
     let question = "袭人先后服侍过哪些人？";
-    let frame: question_frame::RuntimeQuestionFrame =
-        serde_json::from_value(xiren_open_object_relation_question_frame_value())
-            .expect("open-object frame");
+    let frame = question_frame::parse_runtime_question_frame(
+        &xiren_open_object_relation_question_frame_value(),
+    )
+    .expect("open-object frame");
     let projection = test_runtime_projection(
         "trace-open-object-repair-message-budget",
         "context-pack://test/open-object-repair-message-budget",
@@ -9500,6 +9525,166 @@ fn runtime_allows_commentary_question_draft_with_commentary_text_anchor() {
 }
 
 #[test]
+fn rejected_commentary_draft_returns_retrieved_evidence_answer() {
+    let mut commentary = sample_card("commentary");
+    commentary.evidence_id = "ev-xiangyun-commentary-song".to_string();
+    commentary.source_id = "shitouji-wikisource-zhiyanzhai".to_string();
+    commentary.source_title = "乐中悲".to_string();
+    commentary.support_scope =
+        "knownledge retriever EvidencePack 命中；projection=answer_basis".to_string();
+    commentary.text =
+        "第六支，樂中悲：\n襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。".to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![commentary],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "关于史湘云的结局，脂批中的证据呢？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "脂批指出“襁褓中，父母叹双亡”等语，并批“终久”二字，暗示湘云最终命运悲苦；具体情节如夫婿早逝或守寡，脂批未明确说明。",
+            "脂批在《乐中悲》曲中批有“终久”二字，暗示史湘云最终命运悲苦；具体情节如夫婿早逝或守寡未明。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("runtime draft rejected with evidence-only answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        workflow.answer_source,
+        "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
+    );
+    assert!(
+        workflow
+            .final_answer
+            .starts_with("当前检索到的脂批来源线索如下")
+    );
+    assert!(workflow.final_answer.contains("第六支，樂中悲"));
+    assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
+    assert!(workflow.final_answer.contains("不能确认"));
+    assert!(!workflow.final_answer.contains("未形成最终回答"));
+    assert!(!workflow.final_answer.contains("脂批指出"));
+    assert!(!workflow.final_answer.contains("最终命运悲苦"));
+    assert!(!workflow.final_answer.contains("夫婿早逝"));
+    assert!(!workflow.final_answer.contains("守寡"));
+}
+
+#[test]
+fn rejected_concrete_fate_draft_says_not_found_in_scope() {
+    let mut commentary = sample_card("commentary");
+    commentary.evidence_id = "ev-xiangyun-commentary-song-not-found".to_string();
+    commentary.source_id = "shitouji-wikisource-zhiyanzhai".to_string();
+    commentary.source_title = "乐中悲".to_string();
+    commentary.support_scope =
+        "knownledge retriever EvidencePack 命中；projection=answer_basis".to_string();
+    commentary.text = "第六支，樂中悲：終久是雲散高唐，水涸湘江。".to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![commentary],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "脂批里是否提到史湘云丧夫？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "脂批指出史湘云丧夫，但也有《乐中悲》“终久是云散高唐，水涸湘江”。",
+            "《乐中悲》写“云散高唐，水涸湘江”。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("runtime draft rejected with not-found evidence answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_claim_exceeds_evidence_boundary")
+    );
+    assert!(
+        workflow
+            .final_answer
+            .starts_with("当前检索到的脂批来源证据未明写问题中的具体说法")
+    );
+    assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
+    assert!(workflow.final_answer.contains("不能确认问题中的具体说法"));
+    assert!(!workflow.final_answer.contains("脂批指出史湘云丧夫"));
+    assert!(!workflow.final_answer.starts_with("有。"));
+}
+
+#[test]
+fn rejected_later_forty_draft_keeps_explicit_widowhood_evidence_when_requested() {
+    let mut later_forty = sample_card("base_text");
+    later_forty.evidence_id = "ev-xiangyun-later-forty-widowhood".to_string();
+    later_forty.source_id = "hongloumeng-wikisource-120".to_string();
+    later_forty.source_title = "紅樓夢/第一一〇回".to_string();
+    later_forty.support_scope =
+        "knownledge retriever EvidencePack 命中；projection=answer_basis；第八十一回及以后（后四十回）边界"
+            .to_string();
+    later_forty.text =
+        "就是史姑娘是他叔叔的主意，頭裡原好，如今姑爺癆病死了，你史妹妹立志守寡，也就苦了。"
+            .to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![later_forty],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "按后四十回，史湘云是否守寡？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "package_id 暴露时本地治理会拒绝这个草稿，但证据中明写姑爷病死、史妹妹立志守寡。",
+            "后四十回写“史妹妹立志守寡”。",
+            evidence_ids(&workflow.package.cards),
+        ));
+
+    let application = apply_agent_runtime_content_outputs(
+        &mut workflow,
+        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+    )
+    .expect("runtime draft rejected with explicit later-forty evidence answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_exposes_internal_public_term")
+    );
+    assert!(workflow.final_answer.contains("姑爺癆病死了"));
+    assert!(workflow.final_answer.contains("史妹妹立志守寡"));
+    assert!(workflow.final_answer.contains("直接能支持"));
+    assert!(!workflow.final_answer.contains("不能确认问题中的具体说法"));
+}
+
+#[test]
 fn runtime_allows_commentary_question_draft_with_normalized_text_anchor_fragment() {
     let mut commentary = sample_card("commentary");
     commentary.source_title = "脂硯齋重評石頭記/第十五回".to_string();
@@ -9670,11 +9855,9 @@ fn hermes_mode_rejects_user_opt_in_continuation_draft() {
         application.rejected_reason,
         Some("draft_stops_for_user_opt_in")
     );
-    assert!(
-        workflow
-            .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
-    );
+    assert!(workflow.final_answer.contains("当前检索到的可追溯证据如下"));
+    assert!(workflow.final_answer.contains("结论只限于上述检索证据"));
+    assert!(!workflow.final_answer.contains("未形成最终回答"));
     assert!(!workflow.final_answer.contains("如果你愿意"));
     assert!(!workflow.final_answer.contains("我可以继续"));
     assert_eq!(
@@ -9701,8 +9884,6 @@ fn hard_evidence_rejections_skip_draft_repair() {
         "claim_evidence_refs_unavailable",
         "draft_claim_ref_focus_mismatch",
         "draft_claim_uses_only_supplemental_evidence",
-        "draft_missing_later_forty_boundary",
-        "draft_uses_unscoped_later_forty",
     ] {
         let application = AgentRuntimeContentApplication {
             draft_consumed: false,
@@ -9729,6 +9910,8 @@ fn structural_draft_rejections_trigger_draft_repair() {
         "draft_claim_ref_text_unsupported",
         "draft_missing_requested_evidence_type_anchor",
         "draft_exposes_internal_public_term",
+        "draft_missing_later_forty_boundary",
+        "draft_uses_unscoped_later_forty",
     ] {
         let application = AgentRuntimeContentApplication {
             draft_consumed: false,
@@ -9787,7 +9970,7 @@ async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
     );
     workflow.question = question.to_string();
     workflow.package.question = question.to_string();
-    workflow.package.question_frame = serde_json::to_value(&question_frame).ok();
+    workflow.package.question_frame = Some(xiren_open_object_relation_question_frame_value());
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].output = json!({
         "object": "tonglingyu.draft_answer",
@@ -9810,15 +9993,14 @@ async fn runtime_repairs_open_object_relation_draft_missing_supported_object() {
         "source_scope_policy": source_scope_policy_for_question(question),
         "out_of_scope_hints": [],
     });
-    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
-        upstream_bundle_summary(
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] =
+        json!(upstream_bundle_summary(
             question,
             &package_id,
-            "袭人先前本是贾母的婢女，后来又在宝玉房里贴身服侍宝玉；据第003回与第019回可见，她先后服侍过贾母和宝玉。",
-            "袭人服侍过贾母和宝玉。",
+            "袭人先前本是贾母的婢女；据第003回可见，她服侍过贾母。",
+            "袭人服侍过贾母。",
             evidence_ids(&workflow.package.cards),
-        )
-    );
+        ));
 
     let rejected = apply_agent_runtime_content_outputs(
         &mut workflow,
@@ -10186,7 +10368,7 @@ fn hermes_mode_allows_later_forty_style_boundary_without_using_later_forty_evide
         upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "就现有前八十回正文与脂批来看，史湘云的结局只能作“有悲意的归结”来答，不能据此断成后四十回式的定论。第五回曲文已写她“襁褓中，父母叹双亡”，同回脂批又以“乐中悲”点出这一支的底色；至于更具体的终局细节，现有证据并不能证明。",
+            "就现有前八十回正文与脂批来看，只能根据第五回曲文“襁褓中，父母嘆雙亡”和脂批来源中的“樂中悲”作边界化回答，不能据此断成后四十回式的定论；至于更具体的终局细节，现有证据并不能证明。",
             "默认范围内只使用前八十回正文和脂批；若要谈史湘云更具体的终局，只能另行引入后四十回材料，本次包内不允许。",
             evidence_ids(&workflow.package.cards),
         )
@@ -11608,11 +11790,9 @@ async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_draf
         workflow.answer_source,
         "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
     );
-    assert!(
-        workflow
-            .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
-    );
+    assert!(workflow.final_answer.contains("当前检索到的可追溯证据如下"));
+    assert!(workflow.final_answer.contains("结论只限于上述检索证据"));
+    assert!(!workflow.final_answer.contains("未形成最终回答"));
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
         "openai_compatible_draft_with_local_governance"

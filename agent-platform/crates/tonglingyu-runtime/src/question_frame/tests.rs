@@ -969,6 +969,14 @@ fn relation_direct_support_accepts_speaker_self_relation() {
         Some("question_frame_relation_answer_contradicts_evidence")
     );
     assert_eq!(
+        relation_draft_rejection_reason(
+            Some(&frame),
+            &cards,
+            "未见有可靠证据表明袭人曾服侍过史湘云。"
+        ),
+        Some("question_frame_relation_answer_contradicts_evidence")
+    );
+    assert_eq!(
         relation_draft_rejection_reason(Some(&frame), &cards, "袭人没有服侍过史湘云。"),
         Some("question_frame_relation_answer_contradicts_evidence")
     );

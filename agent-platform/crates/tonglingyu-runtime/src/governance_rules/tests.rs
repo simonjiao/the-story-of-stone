@@ -14,8 +14,43 @@ fn default_catalog_drives_draft_boundary_terms() {
             .expect("unsupported fate overclaim terms load")
     );
     assert!(
+        draft_has_unsupported_term_without_evidence(
+            "史湘云丧夫守寡",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("unsupported fate overclaim terms load")
+    );
+    assert!(
+        draft_has_unsupported_term_without_evidence(
+            "史湘云夫婿早逝",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("unsupported fate overclaim terms load")
+    );
+    assert!(
+        !draft_has_unsupported_term_without_evidence(
+            "当前证据未明写史湘云丧夫或守寡，不能确认具体后续情节。",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("unsupported fate boundary terms load")
+    );
+    assert!(
         !draft_has_unsupported_term_without_evidence("史湘云守寡", "史妹妹立志守寡")
             .expect("unsupported fate overclaim terms load")
+    );
+    assert!(
+        draft_has_unsupported_term_without_evidence(
+            "脂批指出史湘云最终命运悲苦。",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("unsupported source action terms load")
+    );
+    assert!(
+        !draft_has_unsupported_term_without_evidence(
+            "脂批来源中可见《乐中悲》曲文。",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("commentary source layer wording allowed")
     );
     assert!(
         !draft_has_unsupported_term_without_evidence("这是礼教问题", "礼教一词已在证据中出现")

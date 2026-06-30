@@ -317,13 +317,13 @@ pub(crate) fn relation_draft_rejection_reason(
 ) -> Option<&'static str> {
     let frame = frame.filter(|frame| frame.has_relation_object())?;
     let groups = relation_support_terms(frame)?;
-    if !relation_text_matches_support_terms(draft, &groups) {
-        return Some("question_frame_relation_answer_missing");
-    }
     let direct_support = !relation_direct_support_cards(frame, cards).is_empty();
     let has_boundary = relation_answer_has_boundary(draft);
     if direct_support && has_boundary {
         return Some("question_frame_relation_answer_contradicts_evidence");
+    }
+    if !relation_text_matches_support_terms(draft, &groups) {
+        return Some("question_frame_relation_answer_missing");
     }
     if !direct_support && !has_boundary {
         return Some("question_frame_relation_boundary_missing");

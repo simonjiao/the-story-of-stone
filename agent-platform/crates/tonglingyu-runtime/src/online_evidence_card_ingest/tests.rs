@@ -64,17 +64,22 @@ fn relation_request(conn: &Connection) -> OnlineEvidenceCardUpdateRequestRecord 
             session_id: Some("session-a".to_string()),
             resolved_question: "A 是否服侍 B".to_string(),
             question_frame: Some(json!({
-                "intent": "relation_query",
-                "canonical_question": "A 是否服侍 B",
-                "subject": {"canonical": "A", "aliases": []},
-                "predicate": {
-                    "id": "serve",
-                    "label": "服侍",
-                    "aliases": ["服侍"],
-                    "evidence_terms": ["服侍"]
+                "schema_version": "tonglingyu.question_frame.v2",
+                "original_question": "A 是否服侍 B",
+                "normalized_question": "A 是否服侍 B",
+                "task": "verify_relation",
+                "answer_target": {"type": "boolean_relation"},
+                "slots": {
+                    "subject": {"name": "A", "aliases": []},
+                    "relation": {
+                        "id": "serve",
+                        "label": "服侍",
+                        "aliases": ["服侍"],
+                        "evidence_terms": ["服侍"]
+                    },
+                    "object": {"name": "B", "aliases": []}
                 },
-                "object": {"canonical": "B", "aliases": []},
-                "required_evidence_types": ["base_text"]
+                "evidence_contract": {"required_types": ["base_text"], "supporting_types": []}
             })),
             coverage_gap_reason: "coverage_partial".to_string(),
             source_scope_policy: json!({"scope": "test"}),
@@ -92,17 +97,28 @@ fn attribute_age_request(conn: &Connection) -> OnlineEvidenceCardUpdateRequestRe
             session_id: Some("session-attribute-age".to_string()),
             resolved_question: "林黛玉进贾府时多大了".to_string(),
             question_frame: Some(json!({
-                "intent": "attribute_at_event",
-                "canonical_question": "林黛玉进贾府时多大了",
-                "subject": {"canonical": "林黛玉", "aliases": ["林黛玉", "黛玉", "林姑娘"]},
-                "predicate": {
-                    "id": "age",
-                    "label": "年龄",
-                    "aliases": ["年龄", "几岁", "多大"],
-                    "evidence_terms": ["岁", "歲", "年纪", "年紀", "年方"]
+                "schema_version": "tonglingyu.question_frame.v2",
+                "original_question": "林黛玉进贾府时多大了",
+                "normalized_question": "林黛玉进贾府时多大了",
+                "task": "extract_attribute",
+                "answer_target": {"type": "attribute_value"},
+                "slots": {
+                    "subject": {
+                        "name": "林黛玉",
+                        "aliases": ["林黛玉", "黛玉", "林姑娘"]
+                    },
+                    "attribute": {
+                        "id": "age",
+                        "label": "年龄",
+                        "aliases": ["年龄", "几岁", "多大"],
+                        "evidence_terms": ["岁", "歲", "年纪", "年紀", "年方"]
+                    },
+                    "object": null
                 },
-                "object": null,
-                "required_evidence_types": ["base_text", "commentary"]
+                "evidence_contract": {
+                    "required_types": ["base_text", "commentary"],
+                    "supporting_types": []
+                }
             })),
             coverage_gap_reason: "coverage_partial".to_string(),
             source_scope_policy: json!({

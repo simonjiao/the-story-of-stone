@@ -1,36 +1,40 @@
 {
   "schema_version": "tonglingyu.runtime_prompt_catalog.v1",
-  "catalog_version": "2026-06-02.runtime-prompt-catalog.v1",
+  "catalog_version": "2026-06-30.runtime-prompt-catalog.v2",
   "draft_answer": {
     "result_summary_contract_parts": [
-      "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}.",
+      "Return exactly one non-empty JSON object with this shape: {\"schema_version\":\"tonglingyu-upstream-bundle-v1\",\"package_id\":\"...\",\"source_scope_policy\":{},\"draft_candidate\":{\"draft_answer\":\"...\",\"package_id\":\"...\",\"claim_statements\":[{\"text\":\"...\",\"stance\":\"explicit_supported|inferential_supported|not_found_in_scope|speculation_attested\",\"certainty\":\"certain|likely|possible|unknown\",\"evidence_refs\":[...]}]},\"coverage_assessment\":{\"status\":\"passed|partial|insufficient\",\"missing_in_scope_slots\":[],\"out_of_scope_slots\":[]},\"evidence_hints\":[],\"retrieval_repair\":{\"recommended\":false,\"queries\":[]},\"out_of_scope_hints\":[]}.",
       "retrieval_repair.queries use full_text_search_request_v1 fields: query_text, search_terms, corpus_ids, source_layers, chapter_range, required_evidence_types, reason; no later-forty requests when later_forty_allowed=false.",
       "Copy step_output_json.source_scope_policy exactly. Use only step_output_json evidence_brief, answer_requirements, question_frame_answer_requirements, entity_intro_answer_policy, and source_scope_policy; evidence_refs must come from step_output_json.evidence_ids.",
       "Evidence with answer_use=supplemental_only may only be mentioned as supplementary clues and must not be the sole evidence_ref for a claim.",
       "Keep draft_candidate.claim_statements[].text locally verifiable: each claim text must be a short evidence-backed statement containing an exact phrase, title, or distinctive cue copied from its evidence_refs. Put synthesis or interpretation in draft_answer, not in claim_statements, unless the same interpretive words appear in the cited evidence.",
       "When a claim quotes text in quotation marks, every quoted phrase must appear in the cited evidence_refs; cite the exact evidence card that contains the quoted phrase, not another card on the same topic.",
+      "Classify every claim_statement stance. explicit_supported means the cited evidence directly says it. inferential_supported means cited evidence gives a concrete cue but not the exact conclusion. not_found_in_scope means cited in-scope evidence was checked and does not state the requested concrete conclusion. speculation_attested means the cited evidence records that someone says or speculates it. Do not use '有说', '有推测', '可能是', or similar modal wording unless the stance and cited evidence support that wording.",
       "If answer_requirements.requested_evidence_type_anchors is non-empty, draft_answer and claim_statements must satisfy each anchor.required_cue_kind: source_or_text may use acceptable_anchor_cues, text must use text_anchor_cues. Generic source-layer labels or source titles alone are not enough when required_cue_kind=text.",
       "If question_frame_answer_requirements.relation_open_object.must_mention_objects is non-empty, mention every listed object by acceptable_cues and include its source_cues or text_cue evidence.",
       "If question_frame_answer_requirements.chapter_location is present, answer the chapter number first in draft_answer and quote or reuse primary_text_cue wording exactly; do not replace evidence wording with synonyms such as 去世 when the cue says 長逝. claim_statements for chapter-location must cite primary_evidence_id and copy primary_text_cue or an exact phrase from that evidence; do not make chapter number or chapter title the only claim text. If chapter_title is present, copy that exact chapter_title value or an exact distinctive cue from it into draft_answer and at least one claim_statement; if chapter_title is null or absent, do not invent or mention a chapter title. Do not cite commentary unless the quoted commentary itself explains the chapter/title/location relation; prefer base-text or title evidence for plain chapter-location questions.",
       "If entity_intro_answer_policy.applies=true, introduce the named entity from multiple readable in-package evidence cards when available; do not use a single short speech shell as the whole answer, and do not write package-external biography.",
       "Commentary evidence is first-class in scope. If later_forty_allowed=false, ignore later-forty source layers.",
       "For fate, ending, or interpretive questions, coverage_assessment.status=passed when the answer is bounded to source_scope_policy and states the evidence boundary; excluded later-forty is out_of_scope, not missing_in_scope. Use partial only when missing in-scope evidence prevents a bounded answer.",
-      "For fate or ending answers, do not add concrete life-outcome wording such as 孤苦无依, 早寡, 结局不幸, or similar terms unless those exact words or direct cues appear in the cited evidence. Prefer boundary phrasing: the cited text provides tragic/parting cues, but the answer must not claim more specific later events than the retrieved evidence states.",
+      "For fate or ending answers, do not add concrete life-outcome wording such as 孤苦无依, 早寡, 丧夫, 守寡, 夫婿早逝, 结局不幸, or similar terms unless those exact words or direct cues appear in the cited evidence. Prefer boundary phrasing: the cited text provides tragic/parting cues, but the answer must not claim more specific later events than the retrieved evidence states.",
       "For judgement-poem and Hongloumeng-song evidence about a character fate, answer only from the retrieved judgement/song text and commentary text. Use wording like '可以说明悲剧或离散意象' and '不能确认更具体的后续情节' when the cited evidence does not state a concrete later event.",
+      "A commentary evidence card is a source layer, not automatically an explicit commentator action. You may say '脂批来源中可见/保存/列出' the copied text. Do not say '脂批指出', '脂批批', '脂批强调', '批语表明', or similar unless the cited evidence text itself contains an explicit note/comment marker that says this.",
       "The visible draft_answer must be grounded in concrete retrieved evidence cues and must not expose internal terms such as package_id, trace_id, context_pack, claim_statements, or result_summary. Do not answer only with generic phrases such as 'some evidence' or 'related clues'.",
       "Local reviewer remains authoritative. Do not add nested result_summary."
     ],
     "compact_result_summary_contract_parts": [
-      "Return one upstream bundle JSON object with schema_version=\"tonglingyu-upstream-bundle-v1\", package_id, source_scope_policy, draft_candidate{draft_answer,package_id,claim_statements{text,evidence_refs}}, coverage_assessment, evidence_hints, retrieval_repair, out_of_scope_hints.",
+      "Return one upstream bundle JSON object with schema_version=\"tonglingyu-upstream-bundle-v1\", package_id, source_scope_policy, draft_candidate{draft_answer,package_id,claim_statements{text,stance,certainty,evidence_refs}}, coverage_assessment, evidence_hints, retrieval_repair, out_of_scope_hints.",
       "retrieval_repair.queries use full_text_search_request_v1 fields: query_text, search_terms, corpus_ids, source_layers, chapter_range, required_evidence_types, reason; no later-forty requests when later_forty_allowed=false.",
       "Copy source_scope_policy from step_output_json. Use only evidence_refs from step_output_json.evidence_ids. Evidence with answer_use=supplemental_only can only be supplementary and cannot be the sole evidence_ref for a claim.",
       "claim_statements[].text must be short and locally verifiable with exact evidence phrases, titles, or distinctive cues from its evidence_refs; keep broader synthesis in draft_answer.",
+      "claim_statements[].stance must match the evidence: direct text = explicit_supported, concrete cue but no exact conclusion = inferential_supported, checked in-scope evidence lacks the requested concrete conclusion = not_found_in_scope, cited source records a view/speculation = speculation_attested. Modal wording such as 有说/有推测/可能 requires a supporting stance and evidence.",
       "Quoted phrases in claim_statements must appear in the same cited evidence_refs; cite the evidence card containing each quoted phrase.",
       "Obey answer_requirements, question_frame_answer_requirements, entity_intro_answer_policy, and source_scope_policy.",
       "For chapter-location questions, lead with the chapter number in draft_answer and reuse primary_text_cue wording exactly; do not replace evidence wording with synonyms such as 去世 when the cue says 長逝. claim_statements must cite primary_evidence_id and copy primary_text_cue or another exact evidence phrase; do not use chapter number or invented chapter title as the only claim. When chapter_title is available, copy that exact title or exact title cue; when absent, do not mention a title. Commentary is optional and must explain what it supports.",
       "For entity_intro_answer_policy.applies=true, use multiple readable in-package evidence cards, avoid short speech shells and excluded public quote terms, and do not write package-external biography.",
-      "For fate or ending questions, avoid concrete outcome words not present in evidence; state the retrieved tragic/parting cues and the evidence boundary instead of over-interpreting.",
+      "For fate or ending questions, avoid concrete outcome words not present in evidence, including 丧夫, 守寡, and 夫婿早逝; state the retrieved tragic/parting cues and the evidence boundary instead of over-interpreting.",
       "For judgement-poem/song fate evidence, say the evidence supports tragic or parting cues; do not add husband, widowhood, white-headed, or exact later-event claims unless the retrieved text says them.",
+      "For commentary cards, say the source contains or preserves the cited text; do not turn a commentary source layer into '脂批指出/批/强调' unless the quoted card text has an explicit comment marker.",
       "Commentary is first-class; ignore later-forty when disallowed. Use insufficient coverage only when constraints cannot be met. Do not expose package_id, trace_id, context ids, claim_statements, result_summary, or internal rule terms in draft_answer."
     ],
     "repair_context": {
@@ -40,7 +44,10 @@
         "keep the same package_id and source_scope_policy",
         "do not introduce new evidence_refs",
         "fix only the rejected draft boundary",
-        "for draft_claim_exceeds_evidence_boundary, remove wording not present in cited evidence; do not say 孤苦无依, 早寡, 结局不幸, or named source claims such as 脂砚斋指出 unless those exact cues are in the cited evidence",
+        "repair by stance, not by fallback: explicit support may use 可以确定/明写; inferential support may use 可作为线索/可说明意象; not_found_in_scope must use 当前证据未见明写/不能确认; speculation_attested may use 有说/有推测 only when the cited evidence records that view",
+        "for draft_claim_exceeds_evidence_boundary, remove wording not present in cited evidence; do not say 孤苦无依, 早寡, 丧夫, 守寡, 夫婿早逝, 结局不幸, or named source claims such as 脂砚斋指出/脂批指出/脂批批/脂批强调 unless those exact cues are in the cited evidence",
+        "for draft_missing_later_forty_boundary or draft_uses_unscoped_later_forty, do not use later-forty content as answer evidence when source_scope_policy.later_forty_allowed=false; rewrite to the in-scope evidence boundary instead",
+        "for commentary evidence, prefer '脂批来源中可见/保存/列出' over commentator-action wording unless the cited text contains an explicit note/comment marker",
         "for chapter_location_title_cue_missing, copy step_output_json.question_frame_answer_requirements.chapter_location.chapter_title or one exact cue from it",
         "if repair cannot satisfy the contract, set coverage_assessment.status to insufficient"
       ],
@@ -50,6 +57,7 @@
         "for count questions, infer only from retrieved evidence and cite the supporting evidence_refs",
         "for relation_open_object mention every must_mention object with source cue",
         "for evidence-boundary rejection, remove evidence-external fate conclusions and state only retrieved text cues plus boundary",
+        "for unscoped later-forty rejection, remove later-forty answer evidence and state the active source-scope boundary",
         "for quoted-phrase rejection, cite the evidence card containing the quoted phrase or remove the quote",
         "if constraints cannot be met, return coverage status insufficient"
       ]
