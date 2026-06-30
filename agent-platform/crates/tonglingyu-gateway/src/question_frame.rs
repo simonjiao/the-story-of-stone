@@ -413,6 +413,28 @@ fn v2_event_slot_for_frame(frame: &QuestionFrame) -> Option<QuestionFrameV2Event
             trigger: Some("葬花".to_string()),
         });
     }
+    if is_loss_or_theft_question(question) {
+        return Some(QuestionFrameV2EventSlot {
+            event_type: "loss_or_theft".to_string(),
+            trigger: first_matching_term(
+                question,
+                &[
+                    "良儿偷玉",
+                    "良兒偷玉",
+                    "偷玉",
+                    "失玉",
+                    "丢了",
+                    "丟了",
+                    "丢",
+                    "丟",
+                    "不见",
+                    "不見",
+                    "遗失",
+                    "遺失",
+                ],
+            ),
+        });
+    }
     (frame.intent == "chapter_location_query").then(|| QuestionFrameV2EventSlot {
         event_type: "located_event".to_string(),
         trigger: None,
@@ -443,6 +465,9 @@ fn v2_topic_for_frame(frame: &QuestionFrame) -> Option<String> {
 fn v2_evidence_focus_for_frame(frame: &QuestionFrame) -> Option<String> {
     if frame.intent == "character_fate_query" || frame.canonical_question.contains("结局") {
         Some("character_fate".to_string())
+    } else if frame.intent == "count_query" && is_loss_or_theft_question(&frame.canonical_question)
+    {
+        Some("loss_event".to_string())
     } else {
         None
     }
@@ -690,6 +715,27 @@ fn first_matching_term(text: &str, terms: &[&str]) -> Option<String> {
         .iter()
         .find(|term| text.contains(**term))
         .map(|term| (*term).to_string())
+}
+
+fn is_loss_or_theft_question(question: &str) -> bool {
+    contains_any_local(
+        question,
+        &["通灵宝玉", "通靈寶玉", "通灵玉", "通靈玉", "那块玉", "那塊玉"],
+    ) && contains_any_local(
+        question,
+        &[
+            "良儿偷玉",
+            "良兒偷玉",
+            "偷玉",
+            "失玉",
+            "丢",
+            "丟",
+            "不见",
+            "不見",
+            "遗失",
+            "遺失",
+        ],
+    )
 }
 
 fn approx_chars_from_question(question: &str) -> Option<usize> {

@@ -17768,6 +17768,23 @@ fn domain_frame_structured_terms(question_frame: Option<&Value>) -> Vec<String> 
                         .iter()
                         .map(|term| (*term).to_string()),
                 );
+            } else if event_type == "loss_or_theft" {
+                terms.extend(
+                    [
+                        "失玉",
+                        "丢玉",
+                        "玉丢了",
+                        "玉不见",
+                        "良儿偷玉",
+                        "良兒偷玉",
+                        "偷玉",
+                        "扫雪拾玉",
+                        "掃雪拾玉",
+                        "甄宝玉送玉",
+                    ]
+                    .iter()
+                    .map(|term| (*term).to_string()),
+                );
             }
         }
         if let Some(group_name) = slots
@@ -17811,6 +17828,7 @@ fn domain_primary_intent(
         answer_target.as_deref(),
         Some("chapter_no" | "chapter_or_time")
     ) || event_type.as_deref() == Some("death")
+        || (frame_task.as_deref() == Some("count_occurrences") && event_type.is_some())
     {
         return "event_lookup".to_string();
     }
@@ -17869,6 +17887,12 @@ fn domain_secondary_intents(
         frame_task.as_deref(),
         Some("locate_event" | "collect_entity_fates")
     ) {
+        intents.push("event_lookup".to_string());
+        intents.push("text_lookup".to_string());
+    }
+    if frame_task.as_deref() == Some("count_occurrences")
+        && domain_frame_event_type(question_frame).is_some()
+    {
         intents.push("event_lookup".to_string());
         intents.push("text_lookup".to_string());
     }

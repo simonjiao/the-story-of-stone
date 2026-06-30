@@ -403,6 +403,7 @@ fn source_scope_phrase_updates_explicit_later_forty_scope() {
 #[test]
 fn count_question_frame_uses_external_count_terms() {
     let frame = build_question_frame("通灵宝玉丢了几次？").expect("frame");
+    let value = serde_json::to_value(&frame).expect("v2 frame json");
 
     assert_eq!(frame.intent, "count_query");
     assert_eq!(
@@ -419,6 +420,28 @@ fn count_question_frame_uses_external_count_terms() {
             .iter()
             .any(|item| item == "base_text")
     );
+    assert_eq!(value["task"], "count_occurrences");
+    assert_eq!(value["answer_target"]["type"], "count");
+    assert_eq!(value["slots"]["event"]["type"], "loss_or_theft");
+    assert_eq!(value["slots"]["event"]["trigger"], "丢了");
+    assert_eq!(value["slots"]["evidence_focus"], "loss_event");
+}
+
+#[test]
+fn count_question_without_loss_terms_does_not_use_loss_event() {
+    let frame = build_question_frame("通灵宝玉出现了几次？").expect("frame");
+    let value = serde_json::to_value(&frame).expect("v2 frame json");
+
+    assert_eq!(frame.intent, "count_query");
+    assert_eq!(value["task"], "count_occurrences");
+    assert!(matches!(
+        value["slots"].get("event"),
+        None | Some(serde_json::Value::Null)
+    ));
+    assert!(matches!(
+        value["slots"].get("evidence_focus"),
+        None | Some(serde_json::Value::Null)
+    ));
 }
 
 #[test]

@@ -12324,3 +12324,54 @@ fn domain_retrieval_plan_uses_v2_frame_for_death_chapter_location() {
     );
     assert_ne!(plan.retrieval_profile, "commentary");
 }
+
+#[test]
+fn domain_retrieval_plan_uses_loss_event_terms_for_count_frame() {
+    let frame = json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "frame_id": "qf_primary",
+        "original_question": "通灵宝玉丢了几次？",
+        "normalized_question": "通灵宝玉丢了几次？",
+        "task": "count_occurrences",
+        "slots": {
+            "subject": {"type": "character", "name": "通灵宝玉", "aliases": ["通灵玉", "通靈寶玉"], "source": "current_question"},
+            "event": {"type": "loss_or_theft", "trigger": "丢了"},
+            "evidence_focus": "loss_event",
+            "source_scope": {"work": "hongloumeng", "range": "pre_80_base_text_and_commentary"}
+        },
+        "answer_target": {"type": "count"},
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"],
+            "min_answer_basis": 1,
+            "require_claim_evidence_map": true,
+            "allow_navigation_hint_as_answer_basis": false,
+            "citation_granularity": "chapter_or_span",
+            "unsupported_behavior": "fail_closed"
+        },
+        "subquestions": [],
+        "clarification": {"needed": false, "open_slots": [], "question": null}
+    });
+    let plan = domain_retrieval_plan(
+        "通灵宝玉丢了几次？",
+        "base_text",
+        &["base_text".to_string()],
+        Some(&frame),
+    )
+    .expect("domain retrieval plan");
+
+    assert_eq!(plan.primary_intent, "event_lookup");
+    assert_eq!(plan.retrieval_profile, "event");
+    assert!(
+        plan.structured_terms
+            .contains(&"event_type:loss_or_theft".to_string())
+    );
+    assert!(plan.structured_terms.contains(&"良儿偷玉".to_string()));
+    assert!(plan.structured_terms.contains(&"扫雪拾玉".to_string()));
+    assert!(
+        plan.keyword_queries
+            .iter()
+            .any(|query| query.contains("良儿偷玉") && query.contains("扫雪拾玉"))
+    );
+    assert!(plan.routes.contains(&"event".to_string()));
+}

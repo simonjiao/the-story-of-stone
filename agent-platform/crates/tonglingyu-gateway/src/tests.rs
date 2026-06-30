@@ -2098,6 +2098,40 @@ fn query_planner_adapter_maps_person_intro_to_person_recall() {
 }
 
 #[test]
+fn query_planner_count_loss_question_uses_event_recall_terms() {
+    let query = "通灵宝玉丢了几次？";
+    let frame = crate::question_frame::build_question_frame(query).expect("question frame");
+    let frame_value = serde_json::to_value(&frame).expect("v2 frame json");
+    let query_plan = query_plan_from_gateway_policy(
+        query,
+        "base_text",
+        &["base_text".to_string()],
+        Some(&frame_value),
+    )
+    .expect("query plan");
+    let search_plan = RetrieverSearchPlan::for_domain_plan(&query_plan, 8, false);
+
+    assert_eq!(query_plan.primary_intent, "event_lookup");
+    assert_eq!(query_plan.retrieval_profile, "event");
+    assert!(
+        search_plan
+            .retrieval_routes
+            .contains(&"event_lookup".to_string())
+    );
+    assert!(
+        search_plan
+            .structured_terms
+            .contains(&"event_type:loss_or_theft".to_string())
+    );
+    assert!(
+        search_plan
+            .keyword_queries
+            .iter()
+            .any(|query| query.contains("良儿偷玉") && query.contains("扫雪拾玉"))
+    );
+}
+
+#[test]
 fn eval_quality_summary_fails_closed_without_expected_denominator() {
     let quality = EvalQualityAccumulator {
         total_cases: 1,
