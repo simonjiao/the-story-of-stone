@@ -9646,9 +9646,12 @@ fn chapter_location_draft_rejections_are_governed_decisions() {
 fn hard_evidence_rejections_skip_draft_repair() {
     for reason in [
         "coverage_assessment_not_passed",
+        "claim_evidence_ref_outside_package",
+        "claim_evidence_refs_unavailable",
         "draft_claim_ref_focus_mismatch",
-        "draft_claim_ref_text_unsupported",
-        "draft_missing_requested_evidence_type_anchor",
+        "draft_claim_uses_only_supplemental_evidence",
+        "draft_missing_later_forty_boundary",
+        "draft_uses_unscoped_later_forty",
     ] {
         let application = AgentRuntimeContentApplication {
             draft_consumed: false,
@@ -9669,17 +9672,28 @@ fn hard_evidence_rejections_skip_draft_repair() {
 
 #[test]
 fn structural_draft_rejections_trigger_draft_repair() {
-    let application = AgentRuntimeContentApplication {
-        draft_consumed: false,
-        content_used_for_final_answer: false,
-        result_format: "json",
-        rejected_reason: Some("coverage_assessment_status_missing"),
-    };
+    for reason in [
+        "coverage_assessment_status_missing",
+        "draft_claim_exceeds_evidence_boundary",
+        "draft_claim_ref_text_unsupported",
+        "draft_missing_requested_evidence_type_anchor",
+        "draft_exposes_internal_public_term",
+    ] {
+        let application = AgentRuntimeContentApplication {
+            draft_consumed: false,
+            content_used_for_final_answer: false,
+            result_format: "json",
+            rejected_reason: Some(reason),
+        };
 
-    assert!(should_repair_agent_runtime_draft(
-        TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
-        Some(&application),
-    ));
+        assert!(
+            should_repair_agent_runtime_draft(
+                TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork,
+                Some(&application),
+            ),
+            "{reason} should trigger draft repair"
+        );
+    }
 }
 
 #[tokio::test]

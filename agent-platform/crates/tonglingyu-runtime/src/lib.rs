@@ -1414,15 +1414,18 @@ impl TonglingyuRuntimeStore {
             apply_agent_runtime_package_output(&mut workflow, mode);
         let mut agent_runtime_content_application =
             apply_agent_runtime_content_outputs(&mut workflow, mode);
-        let repair_application = agent_runtime_content_application
-            .filter(|application| should_repair_agent_runtime_draft(mode, Some(application)));
-        if let Some(rejected_application) = repair_application {
+        for _ in 0..agent_runtime_draft_repair_attempt_limit() {
+            let repair_application = agent_runtime_content_application
+                .filter(|application| should_repair_agent_runtime_draft(mode, Some(application)));
+            let Some(rejected_application) = repair_application else {
+                break;
+            };
             if let Err(error) = repair_agent_runtime_draft(
                 &mut workflow,
                 &input.profiles,
                 &input.context,
                 mode,
-                runtime,
+                runtime.clone(),
                 &rejected_application,
             )
             .await
@@ -5704,19 +5707,19 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
     )
 }
 
+fn agent_runtime_draft_repair_attempt_limit() -> usize {
+    2
+}
+
 fn agent_runtime_draft_rejection_skips_repair(reason: &str) -> bool {
     matches!(
         reason,
         "coverage_assessment_not_passed"
             | "claim_evidence_ref_outside_package"
             | "claim_evidence_refs_unavailable"
-            | "draft_claim_exceeds_evidence_boundary"
             | "draft_claim_ref_focus_mismatch"
-            | "draft_claim_ref_text_unsupported"
             | "draft_claim_uses_only_supplemental_evidence"
-            | "draft_exposes_internal_public_term"
             | "draft_missing_later_forty_boundary"
-            | "draft_missing_requested_evidence_type_anchor"
             | "draft_uses_unscoped_later_forty"
     )
 }
