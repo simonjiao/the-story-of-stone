@@ -10254,9 +10254,9 @@ fn openai_compatible_mode_allows_later_forty_style_boundary_without_using_later_
 }
 
 #[test]
-fn openai_compatible_mode_rejects_partial_coverage_count_draft() {
+fn openai_compatible_mode_allows_partial_coverage_count_draft_with_supported_claims() {
     let mut workflow = runtime_draft_workflow(
-        vec![sample_card("base_text"), sample_card("commentary")],
+        in_scope_lost_jade_event_cards(),
         ReviewRecord {
             status: "passed".to_string(),
             severity: "none".to_string(),
@@ -10264,6 +10264,8 @@ fn openai_compatible_mode_rejects_partial_coverage_count_draft() {
             summary: "reviewer passed".to_string(),
         },
     );
+    workflow.question = "通灵宝玉丢了几次？".to_string();
+    workflow.package.question = workflow.question.clone();
     let package_id = workflow.package.package_id.clone();
     workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
         serde_json::to_string(&json!({
@@ -10271,10 +10273,10 @@ fn openai_compatible_mode_rejects_partial_coverage_count_draft() {
             "package_id": package_id,
             "source_scope_policy": source_scope_policy_for_question(&workflow.question),
             "draft_candidate": {
-                "draft_answer": "通灵宝玉在前八十回里，通常可明确算作丢失/失而复得的情节主要有两次。",
+                "draft_answer": "就当前证据包，只能确认前八十回正文中有“那一年有一个良儿偷玉”这一处明文线索；脂批另有“甄寶玉送玉”“鳳姐掃雪拾玉”的伏笔线索，不能把它们直接计成正文已发生次数。",
                 "package_id": package_id,
                 "claim_statements": [{
-                    "text": "前八十回里，通灵宝玉可概括为有两次主要的丢失/失而复得情节。",
+                    "text": "前八十回正文中有“那一年有一个良儿偷玉”这一处明文线索。",
                     "evidence_refs": evidence_ids(&workflow.package.cards),
                 }],
             },
@@ -10295,25 +10297,23 @@ fn openai_compatible_mode_rejects_partial_coverage_count_draft() {
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
-            .expect("partial coverage draft rejected");
+            .expect("partial coverage draft should be accepted when claims are supported");
 
-    assert!(!application.draft_consumed);
-    assert_eq!(
-        application.rejected_reason,
-        Some("coverage_assessment_not_passed")
-    );
+    assert!(application.draft_consumed);
+    assert_eq!(application.rejected_reason, None);
     assert_eq!(
         workflow.steps[0].output["agent_runtime_coverage_status"],
         "partial"
     );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
-        "coverage_assessment_not_passed"
+        Value::Null
     );
+    assert!(workflow.final_answer.contains("良儿偷玉"));
 }
 
 #[test]
-fn openai_compatible_mode_rejects_partial_coverage_before_claim_ref_validation() {
+fn openai_compatible_mode_rejects_partial_coverage_with_outside_claim_ref() {
     let mut workflow = runtime_draft_workflow(
         vec![sample_card("base_text"), sample_card("commentary")],
         ReviewRecord {
@@ -10335,7 +10335,7 @@ fn openai_compatible_mode_rejects_partial_coverage_before_claim_ref_validation()
                 "draft_answer": "通灵宝玉失落后，当前可用证据仍不足以回答完整经过。",
                 "package_id": package_id,
                 "claim_statements": [{
-                    "text": "上游报告 coverage=partial 时，claim refs 不再决定是否完成治理。",
+                    "text": "上游报告 coverage=partial 时，claim refs 仍必须属于当前证据包。",
                     "evidence_refs": evidence_refs,
                 }],
             },
@@ -10356,16 +10356,16 @@ fn openai_compatible_mode_rejects_partial_coverage_before_claim_ref_validation()
 
     let application =
         apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
-            .expect("partial coverage rejected before refs");
+            .expect("partial coverage still validates claim refs");
 
     assert!(!application.draft_consumed);
     assert_eq!(
         application.rejected_reason,
-        Some("coverage_assessment_not_passed")
+        Some("claim_evidence_ref_outside_package")
     );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
-        "coverage_assessment_not_passed"
+        "claim_evidence_ref_outside_package"
     );
 }
 

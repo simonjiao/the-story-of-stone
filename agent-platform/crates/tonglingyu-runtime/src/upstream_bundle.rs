@@ -273,25 +273,28 @@ pub(crate) fn extract_upstream_bundle_draft(
         .get("claim_statements")
         .and_then(Value::as_array)
         .map(Vec::len);
-    if coverage_status.as_deref() != Some("passed") {
-        let rejected_reason = if coverage_status.is_some() {
-            "coverage_assessment_not_passed"
-        } else {
-            "coverage_assessment_status_missing"
-        };
-        return UpstreamBundleDraftExtraction {
-            package_id: candidate_package_id,
-            package_id_rebound: bundle_package_id_rebound || candidate_package_id_rebound,
-            observed_bundle_package_id,
-            observed_candidate_package_id,
-            claim_statement_count,
-            coverage_status,
-            evidence_hint_count,
-            retrieval_repair_recommended,
-            retrieval_repair_queries,
-            out_of_scope_hint_count,
-            ..rejected_bundle("json", Some(rejected_reason))
-        };
+    match coverage_status.as_deref() {
+        Some("passed" | "partial") => {}
+        Some(_) | None => {
+            let rejected_reason = if coverage_status.is_some() {
+                "coverage_assessment_not_passed"
+            } else {
+                "coverage_assessment_status_missing"
+            };
+            return UpstreamBundleDraftExtraction {
+                package_id: candidate_package_id,
+                package_id_rebound: bundle_package_id_rebound || candidate_package_id_rebound,
+                observed_bundle_package_id,
+                observed_candidate_package_id,
+                claim_statement_count,
+                coverage_status,
+                evidence_hint_count,
+                retrieval_repair_recommended,
+                retrieval_repair_queries,
+                out_of_scope_hint_count,
+                ..rejected_bundle("json", Some(rejected_reason))
+            };
+        }
     }
     if claim_statement_count.is_none() {
         return UpstreamBundleDraftExtraction {
@@ -659,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_upstream_bundle_still_rejects_partial_coverage_alias() {
+    fn extract_upstream_bundle_accepts_partial_coverage_alias() {
         let expected_policy = source_scope_policy_for_question("通灵玉是什么？");
         let allowed_evidence_ids = BTreeSet::from(["ev-1".to_string()]);
         let result_summary = json!({
@@ -691,10 +694,7 @@ mod tests {
             &allowed_evidence_ids,
         );
 
-        assert_eq!(
-            extraction.rejected_reason,
-            Some("coverage_assessment_not_passed")
-        );
+        assert_eq!(extraction.rejected_reason, None);
         assert_eq!(extraction.coverage_status.as_deref(), Some("partial"));
     }
 
