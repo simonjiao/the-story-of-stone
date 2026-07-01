@@ -9472,12 +9472,7 @@ fn rejected_commentary_draft_returns_retrieved_evidence_answer() {
         workflow.answer_source,
         "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
     );
-    assert!(
-        workflow
-            .final_answer
-            .starts_with("这些材料没有明写具体结局")
-    );
-    assert!(workflow.final_answer.contains("第六支，樂中悲"));
+    assert!(workflow.final_answer.starts_with("具体结局不能确认"));
     assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
     assert!(workflow.final_answer.contains("不能确认"));
     assert!(!workflow.final_answer.contains("未形成最终回答"));
@@ -9528,13 +9523,9 @@ fn rejected_concrete_fate_draft_says_not_found_in_scope() {
         application.rejected_reason,
         Some("draft_claim_exceeds_evidence_boundary")
     );
-    assert!(
-        workflow
-            .final_answer
-            .starts_with("这些脂批来源没有明写问题中的具体说法")
-    );
+    assert!(workflow.final_answer.starts_with("没有。脂批来源没有明写"));
     assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
-    assert!(workflow.final_answer.contains("不能确认问题中的具体说法"));
+    assert!(workflow.final_answer.contains("不能把这些线索说成"));
     assert!(!workflow.final_answer.contains("脂批指出史湘云丧夫"));
     assert!(!workflow.final_answer.starts_with("有。"));
 }

@@ -62,12 +62,11 @@ use question_frame::{
     RelationSupportTerms, attribute_card_support, chapter_location_answer,
     chapter_location_answer_requirement_value, chapter_location_draft_rejection_reason,
     chapter_location_evidence_ids_for_requirements, frame_focus_terms, frame_search_query,
-    question_frame_from_context,
-    relation_draft_rejection_reason, relation_open_object_draft_rejection_reason,
-    relation_open_object_focus_terms, relation_open_object_search_terms,
-    relation_open_object_supported_objects, relation_open_object_text_candidate_names,
-    relation_required_evidence_types, relation_review_issues, relation_support_terms,
-    relation_text_matches_support_terms,
+    question_frame_from_context, relation_draft_rejection_reason,
+    relation_open_object_draft_rejection_reason, relation_open_object_focus_terms,
+    relation_open_object_search_terms, relation_open_object_supported_objects,
+    relation_open_object_text_candidate_names, relation_required_evidence_types,
+    relation_review_issues, relation_support_terms, relation_text_matches_support_terms,
 };
 use upstream_bundle::{
     UPSTREAM_BUNDLE_SCHEMA_VERSION, UpstreamBundleDraftExtraction, evidence_card_is_later_forty,
@@ -16251,6 +16250,9 @@ fn evidence_only_answer_from_package(package: &EvidencePackage) -> Option<String
     if let Some(answer) = evidence_only_loss_count_answer(package) {
         return Some(answer);
     }
+    if let Some(answer) = evidence_only_fate_answer(package) {
+        return Some(answer);
+    }
     let display_cards = evidence_only_answer_cards(package, 4);
     if display_cards.is_empty() {
         return None;
@@ -16360,6 +16362,80 @@ fn evidence_only_loss_count_answer(package: &EvidencePackage) -> Option<String> 
     ))
 }
 
+fn evidence_only_fate_answer(package: &EvidencePackage) -> Option<String> {
+    let question = normalize_text(&package.question);
+    let concrete_family = requested_concrete_fate_family(&question);
+    if concrete_family.is_none() && !evidence_only_answer_is_fate_question(&package.question) {
+        return None;
+    }
+    let display_cards = evidence_only_answer_cards(package, 6);
+    if display_cards.is_empty() {
+        return None;
+    }
+    let stance = evidence_only_answer_stance(package, &display_cards);
+    let subject = evidence_only_fate_subject(package);
+    let has_commentary = display_cards
+        .iter()
+        .any(|card| card.evidence_type == "commentary");
+    let cues = evidence_only_fate_cues(&package.question, &display_cards, concrete_family);
+
+    if let Some(family) = concrete_family {
+        let concrete = concrete_fate_label(&question, family);
+        return match stance {
+            EvidenceOnlyAnswerStance::ExplicitSupported => {
+                let mut answer = format!("可以确认，相关材料直接支持“{subject}{concrete}”。");
+                if !cues.is_empty() {
+                    answer.push_str(&format!("依据是{}。", natural_join(&cues)));
+                }
+                Some(answer)
+            }
+            EvidenceOnlyAnswerStance::DirectlyDenied => {
+                let source = if has_commentary {
+                    "这些脂批来源"
+                } else {
+                    "这些材料"
+                };
+                Some(format!(
+                    "{source}直接否定“{subject}{concrete}”，不能改写成相反结论。"
+                ))
+            }
+            EvidenceOnlyAnswerStance::NotFoundInScope
+            | EvidenceOnlyAnswerStance::InferentialSupported => {
+                let source = if has_commentary {
+                    "脂批来源"
+                } else {
+                    "这些材料"
+                };
+                let mut answer = format!("没有。{source}没有明写“{subject}{concrete}”。");
+                if !cues.is_empty() {
+                    answer.push_str(&format!(
+                        "能看到的只是相关命运线索，比如{}。",
+                        natural_join(&cues)
+                    ));
+                }
+                answer.push_str(&format!("所以不能把这些线索说成“{subject}{concrete}”。"));
+                Some(answer)
+            }
+        };
+    }
+
+    if stance != EvidenceOnlyAnswerStance::InferentialSupported {
+        return None;
+    }
+
+    let mut answer = if has_commentary {
+        format!("具体结局不能确认；脂批来源里有相关线索，但没有明写{subject}的完整结局。")
+    } else {
+        format!("具体结局不能确认；这些材料有相关线索，但没有明写{subject}的完整结局。")
+    };
+    if !cues.is_empty() {
+        answer.push_str(&format!("能直接引用的是{}。", natural_join(&cues)));
+    }
+    answer
+        .push_str("这些线索可以说明悲剧、离散或命运转折意味，但不能确认材料未明写的具体后续情节。");
+    Some(answer)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvidenceOnlyAnswerStance {
     ExplicitSupported,
@@ -16430,6 +16506,179 @@ fn requested_concrete_fate_family(question: &str) -> Option<&'static ConcreteFat
     CONCRETE_FATE_FAMILIES
         .iter()
         .find(|family| evidence_contains_any(question, family.question_terms))
+}
+
+fn concrete_fate_label(question: &str, family: &ConcreteFateFamily) -> String {
+    family
+        .question_terms
+        .iter()
+        .find(|term| question.contains(&normalize_text(term)))
+        .map(|term| match *term {
+            "喪夫" | "丧夫" => "丧夫",
+            "早寡" => "早寡",
+            "夫婿早逝" => "夫婿早逝",
+            "亡夫" => "亡夫",
+            "夫亡" => "夫亡",
+            "寡居" => "寡居",
+            _ => "守寡",
+        })
+        .unwrap_or("具体遭际")
+        .to_string()
+}
+
+fn evidence_only_fate_subject(package: &EvidencePackage) -> String {
+    if let Some(frame) = package
+        .question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame)
+    {
+        if let Some(entity) = frame.character_fate_entity() {
+            return entity.canonical.clone();
+        }
+    }
+    let question = normalize_text(&package.question);
+    for (canonical, aliases) in [
+        (
+            "史湘云",
+            ["史湘云", "史湘雲", "湘云", "湘雲", "史姑娘"].as_slice(),
+        ),
+        ("秦钟", ["秦钟", "秦鐘"].as_slice()),
+    ] {
+        if aliases
+            .iter()
+            .any(|alias| question.contains(&normalize_text(alias)))
+        {
+            return canonical.to_string();
+        }
+    }
+    "这个人物".to_string()
+}
+
+fn evidence_only_fate_cues(
+    question: &str,
+    cards: &[&EvidenceCard],
+    concrete_family: Option<&ConcreteFateFamily>,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut cues = Vec::new();
+    for card in cards {
+        let Some(quote) = evidence_only_fate_quote(question, card, concrete_family) else {
+            continue;
+        };
+        let source = evidence_only_short_source_title(card);
+        let cue = if source.is_empty() {
+            quoted_evidence_only_excerpt(&quote)
+        } else {
+            format!("《{source}》{}", quoted_evidence_only_excerpt(&quote))
+        };
+        if seen.insert(cue.clone()) {
+            cues.push(cue);
+        }
+        if cues.len() >= 2 {
+            break;
+        }
+    }
+    cues
+}
+
+fn evidence_only_fate_quote(
+    question: &str,
+    card: &EvidenceCard,
+    concrete_family: Option<&ConcreteFateFamily>,
+) -> Option<String> {
+    if let Some(family) = concrete_family {
+        for term in family.support_terms {
+            if let Some(quote) = exact_text_window(&card.text, term, 36) {
+                return Some(quote);
+            }
+        }
+    }
+    for cue in [
+        "終久是雲散高唐，水涸湘江",
+        "终久是云散高唐，水涸湘江",
+        "湘江水逝楚雲飛",
+        "湘江水逝楚云飞",
+        "後面又畫幾縷飛雲，一灣逝水",
+        "后面又画几缕飞云，一湾逝水",
+        "襁褓中，父母嘆雙亡",
+        "襁褓中，父母叹双亡",
+    ] {
+        if card.text.contains(cue) {
+            return Some(cue.to_string());
+        }
+    }
+    let excerpt = evidence_only_answer_excerpt(question, card);
+    if excerpt.trim().is_empty() || !evidence_only_fate_excerpt_has_signal(&excerpt) {
+        return None;
+    }
+    Some(trim_text(&excerpt, 80))
+}
+
+fn exact_text_window(text: &str, cue: &str, max_chars: usize) -> Option<String> {
+    if text.contains(cue) {
+        return Some(trim_text_around(text, cue, max_chars));
+    }
+    let normalized_cue = normalize_text(cue);
+    if normalized_cue.trim().is_empty() {
+        return None;
+    }
+    if normalize_text(text).contains(&normalized_cue) {
+        return Some(trim_text_around(text, cue, max_chars));
+    }
+    None
+}
+
+fn evidence_only_fate_excerpt_has_signal(text: &str) -> bool {
+    let text = normalize_text(text);
+    [
+        "判词",
+        "判詞",
+        "樂中悲",
+        "乐中悲",
+        "云散高唐",
+        "雲散高唐",
+        "水涸湘江",
+        "湘江水逝",
+        "楚云飞",
+        "楚雲飛",
+        "飞云",
+        "飛雲",
+        "逝水",
+        "守寡",
+        "丧夫",
+        "喪夫",
+        "姑爷",
+        "姑爺",
+    ]
+    .iter()
+    .any(|term| text.contains(&normalize_text(term)))
+}
+
+fn evidence_only_short_source_title(card: &EvidenceCard) -> String {
+    let title = if card.source_title.trim().is_empty() {
+        card.source_id.trim()
+    } else {
+        card.source_title.trim()
+    };
+    if title.is_empty() {
+        card.block_id.trim().to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+fn natural_join(parts: &[String]) -> String {
+    match parts {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first}，以及{second}"),
+        _ => {
+            let mut joined = parts[..parts.len() - 1].join("，");
+            joined.push_str("，以及");
+            joined.push_str(&parts[parts.len() - 1]);
+            joined
+        }
+    }
 }
 
 fn evidence_contains_any(text: &str, terms: &[&str]) -> bool {
@@ -16608,8 +16857,7 @@ fn evidence_only_answer_intro(
     } else if stance == EvidenceOnlyAnswerStance::InferentialSupported
         && evidence_only_answer_is_fate_question(&package.question)
     {
-        "这些材料没有明写具体结局；能支持的是悲剧、离散或命运转折线索："
-            .to_string()
+        "这些材料没有明写具体结局；能支持的是悲剧、离散或命运转折线索：".to_string()
     } else if has_commentary {
         if stance == EvidenceOnlyAnswerStance::InferentialSupported {
             "可用的脂批来源线索是：".to_string()
