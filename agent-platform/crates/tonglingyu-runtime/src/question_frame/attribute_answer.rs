@@ -92,7 +92,7 @@ fn age_answer(
     let mentions = age_mentions_for_entity(subject, cards, &policy);
     let Some(primary) = mentions.first() else {
         return Some(format!(
-            "就当前证据包看，还没有直接命中能说明{}“{}”的材料；因此不能把当前材料改写成{}结论。",
+            "就这些材料看，还没有直接命中能说明{}“{}”的材料；因此不能把当前材料改写成{}结论。",
             subject.canonical, predicate.label, predicate.label
         ));
     };
@@ -102,7 +102,7 @@ fn age_answer(
             && !policy.rule.trim().is_empty()
         {
             return Some(format!(
-                "推理链条是：先把追问绑定回{}的{}问题；再只看证据包内可追溯的年龄线索；当前最强线索是{}的{}。因此只能把{}说成所问情节附近大约{}上下。因为证据包没有给出生日或精确时点，不能进一步说成精确年龄。",
+                "推理链条是：先把追问绑定回{}的{}问题；再只看这些材料中可追溯的年龄线索；当前最强线索是{}的{}。因此只能把{}说成所问情节附近大约{}上下。因为材料没有给出生日或精确时点，不能进一步说成精确年龄。",
                 subject.canonical,
                 predicate.label,
                 primary.source_title,
@@ -190,7 +190,7 @@ fn age_compare_answer(
                 "两者年龄区间有重叠，不能稳定判断谁更大".to_string()
             };
             Some(format!(
-                "按当前证据包内的年龄线索推算，{}。依据是：{}有{}，{}有{}。这个结论只限于这些年龄线索；若要精确到生日或不同情节时点，还需要更多材料。",
+                "按这些材料中的年龄线索推算，{}。依据是：{}有{}，{}有{}。这个结论只限于这些年龄线索；若要精确到生日或不同情节时点，还需要更多材料。",
                 comparison,
                 subject_age.source_title,
                 subject_age.cue,
@@ -215,7 +215,7 @@ fn age_compare_answer(
             predicate.label
         )),
         (None, None) => Some(format!(
-            "就当前证据包看，还没有同时支持{}和{}“{}”比较的直接材料；因此不能只凭当前命中内容判断谁的{}更大。",
+            "就这些材料看，还没有同时支持{}和{}“{}”比较的直接材料；因此不能只凭当前命中内容判断谁的{}更大。",
             subject.canonical, object.canonical, predicate.label, predicate.label
         )),
     }
@@ -274,12 +274,12 @@ fn generic_attribute_answer(
         });
         if direct_support {
             return Some(format!(
-                "就当前证据包看，已经命中{}和{}的“{}”相关材料，但还缺少能直接完成比较的并列依据；因此不能只凭当前命中内容判断谁的{}更大。",
+                "就这些材料看，已经命中{}和{}的“{}”相关材料，但还缺少能直接完成比较的并列依据；因此不能只凭当前命中内容判断谁的{}更大。",
                 subject.canonical, object.canonical, predicate.label, predicate.label
             ));
         }
         return Some(format!(
-            "就当前证据包看，还没有同时支持{}和{}“{}”比较的直接材料；因此不能只凭当前命中内容判断谁的{}更大。",
+            "就这些材料看，还没有同时支持{}和{}“{}”比较的直接材料；因此不能只凭当前命中内容判断谁的{}更大。",
             subject.canonical, object.canonical, predicate.label, predicate.label
         ));
     }
@@ -288,12 +288,12 @@ fn generic_attribute_answer(
         .any(|card| attribute_card_mentions_entity_and_attribute(subject, predicate, card));
     if direct_support {
         return Some(format!(
-            "就当前证据包看，已经命中{}“{}”相关材料，但还不足以直接抽取稳定结论；需要继续补充能直接说明{}的材料。",
+            "就这些材料看，已经命中{}“{}”相关材料，但还不足以直接抽取稳定结论；需要继续补充能直接说明{}的材料。",
             subject.canonical, predicate.label, predicate.label
         ));
     }
     Some(format!(
-        "就当前证据包看，还没有直接命中能说明{}“{}”的材料；因此不能把当前材料改写成{}结论。",
+        "就这些材料看，还没有直接命中能说明{}“{}”的材料；因此不能把当前材料改写成{}结论。",
         subject.canonical, predicate.label, predicate.label
     ))
 }

@@ -60,7 +60,7 @@ pub(crate) fn compose_entity_intro_answer(
     let candidates = entity_intro_candidates(entity, cards, &policy);
     if candidates.is_empty() {
         return Some(format!(
-            "就当前证据包看，没有命中关于{}的直接材料，不能可靠概括这个人物。",
+            "就这些材料看，没有命中关于{}的直接材料，不能可靠概括这个人物。",
             entity.canonical
         ));
     }
@@ -72,7 +72,7 @@ pub(crate) fn compose_entity_intro_answer(
         .collect::<Vec<_>>();
     if readable.is_empty() {
         return Some(format!(
-            "就当前证据包看，只命中关于{}的过短片段，如{}：{}；这些材料不足以可靠概括这个人物。",
+            "就这些材料看，只命中关于{}的过短片段，如{}：{}；这些材料不足以可靠概括这个人物。",
             entity.canonical, candidates[0].card.source_title, candidates[0].quote
         ));
     }
@@ -101,7 +101,7 @@ pub(crate) fn compose_entity_intro_answer(
     };
 
     Some(format!(
-        "就当前证据包看，{}可以先按命中材料作有边界的介绍：\n{}\n{}",
+        "就这些材料看，{}可以先按命中材料作有边界的介绍：\n{}\n{}",
         entity.canonical, evidence_text, coverage
     ))
 }

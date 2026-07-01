@@ -57,8 +57,8 @@
     "chapter_title_template": "回目是：{chapter_title}。",
     "base_evidence_template": "正文依据可见“{quote}”。",
     "commentary_evidence_template": "脂批可补充说明：{quote}。",
-    "no_evidence_template": "请再明确要定位的情节口径。当前证据包没有命中能把“{event}”定位到具体回目的可用材料，不能改答成人物介绍。",
-    "ambiguous_template": "当前证据包把“{event}”相关线索命中到多个回目：{locations}。请明确你要问的是正面情节发生回目，还是文本中出现/追提该线索的回目。",
+    "no_evidence_template": "请再明确要定位的情节口径。当前材料没有命中能把“{event}”定位到具体回目的可用材料，不能改答成人物介绍。",
+    "ambiguous_template": "当前材料把“{event}”相关线索命中到多个回目：{locations}。请明确你要问的是正面情节发生回目，还是文本中出现/追提该线索的回目。",
     "rule": "For chapter-location questions, answer the chapter number first. Prefer chapter heading/title and direct base-text evidence. Commentary may be visible only when the quote itself explains the location or title relation; do not cite isolated local comments that do not explain what they support."
   },
   "attribute_age": {

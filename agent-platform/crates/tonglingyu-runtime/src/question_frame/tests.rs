@@ -1046,7 +1046,7 @@ fn relation_draft_gate_requires_boundary_when_direct_support_is_missing() {
         relation_draft_rejection_reason(
             Some(&frame),
             &cards,
-            "就当前证据包看，没有直接证据能确认紫鹃服侍过史湘云。"
+            "就这些材料看，没有直接证据能确认紫鹃服侍过史湘云。"
         ),
         None
     );

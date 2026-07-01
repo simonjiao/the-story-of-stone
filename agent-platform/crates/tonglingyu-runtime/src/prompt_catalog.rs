@@ -279,6 +279,8 @@ mod tests {
         assert!(draft.contains(UPSTREAM_BUNDLE_SCHEMA_VERSION));
         assert!(draft.contains("answer_use=supplemental_only"));
         assert!(draft.contains("copy that exact chapter_title"));
+        assert!(draft.contains("draft_answer"));
+        assert!(draft.contains("natural user-facing Chinese"));
         assert!(draft.contains("claim_statements[].text"));
         assert!(draft.contains("locally verifiable"));
         assert!(draft.contains("孤苦无依"));

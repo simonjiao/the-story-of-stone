@@ -373,7 +373,7 @@ pub(crate) fn relation_boundary_answer(
     let predicate = frame.predicate.as_ref()?;
     let object = frame.object.as_ref()?;
     let mut answer = format!(
-        "就当前证据包看，没有直接证据能确认{}与{}之间存在“{}”关系；因此不能确认这是一条已被文本支持的关系。",
+        "就这些材料看，没有直接证据能确认{}与{}之间存在“{}”关系；因此不能确认这是一条已被文本支持的关系。",
         subject.canonical, object.canonical, predicate.label
     );
     if !cards.is_empty() {
@@ -393,7 +393,7 @@ pub(crate) fn relation_open_object_answer(
     let object_candidates = relation_open_object_supported_objects(Some(frame), cards);
     if object_candidates.is_empty() {
         return Some(format!(
-            "就当前证据包看，尚不能从命中材料中抽出明确的{}“{}”对象；需要继续命中同时出现主体、关系和对象的直接材料。",
+            "就这些材料看，尚不能从命中材料中抽出明确的{}“{}”对象；需要继续命中同时出现主体、关系和对象的直接材料。",
             subject.canonical, predicate.label
         ));
     }
@@ -408,7 +408,7 @@ pub(crate) fn relation_open_object_answer(
         })
         .collect::<Vec<_>>();
     Some(format!(
-        "就当前证据包看，可以直接支持的{}“{}”对象包括：{}。其他对象仍需继续检索能同时出现主体、关系和对象的直接材料。",
+        "就这些材料看，可以直接支持的{}“{}”对象包括：{}。其他对象仍需继续检索能同时出现主体、关系和对象的直接材料。",
         subject.canonical,
         predicate.label,
         summaries.join("；")

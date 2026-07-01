@@ -8434,7 +8434,7 @@ fn replay_keeps_package_id_and_review_downgrade() {
     assert!(!answer.contains("pkg-test"));
     assert!(!answer.contains("证据包"));
     assert!(!answer.contains("reviewer"));
-    assert!(answer.contains("检索未返回可追溯证据"));
+    assert!(answer.contains("检索没有返回可核对材料"));
 }
 
 #[test]
@@ -8616,7 +8616,7 @@ fn runtime_workflow_consumes_pre_retrieved_evidence() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
 }
 
@@ -8689,7 +8689,7 @@ fn runtime_workflow_binds_relation_frame_to_retrieval_and_review() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(!workflow.final_answer.contains("没有直接证据"));
     assert!(!workflow.final_answer.contains("不能确认"));
@@ -8748,7 +8748,7 @@ fn runtime_workflow_promotes_relation_direct_support_cards() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(!workflow.final_answer.contains("可以确认"));
     assert!(!workflow.final_answer.contains("袭人服侍过贾母"));
@@ -8807,7 +8807,7 @@ fn runtime_workflow_promotes_open_object_relation_support_cards() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(!workflow.final_answer.contains("袭人先后服侍"));
     assert!(!workflow.final_answer.contains("尚不能"));
@@ -8854,7 +8854,7 @@ fn runtime_workflow_promotes_entity_question_frame_focus_cards() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(!workflow.final_answer.contains("紅樓夢/第003回"));
     assert!(
@@ -8940,7 +8940,7 @@ fn runtime_workflow_keeps_character_fate_evidence_without_slot_answer() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(
         !workflow
@@ -8981,7 +8981,7 @@ fn runtime_workflow_promotes_attribute_support_cards() {
     assert!(
         workflow
             .final_answer
-            .contains("已取得检索证据，但没有生成可用的 evidence-based draft")
+            .contains("已经取回可核对材料，但没有生成可用的证据内回答")
     );
     assert!(!workflow.final_answer.contains("年方五歲"));
     assert!(!workflow.final_answer.contains("还没有直接命中"));
@@ -9164,7 +9164,7 @@ fn openai_compatible_relation_question_rejects_contradiction_without_local_answe
     assert!(
         workflow
             .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+            .contains("生成的回答未通过证据边界检查")
     );
     assert!(!workflow.final_answer.contains("可以确认"));
     assert!(!workflow.final_answer.contains("袭人服侍过贾母"));
@@ -9450,7 +9450,7 @@ fn rejected_commentary_draft_returns_retrieved_evidence_answer() {
     assert!(
         workflow
             .final_answer
-            .starts_with("当前检索到的脂批来源线索如下")
+            .starts_with("可用的脂批来源线索是")
     );
     assert!(workflow.final_answer.contains("第六支，樂中悲"));
     assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
@@ -9506,7 +9506,7 @@ fn rejected_concrete_fate_draft_says_not_found_in_scope() {
     assert!(
         workflow
             .final_answer
-            .starts_with("当前检索到的脂批来源证据未明写问题中的具体说法")
+            .starts_with("这些脂批来源没有明写问题中的具体说法")
     );
     assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
     assert!(workflow.final_answer.contains("不能确认问题中的具体说法"));
@@ -9560,7 +9560,7 @@ fn rejected_later_forty_draft_keeps_explicit_widowhood_evidence_when_requested()
     );
     assert!(workflow.final_answer.contains("姑爺癆病死了"));
     assert!(workflow.final_answer.contains("史妹妹立志守寡"));
-    assert!(workflow.final_answer.contains("直接能支持"));
+    assert!(workflow.final_answer.contains("直接支持"));
     assert!(!workflow.final_answer.contains("不能确认问题中的具体说法"));
 }
 
@@ -9572,7 +9572,7 @@ fn runtime_allows_commentary_question_draft_with_normalized_text_anchor_fragment
 
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "关于史湘云的结局，脂批中的证据呢",
-        "脂批中可见第十五回批语“总写阿凤聪明中的痴人”，但它只能作为当前检索到的脂批线索，不能替代后四十回叙事。",
+        "脂批中可见第十五回批语“总写阿凤聪明中的痴人”，但它只能作为可用的脂批线索，不能替代后四十回叙事。",
         &[commentary],
     );
 
@@ -9658,7 +9658,7 @@ fn runtime_allows_loss_count_draft_that_excludes_related_slot_after_direct_count
 fn runtime_allows_loss_count_draft_using_commentary_foreshadowing_without_later_forty_scope() {
     let rejected = agent_runtime_draft_evidence_boundary_rejection(
         "通灵宝玉丢了几次",
-        "按当前证据包的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
+        "按默认前八十回正文与脂批范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
         &in_scope_lost_jade_event_cards(),
     );
 
@@ -9683,7 +9683,7 @@ fn openai_compatible_mode_accepts_default_scope_draft_using_in_scope_commentary_
         upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "按当前证据包的默认范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
+            "按默认前八十回正文与脂批范围，可以说有两处明确失玉证据：第五十二回良儿偷玉、脂批第二十三回称凤姐扫雪拾玉；另有脂批第十八回伏甄宝玉送玉，属于疑似流转线索。",
             "默认范围内的正文和脂批证据支持两处明确失玉证据，并保留一条疑似流转线索。",
             evidence_ids(&workflow.package.cards),
         )
@@ -9735,8 +9735,8 @@ fn openai_compatible_mode_rejects_user_opt_in_continuation_draft() {
         application.rejected_reason,
         Some("draft_stops_for_user_opt_in")
     );
-    assert!(workflow.final_answer.contains("当前检索到的可追溯证据如下"));
-    assert!(workflow.final_answer.contains("结论只限于上述检索证据"));
+    assert!(workflow.final_answer.contains("可核对的材料主要是"));
+    assert!(workflow.final_answer.contains("回答只能限于这些材料"));
     assert!(!workflow.final_answer.contains("未形成最终回答"));
     assert!(!workflow.final_answer.contains("如果你愿意"));
     assert!(!workflow.final_answer.contains("我可以继续"));
@@ -9934,7 +9934,7 @@ fn openai_compatible_mode_rejects_runtime_draft_when_local_review_downgrades() {
         json!(upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "OpenAI-compatible profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "这条回答来自当前材料中的直接线索。",
             "OpenAI-compatible profile 草稿绑定本地证据包。",
             evidence_ids(&workflow.package.cards),
         ));
@@ -9944,8 +9944,8 @@ fn openai_compatible_mode_rejects_runtime_draft_when_local_review_downgrades() {
             .expect("runtime draft consumed");
     assert!(application.draft_consumed);
     assert!(!application.content_used_for_final_answer);
-    assert!(workflow.draft_answer.contains("OpenAI-compatible profile 草稿"));
-    assert!(!workflow.final_answer.contains("OpenAI-compatible profile 草稿"));
+    assert!(workflow.draft_answer.contains("当前材料"));
+    assert!(!workflow.final_answer.contains("当前材料中的直接线索"));
     assert_eq!(
         workflow.answer_source,
         "agent_runtime_openai_compatible_profile_rejected_by_local_review"
@@ -9976,7 +9976,7 @@ fn openai_compatible_mode_accepts_structured_draft_with_matching_package() {
         json!(upstream_bundle_summary(
             &workflow.question,
             &package_id,
-            "结构化上游草稿：必须引用证据包 pkg-runtime-draft-test。",
+            "结构化上游草稿可以依据当前材料作答。",
             "结构化 claim",
             evidence_ids(&workflow.package.cards),
         ));
@@ -9990,7 +9990,7 @@ fn openai_compatible_mode_accepts_structured_draft_with_matching_package() {
     assert!(application.rejected_reason.is_none());
     assert_eq!(
         workflow.draft_answer,
-        "结构化上游草稿：必须引用证据包 pkg-runtime-draft-test。"
+        "结构化上游草稿可以依据当前材料作答。"
     );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_result_format"],
@@ -10069,7 +10069,7 @@ fn openai_compatible_mode_rejects_plain_text_draft_summary() {
     assert!(
         workflow
             .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+            .contains("生成的回答未通过证据边界检查")
     );
     assert_eq!(
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
@@ -10287,7 +10287,7 @@ fn openai_compatible_mode_allows_partial_coverage_count_draft_with_supported_cla
             "package_id": package_id,
             "source_scope_policy": source_scope_policy_for_question(&workflow.question),
             "draft_candidate": {
-                "draft_answer": "就当前证据包，只能确认前八十回正文中有“那一年有一个良儿偷玉”这一处明文线索；脂批另有“甄寶玉送玉”“鳳姐掃雪拾玉”的伏笔线索，不能把它们直接计成正文已发生次数。",
+                "draft_answer": "前八十回正文能明确确认“那一年有一个良儿偷玉”这一处失玉线索；脂批另有“甄寶玉送玉”“鳳姐掃雪拾玉”的伏笔线索，不能把它们直接计成正文已发生次数。",
                 "package_id": package_id,
                 "claim_statements": [{
                     "text": "前八十回正文中有“那一年有一个良儿偷玉”这一处明文线索。",
@@ -10350,7 +10350,7 @@ fn openai_compatible_mode_allows_not_found_in_scope_count_claim() {
             "package_id": package_id,
             "source_scope_policy": source_scope_policy_for_question(&workflow.question),
             "draft_candidate": {
-                "draft_answer": "根据前八十回正文，通灵宝玉明确丢失过一次。第五十二回平儿提到“那一年有一个良儿偷玉”，这是当前证据包内唯一一次直接记载的丢失事件。",
+                "draft_answer": "根据前八十回正文，通灵宝玉明确丢失过一次。第五十二回平儿提到“那一年有一个良儿偷玉”，这是现有材料里唯一一次直接记载的丢失事件。",
                 "package_id": package_id,
                 "claim_statements": [
                     {
@@ -10928,8 +10928,8 @@ fn runtime_draft_workflow(cards: Vec<EvidenceCard>, review: ReviewRecord) -> Run
     let default_draft_summary = upstream_bundle_summary(
         &package.question,
         &package.package_id,
-        "OpenAI-compatible profile 草稿：必须引用证据包 pkg-runtime-draft-test。",
-        "OpenAI-compatible profile 草稿绑定本地证据包。",
+        "OpenAI-compatible profile 草稿可以依据当前材料作答。",
+        "OpenAI-compatible profile 草稿保留当前材料边界。",
         evidence_ids(&package.cards),
     );
     RuntimeWorkflowOutput {
@@ -11536,7 +11536,7 @@ async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_cove
     assert!(
         workflow
             .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+            .contains("生成的回答未通过证据边界检查")
     );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
@@ -11610,7 +11610,7 @@ async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_clai
     assert!(
         workflow
             .final_answer
-            .contains("基于检索证据的 draft 未通过本地证据边界检查")
+            .contains("生成的回答未通过证据边界检查")
     );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],
@@ -11681,8 +11681,8 @@ async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_draf
         workflow.answer_source,
         "agent_runtime_openai_compatible_profile_rejected_by_local_governance"
     );
-    assert!(workflow.final_answer.contains("当前检索到的可追溯证据如下"));
-    assert!(workflow.final_answer.contains("结论只限于上述检索证据"));
+    assert!(workflow.final_answer.contains("可核对的材料主要是"));
+    assert!(workflow.final_answer.contains("回答只能限于这些材料"));
     assert!(!workflow.final_answer.contains("未形成最终回答"));
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],

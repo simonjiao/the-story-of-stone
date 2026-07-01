@@ -5456,6 +5456,7 @@ fn agent_runtime_draft_rejection_is_governed_decision(reason: &str) -> bool {
             | "claim_evidence_refs_empty"
             | "claim_evidence_ref_invalid"
             | "claim_evidence_ref_outside_package"
+            | "draft_answer_missing"
             | "draft_exposes_internal_public_term"
             | "draft_missing_later_forty_boundary"
             | "draft_missing_requested_evidence_type_anchor"
@@ -16207,16 +16208,16 @@ pub fn enforce_review(draft: String, package: &EvidencePackage) -> String {
 
 fn evidence_based_draft_unavailable_answer(package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
-        return "检索未返回可追溯证据，未形成基于证据的回答。".to_string();
+        return "检索没有返回可核对材料，因此不能可靠回答。".to_string();
     }
-    "已取得检索证据，但没有生成可用的 evidence-based draft，未形成最终回答。".to_string()
+    "已经取回可核对材料，但没有生成可用的证据内回答。".to_string()
 }
 
 fn evidence_based_draft_rejected_answer(package: &EvidencePackage) -> String {
     if package.cards.is_empty() {
         return evidence_based_draft_unavailable_answer(package);
     }
-    "基于检索证据的 draft 未通过本地证据边界检查，未形成最终回答。".to_string()
+    "已经取回可核对材料，但生成的回答未通过证据边界检查，因此不能作为可靠答案给出。".to_string()
 }
 
 fn evidence_based_draft_rejected_answer_for_reason(
@@ -16506,24 +16507,24 @@ fn evidence_only_answer_intro(
     let has_commentary = cards.iter().any(|card| card.evidence_type == "commentary");
     if stance == EvidenceOnlyAnswerStance::NotFoundInScope {
         if has_commentary {
-            "当前检索到的脂批来源证据未明写问题中的具体说法；可见的相关线索如下：".to_string()
+            "这些脂批来源没有明写问题中的具体说法；能作为相关线索的材料是：".to_string()
         } else {
-            "当前检索到的证据未明写问题中的具体说法；可见的相关线索如下：".to_string()
+            "这些材料没有明写问题中的具体说法；能作为相关线索的是：".to_string()
         }
     } else if stance == EvidenceOnlyAnswerStance::DirectlyDenied {
-        "当前检索证据直接否定问题中的具体说法；相关证据如下：".to_string()
+        "这些材料直接否定问题中的具体说法；相关依据是：".to_string()
     } else if has_base && has_commentary {
-        "可以。当前检索到的正文和脂批来源证据如下：".to_string()
+        "可以。相关正文和脂批来源依据是：".to_string()
     } else if has_commentary {
         if stance == EvidenceOnlyAnswerStance::InferentialSupported {
-            "当前检索到的脂批来源线索如下：".to_string()
+            "可用的脂批来源线索是：".to_string()
         } else {
-            "有。当前检索到的脂批来源证据如下：".to_string()
+            "有。脂批来源中能看到这些材料：".to_string()
         }
     } else if evidence_only_answer_is_fate_question(&package.question) {
-        "当前检索到的可追溯命运线索如下：".to_string()
+        "能据以讨论命运走向的材料主要是：".to_string()
     } else {
-        "当前检索到的可追溯证据如下：".to_string()
+        "可核对的材料主要是：".to_string()
     }
 }
 
@@ -16533,13 +16534,13 @@ fn evidence_only_answer_conclusion(
 ) -> String {
     match stance {
         EvidenceOnlyAnswerStance::ExplicitSupported => {
-            "结论只限于上述检索证据直接能支持的范围。".to_string()
+            "因此，回答只能限于这些材料直接支持的范围。".to_string()
         }
         EvidenceOnlyAnswerStance::DirectlyDenied => {
-            "因此，当前证据范围内应按证据中的否定表述作答，不能改写成相反结论。".to_string()
+            "因此，应按这些材料中的否定表述作答，不能改写成相反结论。".to_string()
         }
         EvidenceOnlyAnswerStance::NotFoundInScope => {
-            "因此，在当前检索证据范围内，不能确认问题中的具体说法；只能把上述文本作为相关线索，不能改写成证据未明写的后续情节。"
+            "因此，不能确认问题中的具体说法；只能把这些文本作为相关线索，不能改写成材料未明写的后续情节。"
                 .to_string()
         }
         EvidenceOnlyAnswerStance::InferentialSupported => {
@@ -16547,7 +16548,7 @@ fn evidence_only_answer_conclusion(
                 "据此只能说明这些文本提供了悲剧、离散或命运转折的线索；未在证据中明写的具体后续情节不能确认。"
                     .to_string()
             } else {
-                "结论只限于上述检索证据直接能支持的范围。".to_string()
+                "因此，回答只能限于这些材料直接支持的范围。".to_string()
             }
         }
     }
