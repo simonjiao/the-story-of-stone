@@ -9475,7 +9475,7 @@ fn rejected_commentary_draft_returns_retrieved_evidence_answer() {
     assert!(
         workflow
             .final_answer
-            .starts_with("可用的脂批来源线索是")
+            .starts_with("这些材料没有明写具体结局")
     );
     assert!(workflow.final_answer.contains("第六支，樂中悲"));
     assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));

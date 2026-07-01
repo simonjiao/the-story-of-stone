@@ -16325,7 +16325,15 @@ fn evidence_only_loss_count_answer(package: &EvidencePackage) -> Option<String> 
         let text = normalize_text(&card.text);
         if text.contains("良儿偷玉") || text.contains("良兒偷玉") {
             direct_events.insert("第五十二回良儿偷玉".to_string());
-            lianger_quote.get_or_insert_with(|| evidence_only_answer_excerpt(&package.question, card));
+            lianger_quote.get_or_insert_with(|| {
+                if card.text.contains("那一年有一個良兒偷玉") {
+                    "那一年有一個良兒偷玉".to_string()
+                } else if card.text.contains("那一年有一个良儿偷玉") {
+                    "那一年有一个良儿偷玉".to_string()
+                } else {
+                    evidence_only_answer_excerpt(&package.question, card)
+                }
+            });
         }
         if text.contains("凤姐扫雪拾玉") || text.contains("鳳姐掃雪拾玉") {
             direct_events.insert("脂批第二十三回凤姐扫雪拾玉".to_string());
@@ -16597,6 +16605,11 @@ fn evidence_only_answer_intro(
         "这些材料直接否定问题中的具体说法；相关依据是：".to_string()
     } else if has_base && has_commentary {
         "可以。相关正文和脂批来源依据是：".to_string()
+    } else if stance == EvidenceOnlyAnswerStance::InferentialSupported
+        && evidence_only_answer_is_fate_question(&package.question)
+    {
+        "这些材料没有明写具体结局；能支持的是悲剧、离散或命运转折线索："
+            .to_string()
     } else if has_commentary {
         if stance == EvidenceOnlyAnswerStance::InferentialSupported {
             "可用的脂批来源线索是：".to_string()
