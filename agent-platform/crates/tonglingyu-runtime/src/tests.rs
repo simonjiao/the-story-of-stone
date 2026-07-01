@@ -9858,8 +9858,8 @@ fn rejected_chapter_location_draft_keeps_structured_chapter_answer() {
         application.rejected_reason,
         Some("draft_stops_for_user_opt_in")
     );
-    assert!(workflow.final_answer.contains("第16回"));
-    assert!(workflow.final_answer.contains("蕭然長逝"));
+    assert!(workflow.final_answer.starts_with("秦钟死于《红楼梦》第16回。"));
+    assert!(workflow.final_answer.contains("正文依据可见“說畢，便長歎一聲，蕭然長逝了”。"));
     assert!(!workflow.final_answer.contains("可核对的材料主要是"));
     assert!(!workflow.final_answer.contains("如果你愿意"));
 }

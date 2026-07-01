@@ -344,8 +344,11 @@ fn v2_chapter_location_requirements_use_block_id_chapter_no() {
     assert!(
         requirements["primary_text_cue"]
             .as_str()
-            .is_some_and(|cue| cue.contains("蕭然長逝"))
+            .is_some_and(|cue| cue == "說畢，便長歎一聲，蕭然長逝了")
     );
+    let answer = question_frame_answer(Some(&frame), &[card.clone()]).expect("chapter answer");
+    assert!(answer.starts_with("秦钟死于《红楼梦》第16回。"));
+    assert!(answer.contains("正文依据可见“說畢，便長歎一聲，蕭然長逝了”。"));
     assert_eq!(
         chapter_location_draft_rejection_reason(
             Some(&frame),

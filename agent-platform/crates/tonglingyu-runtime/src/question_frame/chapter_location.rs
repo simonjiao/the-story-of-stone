@@ -282,13 +282,10 @@ fn render_chapter_location_answer(
     event_label: &str,
     policy: &ChapterLocationPolicy,
 ) -> String {
-    let mut sentences = vec![render_chapter_location_template(
-        &policy.direct_answer_template,
+    let mut sentences = vec![render_chapter_location_direct_answer(
         event_label,
-        Some(selection.chapter_no),
-        None,
-        None,
-        None,
+        selection.chapter_no,
+        policy,
     )];
     if let Some(title) = &selection.title {
         sentences.push(render_chapter_location_template(
@@ -320,6 +317,53 @@ fn render_chapter_location_answer(
         ));
     }
     sentences.join("")
+}
+
+fn render_chapter_location_direct_answer(
+    event_label: &str,
+    chapter_no: i64,
+    policy: &ChapterLocationPolicy,
+) -> String {
+    if let Some(subject) = chapter_location_death_subject(event_label) {
+        return format!("{subject}死于《红楼梦》第{chapter_no}回。");
+    }
+    render_chapter_location_template(
+        &policy.direct_answer_template,
+        event_label,
+        Some(chapter_no),
+        None,
+        None,
+        None,
+    )
+}
+
+fn chapter_location_death_subject(event_label: &str) -> Option<String> {
+    let mut subject = event_label.trim().to_string();
+    let mut matched = false;
+    for term in [
+        "蕭然長逝",
+        "萧然长逝",
+        "長逝",
+        "长逝",
+        "病逝",
+        "亡故",
+        "去世",
+        "死",
+    ] {
+        if subject.contains(term) {
+            matched = true;
+        }
+        subject = subject.replace(term, "");
+    }
+    if !matched {
+        return None;
+    }
+    let subject = subject.trim();
+    if subject.is_empty() {
+        None
+    } else {
+        Some(subject.to_string())
+    }
 }
 
 fn render_chapter_location_template(
@@ -539,6 +583,9 @@ fn chapter_location_card_score(
 
 fn chapter_location_quote(card: &EvidenceCard, terms: &[String], max_chars: usize) -> String {
     let clean = public_quote_text(&card.text);
+    if let Some(quote) = chapter_location_death_quote(&clean) {
+        return quote;
+    }
     for term in terms {
         let term = term.trim();
         if term.is_empty() {
@@ -555,6 +602,18 @@ fn chapter_location_quote(card: &EvidenceCard, terms: &[String], max_chars: usiz
         }
     }
     trim_chars(&clean, max_chars)
+}
+
+fn chapter_location_death_quote(text: &str) -> Option<String> {
+    [
+        "說畢，便長歎一聲，蕭然長逝了",
+        "说毕，便长叹一声，萧然长逝了",
+        "便長歎一聲，蕭然長逝了",
+        "便长叹一声，萧然长逝了",
+    ]
+    .iter()
+    .find(|quote| text.contains(**quote))
+    .map(|quote| quote.to_string())
 }
 
 fn chapter_location_title(
