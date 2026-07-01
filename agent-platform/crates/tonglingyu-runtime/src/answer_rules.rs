@@ -128,17 +128,11 @@ pub(crate) struct ChapterLocationPolicy {
     pub(crate) max_title_chars: usize,
     pub(crate) dominant_chapter_score_margin: i64,
     pub(crate) weak_mention_markers: Vec<String>,
-    #[cfg(test)]
     pub(crate) direct_answer_template: String,
-    #[cfg(test)]
     pub(crate) chapter_title_template: String,
-    #[cfg(test)]
     pub(crate) base_evidence_template: String,
-    #[cfg(test)]
     pub(crate) commentary_evidence_template: String,
-    #[cfg(test)]
     pub(crate) no_evidence_template: String,
-    #[cfg(test)]
     pub(crate) ambiguous_template: String,
     pub(crate) rule: String,
 }
@@ -211,17 +205,11 @@ pub(crate) fn chapter_location_policy() -> Result<ChapterLocationPolicy> {
         max_title_chars: rules.max_title_chars,
         dominant_chapter_score_margin: rules.dominant_chapter_score_margin,
         weak_mention_markers: rules.weak_mention_markers,
-        #[cfg(test)]
         direct_answer_template: rules.direct_answer_template,
-        #[cfg(test)]
         chapter_title_template: rules.chapter_title_template,
-        #[cfg(test)]
         base_evidence_template: rules.base_evidence_template,
-        #[cfg(test)]
         commentary_evidence_template: rules.commentary_evidence_template,
-        #[cfg(test)]
         no_evidence_template: rules.no_evidence_template,
-        #[cfg(test)]
         ambiguous_template: rules.ambiguous_template,
         rule: rules.rule,
     })

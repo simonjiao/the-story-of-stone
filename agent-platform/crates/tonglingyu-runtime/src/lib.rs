@@ -59,9 +59,10 @@ use governance_rules::{
 #[cfg(test)]
 use question_frame::question_frame_answer;
 use question_frame::{
-    RelationSupportTerms, attribute_card_support, chapter_location_answer_requirement_value,
-    chapter_location_draft_rejection_reason, chapter_location_evidence_ids_for_requirements,
-    frame_focus_terms, frame_search_query, question_frame_from_context,
+    RelationSupportTerms, attribute_card_support, chapter_location_answer,
+    chapter_location_answer_requirement_value, chapter_location_draft_rejection_reason,
+    chapter_location_evidence_ids_for_requirements, frame_focus_terms, frame_search_query,
+    question_frame_from_context,
     relation_draft_rejection_reason, relation_open_object_draft_rejection_reason,
     relation_open_object_focus_terms, relation_open_object_search_terms,
     relation_open_object_supported_objects, relation_open_object_text_candidate_names,
@@ -16243,6 +16244,9 @@ fn agent_runtime_rejection_allows_evidence_only_answer(reason: &str) -> bool {
 }
 
 fn evidence_only_answer_from_package(package: &EvidencePackage) -> Option<String> {
+    if let Some(answer) = evidence_only_chapter_location_answer(package) {
+        return Some(answer);
+    }
     let display_cards = evidence_only_answer_cards(package, 4);
     if display_cards.is_empty() {
         return None;
@@ -16268,6 +16272,27 @@ fn evidence_only_answer_from_package(package: &EvidencePackage) -> Option<String
     answer.push_str("\n\n");
     answer.push_str(&evidence_only_answer_conclusion(package, stance));
     Some(answer)
+}
+
+fn evidence_only_chapter_location_answer(package: &EvidencePackage) -> Option<String> {
+    let frame = package
+        .question_frame
+        .as_ref()
+        .and_then(question_frame::parse_runtime_question_frame)?;
+    if !frame.is_chapter_location() {
+        return None;
+    }
+    let basis_ids = evidence_only_answer_basis_ids(package);
+    let cards = package
+        .cards
+        .iter()
+        .filter(|card| evidence_only_answer_card_allowed(card, &basis_ids))
+        .cloned()
+        .collect::<Vec<_>>();
+    if cards.is_empty() {
+        return None;
+    }
+    chapter_location_answer(Some(&frame), &cards)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

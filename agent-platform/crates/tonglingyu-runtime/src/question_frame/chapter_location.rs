@@ -39,7 +39,6 @@ struct ChapterLocationSelection<'a> {
     support_count: usize,
 }
 
-#[cfg(test)]
 pub(crate) fn chapter_location_answer(
     frame: Option<&RuntimeQuestionFrame>,
     cards: &[EvidenceCard],
@@ -257,7 +256,6 @@ fn chapter_location_event_label(frame: &RuntimeQuestionFrame, terms: &[String]) 
     event
 }
 
-#[cfg(test)]
 fn ambiguous_chapter_location_answer(
     selections: &[ChapterLocationSelection<'_>],
     event_label: &str,
@@ -279,7 +277,6 @@ fn ambiguous_chapter_location_answer(
     )
 }
 
-#[cfg(test)]
 fn render_chapter_location_answer(
     selection: &ChapterLocationSelection<'_>,
     event_label: &str,
@@ -325,7 +322,6 @@ fn render_chapter_location_answer(
     sentences.join("")
 }
 
-#[cfg(test)]
 fn render_chapter_location_template(
     template: &str,
     event: &str,
@@ -345,7 +341,6 @@ fn render_chapter_location_template(
         .replace("{locations}", locations.unwrap_or(""))
 }
 
-#[cfg(test)]
 fn chapter_location_selection_label(selection: &ChapterLocationSelection<'_>) -> String {
     if let Some(title) = &selection.title {
         format!("第{}回（{}）", selection.chapter_no, title)

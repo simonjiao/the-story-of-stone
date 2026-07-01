@@ -12,8 +12,8 @@ mod attribute_answer;
 mod chapter_location;
 
 pub(crate) use chapter_location::{
-    chapter_location_answer_requirement_value, chapter_location_draft_rejection_reason,
-    chapter_location_evidence_ids_for_requirements,
+    chapter_location_answer, chapter_location_answer_requirement_value,
+    chapter_location_draft_rejection_reason, chapter_location_evidence_ids_for_requirements,
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RelationSupportTerms {

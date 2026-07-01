@@ -715,6 +715,31 @@ fn lindaiyu_character_fate_question_frame_value() -> Value {
     })
 }
 
+fn qinzhong_death_chapter_question_frame_value() -> Value {
+    json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "frame_id": "qf_primary",
+        "original_question": "秦钟是第几回死的？",
+        "normalized_question": "秦钟是第几回死的？",
+        "task": "locate_event",
+        "slots": {
+            "subject": {"type": "character", "name": "秦钟", "aliases": ["秦鐘"], "source": "current_question"},
+            "event": {"type": "death", "trigger": "死", "aliases": ["長逝", "蕭然長逝"]},
+            "source_scope": {"work": "hongloumeng", "range": "pre_80_base_text_and_commentary"}
+        },
+        "answer_target": {"type": "chapter_no"},
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"],
+            "min_answer_basis": 1,
+            "allow_navigation_hint_as_answer_basis": false
+        },
+        "confidence": 0.91,
+        "needs_clarification": false,
+        "clarification_question": null
+    })
+}
+
 #[async_trait]
 impl RuntimeClient for CalibrationJudgeRuntimeClient {
     async fn execute_run(&self, _input: RuntimeRunInput) -> CoreResult<RuntimeOutput> {
@@ -9744,6 +9769,54 @@ fn openai_compatible_mode_rejects_user_opt_in_continuation_draft() {
         workflow.steps[0].output["agent_runtime_draft_rejected_reason"],
         "draft_stops_for_user_opt_in"
     );
+}
+
+#[test]
+fn rejected_chapter_location_draft_keeps_structured_chapter_answer() {
+    let mut card = sample_card("base_text");
+    card.evidence_id = "ev-qinzhong-live-chapter-location".to_string();
+    card.source_title = "秦钟劝宝玉立志后萧然长逝".to_string();
+    card.block_id = "hlm120.c016.p0023.seg0003".to_string();
+    card.text = "秦鐘道：“并無別話。以前你我見識自為高過世人，我今日才知自誤了。以後還該立志功名，以榮耀顯達為是。”說畢，便長歎一聲，蕭然長逝了。"
+        .to_string();
+    card.support_scope = "knownledge retriever EvidencePack 命中；projection=answer_basis"
+        .to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![card],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "秦钟是第几回死的？".to_string();
+    workflow.package.question = workflow.question.clone();
+    workflow.package.question_frame = Some(qinzhong_death_chapter_question_frame_value());
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "秦钟死于第十六回。如果你愿意，我可以继续补充相关原文。",
+            "秦钟在第十六回蕭然長逝。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+            .expect("chapter-location evidence-only answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_stops_for_user_opt_in")
+    );
+    assert!(workflow.final_answer.contains("第16回"));
+    assert!(workflow.final_answer.contains("蕭然長逝"));
+    assert!(!workflow.final_answer.contains("可核对的材料主要是"));
+    assert!(!workflow.final_answer.contains("如果你愿意"));
 }
 
 #[test]
