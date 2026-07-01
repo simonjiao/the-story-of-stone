@@ -46,6 +46,13 @@ fn default_catalog_drives_draft_boundary_terms() {
         .expect("unsupported source action terms load")
     );
     assert!(
+        draft_has_unsupported_term_without_evidence(
+            "脂批对此有直接评论，暗示她幼年孤苦、夫妻分离、命运凋零，并点明悲剧宿命。",
+            "第六支，樂中悲：終久是雲散高唐，水涸湘江。"
+        )
+        .expect("unsupported fate paraphrase terms load")
+    );
+    assert!(
         !draft_has_unsupported_term_without_evidence(
             "脂批来源中可见《乐中悲》曲文。",
             "第六支，樂中悲：終久是雲散高唐，水涸湘江。"

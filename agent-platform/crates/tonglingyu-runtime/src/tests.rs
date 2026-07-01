@@ -9483,6 +9483,60 @@ fn rejected_commentary_draft_returns_retrieved_evidence_answer() {
 }
 
 #[test]
+fn rejected_overinterpreted_fate_draft_returns_natural_evidence_answer() {
+    let mut song = sample_card("commentary");
+    song.evidence_id = "ev-xiangyun-song-overinterpretation".to_string();
+    song.source_title = "乐中悲".to_string();
+    song.support_scope = "knownledge retriever EvidencePack 命中；projection=answer_basis".to_string();
+    song.text = "第六支，樂中悲：襁褓中，父母嘆雙亡。終久是雲散高唐，水涸湘江。這是塵寰中消長數應當，何必枉悲傷。".to_string();
+    let mut judgement = sample_card("commentary");
+    judgement.evidence_id = "ev-xiangyun-judgement-overinterpretation".to_string();
+    judgement.source_title = "正册湘云判词".to_string();
+    judgement.support_scope =
+        "knownledge retriever EvidencePack 命中；projection=answer_basis".to_string();
+    judgement.text = "後面又畫幾縷飛雲，一灣逝水。其詞曰：富貴又何為？襁褓之間父母違；展眼弔斜暉，湘江水逝楚雲飛。".to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![song, judgement],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "史湘云的结局是什么？脂批里是否有证据？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        upstream_bundle_summary(
+            &workflow.question,
+            &package_id,
+            "史湘云的结局在前八十回中并未明确写出，但第五回中她的判词和《乐中悲》曲提供了悲剧性暗示。脂批对此有直接评论，指出“襁褓中，父母叹双亡”等句预示了她幼年孤苦，而“终久是云散高唐，水涸湘江”则暗示了夫妻分离、命运凋零的结局。脂批还提到“尘寰中消长数应当，何必枉悲伤”，进一步点明其悲剧宿命。",
+            "《乐中悲》写“终久是云散高唐，水涸湘江”。",
+            evidence_ids(&workflow.package.cards),
+        )
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+            .expect("overinterpreted fate draft rejected with evidence-only answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("draft_claim_exceeds_evidence_boundary")
+    );
+    assert!(workflow.final_answer.starts_with("具体结局不能确认"));
+    assert!(workflow.final_answer.contains("終久是雲散高唐，水涸湘江"));
+    assert!(workflow.final_answer.contains("湘江水逝楚雲飛"));
+    assert!(!workflow.final_answer.contains("脂批对此有直接评论"));
+    assert!(!workflow.final_answer.contains("幼年孤苦"));
+    assert!(!workflow.final_answer.contains("夫妻分离"));
+    assert!(!workflow.final_answer.contains("命运凋零"));
+    assert!(!workflow.final_answer.contains("悲剧宿命"));
+}
+
+#[test]
 fn rejected_concrete_fate_draft_says_not_found_in_scope() {
     let mut commentary = sample_card("commentary");
     commentary.evidence_id = "ev-xiangyun-commentary-song-not-found".to_string();
