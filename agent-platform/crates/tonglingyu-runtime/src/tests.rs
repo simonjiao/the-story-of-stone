@@ -9820,6 +9820,68 @@ fn rejected_chapter_location_draft_keeps_structured_chapter_answer() {
 }
 
 #[test]
+fn coverage_insufficient_loss_count_draft_uses_retrieved_count_evidence() {
+    let mut lianger = sample_card("base_text");
+    lianger.evidence_id = "ev-lianger-count-answer".to_string();
+    lianger.source_title = "第052回｜正文片段".to_string();
+    lianger.text = "平兒道：“寶玉是偏在你們身上留心用意，爭胜要強的，那一年有一個良兒偷玉，剛冷了一二年間，還有人提起來趁願。”"
+        .to_string();
+    lianger.support_scope = "knownledge retriever EvidencePack 命中；projection=answer_basis"
+        .to_string();
+    let mut workflow = runtime_draft_workflow(
+        vec![lianger],
+        ReviewRecord {
+            status: "passed".to_string(),
+            severity: "none".to_string(),
+            issues: vec![],
+            summary: "reviewer passed".to_string(),
+        },
+    );
+    workflow.question = "通灵宝玉丢了几次？".to_string();
+    workflow.package.question = workflow.question.clone();
+    let package_id = workflow.package.package_id.clone();
+    workflow.steps[0].agent_runtime.as_mut().unwrap()["result_summary"] = json!(
+        serde_json::to_string(&json!({
+            "schema_version": UPSTREAM_BUNDLE_SCHEMA_VERSION,
+            "package_id": package_id,
+            "source_scope_policy": source_scope_policy_for_question(&workflow.question),
+            "draft_candidate": {
+                "draft_answer": "这些材料不足以回答通灵宝玉丢了几次。",
+                "package_id": package_id,
+                "claim_statements": [{
+                    "text": "前八十回正文有“那一年有一个良儿偷玉”线索。",
+                    "stance": "explicit_supported",
+                    "certainty": "certain",
+                    "evidence_refs": evidence_ids(&workflow.package.cards),
+                }],
+            },
+            "coverage_assessment": {
+                "status": "insufficient",
+                "missing_in_scope_slots": ["count_scope"],
+                "out_of_scope_slots": [],
+            },
+            "evidence_hints": [],
+            "retrieval_repair": {"recommended": false, "queries": []},
+            "out_of_scope_hints": [],
+        }))
+        .expect("upstream bundle serializes")
+    );
+
+    let application =
+        apply_agent_runtime_content_outputs(&mut workflow, TonglingyuAgentRuntimeMode::OpenAiCompatibleNetwork)
+            .expect("coverage-insufficient evidence-only answer");
+
+    assert!(!application.draft_consumed);
+    assert_eq!(
+        application.rejected_reason,
+        Some("coverage_assessment_not_passed")
+    );
+    assert!(workflow.final_answer.contains("明确丢失过一次"));
+    assert!(workflow.final_answer.contains("良兒偷玉") || workflow.final_answer.contains("良儿偷玉"));
+    assert!(!workflow.final_answer.contains("生成的回答未通过证据边界检查"));
+}
+
+#[test]
 fn chapter_location_draft_rejections_are_governed_decisions() {
     assert!(agent_runtime_draft_rejection_is_governed_decision(
         "chapter_location_chapter_number_missing"
@@ -11609,7 +11671,7 @@ async fn openai_compatible_workflow_rejects_draft_without_local_answer_when_cove
     assert!(
         workflow
             .final_answer
-            .contains("生成的回答未通过证据边界检查")
+            .contains("可核对的材料主要是")
     );
     assert_eq!(
         workflow.agent_runtime_summary["profile_execution_status"],

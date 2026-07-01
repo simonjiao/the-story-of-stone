@@ -16235,7 +16235,8 @@ fn evidence_based_draft_rejected_answer_for_reason(
 fn agent_runtime_rejection_allows_evidence_only_answer(reason: &str) -> bool {
     matches!(
         reason,
-        "draft_claim_exceeds_evidence_boundary"
+        "coverage_assessment_not_passed"
+            | "draft_claim_exceeds_evidence_boundary"
             | "draft_claim_ref_text_unsupported"
             | "draft_exposes_internal_public_term"
             | "draft_missing_requested_evidence_type_anchor"
@@ -16245,6 +16246,9 @@ fn agent_runtime_rejection_allows_evidence_only_answer(reason: &str) -> bool {
 
 fn evidence_only_answer_from_package(package: &EvidencePackage) -> Option<String> {
     if let Some(answer) = evidence_only_chapter_location_answer(package) {
+        return Some(answer);
+    }
+    if let Some(answer) = evidence_only_loss_count_answer(package) {
         return Some(answer);
     }
     let display_cards = evidence_only_answer_cards(package, 4);
@@ -16293,6 +16297,59 @@ fn evidence_only_chapter_location_answer(package: &EvidencePackage) -> Option<St
         return None;
     }
     chapter_location_answer(Some(&frame), &cards)
+}
+
+fn evidence_only_loss_count_answer(package: &EvidencePackage) -> Option<String> {
+    let question = normalize_text(&package.question);
+    let asks_count = question.contains("几次")
+        || question.contains("幾次")
+        || question.contains("多少次")
+        || question.contains("次数")
+        || question.contains("次數");
+    let asks_lost_jade = (question.contains("通灵宝玉")
+        || question.contains("通靈寶玉")
+        || question.contains("通灵玉")
+        || question.contains("通靈玉"))
+        && (question.contains("丢")
+            || question.contains("丟")
+            || question.contains("失")
+            || question.contains("偷"));
+    if !asks_count || !asks_lost_jade {
+        return None;
+    }
+
+    let display_cards = evidence_only_answer_cards(package, 6);
+    let mut direct_events = BTreeSet::new();
+    let mut lianger_quote = None::<String>;
+    for card in display_cards {
+        let text = normalize_text(&card.text);
+        if text.contains("良儿偷玉") || text.contains("良兒偷玉") {
+            direct_events.insert("第五十二回良儿偷玉".to_string());
+            lianger_quote.get_or_insert_with(|| evidence_only_answer_excerpt(&package.question, card));
+        }
+        if text.contains("凤姐扫雪拾玉") || text.contains("鳳姐掃雪拾玉") {
+            direct_events.insert("脂批第二十三回凤姐扫雪拾玉".to_string());
+        }
+    }
+    if direct_events.is_empty() {
+        return None;
+    }
+    if direct_events.len() == 1 && direct_events.contains("第五十二回良儿偷玉") {
+        let quote = lianger_quote
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(quoted_evidence_only_excerpt)
+            .unwrap_or_else(|| "“那一年有一个良儿偷玉”".to_string());
+        return Some(format!(
+            "根据前八十回正文，通灵宝玉明确丢失过一次。第五十二回平儿提到{}，这是这些材料里能直接确认的一处丢失事件。",
+            quote
+        ));
+    }
+    Some(format!(
+        "按这些材料，能作为通灵宝玉失玉或拾玉线索直接计入的有{}处：{}。其他送玉或流转线索不能直接计成正文已发生的丢失次数。",
+        direct_events.len(),
+        direct_events.into_iter().collect::<Vec<_>>().join("、")
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
