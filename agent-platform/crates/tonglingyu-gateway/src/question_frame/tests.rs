@@ -257,8 +257,9 @@ fn evidence_followup_frame_preserves_subject_and_commentary_scope() {
 
 #[test]
 fn evidence_frame_requires_base_text_when_user_asks_original_text_and_commentary() {
-    let frame = build_question_frame("史湘云的判词和红楼梦曲能说明她的结局吗？结合原文和脂批说明。")
-        .expect("frame");
+    let frame =
+        build_question_frame("史湘云的判词和红楼梦曲能说明她的结局吗？结合原文和脂批说明。")
+            .expect("frame");
     let value = serde_json::to_value(&frame).expect("v2 frame json");
 
     assert_eq!(frame.intent, "evidence_query");
@@ -577,4 +578,30 @@ fn death_chapter_question_serializes_as_v2_locate_event_frame() {
         value["evidence_contract"]["supporting_types"],
         serde_json::json!(["commentary"])
     );
+}
+
+#[test]
+fn other_death_chapter_questions_share_locate_event_frame_shape() {
+    for (question, subject) in [
+        ("晴雯是第几回死的", "晴雯"),
+        ("林黛玉是第几回死的", "林黛玉"),
+    ] {
+        let frame = build_question_frame(question).expect("frame");
+        let value = serde_json::to_value(&frame).expect("v2 frame json");
+
+        assert_eq!(value["task"], serde_json::json!("locate_event"));
+        assert_eq!(
+            value["slots"]["subject"]["name"],
+            serde_json::json!(subject)
+        );
+        assert_eq!(value["slots"]["event"]["type"], serde_json::json!("death"));
+        assert_eq!(
+            value["answer_target"]["type"],
+            serde_json::json!("chapter_no")
+        );
+        assert_eq!(
+            value["evidence_contract"]["required_types"],
+            serde_json::json!(["base_text"])
+        );
+    }
 }

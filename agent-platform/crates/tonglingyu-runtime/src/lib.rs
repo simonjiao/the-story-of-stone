@@ -18120,6 +18120,16 @@ fn domain_frame_structured_terms(question_frame: Option<&Value>) -> Vec<String> 
         return Vec::new();
     };
     let mut terms = Vec::new();
+    if let Some(answer_target) = domain_frame_answer_target(question_frame) {
+        terms.push(format!("answer_target:{answer_target}"));
+        if answer_target == "chapter_no" {
+            terms.push("所在章节".to_string());
+            terms.push("回目".to_string());
+        }
+    }
+    if let Some(task) = domain_frame_task(question_frame) {
+        terms.push(format!("task:{task}"));
+    }
     if let Some(slots) = frame.get("slots") {
         for key in ["subject", "object"] {
             if let Some(name) = slots
@@ -18138,9 +18148,12 @@ fn domain_frame_structured_terms(question_frame: Option<&Value>) -> Vec<String> 
             terms.push(format!("event_type:{event_type}"));
             if event_type == "death" {
                 terms.extend(
-                    ["死亡", "病逝", "去世", "亡故", "夭亡"]
-                        .iter()
-                        .map(|term| (*term).to_string()),
+                    [
+                        "死亡", "病逝", "去世", "亡故", "夭亡", "夭逝", "临终", "臨終", "临死",
+                        "臨死", "咽气", "咽氣", "死讯", "死訊", "长逝", "長逝",
+                    ]
+                    .iter()
+                    .map(|term| (*term).to_string()),
                 );
             } else if event_type == "loss_or_theft" {
                 terms.extend(
@@ -18171,16 +18184,6 @@ fn domain_frame_structured_terms(question_frame: Option<&Value>) -> Vec<String> 
         if let Some(focus) = slots.get("evidence_focus").and_then(Value::as_str) {
             terms.push(format!("evidence_focus:{focus}"));
         }
-    }
-    if let Some(answer_target) = domain_frame_answer_target(question_frame) {
-        terms.push(format!("answer_target:{answer_target}"));
-        if answer_target == "chapter_no" {
-            terms.push("所在章节".to_string());
-            terms.push("回目".to_string());
-        }
-    }
-    if let Some(task) = domain_frame_task(question_frame) {
-        terms.push(format!("task:{task}"));
     }
     domain_dedupe_limited(terms, DOMAIN_MAX_PLAN_TERMS)
 }
@@ -18383,6 +18386,13 @@ fn domain_planner_keyword_queries(
             "通灵宝玉 失玉 偷玉 拾玉 送玉".to_string(),
         ]);
     }
+    if domain_terms_include_death_event(terms) {
+        queries.extend([
+            format!("{query} 临终 咽气 死讯"),
+            format!("{query} 長逝 咽氣 死訊"),
+            format!("{query} 遗体 焚化 祭奠"),
+        ]);
+    }
     if !terms.is_empty() {
         queries.push(terms.join(" "));
     }
@@ -18402,6 +18412,13 @@ fn domain_terms_include_loss_event(terms: &[String]) -> bool {
         let normalized = term.trim().replace('-', "_");
         normalized.eq_ignore_ascii_case("event_type:loss_or_theft")
             || normalized.eq_ignore_ascii_case("evidence_focus:loss_event")
+    })
+}
+
+fn domain_terms_include_death_event(terms: &[String]) -> bool {
+    terms.iter().any(|term| {
+        let normalized = term.trim().replace('-', "_");
+        normalized.eq_ignore_ascii_case("event_type:death")
     })
 }
 

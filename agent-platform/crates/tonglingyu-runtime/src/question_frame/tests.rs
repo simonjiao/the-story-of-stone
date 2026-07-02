@@ -360,6 +360,109 @@ fn v2_chapter_location_requirements_use_block_id_chapter_no() {
 }
 
 #[test]
+fn death_chapter_answer_layers_qingwen_occurrence_and_confirmation() {
+    let frame = parse_runtime_question_frame(&json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "task": "locate_event",
+        "normalized_question": "晴雯是第几回死的？",
+        "answer_target": {"type": "chapter_no"},
+        "slots": {
+            "subject": {"name": "晴雯", "aliases": ["晴雯"]},
+            "event": {"type": "death", "trigger": "死的"},
+            "object": null,
+            "relation": null,
+            "attribute": null
+        },
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"]
+        }
+    }))
+    .expect("v2 frame");
+    let mut occurrence = card_with_source_text(
+        "紅樓夢/第077回",
+        "寶玉至五更方睡去時，只見晴雯從外頭走來，仍是往日形景，進來笑向寶玉道：“你們好生過罷，我從此就別過了。”說畢，翻身便走。寶玉哭了，說道：“晴雯死了。”",
+    );
+    occurrence.evidence_id = "ev-qingwen-c77-death".to_string();
+    occurrence.block_id = "hlm120.c077.p0021.seg0001".to_string();
+    let mut confirmation = card_with_source_text(
+        "紅樓夢/第078回",
+        "小丫頭道：“果然是未正二刻他咽了氣。”寶玉意為停柩在內，誰知他哥嫂見他一咽氣便回了進去，王夫人又命即刻送到外頭焚化了罷。",
+    );
+    confirmation.evidence_id = "ev-qingwen-c78-confirmed".to_string();
+    confirmation.block_id = "hlm120.c078.p0016.seg0001".to_string();
+
+    let requirements = chapter_location_answer_requirement_value(
+        Some(&frame),
+        &[confirmation.clone(), occurrence.clone()],
+    )
+    .expect("requirements");
+    assert_eq!(requirements["must_answer_chapter_no"], json!(77));
+    assert_eq!(
+        requirements["answer_shape"],
+        json!("death_occurrence_chapter_first_then_confirmation_boundary")
+    );
+    assert_eq!(requirements["confirmation_chapter_no"], json!(78));
+
+    let answer = question_frame_answer(Some(&frame), &[confirmation.clone(), occurrence.clone()])
+        .expect("chapter answer");
+    assert!(answer.contains("晴雯的死亡情节应归在《红楼梦》第77回"));
+    assert!(answer.contains("第78回又集中确认死讯或处理身后事"));
+    assert!(!answer.contains("找不到"));
+    assert_eq!(
+        chapter_location_draft_rejection_reason(
+            Some(&frame),
+            &[confirmation, occurrence],
+            "晴雯死亡情节应归在第七十七回；第七十八回又确认死讯并写身后事。"
+        ),
+        None
+    );
+}
+
+#[test]
+fn death_chapter_answer_uses_fate_boundary_when_no_death_location_evidence() {
+    let frame = parse_runtime_question_frame(&json!({
+        "schema_version": "tonglingyu.question_frame.v2",
+        "task": "locate_event",
+        "normalized_question": "林黛玉是第几回死的？",
+        "answer_target": {"type": "chapter_no"},
+        "slots": {
+            "subject": {"name": "林黛玉", "aliases": ["黛玉", "林姑娘"]},
+            "event": {"type": "death", "trigger": "死的"},
+            "object": null,
+            "relation": null,
+            "attribute": null
+        },
+        "evidence_contract": {
+            "required_types": ["base_text"],
+            "supporting_types": ["commentary"]
+        }
+    }))
+    .expect("v2 frame");
+    let mut fate_card = card_with_source_text(
+        "紅樓夢/第五回",
+        "林黛玉判词与《红楼梦曲》可作命运线索，如“玉帶林中掛”“枉凝眉”等，但这里只是册页曲文线索。",
+    );
+    fate_card.evidence_id = "ev-lindaiyu-fate-cue".to_string();
+    fate_card.block_id = "hlm120.c005.p0024.seg0001".to_string();
+
+    let requirements =
+        chapter_location_answer_requirement_value(Some(&frame), &[fate_card.clone()])
+            .expect("requirements");
+    assert_eq!(
+        requirements["answer_shape"],
+        json!("death_chapter_unlocated_use_fate_boundary")
+    );
+    assert!(requirements.get("must_answer_chapter_no").is_none());
+
+    let answer = question_frame_answer(Some(&frame), &[fate_card]).expect("fate boundary answer");
+    assert!(answer.contains("不能定位林黛玉"));
+    assert!(answer.contains("不能确定死亡回目"));
+    assert!(!answer.contains("林黛玉死于《红楼梦》第5回"));
+    assert!(!answer.contains("第5回死"));
+}
+
+#[test]
 fn entity_query_misclassification_for_chapter_location_only_clarifies() {
     let frame: RuntimeQuestionFrame = serde_json::from_value(json!({
         "intent": "entity_query",

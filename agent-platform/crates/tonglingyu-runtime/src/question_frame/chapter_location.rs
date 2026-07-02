@@ -18,6 +18,7 @@ struct ChapterLocationCandidate<'a> {
     chapter_title: Option<String>,
     score: i64,
     kind: ChapterLocationCandidateKind,
+    death_role: Option<DeathChapterEvidenceRole>,
     index: usize,
 }
 
@@ -29,12 +30,22 @@ enum ChapterLocationCandidateKind {
     WeakMention,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeathChapterEvidenceRole {
+    Occurrence,
+    Confirmation,
+    Memorial,
+}
+
 #[derive(Debug, Clone)]
 struct ChapterLocationSelection<'a> {
     chapter_no: i64,
     title: Option<String>,
     base: Option<ChapterLocationCandidate<'a>>,
     commentary: Option<ChapterLocationCandidate<'a>>,
+    death_occurrence: Option<ChapterLocationCandidate<'a>>,
+    death_confirmation: Option<ChapterLocationCandidate<'a>>,
+    death_memorial: Option<ChapterLocationCandidate<'a>>,
     best: ChapterLocationCandidate<'a>,
     support_count: usize,
 }
@@ -58,7 +69,12 @@ pub(crate) fn chapter_location_answer(
         );
     }
     let event_label = chapter_location_event_label(frame, &terms);
-    let mut candidates = chapter_location_candidates(cards, &terms, &policy);
+    if is_death_chapter_location(frame)
+        && let Some(answer) = death_fate_boundary_answer(frame, cards)
+    {
+        return Some(answer);
+    }
+    let mut candidates = chapter_location_candidates(frame, cards, &terms, &policy);
     if candidates.is_empty() {
         return Some(render_chapter_location_template(
             &policy.no_evidence_template,
@@ -71,6 +87,11 @@ pub(crate) fn chapter_location_answer(
     }
     candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.score), candidate.index));
     let selections = ranked_chapter_location_selections(candidates, event_label.clone());
+    if let Some(answer) =
+        render_death_chapter_location_answer(frame, &selections, &event_label, &policy)
+    {
+        return Some(answer);
+    }
     let Some(selection) = dominant_chapter_selection(&selections, &policy) else {
         return Some(ambiguous_chapter_location_answer(
             &selections,
@@ -106,7 +127,12 @@ pub(crate) fn chapter_location_answer_requirement_value(
         }));
     }
     let event_label = chapter_location_event_label(frame, &terms);
-    let mut candidates = chapter_location_candidates(cards, &terms, &policy);
+    if is_death_chapter_location(frame)
+        && let Some(requirements) = death_fate_boundary_answer_requirement_value(frame, cards)
+    {
+        return Some(requirements);
+    }
+    let mut candidates = chapter_location_candidates(frame, cards, &terms, &policy);
     if candidates.is_empty() {
         return Some(json!({
             "event": event_label,
@@ -116,6 +142,11 @@ pub(crate) fn chapter_location_answer_requirement_value(
     }
     candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.score), candidate.index));
     let selections = ranked_chapter_location_selections(candidates, event_label.clone());
+    if let Some(requirements) =
+        death_chapter_location_answer_requirement_value(frame, &selections, &event_label, &policy)
+    {
+        return Some(requirements);
+    }
     let selection = dominant_chapter_selection(&selections, &policy)?;
     let primary = primary_chapter_location_candidate(selection);
     Some(json!({
@@ -146,12 +177,21 @@ pub(crate) fn chapter_location_draft_rejection_reason(
         return None;
     }
     let event_label = chapter_location_event_label(frame, &terms);
-    let mut candidates = chapter_location_candidates(cards, &terms, &policy);
+    let mut candidates = chapter_location_candidates(frame, cards, &terms, &policy);
     if candidates.is_empty() {
         return None;
     }
     candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.score), candidate.index));
     let selections = ranked_chapter_location_selections(candidates, event_label);
+    if let Some(primary_chapter_no) =
+        death_chapter_primary_selection(frame, &selections).map(|selection| selection.chapter_no)
+    {
+        let normalized_draft = normalize_text(draft);
+        if !chapter_number_mentioned(&normalized_draft, primary_chapter_no) {
+            return Some("chapter_location_chapter_number_missing");
+        }
+        return None;
+    }
     let selection = dominant_chapter_selection(&selections, &policy)?;
     let normalized_draft = normalize_text(draft);
     if !chapter_number_mentioned(&normalized_draft, selection.chapter_no) {
@@ -319,6 +359,158 @@ fn render_chapter_location_answer(
     sentences.join("")
 }
 
+fn render_death_chapter_location_answer(
+    frame: &RuntimeQuestionFrame,
+    selections: &[ChapterLocationSelection<'_>],
+    _event_label: &str,
+    _policy: &ChapterLocationPolicy,
+) -> Option<String> {
+    if !is_death_chapter_location(frame) {
+        return None;
+    }
+    let subject = frame.subject.as_ref()?.canonical.as_str();
+    let occurrence = death_chapter_occurrence_selection(selections);
+    let confirmation = death_chapter_confirmation_selection(selections);
+    let memorial = death_chapter_memorial_selection(selections);
+    if let Some(selection) = occurrence {
+        let mut answer = format!(
+            "{subject}的死亡情节应归在《红楼梦》第{}回。",
+            selection.chapter_no
+        );
+        if let Some(card) = selection
+            .death_occurrence
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best))
+        {
+            answer.push_str(&format!("正文依据可见“{}”。", card.quote));
+        }
+        if let Some(confirm) = confirmation
+            && confirm.chapter_no != selection.chapter_no
+        {
+            answer.push_str(&format!(
+                "第{}回又集中确认死讯或处理身后事。",
+                confirm.chapter_no
+            ));
+            if let Some(card) = confirm
+                .death_confirmation
+                .as_ref()
+                .or(confirm.base.as_ref())
+                .or(Some(&confirm.best))
+            {
+                answer.push_str(&format!("相关依据是“{}”。", card.quote));
+            }
+        }
+        if let Some(memorial) = memorial
+            && memorial.chapter_no != selection.chapter_no
+            && confirmation
+                .map(|confirm| confirm.chapter_no != memorial.chapter_no)
+                .unwrap_or(true)
+        {
+            answer.push_str(&format!(
+                "第{}回属于祭奠、诔文或悼亡展开，不宜改作死亡发生回。",
+                memorial.chapter_no
+            ));
+        }
+        return Some(answer);
+    }
+    if let Some(selection) = confirmation {
+        let mut answer = format!(
+            "当前证据能确认{}的死讯在《红楼梦》第{}回出现；但这只能说明死讯确认或身后事处理的回目，不能把它直接说成死亡发生回。",
+            subject, selection.chapter_no
+        );
+        if let Some(card) = selection
+            .death_confirmation
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best))
+        {
+            answer.push_str(&format!("正文依据可见“{}”。", card.quote));
+        }
+        return Some(answer);
+    }
+    if let Some(selection) = memorial {
+        let mut answer = format!(
+            "当前证据只命中《红楼梦》第{}回的祭奠、诔文或悼亡材料，不能据此回答{}“第几回死”。",
+            selection.chapter_no, subject
+        );
+        if let Some(card) = selection
+            .death_memorial
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best))
+        {
+            answer.push_str(&format!("可见材料是“{}”。", card.quote));
+        }
+        return Some(answer);
+    }
+    None
+}
+
+fn death_chapter_location_answer_requirement_value(
+    frame: &RuntimeQuestionFrame,
+    selections: &[ChapterLocationSelection<'_>],
+    event_label: &str,
+    policy: &ChapterLocationPolicy,
+) -> Option<Value> {
+    if !is_death_chapter_location(frame) {
+        return None;
+    }
+    let occurrence = death_chapter_occurrence_selection(selections);
+    let confirmation = death_chapter_confirmation_selection(selections);
+    let memorial = death_chapter_memorial_selection(selections);
+    if let Some(selection) = occurrence {
+        let primary = selection
+            .death_occurrence
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best));
+        return Some(json!({
+            "event": event_label,
+            "must_answer_chapter_no": selection.chapter_no,
+            "primary_evidence_id": primary.map(|candidate| candidate.card.evidence_id.clone()),
+            "primary_source_title": primary.map(|candidate| candidate.card.source_title.clone()),
+            "primary_text_cue": primary.map(|candidate| candidate.quote.clone()),
+            "answer_shape": "death_occurrence_chapter_first_then_confirmation_boundary",
+            "confirmation_chapter_no": confirmation.map(|selection| selection.chapter_no),
+            "memorial_chapter_no": memorial.map(|selection| selection.chapter_no),
+            "rule": policy.rule,
+        }));
+    }
+    if let Some(selection) = confirmation {
+        let primary = selection
+            .death_confirmation
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best));
+        return Some(json!({
+            "event": event_label,
+            "must_answer_chapter_no": selection.chapter_no,
+            "primary_evidence_id": primary.map(|candidate| candidate.card.evidence_id.clone()),
+            "primary_source_title": primary.map(|candidate| candidate.card.source_title.clone()),
+            "primary_text_cue": primary.map(|candidate| candidate.quote.clone()),
+            "answer_shape": "death_confirmation_chapter_with_occurrence_boundary",
+            "rule": policy.rule,
+        }));
+    }
+    if let Some(selection) = memorial {
+        let primary = selection
+            .death_memorial
+            .as_ref()
+            .or(selection.base.as_ref())
+            .or(Some(&selection.best));
+        return Some(json!({
+            "event": event_label,
+            "primary_evidence_id": primary.map(|candidate| candidate.card.evidence_id.clone()),
+            "primary_source_title": primary.map(|candidate| candidate.card.source_title.clone()),
+            "primary_text_cue": primary.map(|candidate| candidate.quote.clone()),
+            "answer_shape": "death_memorial_only_no_death_chapter",
+            "rule": policy.rule,
+        }));
+    }
+    None
+}
+
 fn render_chapter_location_direct_answer(
     event_label: &str,
     chapter_no: i64,
@@ -406,6 +598,44 @@ fn primary_chapter_location_candidate<'a>(
         .or(Some(&selection.best))
 }
 
+fn death_chapter_primary_selection<'a>(
+    frame: &RuntimeQuestionFrame,
+    selections: &'a [ChapterLocationSelection<'a>],
+) -> Option<&'a ChapterLocationSelection<'a>> {
+    if !is_death_chapter_location(frame) {
+        return None;
+    }
+    death_chapter_occurrence_selection(selections)
+        .or_else(|| death_chapter_confirmation_selection(selections))
+}
+
+fn death_chapter_occurrence_selection<'a>(
+    selections: &'a [ChapterLocationSelection<'a>],
+) -> Option<&'a ChapterLocationSelection<'a>> {
+    selections
+        .iter()
+        .filter(|selection| selection.death_occurrence.is_some())
+        .min_by_key(|selection| selection.chapter_no)
+}
+
+fn death_chapter_confirmation_selection<'a>(
+    selections: &'a [ChapterLocationSelection<'a>],
+) -> Option<&'a ChapterLocationSelection<'a>> {
+    selections
+        .iter()
+        .filter(|selection| selection.death_confirmation.is_some())
+        .min_by_key(|selection| selection.chapter_no)
+}
+
+fn death_chapter_memorial_selection<'a>(
+    selections: &'a [ChapterLocationSelection<'a>],
+) -> Option<&'a ChapterLocationSelection<'a>> {
+    selections
+        .iter()
+        .filter(|selection| selection.death_memorial.is_some())
+        .min_by_key(|selection| selection.chapter_no)
+}
+
 fn dominant_chapter_selection<'a>(
     selections: &'a [ChapterLocationSelection<'a>],
     policy: &ChapterLocationPolicy,
@@ -448,11 +678,26 @@ fn ranked_chapter_location_selections<'a>(
                 .iter()
                 .find(|item| item.kind == ChapterLocationCandidateKind::Commentary)
                 .cloned();
+            let death_occurrence = items
+                .iter()
+                .find(|item| item.death_role == Some(DeathChapterEvidenceRole::Occurrence))
+                .cloned();
+            let death_confirmation = items
+                .iter()
+                .find(|item| item.death_role == Some(DeathChapterEvidenceRole::Confirmation))
+                .cloned();
+            let death_memorial = items
+                .iter()
+                .find(|item| item.death_role == Some(DeathChapterEvidenceRole::Memorial))
+                .cloned();
             Some(ChapterLocationSelection {
                 chapter_no,
                 title,
                 base,
                 commentary,
+                death_occurrence,
+                death_confirmation,
+                death_memorial,
                 best,
                 support_count: items.len(),
             })
@@ -480,10 +725,12 @@ fn remove_entity_terms(text: &mut String, entity: &RuntimeQuestionFrameEntity) {
 }
 
 fn chapter_location_candidates<'a>(
+    frame: &RuntimeQuestionFrame,
     cards: &'a [EvidenceCard],
     terms: &[String],
     policy: &ChapterLocationPolicy,
 ) -> Vec<ChapterLocationCandidate<'a>> {
+    let death_location = is_death_chapter_location(frame);
     cards
         .iter()
         .enumerate()
@@ -504,7 +751,11 @@ fn chapter_location_candidates<'a>(
             } else {
                 ChapterLocationCandidateKind::WeakMention
             };
-            let score = chapter_location_card_score(card, terms, &chapter_title, weak_mention);
+            let death_role = death_location
+                .then(|| death_chapter_evidence_role(card))
+                .flatten();
+            let score = chapter_location_card_score(card, terms, &chapter_title, weak_mention)
+                + death_role_score(death_role);
             if score <= 0 {
                 return None;
             }
@@ -515,6 +766,7 @@ fn chapter_location_candidates<'a>(
                 chapter_title,
                 score,
                 kind,
+                death_role,
                 index,
             })
         })
@@ -610,10 +862,220 @@ fn chapter_location_death_quote(text: &str) -> Option<String> {
         "说毕，便长叹一声，萧然长逝了",
         "便長歎一聲，蕭然長逝了",
         "便长叹一声，萧然长逝了",
+        "果然是未正二刻他咽了氣",
+        "果然是未正二刻他咽了气",
+        "晴雯死了",
+        "一咽氣便回了進去",
+        "一咽气便回了进去",
+        "即刻送到外頭焚化了罷",
+        "即刻送到外头焚化了罢",
+        "名曰《芙蓉女兒誄》",
+        "名曰《芙蓉女儿诔》",
     ]
     .iter()
     .find(|quote| text.contains(**quote))
     .map(|quote| quote.to_string())
+}
+
+fn is_death_chapter_location(frame: &RuntimeQuestionFrame) -> bool {
+    if !frame.is_chapter_location() {
+        return false;
+    }
+    let normalized = normalize_text(&frame.canonical_question);
+    [
+        "死", "去世", "亡故", "病逝", "夭亡", "夭逝", "长逝", "長逝", "咽气", "咽氣", "死讯",
+        "死訊",
+    ]
+    .iter()
+    .any(|term| normalized.contains(&normalize_text(term)))
+}
+
+fn death_chapter_evidence_role(card: &EvidenceCard) -> Option<DeathChapterEvidenceRole> {
+    let text = normalize_text(&format!(
+        "{}\n{}\n{}",
+        card.source_title, card.text, card.support_scope
+    ));
+    if contains_any_normalized(
+        &text,
+        &[
+            "芙蓉女儿诔",
+            "芙蓉女兒誄",
+            "祭晴雯",
+            "诔文",
+            "誄文",
+            "泣涕念曰",
+            "悼亡",
+        ],
+    ) {
+        return Some(DeathChapterEvidenceRole::Memorial);
+    }
+    if contains_any_normalized(
+        &text,
+        &[
+            "死讯",
+            "死訊",
+            "打听晴雯",
+            "探问晴雯",
+            "得知她已经死亡",
+            "得知她已經死亡",
+            "已死",
+            "閉了眼",
+            "闭了眼",
+            "住了口",
+            "倒气",
+            "倒氣",
+            "一咽气便回了进去",
+            "一咽氣便回了進去",
+            "停柩",
+            "遗体",
+            "遺體",
+            "入殓",
+            "入殮",
+            "焚化",
+            "灵前",
+            "靈前",
+        ],
+    ) {
+        return Some(DeathChapterEvidenceRole::Confirmation);
+    }
+    if contains_any_normalized(
+        &text,
+        &[
+            "萧然长逝",
+            "蕭然長逝",
+            "长逝了",
+            "長逝了",
+            "咽了气",
+            "咽了氣",
+            "晴雯死了",
+            "死了",
+            "身亡",
+            "病逝",
+            "去世",
+            "亡故",
+            "夭亡",
+            "夭逝",
+            "自尽",
+            "自盡",
+            "自刎",
+            "投井",
+            "吞金",
+            "上吊",
+            "临终",
+            "臨終",
+            "临死",
+            "臨死",
+        ],
+    ) {
+        return Some(DeathChapterEvidenceRole::Occurrence);
+    }
+    None
+}
+
+fn death_role_score(role: Option<DeathChapterEvidenceRole>) -> i64 {
+    match role {
+        Some(DeathChapterEvidenceRole::Occurrence) => 180,
+        Some(DeathChapterEvidenceRole::Confirmation) => 125,
+        Some(DeathChapterEvidenceRole::Memorial) => 70,
+        None => 0,
+    }
+}
+
+fn death_fate_boundary_answer(
+    frame: &RuntimeQuestionFrame,
+    cards: &[EvidenceCard],
+) -> Option<String> {
+    if !is_death_chapter_location(frame) || cards.is_empty() {
+        return None;
+    }
+    let subject = frame.subject.as_ref()?;
+    if cards.iter().any(|card| {
+        card_mentions_entity(card, subject) && death_chapter_evidence_role(card).is_some()
+    }) {
+        return None;
+    }
+    let card = cards
+        .iter()
+        .filter(|card| card_mentions_entity(card, subject))
+        .find(|card| card_has_fate_boundary_cue(card))?;
+    Some(format!(
+        "当前证据不能定位{}“第几回死”：材料只支持人物命运线索，而没有命中正文死亡发生场景或死讯确认。可见依据是{}“{}”。因此在当前范围内，应回答为：不能确定死亡回目，只能说明这些材料预示或关联其命运。",
+        subject.canonical,
+        card.source_title,
+        chapter_location_quote(card, &subject.identity_terms(), 72)
+    ))
+}
+
+fn death_fate_boundary_answer_requirement_value(
+    frame: &RuntimeQuestionFrame,
+    cards: &[EvidenceCard],
+) -> Option<Value> {
+    if !is_death_chapter_location(frame) {
+        return None;
+    }
+    let subject = frame.subject.as_ref()?;
+    if cards.iter().any(|card| {
+        card_mentions_entity(card, subject) && death_chapter_evidence_role(card).is_some()
+    }) {
+        return None;
+    }
+    let card = cards
+        .iter()
+        .filter(|card| card_mentions_entity(card, subject))
+        .find(|card| card_has_fate_boundary_cue(card))?;
+    Some(json!({
+        "event": format!("{}死亡回目", subject.canonical),
+        "primary_evidence_id": card.evidence_id.clone(),
+        "primary_source_title": card.source_title.clone(),
+        "primary_text_cue": chapter_location_quote(card, &subject.identity_terms(), 72),
+        "answer_shape": "death_chapter_unlocated_use_fate_boundary",
+        "rule": "Do not answer a death chapter number from fate, judgement, song, or commentary cues unless the evidence explicitly locates the death occurrence or death-news confirmation.",
+    }))
+}
+
+fn card_mentions_entity(card: &EvidenceCard, entity: &RuntimeQuestionFrameEntity) -> bool {
+    let text = normalize_text(&format!("{}\n{}", card.source_title, card.text));
+    entity
+        .identity_terms()
+        .iter()
+        .any(|term| text.contains(&normalize_text(term)))
+}
+
+fn card_has_fate_boundary_cue(card: &EvidenceCard) -> bool {
+    let text = normalize_text(&format!(
+        "{}\n{}\n{}",
+        card.source_title, card.text, card.support_scope
+    ));
+    contains_any_normalized(
+        &text,
+        &[
+            "判词",
+            "判詞",
+            "红楼梦曲",
+            "紅樓夢曲",
+            "曲文",
+            "册页",
+            "冊頁",
+            "薄命",
+            "命运",
+            "命運",
+            "结局",
+            "結局",
+            "预示",
+            "預示",
+            "玉带林中挂",
+            "玉帶林中掛",
+            "枉凝眉",
+            "还泪",
+            "還淚",
+        ],
+    )
+}
+
+fn contains_any_normalized(text: &str, terms: &[&str]) -> bool {
+    terms
+        .iter()
+        .any(|term| text.contains(&normalize_text(term)))
 }
 
 fn chapter_location_title(
