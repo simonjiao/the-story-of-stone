@@ -81,6 +81,7 @@ mod llm_modes;
 mod llm_provider;
 mod llm_resolver;
 mod plan;
+mod product_protocol;
 mod question_frame;
 mod response;
 mod response_events;

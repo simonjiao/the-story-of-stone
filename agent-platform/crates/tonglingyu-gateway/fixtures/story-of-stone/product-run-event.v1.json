@@ -1,0 +1,13 @@
+{
+  "schema_version": "story-of-stone.product-run-event.v1",
+  "event_id": "event_123",
+  "sequence": 12,
+  "run_id": "studio_run_123",
+  "product_id": "writing-assistant",
+  "type": "run.status",
+  "created_at": "2026-07-10T12:00:00.000Z",
+  "payload": {
+    "stage": "writing_sections",
+    "message": "正在生成正文：2 / 6"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": "story-of-stone.gateway-capabilities.v1",
+  "service": "story-of-stone-studio",
+  "protocol_versions": [
+    "story-of-stone.product-run.v1",
+    "story-of-stone.product-run-event.v1"
+  ],
+  "products": [
+    {
+      "id": "writing-assistant",
+      "actions": true,
+      "artifacts": ["article"],
+      "stream": "sse"
+    }
+  ]
+}

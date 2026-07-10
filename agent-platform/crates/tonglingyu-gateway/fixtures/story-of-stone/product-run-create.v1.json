@@ -1,0 +1,15 @@
+{
+  "schema_version": "story-of-stone.product-run.v1",
+  "request_id": "gateway_run_123",
+  "external_message_id": "openwebui_message_456",
+  "trace_id": "trace_789",
+  "product_id": "writing-assistant",
+  "identity": {
+    "issuer": "tonglingyu-gateway",
+    "user_ref": "openwebui:user_1",
+    "chat_ref": "chat_1"
+  },
+  "input": {
+    "message": "写一篇关于晴雯的人物小传"
+  }
+}
