@@ -153,6 +153,8 @@ pub(crate) enum ResponseEventType {
     OutputTextDelta,
     #[serde(rename = "output_text.done")]
     OutputTextDone,
+    #[serde(rename = "artifact.updated")]
+    ArtifactUpdated,
     #[serde(rename = "response.requires_action")]
     ResponseRequiresAction,
     #[serde(rename = "response.completed")]

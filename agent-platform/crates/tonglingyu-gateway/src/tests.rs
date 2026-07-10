@@ -529,6 +529,11 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         response_job_max_attempts: 3,
         response_sync_wait_secs: 2,
         realtime_max_buffer_chars: 4000,
+        product_bindings: Arc::new(Mutex::new(ProductBindingStoreBackend::InMemory(
+            product_binding::InMemoryProductBindingStore::default(),
+        ))),
+        product_registry: ProductRegistry::unavailable("not configured in gateway unit tests"),
+        studio_client: None,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,
@@ -572,6 +577,56 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         }),
         started_at: now_rfc3339(),
     }
+}
+
+#[test]
+fn product_metadata_is_derived_from_authenticated_headers_and_client_values_are_removed() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-tonglingyu-product-id",
+        "writing-assistant".parse().expect("header"),
+    );
+    headers.insert(
+        "x-tonglingyu-chat-id",
+        "chat-authenticated".parse().expect("header"),
+    );
+    headers.insert(
+        "x-tonglingyu-message-id",
+        "message-authenticated".parse().expect("header"),
+    );
+    let payload = json!({
+        "metadata": {
+            PRODUCT_METADATA_KEY: {
+                "product_id": "attacker-product",
+                "chat_ref": "attacker-chat",
+                "external_message_id": "attacker-message"
+            }
+        }
+    });
+
+    let normalized = normalize_product_metadata(&headers, payload).expect("normalized");
+    let route = product_route(&normalized).expect("route").expect("product");
+
+    assert_eq!(route.product_id, "writing-assistant");
+    assert_eq!(route.chat_ref, "chat-authenticated");
+    assert_eq!(route.external_message_id, "message-authenticated");
+}
+
+#[test]
+fn product_metadata_without_activation_header_is_not_routable() {
+    let payload = json!({
+        "metadata": {
+            PRODUCT_METADATA_KEY: {
+                "product_id": "writing-assistant",
+                "chat_ref": "attacker-chat",
+                "external_message_id": "attacker-message"
+            }
+        }
+    });
+
+    let normalized = normalize_product_metadata(&HeaderMap::new(), payload).expect("normalized");
+
+    assert_eq!(product_route(&normalized).expect("route"), None);
 }
 
 fn seed_eval_retrieval_failure(db_path: &Path, trace_id: &str) -> String {

@@ -15,6 +15,21 @@ source repository.
 
 Open WebUI Functions are formal source code under `../open-webui/functions/`.
 
+## Story of Stone Studio
+
+The writing product is optional for the base knowledge-chat service, but it is
+fail-closed unless all three production prerequisites are present:
+
+```bash
+TONGLINGYU_STUDIO_BASE_URL=http://story-of-stone-studio-api:8787
+TONGLINGYU_STUDIO_SERVICE_KEY=<same-random-key-as-studio>
+TONGLINGYU_REDIS_URL=redis://redis:6379/0
+```
+
+Gateway verifies Studio capabilities at startup. `/healthz` reports the
+`writing-assistant` product as unavailable when the handshake fails or the
+binding store is not durable; ordinary knowledge chat remains independent.
+
 ## Start Locally
 
 Use a local `deploy/.env`, or point at an external deploy environment file:

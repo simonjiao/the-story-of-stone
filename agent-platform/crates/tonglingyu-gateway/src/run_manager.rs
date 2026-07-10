@@ -28,6 +28,12 @@ const FORBIDDEN_CONTROL_FIELDS: &[&str] = &[
     "webhook_url",
     "callback_secret",
     "run_store_override",
+    "product_base_url",
+    "studio_base_url",
+    "executor",
+    "executor_url",
+    "workflow_id",
+    "tool_name",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
