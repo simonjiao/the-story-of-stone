@@ -8,7 +8,7 @@ source repository.
 ## What Stays Here
 
 - `docker-compose.yml`: local stack definition for Tonglingyu Gateway,
-  Open WebUI, and Cloudflare Tunnel.
+  Story of Stone Studio, Open WebUI, Redis, and Cloudflare Tunnel.
 - `scripts/start-local-stack.sh`: local start/rebuild wrapper.
 - `scripts/lib/`: shared layout and env-file loading helpers used by the local
   wrapper.
@@ -17,8 +17,8 @@ Open WebUI Functions are formal source code under `../open-webui/functions/`.
 
 ## Story of Stone Studio
 
-The writing product is optional for the base knowledge-chat service, but it is
-fail-closed unless all production prerequisites are present:
+The writing product is deployed as two Docker services and is fail-closed
+unless all production prerequisites are present:
 
 ```bash
 TONGLINGYU_STUDIO_BASE_URL=http://story-of-stone-studio-api:8787
@@ -26,6 +26,9 @@ TONGLINGYU_STUDIO_SERVICE_KEY=<same-random-key-as-studio>
 TONGLINGYU_STUDIO_PUBLIC_BASE_URL=https://studio.example.com
 TONGLINGYU_REDIS_URL=redis://redis:6379/0
 OPEN_WEBUI_SERVICE_ACCOUNT_KEY=<open-webui-service-account-api-key>
+STORY_OF_STONE_STUDIO_BUILD_CONTEXT=../../story-of-stone-studio
+STORY_OF_STONE_STUDIO_DATA_DIR=/path/to/runtime/story-of-stone-studio
+STORY_OF_STONE_STUDIO_PUBLIC_URL=https://studio.example.com
 ```
 
 Gateway verifies Studio capabilities at startup. `/healthz` reports the

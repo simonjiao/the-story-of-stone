@@ -11,6 +11,26 @@ x-tonglingyu-gateway-image: &tonglingyu-gateway-image
     org.opencontainers.image.version: "${TONGLINGYU_VERSION:-latest}"
   restart: unless-stopped
 
+x-story-of-stone-studio-api-image: &story-of-stone-studio-api-image
+  image: "${STORY_OF_STONE_STUDIO_API_IMAGE_REF:-story-of-stone-studio-api:${STORY_OF_STONE_STUDIO_VERSION:-latest}}"
+  build:
+    context: "${STORY_OF_STONE_STUDIO_BUILD_CONTEXT:-../../story-of-stone-studio}"
+    dockerfile: Dockerfile.api
+  labels:
+    org.opencontainers.image.version: "${STORY_OF_STONE_STUDIO_VERSION:-latest}"
+  restart: unless-stopped
+
+x-story-of-stone-studio-web-image: &story-of-stone-studio-web-image
+  image: "${STORY_OF_STONE_STUDIO_WEB_IMAGE_REF:-story-of-stone-studio-web:${STORY_OF_STONE_STUDIO_VERSION:-latest}}"
+  build:
+    context: "${STORY_OF_STONE_STUDIO_BUILD_CONTEXT:-../../story-of-stone-studio}"
+    dockerfile: Dockerfile.web
+    args:
+      VITE_API_BASE: ""
+  labels:
+    org.opencontainers.image.version: "${STORY_OF_STONE_STUDIO_VERSION:-latest}"
+  restart: unless-stopped
+
 services:
   redis:
     image: "${TONGLINGYU_REDIS_IMAGE_REF:-redis:7-alpine}"
@@ -59,6 +79,7 @@ services:
       OPENAI_API_KEY: "${TONGLINGYU_GATEWAY_API_KEY:?set TONGLINGYU_GATEWAY_API_KEY in .env}"
       OPENAI_API_KEYS: "${OPEN_WEBUI_OPENAI_API_KEYS:-${TONGLINGYU_GATEWAY_API_KEY}}"
       ENABLE_OLLAMA_API: "${OPEN_WEBUI_ENABLE_OLLAMA_API:-false}"
+      ENABLE_API_KEYS: "${OPEN_WEBUI_ENABLE_API_KEYS:-true}"
     volumes:
       - "${OPEN_WEBUI_DATA_DIR:?set OPEN_WEBUI_DATA_DIR in .env}:/app/backend/data"
     expose:
@@ -67,11 +88,69 @@ services:
       tonglingyu-internal:
         ipv4_address: "${OPEN_WEBUI_ORIGIN_IP:-172.20.0.3}"
 
+  story-of-stone-studio-api:
+    <<: *story-of-stone-studio-api-image
+    container_name: story-of-stone-studio-api
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      DATA_DIR: "/data"
+      WEB_ORIGIN: "${STORY_OF_STONE_STUDIO_PUBLIC_URL:?set STORY_OF_STONE_STUDIO_PUBLIC_URL in .env}"
+      STUDIO_AUTH_MODE: "session"
+      STUDIO_SESSION_TTL_SECONDS: "${STUDIO_SESSION_TTL_SECONDS:-28800}"
+      STUDIO_GATEWAY_SERVICE_KEY: "${STUDIO_GATEWAY_SERVICE_KEY:?set STUDIO_GATEWAY_SERVICE_KEY in .env}"
+      TONGLINGYU_GATEWAY_INTERNAL_BASE_URL: "http://tonglingyu-gateway:8090"
+      LLM_PROVIDER: "openai-compatible"
+      OPENAI_BASE_URL: "${STUDIO_OPENAI_BASE_URL:-${TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_BASE_URL}}"
+      OPENAI_API_KEY: "${STUDIO_OPENAI_API_KEY:-${OPENAI_COMPATIBLE_API_KEY}}"
+      OPENAI_MODEL: "${STUDIO_OPENAI_MODEL:-${TONGLINGYU_AGENT_PROVIDER_OPENAI_PROFILE_MODEL}}"
+      RAG_PROVIDER: "tonglingyu"
+      RAG_BASE_URL: "${STUDIO_RAG_BASE_URL:-${TONGLINGYU_RETRIEVER_BASE_URL}}"
+      RAG_API_KEY: "${STUDIO_RAG_API_KEY:-}"
+      RAG_SEARCH_PATH: "/retrieve"
+      RAG_REFS_PATH: "/refs"
+      RAG_TIMEOUT_MS: "${STUDIO_RAG_TIMEOUT_MS:-60000}"
+    volumes:
+      - "${STORY_OF_STONE_STUDIO_DATA_DIR:?set STORY_OF_STONE_STUDIO_DATA_DIR in .env}:/data"
+    expose:
+      - "8787"
+    networks:
+      tonglingyu-internal:
+        ipv4_address: "${STORY_OF_STONE_STUDIO_API_IP:-172.20.0.15}"
+        aliases:
+          - api
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  story-of-stone-studio-web:
+    <<: *story-of-stone-studio-web-image
+    container_name: story-of-stone-studio-web
+    depends_on:
+      story-of-stone-studio-api:
+        condition: service_healthy
+    expose:
+      - "8080"
+    networks:
+      tonglingyu-internal:
+        ipv4_address: "${STORY_OF_STONE_STUDIO_WEB_IP:-172.20.0.16}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   tonglingyu-gateway:
     <<: *tonglingyu-gateway-image
     container_name: tonglingyu-gateway
     depends_on:
       redis:
+        condition: service_healthy
+      story-of-stone-studio-api:
         condition: service_healthy
     command:
       [
@@ -174,12 +253,12 @@ services:
       TONGLINGYU_RESPONSE_WORKER_RECLAIM_IDLE_MS: "${TONGLINGYU_RESPONSE_WORKER_RECLAIM_IDLE_MS:-30000}"
       TONGLINGYU_RESPONSE_WORKER_RECLAIM_INTERVAL_SECS: "${TONGLINGYU_RESPONSE_WORKER_RECLAIM_INTERVAL_SECS:-30}"
       TONGLINGYU_REALTIME_MAX_BUFFER_CHARS: "${TONGLINGYU_REALTIME_MAX_BUFFER_CHARS:-4000}"
-      TONGLINGYU_STUDIO_BASE_URL: "${TONGLINGYU_STUDIO_BASE_URL:-}"
-      TONGLINGYU_STUDIO_SERVICE_KEY: "${TONGLINGYU_STUDIO_SERVICE_KEY:-}"
-      TONGLINGYU_STUDIO_PUBLIC_BASE_URL: "${TONGLINGYU_STUDIO_PUBLIC_BASE_URL:-}"
+      TONGLINGYU_STUDIO_BASE_URL: "${TONGLINGYU_STUDIO_BASE_URL:-http://story-of-stone-studio-api:8787}"
+      TONGLINGYU_STUDIO_SERVICE_KEY: "${TONGLINGYU_STUDIO_SERVICE_KEY:-${STUDIO_GATEWAY_SERVICE_KEY}}"
+      TONGLINGYU_STUDIO_PUBLIC_BASE_URL: "${TONGLINGYU_STUDIO_PUBLIC_BASE_URL:-${STORY_OF_STONE_STUDIO_PUBLIC_URL}}"
       TONGLINGYU_STUDIO_TIMEOUT_SECS: "${TONGLINGYU_STUDIO_TIMEOUT_SECS:-30}"
       TONGLINGYU_OPENWEBUI_BASE_URL: "${TONGLINGYU_OPENWEBUI_BASE_URL:-http://open-webui:8080}"
-      TONGLINGYU_OPENWEBUI_SERVICE_KEY: "${OPEN_WEBUI_SERVICE_ACCOUNT_KEY:-}"
+      TONGLINGYU_OPENWEBUI_SERVICE_KEY: "${OPEN_WEBUI_SERVICE_ACCOUNT_KEY:?set OPEN_WEBUI_SERVICE_ACCOUNT_KEY in .env}"
       TONGLINGYU_OPENWEBUI_DELIVERY_TIMEOUT_SECS: "${TONGLINGYU_OPENWEBUI_DELIVERY_TIMEOUT_SECS:-10}"
       TONGLINGYU_OPENWEBUI_DELIVERY_MAX_ATTEMPTS: "${TONGLINGYU_OPENWEBUI_DELIVERY_MAX_ATTEMPTS:-6}"
       TONGLINGYU_OPENWEBUI_DELIVERY_RETRY_BASE_MS: "${TONGLINGYU_OPENWEBUI_DELIVERY_RETRY_BASE_MS:-250}"
@@ -221,9 +300,12 @@ services:
       TUNNEL_TOKEN: "${CLOUDFLARED_TOKEN:?set CLOUDFLARED_TOKEN in .env}"
     extra_hosts:
       - "open-webui:${OPEN_WEBUI_ORIGIN_IP:-172.20.0.3}"
+      - "story-of-stone-studio-web:${STORY_OF_STONE_STUDIO_WEB_IP:-172.20.0.16}"
     depends_on:
       open-webui:
         condition: service_started
+      story-of-stone-studio-web:
+        condition: service_healthy
 
 networks:
   tonglingyu-internal:
