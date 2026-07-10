@@ -32,7 +32,13 @@ Gateway verifies Studio capabilities at startup. `/healthz` reports the
 `writing-assistant` product as unavailable when the handshake fails or the
 binding store is not durable; ordinary knowledge chat remains independent.
 The Open WebUI key is used only by Gateway to persist `status` and `replace`
-events onto the original assistant message. Install
+events onto the original assistant message. Each delivery has a stable
+idempotency key and remains in the Redis-backed binding until delivered; a
+background recovery pass retries pending/failed deliveries after Gateway or
+Open WebUI restarts, up to
+`TONGLINGYU_OPENWEBUI_DELIVERY_RECOVERY_MAX_ATTEMPTS` per Studio event. An
+exhausted or non-retryable delivery enters `dead_letter` without changing the
+terminal Product Run result. Install
 `open-webui/functions/tonglingyu_product_action.py` in Open WebUI and give its
 Gateway valve the same Gateway service key used by the other Tonglingyu
 Functions.

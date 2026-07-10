@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::product_protocol::{
     GatewayCapabilities, PRODUCT_RUN_EVENT_SCHEMA_VERSION, PRODUCT_RUN_SCHEMA_VERSION,
 };

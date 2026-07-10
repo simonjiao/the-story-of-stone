@@ -262,12 +262,9 @@ def _gateway_headers(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    user_id = _first_non_empty(
-        _get(user, "id"),
-        merged_metadata.get("user_id"),
-        merged_metadata.get("user"),
-        merged_metadata.get("username"),
-    )
+    user_id = _first_non_empty(_get(user, "id"))
+    if not user_id:
+        raise RuntimeError("Open WebUI authenticated user identity is required")
     chat_id = _first_non_empty(
         merged_metadata.get("chat_id"),
         merged_metadata.get("conversation_id"),
@@ -278,8 +275,8 @@ def _gateway_headers(
         merged_metadata.get("message_id"),
         merged_metadata.get("request_id"),
     )
-    if user_id:
-        headers["X-Tonglingyu-User-Id"] = user_id
+    headers["X-Tonglingyu-Subject"] = user_id
+    headers["X-Tonglingyu-User-Id"] = user_id
     if chat_id:
         headers["X-Tonglingyu-Chat-Id"] = chat_id
     if message_id:

@@ -637,6 +637,148 @@ fn product_metadata_without_activation_header_is_not_routable() {
     assert_eq!(product_route(&normalized).expect("route"), None);
 }
 
+#[test]
+fn active_product_run_blocks_ordinary_chat_in_the_same_chat() {
+    let db_path = temp_gateway_db_path("product-run-busy-preflight");
+    let state = test_app_state(db_path.clone());
+    state
+        .product_bindings
+        .lock()
+        .expect("binding store")
+        .create(ProductRunBinding::new(
+            "response-1",
+            "run-1",
+            "writing-assistant",
+            "chat-1",
+            "message-1",
+        ))
+        .expect("active binding");
+    let mut headers = HeaderMap::new();
+    headers.insert("x-tonglingyu-chat-id", "chat-1".parse().expect("header"));
+
+    let response = preflight_product_request(&state, &headers, &json!({}))
+        .expect_err("active product run must block ordinary chat");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    remove_sqlite_file_set(&db_path);
+}
+
+#[test]
+fn failed_enqueue_releases_the_reserved_product_chat() {
+    let db_path = temp_gateway_db_path("product-run-enqueue-release");
+    let state = test_app_state(db_path.clone());
+    state
+        .product_bindings
+        .lock()
+        .expect("binding store")
+        .create(ProductRunBinding::new(
+            "response-1",
+            "run-1",
+            "writing-assistant",
+            "chat-1",
+            "message-1",
+        ))
+        .expect("active binding");
+
+    fail_reserved_product_binding(&state, "response-1");
+
+    let store = state.product_bindings.lock().expect("binding store");
+    assert!(
+        store
+            .active_for_chat("chat-1")
+            .expect("active lookup")
+            .is_none()
+    );
+    assert_eq!(
+        store.get("response-1").expect("binding").status,
+        ProductBindingStatus::Failed
+    );
+    remove_sqlite_file_set(&db_path);
+}
+
+#[test]
+fn recovery_reconciles_a_terminal_response_with_a_stale_active_binding() {
+    let db_path = temp_gateway_db_path("product-run-terminal-reconcile");
+    let state = test_app_state(db_path.clone());
+    let identity = normalize_run(RunNormalizationInput {
+        api_type: RunApiType::Responses,
+        model: "tonglingyu".to_string(),
+        session_id: Some("chat-1".to_string()),
+        auth_subject: "user-1".to_string(),
+        tenant_id: "tenant-1".to_string(),
+        user_id: Some("user-1".to_string()),
+        idempotency_key: Some("message-1".to_string()),
+        metadata: json!({}),
+        request: json!({"model": "tonglingyu", "input": "write"}),
+        stream: false,
+        background: true,
+    })
+    .expect("identity");
+    state
+        .response_store
+        .lock()
+        .expect("response store")
+        .create_response(&identity)
+        .expect("response");
+    append_response_event_for_identity(
+        &state,
+        &identity,
+        ResponseEventType::ResponseFailed,
+        json!({"error": {"code": "response_job_enqueue_failed"}}),
+        Some(ResponseStatus::Failed),
+        None,
+        None,
+        None,
+    )
+    .expect("terminal response");
+    state
+        .product_bindings
+        .lock()
+        .expect("binding store")
+        .create(ProductRunBinding::new(
+            &identity.response_id,
+            &identity.run_id,
+            "writing-assistant",
+            "chat-1",
+            "message-1",
+        ))
+        .expect("stale active binding");
+
+    product_delivery::reconcile_terminal_response_bindings(&state).expect("reconcile");
+
+    let store = state.product_bindings.lock().expect("binding store");
+    assert!(
+        store
+            .active_for_chat("chat-1")
+            .expect("active lookup")
+            .is_none()
+    );
+    assert_eq!(
+        store.get(&identity.response_id).expect("binding").status,
+        ProductBindingStatus::Failed
+    );
+    remove_sqlite_file_set(&db_path);
+}
+
+#[test]
+fn studio_event_replay_detects_each_already_projected_response_event() {
+    let event = ResponseEvent::new(
+        "run-1",
+        "response-1",
+        "session-1",
+        "trace-1",
+        1,
+        ResponseEventType::ArtifactUpdated,
+        json!({"remote_event_id": "studio-event-12"}),
+    );
+
+    assert!(product_projection_exists(
+        &[event],
+        &ResponseEventType::ArtifactUpdated,
+        "studio-event-12"
+    ));
+}
+
 fn seed_eval_retrieval_failure(db_path: &Path, trace_id: &str) -> String {
     let runtime_store = TonglingyuRuntimeStore::new(db_path.to_path_buf());
     let case = eval_case_fixture("rqa-admin-failure");

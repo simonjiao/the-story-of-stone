@@ -1,9 +1,8 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use redis::Commands;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::product_protocol::ProductArtifactRef;
 
@@ -30,6 +29,7 @@ pub(crate) enum ProductDeliveryStatus {
     Delivered,
     Retrying,
     Failed,
+    DeadLetter,
 }
 
 impl ProductBindingStatus {
@@ -60,7 +60,13 @@ pub(crate) struct ProductRunBinding {
     #[serde(default)]
     pub(crate) delivery_last_error_code: Option<String>,
     #[serde(default)]
+    pub(crate) delivery_retryable: bool,
+    #[serde(default)]
     pub(crate) delivery_snapshot: Option<String>,
+    #[serde(default)]
+    pub(crate) delivery_id: Option<String>,
+    #[serde(default)]
+    pub(crate) delivery_body: Option<Value>,
     pub(crate) version: u64,
 }
 
@@ -88,7 +94,10 @@ impl ProductRunBinding {
             delivery_status: ProductDeliveryStatus::Pending,
             delivery_attempts: 0,
             delivery_last_error_code: None,
+            delivery_retryable: false,
             delivery_snapshot: None,
+            delivery_id: None,
+            delivery_body: None,
             version: 1,
         }
     }
@@ -168,6 +177,35 @@ impl ProductBindingStoreBackend {
         }
     }
 
+    pub(crate) fn active_for_chat(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<ProductRunBinding>, ProductBindingStoreError> {
+        match self {
+            Self::InMemory(store) => store.active_for_chat(chat_id),
+            Self::Redis(store) => store.active_for_chat(chat_id),
+        }
+    }
+
+    pub(crate) fn pending_deliveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProductRunBinding>, ProductBindingStoreError> {
+        match self {
+            Self::InMemory(store) => Ok(store.pending_deliveries(limit)),
+            Self::Redis(store) => store.pending_deliveries(limit),
+        }
+    }
+
+    pub(crate) fn active_bindings(
+        &self,
+    ) -> Result<Vec<ProductRunBinding>, ProductBindingStoreError> {
+        match self {
+            Self::InMemory(store) => Ok(store.active_bindings()),
+            Self::Redis(store) => store.active_bindings(),
+        }
+    }
+
     pub(crate) fn save(
         &mut self,
         binding: ProductRunBinding,
@@ -181,6 +219,42 @@ impl ProductBindingStoreBackend {
 }
 
 impl InMemoryProductBindingStore {
+    fn active_bindings(&self) -> Vec<ProductRunBinding> {
+        self.bindings
+            .values()
+            .filter(|binding| !binding.status.is_terminal())
+            .cloned()
+            .collect()
+    }
+
+    fn pending_deliveries(&self, limit: usize) -> Vec<ProductRunBinding> {
+        self.bindings
+            .values()
+            .filter(|binding| {
+                matches!(
+                    binding.delivery_status,
+                    ProductDeliveryStatus::Pending
+                        | ProductDeliveryStatus::Retrying
+                        | ProductDeliveryStatus::Failed
+                ) && (binding.delivery_status != ProductDeliveryStatus::Failed
+                    || binding.delivery_retryable)
+                    && binding.delivery_body.is_some()
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn active_for_chat(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<ProductRunBinding>, ProductBindingStoreError> {
+        self.active_chats
+            .get(chat_id)
+            .map(|response_id| self.get(response_id))
+            .transpose()
+    }
+
     fn create(
         &mut self,
         binding: ProductRunBinding,
@@ -233,6 +307,74 @@ impl InMemoryProductBindingStore {
 }
 
 impl RedisProductBindingStore {
+    fn active_bindings(&self) -> Result<Vec<ProductRunBinding>, ProductBindingStoreError> {
+        let mut connection = self.connection()?;
+        let keys = {
+            let iter: redis::Iter<'_, String> = connection
+                .scan_match(format!("{}:product-binding:*", self.prefix))
+                .map_err(backend_error)?;
+            iter.collect::<Result<Vec<_>, _>>().map_err(backend_error)?
+        };
+        let mut active = Vec::new();
+        for key in keys {
+            let value: Option<String> = connection.get(key).map_err(backend_error)?;
+            let Some(value) = value else { continue };
+            let binding = parse_binding(&value)?;
+            if !binding.status.is_terminal() {
+                active.push(binding);
+            }
+        }
+        Ok(active)
+    }
+
+    fn pending_deliveries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ProductRunBinding>, ProductBindingStoreError> {
+        let mut connection = self.connection()?;
+        let keys = {
+            let iter: redis::Iter<'_, String> = connection
+                .scan_match(format!("{}:product-binding:*", self.prefix))
+                .map_err(backend_error)?;
+            iter.collect::<Result<Vec<_>, _>>().map_err(backend_error)?
+        };
+        let mut pending = Vec::new();
+        for key in keys {
+            let value: Option<String> = connection.get(key).map_err(backend_error)?;
+            let Some(value) = value else { continue };
+            let binding = parse_binding(&value)?;
+            if matches!(
+                binding.delivery_status,
+                ProductDeliveryStatus::Pending
+                    | ProductDeliveryStatus::Retrying
+                    | ProductDeliveryStatus::Failed
+            ) && (binding.delivery_status != ProductDeliveryStatus::Failed
+                || binding.delivery_retryable)
+                && binding.delivery_body.is_some()
+            {
+                pending.push(binding);
+                if pending.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(pending)
+    }
+
+    fn active_for_chat(
+        &self,
+        chat_id: &str,
+    ) -> Result<Option<ProductRunBinding>, ProductBindingStoreError> {
+        let mut connection = self.connection()?;
+        let response_id: Option<String> = connection
+            .get(self.chat_key(chat_id))
+            .map_err(backend_error)?;
+        response_id
+            .as_deref()
+            .map(|response_id| self.get(response_id))
+            .transpose()
+    }
+
     fn ping(&self) -> Result<(), ProductBindingStoreError> {
         let mut connection = self.connection()?;
         let pong: String = redis::cmd("PING")

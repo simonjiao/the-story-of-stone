@@ -83,10 +83,12 @@ mod llm_resolver;
 mod openwebui_delivery;
 mod plan;
 mod product_binding;
+mod product_delivery;
 mod product_handoff;
 mod product_protocol;
 mod product_registry;
 mod product_router;
+mod product_run_worker;
 mod question_frame;
 mod remote_product_run;
 mod response;
@@ -135,23 +137,19 @@ use crate::llm_agent_contracts::{
     CONVERSATION_STATE_WRITER_PROFILE_ID, QUESTION_NORMALIZER_PROFILE_ID,
     tonglingyu_llm_agent_profile_contracts,
 };
-use crate::openwebui_delivery::{
-    OpenWebuiDeliveryClient, OpenWebuiDeliveryError, delivery_for_product_event,
-};
+use crate::openwebui_delivery::OpenWebuiDeliveryClient;
 use crate::plan::{
     RuntimeStepPlan, SearchPolicy, planned_profiles_for_policy, public_search_policy, search_policy,
 };
 use crate::product_binding::{
-    ProductBindingStatus, ProductBindingStoreBackend, ProductBindingStoreError,
-    ProductDeliveryStatus, ProductRunBinding,
+    ProductBindingStatus, ProductBindingStoreBackend, ProductBindingStoreError, ProductRunBinding,
 };
-use crate::product_protocol::{
-    PRODUCT_RUN_SCHEMA_VERSION, ProductRunActionSubmission, ProductRunCreateRequest,
-    ProductRunIdentity, ProductRunInput,
-};
+use crate::product_protocol::ProductRunActionSubmission;
 use crate::product_registry::{ProductAvailability, ProductRegistry};
 use crate::product_router::{PRODUCT_METADATA_KEY, product_route};
-use crate::remote_product_run::project_product_event;
+use crate::product_run_worker::execute_product_response_job;
+#[cfg(test)]
+use crate::product_run_worker::product_projection_exists;
 #[cfg(test)]
 use crate::response::cached_runtime_stream_events;
 use crate::response::{
@@ -159,6 +157,8 @@ use crate::response::{
     streaming_response_from_cached_completion_value, streaming_response_from_completion_value,
     streaming_response_from_runtime_events,
 };
+#[cfg(test)]
+use crate::response_events::ResponseEvent;
 use crate::response_events::response_event_from_runtime_stream_event;
 use crate::response_events::{ResponseEventType, ResponseStatus};
 #[cfg(test)]
@@ -688,6 +688,18 @@ struct ServeArgs {
         default_value_t = 250
     )]
     openwebui_delivery_retry_base_ms: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_OPENWEBUI_DELIVERY_RECOVERY_INTERVAL_SECS",
+        default_value_t = 15
+    )]
+    openwebui_delivery_recovery_interval_secs: u64,
+    #[arg(
+        long,
+        env = "TONGLINGYU_OPENWEBUI_DELIVERY_RECOVERY_MAX_ATTEMPTS",
+        default_value_t = 24
+    )]
+    openwebui_delivery_recovery_max_attempts: u32,
     #[arg(
         long,
         env = "TONGLINGYU_MEMORY_COLLECTOR_BACKGROUND_ENABLED",
@@ -2495,6 +2507,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
         workflow_agent_provider_profiles,
         started_at: now_rfc3339(),
     });
+    if state.openwebui_delivery.is_some() {
+        product_delivery::spawn_recovery_worker(
+            state.clone(),
+            args.openwebui_delivery_recovery_interval_secs,
+            args.openwebui_delivery_recovery_max_attempts,
+        );
+    }
     if args.memory_collector_background_enabled {
         spawn_memory_collector_background_worker(
             args.db.clone(),
@@ -3431,401 +3450,6 @@ async fn execute_response_job(
         Some(format!("final_response:{}", job.response_id)),
     )?;
     Ok(())
-}
-
-async fn execute_product_response_job(
-    state: Arc<AppState>,
-    job: ResponseJob,
-    message: String,
-    route: product_router::ProductRoute,
-) -> Result<(), ResponseJobExecutionError> {
-    state
-        .product_registry
-        .require_available(&route.product_id)
-        .map_err(|_| {
-            ResponseJobExecutionError::new(
-                "product_unavailable",
-                "requested product is unavailable",
-            )
-        })?;
-    let studio = state.studio_client.clone().ok_or_else(|| {
-        ResponseJobExecutionError::new("product_unavailable", "Studio client is unavailable")
-    })?;
-    let new_binding = ProductRunBinding::new(
-        &job.response_id,
-        &job.run_id,
-        &route.product_id,
-        &route.chat_ref,
-        &route.external_message_id,
-    );
-    let mut binding = {
-        let mut store = state.product_bindings.lock().map_err(|_| {
-            ResponseJobExecutionError::new(
-                "product_binding_store_unavailable",
-                "product binding store is unavailable",
-            )
-        })?;
-        store
-            .create(new_binding)
-            .map_err(product_binding_execution_error)?
-    };
-    let user_ref = job
-        .user_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(&job.subject)
-        .to_string();
-    let create_request = ProductRunCreateRequest {
-        schema_version: PRODUCT_RUN_SCHEMA_VERSION.to_string(),
-        request_id: job.run_id.clone(),
-        external_message_id: route.external_message_id,
-        trace_id: job.trace_id.clone(),
-        product_id: route.product_id,
-        identity: ProductRunIdentity {
-            issuer: "tonglingyu-gateway".to_string(),
-            user_ref,
-            chat_ref: route.chat_ref,
-        },
-        input: ProductRunInput {
-            message,
-            article_id: None,
-            workspace_id: None,
-            section_id: None,
-            target_stage: None,
-            replace_existing: None,
-        },
-    };
-    let remote = studio
-        .create_run(&create_request)
-        .await
-        .map_err(studio_execution_error)?;
-    if remote.request_id != job.run_id
-        || remote.external_message_id != create_request.external_message_id
-        || remote.product_id != create_request.product_id
-    {
-        return Err(ResponseJobExecutionError::new(
-            "studio_contract_invalid",
-            "Studio returned a Product Run bound to another request",
-        ));
-    }
-    if binding
-        .remote_run_id
-        .as_deref()
-        .is_some_and(|run_id| run_id != remote.id)
-    {
-        return Err(ResponseJobExecutionError::new(
-            "product_binding_conflict",
-            "Product Run is already bound to another Studio Run",
-        ));
-    }
-    if binding.remote_run_id.is_none() {
-        let expected_version = binding.version;
-        binding.remote_run_id = Some(remote.id.clone());
-        binding.status = product_binding_status(&remote.status);
-        binding = save_product_binding(&state, binding, expected_version)?;
-    }
-    let remote_run_id = binding.remote_run_id.clone().ok_or_else(|| {
-        ResponseJobExecutionError::new("product_binding_invalid", "Studio Run binding is missing")
-    })?;
-    let gateway_state = response_state_record_for_job(&state, &job)?;
-    if gateway_state.cancel_requested || gateway_state.status == ResponseStatus::Canceling {
-        studio
-            .cancel(&remote_run_id)
-            .await
-            .map_err(studio_execution_error)?;
-    }
-    let start_sequence = binding.remote_last_sequence;
-    let stream_state = state.clone();
-    let stream_job = job.clone();
-    let stream_remote_run_id = remote_run_id.clone();
-    let stream_product_id = binding.product_id.clone();
-    studio
-        .stream_events(&remote_run_id, start_sequence, move |event| {
-            let state = stream_state.clone();
-            let job = stream_job.clone();
-            let remote_run_id = stream_remote_run_id.clone();
-            let product_id = stream_product_id.clone();
-            async move { process_product_event(state, job, remote_run_id, product_id, event).await }
-        })
-        .await
-        .map_err(studio_execution_error)
-}
-
-async fn process_product_event(
-    state: Arc<AppState>,
-    job: ResponseJob,
-    remote_run_id: String,
-    product_id: String,
-    event: product_protocol::ProductRunEvent,
-) -> Result<bool, studio_http::StudioHttpError> {
-    if event.run_id != remote_run_id || event.product_id != product_id {
-        return Err(studio_http::StudioHttpError {
-            code: "studio_contract_invalid",
-            message: "Studio event does not match the bound Product Run".to_string(),
-            retryable: false,
-        });
-    }
-    let mut binding = {
-        let store = state
-            .product_bindings
-            .lock()
-            .map_err(|_| studio_http::StudioHttpError {
-                code: "product_binding_store_unavailable",
-                message: "product binding store is unavailable".to_string(),
-                retryable: true,
-            })?;
-        store.get(&job.response_id).map_err(|error| {
-            let error = product_binding_execution_error(error);
-            studio_http::StudioHttpError {
-                code: error.code,
-                message: error.message,
-                retryable: true,
-            }
-        })?
-    };
-    let projected =
-        project_product_event(&event).map_err(|message| studio_http::StudioHttpError {
-            code: "studio_contract_invalid",
-            message,
-            retryable: false,
-        })?;
-    let duplicate_action = projected
-        .iter()
-        .find_map(|item| item.pending_action_id.as_deref())
-        .is_some_and(|action_id| binding.pending_remote_action_id.as_deref() == Some(action_id));
-    if !duplicate_action {
-        for item in &projected {
-            let final_response_ref = if item.terminal {
-                event
-                    .payload
-                    .get("artifacts")
-                    .and_then(Value::as_array)
-                    .and_then(|items| items.first())
-                    .and_then(|item| item.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            } else {
-                None
-            };
-            append_response_event_for_job(
-                &state,
-                &job,
-                item.event_type.clone(),
-                item.payload.clone(),
-                item.status_update.clone(),
-                None,
-                None,
-                final_response_ref,
-            )
-            .map_err(|error| studio_http::StudioHttpError {
-                code: error.code,
-                message: error.message,
-                retryable: true,
-            })?;
-        }
-    }
-    let expected_version = binding.version;
-    binding.remote_last_sequence = event.sequence;
-    if let Some(artifacts) = event.payload.get("artifacts") {
-        binding.artifacts = serde_json::from_value(artifacts.clone()).map_err(|_| {
-            studio_http::StudioHttpError {
-                code: "studio_contract_invalid",
-                message: "Studio event contains invalid artifact references".to_string(),
-                retryable: false,
-            }
-        })?;
-    }
-    if let Some(last) = projected.last() {
-        binding.status = last.binding_status.clone();
-    }
-    binding.pending_remote_action_id = match event.event_type {
-        product_protocol::ProductRunEventType::RunRequiresAction => projected
-            .iter()
-            .find_map(|item| item.pending_action_id.clone()),
-        product_protocol::ProductRunEventType::RunResumed
-        | product_protocol::ProductRunEventType::RunCompleted
-        | product_protocol::ProductRunEventType::RunFailed
-        | product_protocol::ProductRunEventType::RunCanceled => None,
-        _ => binding.pending_remote_action_id.clone(),
-    };
-    binding = save_product_binding(&state, binding, expected_version).map_err(|error| {
-        studio_http::StudioHttpError {
-            code: error.code,
-            message: error.message,
-            retryable: true,
-        }
-    })?;
-    let terminal = projected.iter().any(|item| item.terminal);
-    deliver_product_event(&state, &job, &event, binding).await?;
-    Ok(terminal)
-}
-
-async fn deliver_product_event(
-    state: &AppState,
-    job: &ResponseJob,
-    event: &product_protocol::ProductRunEvent,
-    mut binding: ProductRunBinding,
-) -> Result<(), studio_http::StudioHttpError> {
-    let delivery = delivery_for_product_event(&job.run_id, event);
-    let base_attempts = binding.delivery_attempts;
-    let expected_version = binding.version;
-    binding.delivery_status = ProductDeliveryStatus::Delivering;
-    binding.delivery_last_error_code = None;
-    binding.delivery_snapshot = Some(delivery.snapshot.clone());
-    binding =
-        save_product_binding(state, binding, expected_version).map_err(binding_studio_error)?;
-    let Some(client) = state.openwebui_delivery.as_ref() else {
-        mark_delivery_failed(
-            state,
-            binding,
-            base_attempts + 1,
-            "openwebui_delivery_not_configured",
-        )?;
-        return Ok(());
-    };
-    let response_id = job.response_id.clone();
-    let result = client
-        .deliver(
-            &binding.openwebui_chat_id,
-            &binding.openwebui_assistant_message_id,
-            &delivery,
-            |attempt, error| {
-                update_delivery_retrying(state, &response_id, base_attempts + attempt, error.code)
-            },
-        )
-        .await;
-    let mut latest =
-        product_binding_for_delivery(state, &job.response_id).map_err(binding_studio_error)?;
-    let expected_version = latest.version;
-    match result {
-        Ok(attempts) => {
-            latest.delivery_status = ProductDeliveryStatus::Delivered;
-            latest.delivery_attempts = base_attempts + attempts;
-            latest.delivery_last_error_code = None;
-        }
-        Err(error) => {
-            latest.delivery_status = ProductDeliveryStatus::Failed;
-            latest.delivery_attempts = latest.delivery_attempts.max(base_attempts) + 1;
-            latest.delivery_last_error_code = Some(error.code.to_string());
-            tracing::warn!(
-                response_id = %job.response_id,
-                error_code = error.code,
-                "Open WebUI product notification entered failed delivery state"
-            );
-        }
-    }
-    save_product_binding(state, latest, expected_version).map_err(binding_studio_error)?;
-    Ok(())
-}
-
-fn update_delivery_retrying(
-    state: &AppState,
-    response_id: &str,
-    attempts: u32,
-    error_code: &str,
-) -> Result<(), OpenWebuiDeliveryError> {
-    let mut binding = product_binding_for_delivery(state, response_id).map_err(|error| {
-        OpenWebuiDeliveryError {
-            code: error.code,
-            retryable: true,
-        }
-    })?;
-    let expected_version = binding.version;
-    binding.delivery_status = ProductDeliveryStatus::Retrying;
-    binding.delivery_attempts = attempts;
-    binding.delivery_last_error_code = Some(error_code.to_string());
-    save_product_binding(state, binding, expected_version)
-        .map(|_| ())
-        .map_err(|error| OpenWebuiDeliveryError {
-            code: error.code,
-            retryable: true,
-        })
-}
-
-fn mark_delivery_failed(
-    state: &AppState,
-    mut binding: ProductRunBinding,
-    attempts: u32,
-    error_code: &str,
-) -> Result<(), studio_http::StudioHttpError> {
-    let expected_version = binding.version;
-    binding.delivery_status = ProductDeliveryStatus::Failed;
-    binding.delivery_attempts = attempts;
-    binding.delivery_last_error_code = Some(error_code.to_string());
-    save_product_binding(state, binding, expected_version)
-        .map(|_| ())
-        .map_err(binding_studio_error)
-}
-
-fn product_binding_for_delivery(
-    state: &AppState,
-    response_id: &str,
-) -> Result<ProductRunBinding, ResponseJobExecutionError> {
-    state
-        .product_bindings
-        .lock()
-        .map_err(|_| {
-            ResponseJobExecutionError::new(
-                "product_binding_store_unavailable",
-                "product binding store is unavailable",
-            )
-        })?
-        .get(response_id)
-        .map_err(product_binding_execution_error)
-}
-
-fn binding_studio_error(error: ResponseJobExecutionError) -> studio_http::StudioHttpError {
-    studio_http::StudioHttpError {
-        code: error.code,
-        message: error.message,
-        retryable: true,
-    }
-}
-
-fn save_product_binding(
-    state: &AppState,
-    binding: ProductRunBinding,
-    expected_version: u64,
-) -> Result<ProductRunBinding, ResponseJobExecutionError> {
-    state
-        .product_bindings
-        .lock()
-        .map_err(|_| {
-            ResponseJobExecutionError::new(
-                "product_binding_store_unavailable",
-                "product binding store is unavailable",
-            )
-        })?
-        .save(binding, expected_version)
-        .map_err(product_binding_execution_error)
-}
-
-fn product_binding_status(status: &product_protocol::ProductRunStatus) -> ProductBindingStatus {
-    match status {
-        product_protocol::ProductRunStatus::Queued => ProductBindingStatus::Queued,
-        product_protocol::ProductRunStatus::Running => ProductBindingStatus::Running,
-        product_protocol::ProductRunStatus::RequiresAction => ProductBindingStatus::RequiresAction,
-        product_protocol::ProductRunStatus::Completed => ProductBindingStatus::Completed,
-        product_protocol::ProductRunStatus::Failed => ProductBindingStatus::Failed,
-        product_protocol::ProductRunStatus::Canceling => ProductBindingStatus::Canceling,
-        product_protocol::ProductRunStatus::Canceled => ProductBindingStatus::Canceled,
-    }
-}
-
-fn product_binding_execution_error(error: ProductBindingStoreError) -> ResponseJobExecutionError {
-    let code = match error {
-        ProductBindingStoreError::BackendUnavailable(_) => "product_binding_store_unavailable",
-        ProductBindingStoreError::CorruptBinding(_) => "product_binding_corrupt",
-        ProductBindingStoreError::UnknownResponse(_) => "product_binding_missing",
-        ProductBindingStoreError::BindingConflict(_) => "product_binding_conflict",
-        ProductBindingStoreError::ActiveChatConflict(_) => "product_run_busy",
-        ProductBindingStoreError::SequenceRegression { .. } => "product_sequence_regression",
-    };
-    ResponseJobExecutionError::new(code, "Product Run binding update failed")
-}
-
-fn studio_execution_error(error: studio_http::StudioHttpError) -> ResponseJobExecutionError {
-    ResponseJobExecutionError::new(error.code, error.message)
 }
 
 struct ResponseJobInput {
@@ -5938,7 +5562,7 @@ async fn chat_completions_stream_bridge(
         Ok(payload) => payload,
         Err(response) => return response,
     };
-    if let Err(response) = preflight_product_request(&state, &payload) {
+    if let Err(response) = preflight_product_request(&state, &headers, &payload) {
         return response;
     }
     let input = match run_normalization_input(
@@ -5960,7 +5584,11 @@ async fn chat_completions_stream_bridge(
         Err(response) => return response,
     };
     if created.should_enqueue {
+        if let Err(response) = reserve_product_binding(&state, &payload, &identity) {
+            return response;
+        }
         if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            fail_reserved_product_binding(&state, &identity.response_id);
             return response;
         }
     }
@@ -6662,7 +6290,7 @@ async fn create_run_projection(
         Ok(payload) => payload,
         Err(response) => return response,
     };
-    if let Err(response) = preflight_product_request(&state, &payload) {
+    if let Err(response) = preflight_product_request(&state, &headers, &payload) {
         return response;
     }
     let input = match run_normalization_input(&state, &headers, &payload, auth_subject, api_type) {
@@ -6678,7 +6306,11 @@ async fn create_run_projection(
         Err(response) => return response,
     };
     if created.should_enqueue {
+        if let Err(response) = reserve_product_binding(&state, &payload, &identity) {
+            return response;
+        }
         if let Err(response) = enqueue_response_job(&state, &identity, payload) {
+            fail_reserved_product_binding(&state, &identity.response_id);
             return response;
         }
     }
@@ -6695,6 +6327,81 @@ async fn create_run_projection(
         }
     };
     Json(response_state_projection(&state_record, object_type)).into_response()
+}
+
+fn reserve_product_binding(
+    state: &AppState,
+    payload: &Value,
+    identity: &RunIdentity,
+) -> Result<(), Response> {
+    let Some(route) = product_route(payload).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "product_route_invalid",
+            "product activation metadata is invalid",
+            Some(&identity.trace_id),
+        )
+    })?
+    else {
+        return Ok(());
+    };
+    let binding = ProductRunBinding::new(
+        &identity.response_id,
+        &identity.run_id,
+        route.product_id,
+        route.chat_ref,
+        route.external_message_id,
+    );
+    let result = state
+        .product_bindings
+        .lock()
+        .map_err(|_| ProductBindingStoreError::BackendUnavailable("lock poisoned".to_string()))
+        .and_then(|mut store| store.create(binding));
+    if let Err(error) = result {
+        let (status, code, message) =
+            if matches!(error, ProductBindingStoreError::ActiveChatConflict(_)) {
+                (
+                    StatusCode::CONFLICT,
+                    "run_busy",
+                    "this chat already has an active product run",
+                )
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "product_binding_store_unavailable",
+                    "product binding store is unavailable",
+                )
+            };
+        let _ = append_response_event_for_identity(
+            state,
+            identity,
+            ResponseEventType::ResponseFailed,
+            json!({"error": {"code": code, "message": message}}),
+            Some(ResponseStatus::Failed),
+            None,
+            None,
+            None,
+        );
+        return Err(error_response(
+            status,
+            code,
+            message,
+            Some(&identity.trace_id),
+        ));
+    }
+    Ok(())
+}
+
+fn fail_reserved_product_binding(state: &AppState, response_id: &str) {
+    let Ok(mut store) = state.product_bindings.lock() else {
+        return;
+    };
+    let Ok(mut binding) = store.get(response_id) else {
+        return;
+    };
+    let expected_version = binding.version;
+    binding.status = ProductBindingStatus::Failed;
+    let _ = store.save(binding, expected_version);
 }
 
 fn normalize_product_metadata(headers: &HeaderMap, mut payload: Value) -> Result<Value, Response> {
@@ -6762,7 +6469,11 @@ fn normalize_product_metadata(headers: &HeaderMap, mut payload: Value) -> Result
     Ok(payload)
 }
 
-fn preflight_product_request(state: &AppState, payload: &Value) -> Result<(), Response> {
+fn preflight_product_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: &Value,
+) -> Result<(), Response> {
     let route = product_route(payload).map_err(|_| {
         error_response(
             StatusCode::BAD_REQUEST,
@@ -6771,21 +6482,66 @@ fn preflight_product_request(state: &AppState, payload: &Value) -> Result<(), Re
             None,
         )
     })?;
-    let Some(route) = route else {
+    if let Some(route) = &route {
+        state
+            .product_registry
+            .require_available(&route.product_id)
+            .map_err(|_| {
+                error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "product_unavailable",
+                    "requested product is unavailable",
+                    None,
+                )
+            })?;
+    }
+    let chat_ref = route
+        .as_ref()
+        .map(|route| route.chat_ref.as_str())
+        .or_else(|| {
+            headers
+                .get("x-tonglingyu-chat-id")
+                .or_else(|| headers.get("x-open-webui-chat-id"))
+                .and_then(|value| value.to_str().ok())
+        });
+    let Some(chat_ref) = chat_ref.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
-    state
-        .product_registry
-        .require_available(&route.product_id)
-        .map(|_| ())
+    let active = state
+        .product_bindings
+        .lock()
         .map_err(|_| {
             error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "product_unavailable",
-                "requested product is unavailable",
+                "product_binding_store_unavailable",
+                "product binding store is unavailable",
                 None,
             )
-        })
+        })?
+        .active_for_chat(chat_ref)
+        .map_err(|_| {
+            error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "product_binding_store_unavailable",
+                "product binding store is unavailable",
+                None,
+            )
+        })?;
+    if let Some(active) = active {
+        let same_request = route.as_ref().is_some_and(|route| {
+            route.product_id == active.product_id
+                && route.external_message_id == active.openwebui_assistant_message_id
+        });
+        if !same_request {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "run_busy",
+                "this chat already has an active product run",
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn get_response_projection(

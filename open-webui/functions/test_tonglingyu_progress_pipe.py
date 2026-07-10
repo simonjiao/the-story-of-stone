@@ -173,9 +173,19 @@ class TonglingyuProgressPipeTest(unittest.TestCase):
         )
 
         self.assertEqual(headers["Authorization"], "Bearer gateway-key")
+        self.assertEqual(headers["X-Tonglingyu-Subject"], "user-1")
         self.assertEqual(headers["X-Tonglingyu-User-Id"], "user-1")
         self.assertEqual(headers["X-Tonglingyu-Chat-Id"], "chat-1")
         self.assertEqual(headers["X-Tonglingyu-Message-Id"], "msg-1")
+
+    def test_gateway_headers_reject_body_identity_without_authenticated_user(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "authenticated user identity"):
+            _gateway_headers(
+                {"metadata": {"user_id": "attacker", "chat_id": "chat-1"}},
+                "gateway-key",
+                None,
+                None,
+            )
 
     def test_pipe_emits_replace_embeds_and_returns_only_final_answer(self) -> None:
         pipe = Pipe()

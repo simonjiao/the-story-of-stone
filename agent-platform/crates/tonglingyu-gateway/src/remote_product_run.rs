@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde_json::{Value, json};
 
 use crate::product_binding::ProductBindingStatus;
@@ -83,6 +81,7 @@ pub(crate) fn project_product_event(
                     json!({
                         "text": summary,
                         "artifacts": event.payload.get("artifacts"),
+                        "remote_event_id": event.event_id,
                         "remote_sequence": event.sequence,
                     }),
                     None,

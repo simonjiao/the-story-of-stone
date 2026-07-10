@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::future::Future;
 use std::time::Duration;
 
@@ -76,29 +74,6 @@ impl StudioHttpClient {
             .await
             .map_err(StudioHttpError::transport)?;
         self.decode(response).await
-    }
-
-    pub(crate) async fn events(
-        &self,
-        run_id: &str,
-        after_sequence: u64,
-    ) -> Result<Vec<ProductRunEvent>, StudioHttpError> {
-        let response = self
-            .authorized(
-                self.client
-                    .get(format!("{}/internal/runs/{run_id}/events", self.base_url)),
-            )
-            .query(&[("after_sequence", after_sequence)])
-            .send()
-            .await
-            .map_err(StudioHttpError::transport)?;
-        let events: Vec<ProductRunEvent> = self.decode(response).await?;
-        let mut previous = after_sequence;
-        for event in &events {
-            validate_event(event, previous).map_err(StudioHttpError::contract)?;
-            previous = event.sequence;
-        }
-        Ok(events)
     }
 
     pub(crate) async fn stream_events<F, Fut>(

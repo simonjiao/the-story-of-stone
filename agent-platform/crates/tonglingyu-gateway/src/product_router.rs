@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde_json::Value;
 
 pub(crate) const PRODUCT_METADATA_KEY: &str = "_tonglingyu_product";

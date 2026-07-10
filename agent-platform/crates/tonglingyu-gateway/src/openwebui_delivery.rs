@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url, header};
@@ -24,6 +22,7 @@ pub(crate) struct OpenWebuiDeliveryError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenWebuiDelivery {
+    pub(crate) id: String,
     pub(crate) body: Value,
     pub(crate) snapshot: String,
 }
@@ -85,6 +84,7 @@ impl OpenWebuiDeliveryClient {
                     header::AUTHORIZATION,
                     format!("Bearer {}", self.service_key),
                 )
+                .header("Idempotency-Key", &delivery.id)
                 .json(&delivery.body)
                 .send()
                 .await
@@ -145,11 +145,12 @@ pub(crate) fn delivery_for_product_event(
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("写作任务正在处理。");
-    match event.event_type {
+    let delivery = match event.event_type {
         ProductRunEventType::RunStarted
         | ProductRunEventType::RunStatus
         | ProductRunEventType::ArtifactUpdated
         | ProductRunEventType::RunResumed => OpenWebuiDelivery {
+            id: String::new(),
             body: json!({"type": "status", "data": {"description": message, "done": false}}),
             snapshot: message.to_string(),
         },
@@ -171,6 +172,7 @@ pub(crate) fn delivery_for_product_event(
                 "写作任务等待确认\n\n{title}\n\nRun ID: {gateway_run_id}\nAction ID: {action_id}"
             );
             OpenWebuiDelivery {
+                id: String::new(),
                 body: json!({"type": "replace", "data": {"content": &content}}),
                 snapshot: content,
             }
@@ -205,6 +207,7 @@ pub(crate) fn delivery_for_product_event(
                 )
             };
             OpenWebuiDelivery {
+                id: String::new(),
                 body: json!({"type": "replace", "data": {"content": &content}}),
                 snapshot: content,
             }
@@ -212,6 +215,7 @@ pub(crate) fn delivery_for_product_event(
         ProductRunEventType::RunFailed => {
             let content = format!("写作任务失败。\n\nRun ID: {gateway_run_id}");
             OpenWebuiDelivery {
+                id: String::new(),
                 body: json!({"type": "replace", "data": {"content": &content}}),
                 snapshot: content,
             }
@@ -219,10 +223,15 @@ pub(crate) fn delivery_for_product_event(
         ProductRunEventType::RunCanceled => {
             let content = format!("写作任务已取消。\n\nRun ID: {gateway_run_id}");
             OpenWebuiDelivery {
+                id: String::new(),
                 body: json!({"type": "replace", "data": {"content": &content}}),
                 snapshot: content,
             }
         }
+    };
+    OpenWebuiDelivery {
+        id: format!("product-delivery:{gateway_run_id}:{}", event.event_id),
+        ..delivery
     }
 }
 
