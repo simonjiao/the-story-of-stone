@@ -133,6 +133,9 @@ impl StudioHttpClient {
             while let Some(boundary) = buffer.find("\n\n") {
                 let frame = buffer[..boundary].to_string();
                 buffer.drain(..boundary + 2);
+                if matches!(sse_event_name(&frame), Some("connected" | "ping")) {
+                    continue;
+                }
                 let Some(data) = sse_data(&frame) else {
                     continue;
                 };
@@ -256,6 +259,13 @@ fn sse_data(frame: &str) -> Option<String> {
     } else {
         Some(data.join("\n"))
     }
+}
+
+fn sse_event_name(frame: &str) -> Option<&str> {
+    frame
+        .lines()
+        .find_map(|line| line.strip_prefix("event:").map(str::trim))
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

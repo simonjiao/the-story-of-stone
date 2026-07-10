@@ -45,3 +45,20 @@ fn rejects_unknown_fields_versions_empty_ids_and_non_increasing_sequences() {
     let event: ProductRunEvent = serde_json::from_value(fixture("event")).expect("event");
     assert!(validate_event(&event, event.sequence).is_err());
 }
+
+#[test]
+fn parses_studio_artifact_references_from_event_payload() {
+    let payload = json!({
+        "artifacts": [{
+            "id": "art_b848b8518298c6b85c7406ba",
+            "kind": "article",
+            "title": "晴雯性格与命运的短评"
+        }],
+        "reason": "pi-task-card-draft-created"
+    });
+
+    let artifacts: Vec<ProductArtifactRef> =
+        serde_json::from_value(payload["artifacts"].clone()).expect("artifact references");
+
+    assert_eq!(artifacts[0].id, "art_b848b8518298c6b85c7406ba");
+}

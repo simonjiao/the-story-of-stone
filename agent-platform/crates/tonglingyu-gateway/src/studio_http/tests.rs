@@ -14,3 +14,16 @@ fn parses_only_sse_data_fields() {
     );
     assert_eq!(sse_data("event: ping"), None);
 }
+
+#[test]
+fn identifies_studio_control_frames_separately_from_product_events() {
+    assert_eq!(
+        sse_event_name("event: connected\ndata: {\"ok\":true}"),
+        Some("connected")
+    );
+    assert_eq!(sse_event_name("event: ping\ndata: {\"t\":1}"), Some("ping"));
+    assert_eq!(
+        sse_event_name("id: 12\nevent: artifact.updated\ndata: {}"),
+        Some("artifact.updated")
+    );
+}
