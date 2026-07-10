@@ -7,6 +7,7 @@ required_open_webui_version: 0.6.0
 
 import html
 import json
+import re
 import time
 from typing import Any, AsyncIterator, Optional
 
@@ -62,6 +63,17 @@ class Pipe:
         __model__: Optional[Any] = None,
     ) -> str:
         del __model__
+        command, command_input = _product_command(body)
+        if command == "illustrated-book":
+            return "图文书产品尚未在 Studio capabilities 中发布，当前不会降级为普通对话。"
+        if command == "writing-assistant":
+            return await self._start_product_run(
+                body, command_input, __user__, __metadata__, __event_emitter__
+            )
+        if command == "exit-product":
+            return await self._cancel_product_run(
+                body, __user__, __metadata__, __event_emitter__
+            )
         state = ProgressState(
             title=self.valves.EMBED_TITLE,
             max_lines=max(1, int(self.valves.MAX_PROGRESS_LINES or 8)),
@@ -114,6 +126,58 @@ class Pipe:
         if not answer:
             raise RuntimeError("gateway stream completed without final answer content")
         return answer
+
+    async def _start_product_run(
+        self,
+        body: dict,
+        prompt: str,
+        user: Optional[Any],
+        metadata: Optional[dict],
+        event_emitter: Optional[Any],
+    ) -> str:
+        if not prompt:
+            return "请在 `/写作` 后填写写作要求。"
+        headers = _gateway_headers(body, self.valves.GATEWAY_API_KEY, user, metadata)
+        chat_id = headers.get("X-Tonglingyu-Chat-Id", "")
+        assistant_message_id = _assistant_message_id(body, metadata)
+        if not chat_id or not assistant_message_id:
+            return "无法启动写作产品：缺少 Open WebUI chat_id 或助手占位消息 id。"
+        headers["X-Tonglingyu-Product-Id"] = "writing-assistant"
+        headers["X-Tonglingyu-Message-Id"] = assistant_message_id
+        await _emit_status(event_emitter, "in_progress", "正在启动写作任务")
+        result = await _gateway_request_json(
+            self.valves,
+            "POST",
+            "/v1/runs",
+            headers,
+            {
+                "model": self.valves.UPSTREAM_MODEL,
+                "input": prompt,
+                "background": True,
+                "idempotency_key": assistant_message_id,
+            },
+        )
+        run_id = str(result.get("id") or result.get("run_id") or "unknown")
+        await _emit_status(event_emitter, "complete", "写作任务已启动")
+        return f"写作任务已启动。\n\nRun ID: {run_id}\n\n完成后会自动更新这条助手消息。"
+
+    async def _cancel_product_run(
+        self,
+        body: dict,
+        user: Optional[Any],
+        metadata: Optional[dict],
+        event_emitter: Optional[Any],
+    ) -> str:
+        run_id = _run_id_from_body(body)
+        if not run_id:
+            return "未找到可取消的 Run ID，请使用“取消产品任务”操作并指定任务。"
+        headers = _gateway_headers(body, self.valves.GATEWAY_API_KEY, user, metadata)
+        await _emit_status(event_emitter, "in_progress", "正在取消产品任务")
+        await _gateway_request_json(
+            self.valves, "POST", f"/v1/runs/{run_id}/cancel", headers, {}
+        )
+        await _emit_status(event_emitter, "complete", "取消请求已提交")
+        return f"已提交取消请求。\n\nRun ID: {run_id}"
 
 
 class ProgressState:
@@ -171,7 +235,7 @@ class ProgressState:
 
 
 def _gateway_payload(body: dict, upstream_model: str, metadata: Optional[dict]) -> dict:
-    messages = body.get("messages") or []
+    messages = _normalized_knowledge_messages(body.get("messages") or [])
     safe_metadata = _safe_metadata(body.get("metadata"))
     safe_metadata.update(_safe_metadata(metadata))
     return {
@@ -232,6 +296,99 @@ def _safe_metadata(value: Any) -> dict:
         if item is not None and str(item).strip():
             safe[key] = item
     return safe
+
+
+def _product_command(body: dict) -> tuple[str, str]:
+    messages = body.get("messages") or []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "").strip()
+        for alias, product in (
+            ("/写作", "writing-assistant"),
+            ("/图文书", "illustrated-book"),
+            ("/退出", "exit-product"),
+            ("/问答", "knowledge-chat"),
+        ):
+            if content == alias or content.startswith(alias + " "):
+                return product, content[len(alias) :].strip()
+        break
+    return "", ""
+
+
+def _normalized_knowledge_messages(messages: list) -> list:
+    normalized = [dict(message) if isinstance(message, dict) else message for message in messages]
+    for message in reversed(normalized):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "")
+        if content.strip() == "/问答" or content.strip().startswith("/问答 "):
+            message["content"] = content.strip()[len("/问答") :].strip()
+        break
+    return normalized
+
+
+def _assistant_message_id(body: dict, metadata: Optional[dict]) -> str:
+    merged = {}
+    merged.update(_safe_metadata(body.get("metadata")))
+    merged.update(_safe_metadata(metadata))
+    return _first_non_empty(
+        merged.get("message_id"), merged.get("request_id"), body.get("message_id")
+    )
+
+
+def _run_id_from_body(body: dict) -> str:
+    explicit = _first_non_empty(body.get("run_id"), _get(body.get("metadata"), "run_id"))
+    if explicit:
+        return explicit
+    chunks = []
+    for message in body.get("messages") or []:
+        if isinstance(message, dict):
+            chunks.append(str(message.get("content") or ""))
+    match = re.search(r"Run ID\s*[:=]\s*([A-Za-z0-9_.:-]+)", "\n".join(chunks), re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+async def _gateway_request_json(
+    valves: Any,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    payload: dict,
+) -> dict:
+    timeout = httpx.Timeout(
+        float(valves.REQUEST_TIMEOUT_SECONDS or 180),
+        connect=float(valves.CONNECT_TIMEOUT_SECONDS or 5),
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.request(
+            method,
+            valves.GATEWAY_BASE_URL.rstrip("/") + path,
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        value = response.json()
+        if not isinstance(value, dict):
+            raise RuntimeError("gateway returned a non-object product response")
+        return value
+
+
+async def _emit_status(event_emitter: Optional[Any], status: str, description: str) -> None:
+    if not event_emitter:
+        return
+    result = event_emitter(
+        {
+            "type": "status",
+            "data": {
+                "status": status,
+                "description": description,
+                "done": status in {"complete", "error"},
+            },
+        }
+    )
+    if hasattr(result, "__await__"):
+        await result
 
 
 async def _iter_openai_sse_chunks(response: Any) -> AsyncIterator[dict]:

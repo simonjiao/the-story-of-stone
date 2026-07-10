@@ -534,6 +534,7 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         ))),
         product_registry: ProductRegistry::unavailable("not configured in gateway unit tests"),
         studio_client: None,
+        openwebui_delivery: None,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),
         upstream_base_url: None,

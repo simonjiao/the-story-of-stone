@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::future::Future;
 use std::time::Duration;
 
 use crate::product_protocol::{
@@ -100,14 +101,15 @@ impl StudioHttpClient {
         Ok(events)
     }
 
-    pub(crate) async fn stream_events<F>(
+    pub(crate) async fn stream_events<F, Fut>(
         &self,
         run_id: &str,
         after_sequence: u64,
         mut on_event: F,
     ) -> Result<(), StudioHttpError>
     where
-        F: FnMut(ProductRunEvent) -> Result<bool, StudioHttpError>,
+        F: FnMut(ProductRunEvent) -> Fut,
+        Fut: Future<Output = Result<bool, StudioHttpError>>,
     {
         let response = self
             .authorized(
@@ -141,7 +143,7 @@ impl StudioHttpClient {
                     .map_err(|error| StudioHttpError::contract(error.to_string()))?;
                 validate_event(&event, previous).map_err(StudioHttpError::contract)?;
                 previous = event.sequence;
-                if on_event(event)? {
+                if on_event(event).await? {
                     return Ok(());
                 }
             }

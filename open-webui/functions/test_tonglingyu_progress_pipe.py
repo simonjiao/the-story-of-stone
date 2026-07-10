@@ -86,10 +86,60 @@ class FakeAsyncClient:
         return FakeStreamResponse(lines)
 
 
+class FakeJsonResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {"id": "run-slash-1", "status": "queued"}
+
+
+class FakeProductAsyncClient:
+    last_request = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def request(self, method: str, url: str, headers: dict, json: dict):
+        FakeProductAsyncClient.last_request = {"method": method, "url": url, "headers": headers, "json": json}
+        return FakeJsonResponse()
+
+
 json_module = json
 
 
 class TonglingyuProgressPipeTest(unittest.TestCase):
+    def test_writing_slash_command_creates_background_product_run_for_assistant_placeholder(self) -> None:
+        pipe = Pipe()
+        pipe.valves.GATEWAY_API_KEY = "gateway-key"
+        with patch("tonglingyu_progress_pipe.httpx.AsyncClient", FakeProductAsyncClient):
+            answer = asyncio.run(pipe.pipe(
+                {"messages": [{"role": "user", "content": "/写作 写一篇晴雯小传"}]},
+                __user__={"id": "user-1"},
+                __metadata__={"chat_id": "chat-1", "message_id": "assistant-placeholder-1", "user_message_id": "user-message-1"},
+            ))
+        request = FakeProductAsyncClient.last_request
+        self.assertEqual(request["url"], "http://tonglingyu-gateway:8090/v1/runs")
+        self.assertEqual(request["headers"]["X-Tonglingyu-Product-Id"], "writing-assistant")
+        self.assertEqual(request["headers"]["X-Tonglingyu-Message-Id"], "assistant-placeholder-1")
+        self.assertEqual(request["json"]["input"], "写一篇晴雯小传")
+        self.assertTrue(request["json"]["background"])
+        self.assertIn("Run ID: run-slash-1", answer)
+
+    def test_knowledge_slash_command_is_stripped_before_gateway_stream(self) -> None:
+        payload = _gateway_payload(
+            {"messages": [{"role": "user", "content": "/问答 晴雯是第几回死的"}]},
+            "tonglingyu",
+            None,
+        )
+        self.assertEqual(payload["messages"][-1]["content"], "晴雯是第几回死的")
+
     def test_gateway_payload_forces_upstream_model_and_safe_metadata(self) -> None:
         payload = _gateway_payload(
             {

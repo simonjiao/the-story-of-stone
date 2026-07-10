@@ -24,11 +24,17 @@ fail-closed unless all three production prerequisites are present:
 TONGLINGYU_STUDIO_BASE_URL=http://story-of-stone-studio-api:8787
 TONGLINGYU_STUDIO_SERVICE_KEY=<same-random-key-as-studio>
 TONGLINGYU_REDIS_URL=redis://redis:6379/0
+OPEN_WEBUI_SERVICE_ACCOUNT_KEY=<open-webui-service-account-api-key>
 ```
 
 Gateway verifies Studio capabilities at startup. `/healthz` reports the
 `writing-assistant` product as unavailable when the handshake fails or the
 binding store is not durable; ordinary knowledge chat remains independent.
+The Open WebUI key is used only by Gateway to persist `status` and `replace`
+events onto the original assistant message. Install
+`open-webui/functions/tonglingyu_product_action.py` in Open WebUI and give its
+Gateway valve the same Gateway service key used by the other Tonglingyu
+Functions.
 
 ## Start Locally
 

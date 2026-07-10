@@ -19,6 +19,17 @@ pub(crate) enum ProductBindingStatus {
     Canceled,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProductDeliveryStatus {
+    #[default]
+    Pending,
+    Delivering,
+    Delivered,
+    Retrying,
+    Failed,
+}
+
 impl ProductBindingStatus {
     fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Canceled)
@@ -38,6 +49,14 @@ pub(crate) struct ProductRunBinding {
     pub(crate) openwebui_chat_id: String,
     pub(crate) openwebui_assistant_message_id: String,
     pub(crate) status: ProductBindingStatus,
+    #[serde(default)]
+    pub(crate) delivery_status: ProductDeliveryStatus,
+    #[serde(default)]
+    pub(crate) delivery_attempts: u32,
+    #[serde(default)]
+    pub(crate) delivery_last_error_code: Option<String>,
+    #[serde(default)]
+    pub(crate) delivery_snapshot: Option<String>,
     pub(crate) version: u64,
 }
 
@@ -61,6 +80,10 @@ impl ProductRunBinding {
             openwebui_chat_id: chat_id.into(),
             openwebui_assistant_message_id: message_id.into(),
             status: ProductBindingStatus::Queued,
+            delivery_status: ProductDeliveryStatus::Pending,
+            delivery_attempts: 0,
+            delivery_last_error_code: None,
+            delivery_snapshot: None,
             version: 1,
         }
     }
