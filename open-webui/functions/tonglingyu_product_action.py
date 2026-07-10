@@ -172,7 +172,13 @@ async def _resolve_id(body: dict, key: str, title: str, event_call: Optional[Any
 def _extract_id(text: str, key: str) -> str:
     labels = {"run_id": "Run ID", "action_id": "Action ID", "artifact_id": "Artifact ID"}
     match = re.search(rf"(?:{re.escape(labels.get(key, key))}|{re.escape(key)})\s*[:=]\s*([A-Za-z0-9_.:-]+)", text, re.IGNORECASE)
-    return match.group(1) if match else ""
+    if match:
+        return match.group(1)
+    if key == "artifact_id":
+        artifact = re.search(r"`(art_[A-Za-z0-9_.:-]+)`", text)
+        if artifact:
+            return artifact.group(1)
+    return ""
 
 
 async def _prompt_text(event_call: Optional[Any], title: str, placeholder: str) -> str:

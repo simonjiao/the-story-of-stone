@@ -75,6 +75,17 @@ class TonglingyuProductActionTest(unittest.TestCase):
         self.assertIn("尚未", result["content"])
         urlopen.assert_not_called()
 
+    def test_open_artifact_uses_reference_from_completed_message(self) -> None:
+        action = self.configured()
+        with patch("tonglingyu_product_action.urllib.request.urlopen", return_value=FakeResponse({"url": "https://studio.example/handoff"})) as urlopen:
+            result = asyncio.run(action.action(
+                {"content": "写作任务已完成。\n\n- 晴雯短评 (`art_123`)\n\nRun ID: run-1"},
+                __user__={"id": "user-1"}, __id__="open_product_artifact",
+            ))
+        request = urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.endswith("/v1/runs/run-1/artifacts/art_123/open"))
+        self.assertIn("https://studio.example/handoff", result["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
