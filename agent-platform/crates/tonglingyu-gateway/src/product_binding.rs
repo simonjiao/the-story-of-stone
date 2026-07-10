@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 
+use crate::product_protocol::ProductArtifactRef;
+
 pub(crate) const PRODUCT_BINDING_SCHEMA_VERSION: &str = "tonglingyu.product_run_binding.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +48,8 @@ pub(crate) struct ProductRunBinding {
     pub(crate) remote_run_id: Option<String>,
     pub(crate) remote_last_sequence: u64,
     pub(crate) pending_remote_action_id: Option<String>,
+    #[serde(default)]
+    pub(crate) artifacts: Vec<ProductArtifactRef>,
     pub(crate) openwebui_chat_id: String,
     pub(crate) openwebui_assistant_message_id: String,
     pub(crate) status: ProductBindingStatus,
@@ -77,6 +81,7 @@ impl ProductRunBinding {
             remote_run_id: None,
             remote_last_sequence: 0,
             pending_remote_action_id: None,
+            artifacts: Vec::new(),
             openwebui_chat_id: chat_id.into(),
             openwebui_assistant_message_id: message_id.into(),
             status: ProductBindingStatus::Queued,

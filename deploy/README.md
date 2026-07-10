@@ -18,11 +18,12 @@ Open WebUI Functions are formal source code under `../open-webui/functions/`.
 ## Story of Stone Studio
 
 The writing product is optional for the base knowledge-chat service, but it is
-fail-closed unless all three production prerequisites are present:
+fail-closed unless all production prerequisites are present:
 
 ```bash
 TONGLINGYU_STUDIO_BASE_URL=http://story-of-stone-studio-api:8787
 TONGLINGYU_STUDIO_SERVICE_KEY=<same-random-key-as-studio>
+TONGLINGYU_STUDIO_PUBLIC_BASE_URL=https://studio.example.com
 TONGLINGYU_REDIS_URL=redis://redis:6379/0
 OPEN_WEBUI_SERVICE_ACCOUNT_KEY=<open-webui-service-account-api-key>
 ```
@@ -35,6 +36,11 @@ events onto the original assistant message. Install
 `open-webui/functions/tonglingyu_product_action.py` in Open WebUI and give its
 Gateway valve the same Gateway service key used by the other Tonglingyu
 Functions.
+
+`TONGLINGYU_STUDIO_PUBLIC_BASE_URL` is the browser-facing Studio hostname used
+only for a 60-second, single-use artifact handoff. Keep
+`TONGLINGYU_STUDIO_BASE_URL` and Gateway itself on the private network; the
+Gateway does not need a Cloudflare public hostname.
 
 ## Start Locally
 

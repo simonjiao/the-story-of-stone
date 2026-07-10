@@ -532,8 +532,15 @@ fn test_app_state(db_path: PathBuf) -> AppState {
         product_bindings: Arc::new(Mutex::new(ProductBindingStoreBackend::InMemory(
             product_binding::InMemoryProductBindingStore::default(),
         ))),
+        product_handoffs: Arc::new(Mutex::new(
+            product_handoff::ProductHandoffStoreBackend::InMemory(
+                product_handoff::InMemoryProductHandoffStore::default(),
+            ),
+        )),
         product_registry: ProductRegistry::unavailable("not configured in gateway unit tests"),
         studio_client: None,
+        studio_service_key: Some("studio-test-key".to_string()),
+        studio_public_base_url: Some("https://studio.example.test".to_string()),
         openwebui_delivery: None,
         model_id: DEFAULT_MODEL_ID.to_string(),
         model_name: DEFAULT_MODEL_NAME.to_string(),

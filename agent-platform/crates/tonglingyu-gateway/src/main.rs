@@ -83,6 +83,7 @@ mod llm_resolver;
 mod openwebui_delivery;
 mod plan;
 mod product_binding;
+mod product_handoff;
 mod product_protocol;
 mod product_registry;
 mod product_router;
@@ -657,6 +658,8 @@ struct ServeArgs {
     studio_base_url: Option<String>,
     #[arg(long, env = "TONGLINGYU_STUDIO_SERVICE_KEY")]
     studio_service_key: Option<String>,
+    #[arg(long, env = "TONGLINGYU_STUDIO_PUBLIC_BASE_URL")]
+    studio_public_base_url: Option<String>,
     #[arg(long, env = "TONGLINGYU_STUDIO_TIMEOUT_SECS", default_value_t = 30)]
     studio_timeout_secs: u64,
     #[arg(
@@ -749,8 +752,11 @@ struct AppState {
     response_sync_wait_secs: u64,
     realtime_max_buffer_chars: usize,
     product_bindings: Arc<Mutex<ProductBindingStoreBackend>>,
+    product_handoffs: Arc<Mutex<product_handoff::ProductHandoffStoreBackend>>,
     product_registry: ProductRegistry,
     studio_client: Option<StudioHttpClient>,
+    studio_service_key: Option<String>,
+    studio_public_base_url: Option<String>,
     openwebui_delivery: Option<OpenWebuiDeliveryClient>,
     model_id: String,
     model_name: String,
@@ -2323,6 +2329,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
     )
     .map_err(|error| anyhow!("product binding store initialization failed: {error:?}"))?;
     let product_bindings_durable = product_bindings.is_durable();
+    let product_handoffs = product_handoff::ProductHandoffStoreBackend::from_config(
+        args.redis_url.as_deref(),
+        &args.response_stream_prefix,
+    )
+    .map_err(|error| anyhow!("product handoff store initialization failed: {error:?}"))?;
     let studio_configuration = match (
         args.studio_base_url
             .as_deref()
@@ -2414,6 +2425,19 @@ async fn serve(args: ServeArgs) -> Result<()> {
         product_registry =
             ProductRegistry::unavailable("Open WebUI persistent delivery service key is required");
     }
+    if args
+        .studio_public_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && matches!(
+            &product_registry.writing().availability,
+            ProductAvailability::Available
+        )
+    {
+        product_registry = ProductRegistry::unavailable("Studio public URL is required");
+    }
     let state = Arc::new(AppState {
         db: args.db.clone(),
         runtime_store: TonglingyuRuntimeStore::new(args.db.clone()),
@@ -2423,8 +2447,16 @@ async fn serve(args: ServeArgs) -> Result<()> {
         response_sync_wait_secs: args.response_sync_wait_secs,
         realtime_max_buffer_chars: args.realtime_max_buffer_chars,
         product_bindings: Arc::new(Mutex::new(product_bindings)),
+        product_handoffs: Arc::new(Mutex::new(product_handoffs)),
         product_registry,
         studio_client,
+        studio_service_key: args
+            .studio_service_key
+            .filter(|value| !value.trim().is_empty()),
+        studio_public_base_url: args
+            .studio_public_base_url
+            .map(|value| value.trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty()),
         openwebui_delivery,
         model_id: args.model_id,
         model_name: args.model_name,
@@ -2503,6 +2535,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route(
             "/v1/runs/{run_id}/actions/{action_id}",
             post(submit_run_action_endpoint),
+        )
+        .route(
+            "/v1/runs/{run_id}/artifacts/{artifact_id}/open",
+            post(product_handoff::open_product_artifact_endpoint),
+        )
+        .route(
+            "/internal/studio/handoffs/{code}/consume",
+            post(product_handoff::consume_product_handoff_endpoint),
         )
         .route("/v1/feedback", post(user_feedback_endpoint))
         .route("/v1/evidence/search", get(search_endpoint))
@@ -3586,6 +3626,15 @@ async fn process_product_event(
     }
     let expected_version = binding.version;
     binding.remote_last_sequence = event.sequence;
+    if let Some(artifacts) = event.payload.get("artifacts") {
+        binding.artifacts = serde_json::from_value(artifacts.clone()).map_err(|_| {
+            studio_http::StudioHttpError {
+                code: "studio_contract_invalid",
+                message: "Studio event contains invalid artifact references".to_string(),
+                retryable: false,
+            }
+        })?;
+    }
     if let Some(last) = projected.last() {
         binding.status = last.binding_status.clone();
     }
